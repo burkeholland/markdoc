@@ -229,3 +229,115 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 });
+
+test.describe("local reader TOC keyboard verification", () => {
+  test.skip(
+    process.env.E2E_READER_TOC_KEYBOARD !== "1",
+    "Opt-in selector for the shared local browser slot",
+  );
+
+  test("trusted arrow, Home, End, Enter, and Escape keys preserve native TOC behavior", async ({ browser }) => {
+    const owner = await signIn(browser, "reader-toc-keyboard-owner");
+    const id = await createDocument(owner.page, CONTENT, "Reader Title");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await page.waitForLoadState("networkidle");
+
+    const toggle = page.getByTestId("reader-toc-toggle");
+    const list = page.locator("#reader-toc-list");
+    const entries = page.getByTestId("reader-toc-entry");
+    await expect(toggle).toBeVisible();
+    await expect(entries).toHaveCount(2);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(list).toBeVisible();
+
+    const focusedIndex = () =>
+      entries.evaluateAll((links) => links.findIndex((link) => link === document.activeElement));
+    const pressAndExpect = async (
+      from: import("@playwright/test").Locator,
+      key: "ArrowDown" | "ArrowUp" | "Home" | "End",
+      expectedIndex: number,
+    ) => {
+      await from.focus();
+      const before = await page.evaluate(() => ({
+        hash: location.hash,
+        scrollX,
+        scrollY,
+        current: Array.from(
+          document.querySelectorAll<HTMLAnchorElement>('[data-testid="reader-toc-entry"]'),
+          (link) => link.getAttribute("aria-current"),
+        ),
+      }));
+      await page.evaluate(() => {
+        const runtime = window as typeof window & {
+          __readerTocKey?: { focus: number; key: string; trusted: boolean; ownerView: boolean };
+        };
+        runtime.__readerTocKey = { focus: 0, key: "", trusted: false, ownerView: false };
+        const nav = document.querySelector<HTMLElement>('[data-testid="reader-toc"]')!;
+        nav.addEventListener("keydown", (event) => {
+          const keyboard = event as KeyboardEvent;
+          runtime.__readerTocKey!.key = keyboard.key;
+          runtime.__readerTocKey!.trusted = keyboard.isTrusted;
+          runtime.__readerTocKey!.ownerView = keyboard.view === window;
+        }, { capture: true, once: true });
+        nav.addEventListener("focusin", () => {
+          runtime.__readerTocKey!.focus += 1;
+        }, { once: true });
+      });
+
+      await page.keyboard.press(key);
+
+      await expect.poll(focusedIndex).toBe(expectedIndex);
+      expect(await page.evaluate(() => (
+        window as typeof window & {
+          __readerTocKey: { focus: number; key: string; trusted: boolean; ownerView: boolean };
+        }
+      ).__readerTocKey)).toEqual({
+        focus: 1,
+        key,
+        trusted: true,
+        ownerView: true,
+      });
+      expect(await page.evaluate(() => ({
+        hash: location.hash,
+        scrollX,
+        scrollY,
+        current: Array.from(
+          document.querySelectorAll<HTMLAnchorElement>('[data-testid="reader-toc-entry"]'),
+          (link) => link.getAttribute("aria-current"),
+        ),
+      }))).toEqual(before);
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect(list).toBeVisible();
+    };
+
+    const activeIndex = await entries.evaluateAll((links) =>
+      links.findIndex((link) => link.getAttribute("aria-current") === "location"));
+    await pressAndExpect(toggle, "ArrowDown", activeIndex >= 0 ? activeIndex : 0);
+    await pressAndExpect(entries.nth(1), "ArrowDown", 0);
+    await pressAndExpect(entries.nth(0), "ArrowUp", 1);
+    await pressAndExpect(entries.nth(1), "Home", 0);
+    await pressAndExpect(entries.nth(0), "End", 1);
+    await pressAndExpect(toggle, "ArrowUp", activeIndex >= 0 ? activeIndex : 1);
+
+    await entries.nth(1).focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/p/${id}#second-section$`));
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(list).toBeHidden();
+
+    await toggle.click();
+    await entries.nth(0).focus();
+    await page.keyboard.press("Escape");
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(list).toBeHidden();
+    await expect(toggle).toBeFocused();
+
+    await anon.close();
+    await owner.context.close();
+  });
+});

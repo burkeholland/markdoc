@@ -103,29 +103,120 @@ type PublicationAction = "toggle" | "link" | "escape" | "navigate" | "reject-lin
 
 type NavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
-type KeyboardNavigation = Readonly<{
-  publication: TocPublication;
-  document: Document;
-  view: Window;
-  nativeEvent: KeyboardEvent;
-  control: HTMLButtonElement | HTMLAnchorElement;
-  destination: HTMLAnchorElement;
-  focus: HTMLAnchorElement["focus"];
-  activeElement: Element;
+type CapturedDescriptor = Readonly<{
+  configurable: boolean | undefined;
+  enumerable: boolean | undefined;
+  get: PropertyDescriptor["get"];
+  set: PropertyDescriptor["set"];
+  value: unknown;
+  writable: boolean | undefined;
+}>;
+
+type CapturedGetter = Readonly<{
+  owner: object;
+  key: string;
+  descriptor: CapturedDescriptor;
+  getter: NonNullable<PropertyDescriptor["get"]>;
+}>;
+
+type CapturedMethod = Readonly<{
+  owner: object;
+  key: string;
+  descriptor: CapturedDescriptor;
+  method: (...args: never[]) => unknown;
+}>;
+
+type NavigationIntrinsics = Readonly<{
+  view: Window & typeof globalThis;
+  objectConstructor: ObjectConstructor;
+  reflectObject: typeof Reflect;
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  getPrototypeOf: typeof Object.getPrototypeOf;
+  reflectApply: typeof Reflect.apply;
+  eventConstructor: typeof Event;
+  eventPrototype: Event;
+  uiEventConstructor: typeof UIEvent;
+  uiEventPrototype: UIEvent;
+  keyboardEventConstructor: typeof KeyboardEvent;
+  keyboardEventPrototype: KeyboardEvent;
+  documentConstructor: typeof Document;
+  documentPrototype: Document;
+  htmlElementConstructor: typeof HTMLElement;
+  htmlElementPrototype: HTMLElement;
+  eventGetters: Readonly<{
+    type: CapturedGetter;
+    bubbles: CapturedGetter;
+    cancelable: CapturedGetter;
+    defaultPrevented: CapturedGetter;
+    cancelBubble: CapturedGetter;
+    target: CapturedGetter;
+  }>;
+  keyboardGetters: Readonly<{
+    key: CapturedGetter;
+    repeat: CapturedGetter;
+    altKey: CapturedGetter;
+    ctrlKey: CapturedGetter;
+    metaKey: CapturedGetter;
+    shiftKey: CapturedGetter;
+    isComposing: CapturedGetter;
+  }>;
+  viewGetter: CapturedGetter;
+  activeElementGetter: CapturedGetter;
+  composedPathMethod: CapturedMethod;
+  preventDefaultMethod: CapturedMethod;
+  focusMethod: CapturedMethod;
+  isTrustedDescriptor: CapturedDescriptor;
+  isTrustedGetter: NonNullable<PropertyDescriptor["get"]>;
+}>;
+
+type NativeKeyboardFacts = Readonly<{
   target: EventTarget;
   path: readonly EventTarget[];
+  view: Window;
   type: "keydown";
   bubbles: true;
   cancelable: true;
   key: NavigationKey;
-  repeat: boolean;
-  altKey: boolean;
-  ctrlKey: boolean;
-  metaKey: boolean;
+  repeat: false;
+  altKey: false;
+  ctrlKey: false;
+  metaKey: false;
   shiftKey: boolean;
-  isComposing: boolean;
-  defaultPrevented: boolean;
-  cancelBubble: boolean;
+  isComposing: false;
+  defaultPrevented: false;
+  cancelBubble: false;
+  isTrusted: boolean;
+}>;
+
+type ReactKeyboardFacts = Readonly<{
+  currentTarget: HTMLElement;
+  target: EventTarget;
+  nativeEvent: KeyboardEvent;
+  type: "keydown";
+  key: NavigationKey;
+  repeat: false;
+  altKey: false;
+  ctrlKey: false;
+  metaKey: false;
+  shiftKey: boolean;
+  defaultPrevented: false;
+  isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
+  isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+}>;
+
+type KeyboardNavigation = Readonly<{
+  publication: TocPublication;
+  document: Document;
+  view: Window;
+  reactEvent: ReactKeyboardEvent<HTMLElement>;
+  nativeEvent: KeyboardEvent;
+  control: HTMLButtonElement | HTMLAnchorElement;
+  controlIndex: number;
+  destination: HTMLAnchorElement;
+  destinationIndex: number;
+  activeElement: Element;
+  native: NativeKeyboardFacts;
+  react: ReactKeyboardFacts;
 }>;
 
 type ActionClaim = Readonly<{
@@ -157,6 +248,7 @@ type TocPublication = PermanentOwner & Readonly<{
   trackedParents: ReadonlySet<Node>;
   headingIds: ReadonlySet<string>;
   mutationObserver: MutationObserver;
+  navigationIntrinsics: NavigationIntrinsics;
   claim: (
     action: Exclude<PublicationAction, "reject-link">,
     reactEvent: object,
@@ -164,6 +256,7 @@ type TocPublication = PermanentOwner & Readonly<{
     claims: EventClaims,
     navigation?: KeyboardNavigation,
   ) => ActionClaim | null;
+  releaseNavigationClaim: (claim: ActionClaim, claims: EventClaims) => void;
 }>;
 
 type DisclosureState = Readonly<{
@@ -570,6 +663,252 @@ function hasExpectedEntryClasses(anchor: HTMLAnchorElement, heading: HeadingSnap
   return anchor.className === expected;
 }
 
+function captureDescriptor(descriptor: PropertyDescriptor): CapturedDescriptor {
+  return Object.freeze({
+    configurable: descriptor.configurable,
+    enumerable: descriptor.enumerable,
+    get: descriptor.get,
+    set: descriptor.set,
+    value: descriptor.value,
+    writable: descriptor.writable,
+  });
+}
+
+function descriptorIsExact(
+  descriptor: PropertyDescriptor | undefined,
+  captured: CapturedDescriptor,
+): boolean {
+  return Boolean(
+    descriptor &&
+    descriptor.configurable === captured.configurable &&
+    descriptor.enumerable === captured.enumerable &&
+    descriptor.get === captured.get &&
+    descriptor.set === captured.set &&
+    descriptor.value === captured.value &&
+    descriptor.writable === captured.writable
+  );
+}
+
+function captureGetter(
+  owner: object,
+  key: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+): CapturedGetter | null {
+  const descriptor = getOwnPropertyDescriptor(owner, key);
+  if (!descriptor || typeof descriptor.get !== "function" || descriptor.value !== undefined) return null;
+  return Object.freeze({
+    owner,
+    key,
+    descriptor: captureDescriptor(descriptor),
+    getter: descriptor.get,
+  });
+}
+
+function captureMethod(
+  owner: object,
+  key: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+): CapturedMethod | null {
+  const descriptor = getOwnPropertyDescriptor(owner, key);
+  if (!descriptor || typeof descriptor.value !== "function" || descriptor.get !== undefined) return null;
+  return Object.freeze({
+    owner,
+    key,
+    descriptor: captureDescriptor(descriptor),
+    method: descriptor.value as (...args: never[]) => unknown,
+  });
+}
+
+function captureNavigationIntrinsics(ownerDocument: Document): NavigationIntrinsics | null {
+  const view = ownerDocument.defaultView as (Window & typeof globalThis) | null;
+  if (!view) return null;
+  try {
+    const objectConstructor = view.Object;
+    const reflectObject = view.Reflect;
+    const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+    const getPrototypeOf = objectConstructor.getPrototypeOf;
+    const reflectApply = reflectObject.apply;
+    const eventConstructor = view.Event;
+    const uiEventConstructor = view.UIEvent;
+    const keyboardEventConstructor = view.KeyboardEvent;
+    const documentConstructor = view.Document;
+    const htmlElementConstructor = view.HTMLElement;
+    const eventPrototype = eventConstructor.prototype;
+    const uiEventPrototype = uiEventConstructor.prototype;
+    const keyboardEventPrototype = keyboardEventConstructor.prototype;
+    const documentPrototype = documentConstructor.prototype;
+    const htmlElementPrototype = htmlElementConstructor.prototype;
+    const type = captureGetter(eventPrototype, "type", getOwnPropertyDescriptor);
+    const bubbles = captureGetter(eventPrototype, "bubbles", getOwnPropertyDescriptor);
+    const cancelable = captureGetter(eventPrototype, "cancelable", getOwnPropertyDescriptor);
+    const defaultPrevented = captureGetter(eventPrototype, "defaultPrevented", getOwnPropertyDescriptor);
+    const cancelBubble = captureGetter(eventPrototype, "cancelBubble", getOwnPropertyDescriptor);
+    const target = captureGetter(eventPrototype, "target", getOwnPropertyDescriptor);
+    const key = captureGetter(keyboardEventPrototype, "key", getOwnPropertyDescriptor);
+    const repeat = captureGetter(keyboardEventPrototype, "repeat", getOwnPropertyDescriptor);
+    const altKey = captureGetter(keyboardEventPrototype, "altKey", getOwnPropertyDescriptor);
+    const ctrlKey = captureGetter(keyboardEventPrototype, "ctrlKey", getOwnPropertyDescriptor);
+    const metaKey = captureGetter(keyboardEventPrototype, "metaKey", getOwnPropertyDescriptor);
+    const shiftKey = captureGetter(keyboardEventPrototype, "shiftKey", getOwnPropertyDescriptor);
+    const isComposing = captureGetter(keyboardEventPrototype, "isComposing", getOwnPropertyDescriptor);
+    const viewGetter = captureGetter(uiEventPrototype, "view", getOwnPropertyDescriptor);
+    const activeElementGetter = captureGetter(documentPrototype, "activeElement", getOwnPropertyDescriptor);
+    const composedPathMethod = captureMethod(eventPrototype, "composedPath", getOwnPropertyDescriptor);
+    const preventDefaultMethod = captureMethod(eventPrototype, "preventDefault", getOwnPropertyDescriptor);
+    const focusMethod = captureMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor);
+    const trustProbe = new eventConstructor("reader-toc-intrinsic-probe");
+    const isTrusted = getOwnPropertyDescriptor(trustProbe, "isTrusted");
+    if (
+      !type ||
+      !bubbles ||
+      !cancelable ||
+      !defaultPrevented ||
+      !cancelBubble ||
+      !target ||
+      !key ||
+      !repeat ||
+      !altKey ||
+      !ctrlKey ||
+      !metaKey ||
+      !shiftKey ||
+      !isComposing ||
+      !viewGetter ||
+      !activeElementGetter ||
+      !composedPathMethod ||
+      !preventDefaultMethod ||
+      !focusMethod ||
+      !isTrusted ||
+      typeof isTrusted.get !== "function" ||
+      isTrusted.configurable !== false
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      view,
+      objectConstructor,
+      reflectObject,
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      reflectApply,
+      eventConstructor,
+      eventPrototype,
+      uiEventConstructor,
+      uiEventPrototype,
+      keyboardEventConstructor,
+      keyboardEventPrototype,
+      documentConstructor,
+      documentPrototype,
+      htmlElementConstructor,
+      htmlElementPrototype,
+      eventGetters: Object.freeze({ type, bubbles, cancelable, defaultPrevented, cancelBubble, target }),
+      keyboardGetters: Object.freeze({ key, repeat, altKey, ctrlKey, metaKey, shiftKey, isComposing }),
+      viewGetter,
+      activeElementGetter,
+      composedPathMethod,
+      preventDefaultMethod,
+      focusMethod,
+      isTrustedDescriptor: captureDescriptor(isTrusted),
+      isTrustedGetter: isTrusted.get,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function applyIntrinsic<T>(
+  intrinsics: NavigationIntrinsics,
+  target: (...args: never[]) => unknown,
+  receiver: unknown,
+  args: readonly unknown[] = [],
+): T {
+  return intrinsics.reflectApply(target, receiver, args) as T;
+}
+
+function capturedPropertyIsExact(
+  intrinsics: NavigationIntrinsics,
+  captured: CapturedGetter | CapturedMethod,
+): boolean {
+  const descriptor = applyIntrinsic<PropertyDescriptor | undefined>(
+    intrinsics,
+    intrinsics.getOwnPropertyDescriptor as (...args: never[]) => unknown,
+    intrinsics.objectConstructor,
+    [captured.owner, captured.key],
+  );
+  return descriptorIsExact(descriptor, captured.descriptor);
+}
+
+function navigationIntrinsicsAreExact(intrinsics: NavigationIntrinsics): boolean {
+  try {
+    const getters = [
+      ...Object.values(intrinsics.eventGetters),
+      ...Object.values(intrinsics.keyboardGetters),
+      intrinsics.viewGetter,
+      intrinsics.activeElementGetter,
+    ];
+    const methods = [
+      intrinsics.composedPathMethod,
+      intrinsics.preventDefaultMethod,
+      intrinsics.focusMethod,
+    ];
+    return (
+      intrinsics.view.Object === intrinsics.objectConstructor &&
+      intrinsics.view.Reflect === intrinsics.reflectObject &&
+      intrinsics.objectConstructor.getOwnPropertyDescriptor === intrinsics.getOwnPropertyDescriptor &&
+      intrinsics.objectConstructor.getPrototypeOf === intrinsics.getPrototypeOf &&
+      intrinsics.reflectObject.apply === intrinsics.reflectApply &&
+      intrinsics.view.Event === intrinsics.eventConstructor &&
+      intrinsics.eventConstructor.prototype === intrinsics.eventPrototype &&
+      intrinsics.view.UIEvent === intrinsics.uiEventConstructor &&
+      intrinsics.uiEventConstructor.prototype === intrinsics.uiEventPrototype &&
+      intrinsics.view.KeyboardEvent === intrinsics.keyboardEventConstructor &&
+      intrinsics.keyboardEventConstructor.prototype === intrinsics.keyboardEventPrototype &&
+      intrinsics.view.Document === intrinsics.documentConstructor &&
+      intrinsics.documentConstructor.prototype === intrinsics.documentPrototype &&
+      intrinsics.view.HTMLElement === intrinsics.htmlElementConstructor &&
+      intrinsics.htmlElementConstructor.prototype === intrinsics.htmlElementPrototype &&
+      applyIntrinsic(
+        intrinsics,
+        intrinsics.getPrototypeOf as (...args: never[]) => unknown,
+        intrinsics.objectConstructor,
+        [intrinsics.keyboardEventPrototype],
+      ) === intrinsics.uiEventPrototype &&
+      applyIntrinsic(
+        intrinsics,
+        intrinsics.getPrototypeOf as (...args: never[]) => unknown,
+        intrinsics.objectConstructor,
+        [intrinsics.uiEventPrototype],
+      ) === intrinsics.eventPrototype &&
+      getters.every((getter) => capturedPropertyIsExact(intrinsics, getter)) &&
+      methods.every((method) => capturedPropertyIsExact(intrinsics, method))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function publicationFocusCustodyIsExact(publication: TocPublication): boolean {
+  const { navigationIntrinsics: intrinsics } = publication;
+  try {
+    if (!navigationIntrinsicsAreExact(intrinsics)) return false;
+    const hasOwnFocus = [publication.toggle, ...publication.anchors].some((control) =>
+      applyIntrinsic<PropertyDescriptor | undefined>(
+        intrinsics,
+        intrinsics.getOwnPropertyDescriptor as (...args: never[]) => unknown,
+        intrinsics.objectConstructor,
+        [control, "focus"],
+      ) !== undefined);
+    const hasOwnActiveElement = applyIntrinsic<PropertyDescriptor | undefined>(
+      intrinsics,
+      intrinsics.getOwnPropertyDescriptor as (...args: never[]) => unknown,
+      intrinsics.objectConstructor,
+      [publication.document, "activeElement"],
+    ) !== undefined;
+    return !hasOwnFocus && !hasOwnActiveElement;
+  } catch {
+    return false;
+  }
+}
+
 function publicationTopologyIsExact(publication: TocPublication): boolean {
   const { anchors, document: ownerDocument, list, nav, observerOwner, render, toggle } = publication;
   const { headings } = render.visit;
@@ -765,7 +1104,14 @@ function createPublication(
 ): TocPublication | null {
   const ownerDocument = nav.ownerDocument;
   const MutationObserverConstructor = ownerDocument.defaultView?.MutationObserver;
-  if (!MutationObserverConstructor || (observerOwner && observerOwner.document !== ownerDocument)) return null;
+  const navigationIntrinsics = captureNavigationIntrinsics(ownerDocument);
+  if (
+    !MutationObserverConstructor ||
+    !navigationIntrinsics ||
+    (observerOwner && observerOwner.document !== ownerDocument)
+  ) {
+    return null;
+  }
 
   const headingRoots = observerOwner
     ? observerOwner.headings.flatMap((fact) => fact.element ? [fact.element] : [])
@@ -804,8 +1150,10 @@ function createPublication(
       (action === "navigate") !== Boolean(navigation) ||
       (navigation && (
         navigation.publication !== publication ||
+        navigation.reactEvent !== reactEvent ||
         navigation.nativeEvent !== nativeEvent ||
-        navigation.document !== ownerDocument
+        navigation.document !== ownerDocument ||
+        navigation.view !== navigationIntrinsics.view
       )) ||
       claims.react.has(reactEvent) ||
       claims.native.has(nativeEvent)
@@ -825,6 +1173,19 @@ function createPublication(
     claims.native.set(nativeEvent, next);
     return next;
   };
+  const releaseNavigationClaim: TocPublication["releaseNavigationClaim"] = (claim, claims) => {
+    if (
+      claim.publication !== publication ||
+      claim.action !== "navigate" ||
+      claim.navigation?.publication !== publication ||
+      claims.react.get(claim.reactEvent) !== claim ||
+      claims.native.get(claim.nativeEvent) !== claim
+    ) {
+      return;
+    }
+    claims.react.delete(claim.reactEvent);
+    claims.native.delete(claim.nativeEvent);
+  };
   const publication: TocPublication = Object.freeze({
     identity: Symbol("reader-toc-publication"),
     render,
@@ -841,12 +1202,15 @@ function createPublication(
     trackedParents,
     headingIds,
     mutationObserver,
+    navigationIntrinsics,
     isRetired: () => retired,
     retire,
     claim,
+    releaseNavigationClaim,
   });
   if (
     !publicationTopologyIsExact(publication) ||
+    !publicationFocusCustodyIsExact(publication) ||
     !nodeFactsAreExact(nodeFacts, ownerDocument) ||
     (observerOwner !== null && !headingFactsAreExact(observerOwner))
   ) {
@@ -982,84 +1346,253 @@ function isNavigationKey(key: string): key is NavigationKey {
   return key === "ArrowDown" || key === "ArrowUp" || key === "Home" || key === "End";
 }
 
+function readNativeKeyboardFacts(
+  nativeEvent: KeyboardEvent,
+  publication: TocPublication,
+): NativeKeyboardFacts | null {
+  const intrinsics = publication.navigationIntrinsics;
+  if (!navigationIntrinsicsAreExact(intrinsics)) {
+    publication.retire();
+    return null;
+  }
+  try {
+    const eventPrototype = applyIntrinsic(
+      intrinsics,
+      intrinsics.getPrototypeOf as (...args: never[]) => unknown,
+      intrinsics.objectConstructor,
+      [nativeEvent],
+    );
+    const isTrustedDescriptor = applyIntrinsic<PropertyDescriptor | undefined>(
+      intrinsics,
+      intrinsics.getOwnPropertyDescriptor as (...args: never[]) => unknown,
+      intrinsics.objectConstructor,
+      [nativeEvent, "isTrusted"],
+    );
+    if (
+      eventPrototype !== intrinsics.keyboardEventPrototype ||
+      !descriptorIsExact(isTrustedDescriptor, intrinsics.isTrustedDescriptor)
+    ) {
+      return null;
+    }
+
+    const read = (captured: CapturedGetter) =>
+      applyIntrinsic<unknown>(intrinsics, captured.getter, nativeEvent);
+    const target = read(intrinsics.eventGetters.target);
+    const path = applyIntrinsic<unknown>(
+      intrinsics,
+      intrinsics.composedPathMethod.method,
+      nativeEvent,
+    );
+    const eventView = read(intrinsics.viewGetter);
+    const type = read(intrinsics.eventGetters.type);
+    const bubbles = read(intrinsics.eventGetters.bubbles);
+    const cancelable = read(intrinsics.eventGetters.cancelable);
+    const defaultPrevented = read(intrinsics.eventGetters.defaultPrevented);
+    const cancelBubble = read(intrinsics.eventGetters.cancelBubble);
+    const key = read(intrinsics.keyboardGetters.key);
+    const repeat = read(intrinsics.keyboardGetters.repeat);
+    const altKey = read(intrinsics.keyboardGetters.altKey);
+    const ctrlKey = read(intrinsics.keyboardGetters.ctrlKey);
+    const metaKey = read(intrinsics.keyboardGetters.metaKey);
+    const shiftKey = read(intrinsics.keyboardGetters.shiftKey);
+    const isComposing = read(intrinsics.keyboardGetters.isComposing);
+    const isTrusted = applyIntrinsic<unknown>(
+      intrinsics,
+      intrinsics.isTrustedGetter,
+      nativeEvent,
+    );
+    if (
+      !navigationIntrinsicsAreExact(intrinsics) ||
+      target === null ||
+      (typeof target !== "object" && typeof target !== "function") ||
+      !Array.isArray(path) ||
+      eventView !== intrinsics.view ||
+      type !== "keydown" ||
+      bubbles !== true ||
+      cancelable !== true ||
+      defaultPrevented !== false ||
+      cancelBubble !== false ||
+      typeof key !== "string" ||
+      !isNavigationKey(key) ||
+      repeat !== false ||
+      altKey !== false ||
+      ctrlKey !== false ||
+      metaKey !== false ||
+      typeof shiftKey !== "boolean" ||
+      isComposing !== false ||
+      typeof isTrusted !== "boolean"
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      target: target as EventTarget,
+      path: Object.freeze([...path]) as readonly EventTarget[],
+      view: intrinsics.view,
+      type,
+      bubbles,
+      cancelable,
+      key,
+      repeat,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      isComposing,
+      defaultPrevented,
+      cancelBubble,
+      isTrusted,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function readReactKeyboardFacts(
+  event: ReactKeyboardEvent<HTMLElement>,
+  expectedNativeEvent: KeyboardEvent,
+  native: NativeKeyboardFacts,
+  publication: TocPublication,
+): ReactKeyboardFacts | null {
+  const intrinsics = publication.navigationIntrinsics;
+  try {
+    const currentTarget = event.currentTarget;
+    const target = event.target;
+    const nativeEvent = event.nativeEvent;
+    const type = event.type;
+    const key = event.key;
+    const repeat = event.repeat;
+    const altKey = event.altKey;
+    const ctrlKey = event.ctrlKey;
+    const metaKey = event.metaKey;
+    const shiftKey = event.shiftKey;
+    const defaultPrevented = event.defaultPrevented;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      currentTarget !== publication.nav ||
+      target !== native.target ||
+      nativeEvent !== expectedNativeEvent ||
+      type !== native.type ||
+      key !== native.key ||
+      repeat !== native.repeat ||
+      altKey !== native.altKey ||
+      ctrlKey !== native.ctrlKey ||
+      metaKey !== native.metaKey ||
+      shiftKey !== native.shiftKey ||
+      defaultPrevented !== native.defaultPrevented ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      applyIntrinsic<boolean>(
+        intrinsics,
+        isDefaultPrevented as (...args: never[]) => unknown,
+        event,
+      ) ||
+      applyIntrinsic<boolean>(
+        intrinsics,
+        isPropagationStopped as (...args: never[]) => unknown,
+        event,
+      )
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      currentTarget,
+      target,
+      nativeEvent,
+      type,
+      key,
+      repeat,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      defaultPrevented,
+      isDefaultPrevented,
+      isPropagationStopped,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function readActiveElement(publication: TocPublication): Element | null {
+  const intrinsics = publication.navigationIntrinsics;
+  try {
+    if (!navigationIntrinsicsAreExact(intrinsics)) {
+      publication.retire();
+      return null;
+    }
+    const activeElement = applyIntrinsic<unknown>(
+      intrinsics,
+      intrinsics.activeElementGetter.getter,
+      publication.document,
+    );
+    if (!navigationIntrinsicsAreExact(intrinsics)) {
+      publication.retire();
+      return null;
+    }
+    return activeElement instanceof intrinsics.view.Element ? activeElement : null;
+  } catch {
+    return null;
+  }
+}
+
+function navigationDestinationIndex(
+  publication: TocPublication,
+  controlIndex: number,
+  key: NavigationKey,
+): number {
+  const lastIndex = publication.anchors.length - 1;
+  if (key === "Home") return 0;
+  if (key === "End") return lastIndex;
+  if (controlIndex < 0) {
+    const activeIndex = publication.render.visit.headings.findIndex(
+      (heading) => heading.id === publication.render.active,
+    );
+    return activeIndex >= 0 ? activeIndex : key === "ArrowDown" ? 0 : lastIndex;
+  }
+  return key === "ArrowDown"
+    ? (controlIndex + 1) % publication.anchors.length
+    : (controlIndex - 1 + publication.anchors.length) % publication.anchors.length;
+}
+
 function readKeyboardNavigation(
   event: ReactKeyboardEvent<HTMLElement>,
   publication: TocPublication,
 ): KeyboardNavigation | null {
   const ownerDocument = publication.document;
-  const view = ownerDocument.defaultView;
-  const nativeEvent = event.nativeEvent;
+  const view = publication.navigationIntrinsics.view;
+  let nativeEvent: KeyboardEvent;
+  try {
+    nativeEvent = event.nativeEvent;
+  } catch {
+    return null;
+  }
   if (
-    !view ||
     !publication.render.open ||
-    event.currentTarget !== publication.nav ||
     publication.nav.ownerDocument !== ownerDocument ||
-    !view.KeyboardEvent.prototype.isPrototypeOf(nativeEvent)
+    !publicationFocusCustodyIsExact(publication)
   ) {
     return null;
   }
-
-  const native = readNativeEvent(nativeEvent, ownerDocument);
-  if (!native || native.target === null || native.target !== event.target) return null;
-
-  const eventPrototype = view.Event.prototype;
-  const keyboardPrototype = view.KeyboardEvent.prototype;
-  const type = Object.getOwnPropertyDescriptor(eventPrototype, "type")!.get!.call(nativeEvent) as string;
-  const bubbles = Object.getOwnPropertyDescriptor(eventPrototype, "bubbles")!.get!.call(nativeEvent) as boolean;
-  const cancelable = Object.getOwnPropertyDescriptor(eventPrototype, "cancelable")!.get!.call(nativeEvent) as boolean;
-  const defaultPrevented = Object.getOwnPropertyDescriptor(eventPrototype, "defaultPrevented")!.get!
-    .call(nativeEvent) as boolean;
-  const cancelBubble = Object.getOwnPropertyDescriptor(eventPrototype, "cancelBubble")!.get!
-    .call(nativeEvent) as boolean;
-  const key = Object.getOwnPropertyDescriptor(keyboardPrototype, "key")!.get!.call(nativeEvent) as string;
-  const repeat = Object.getOwnPropertyDescriptor(keyboardPrototype, "repeat")!.get!.call(nativeEvent) as boolean;
-  const altKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "altKey")!.get!.call(nativeEvent) as boolean;
-  const ctrlKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "ctrlKey")!.get!.call(nativeEvent) as boolean;
-  const metaKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "metaKey")!.get!.call(nativeEvent) as boolean;
-  const shiftKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "shiftKey")!.get!.call(nativeEvent) as boolean;
-  const isComposing = Object.getOwnPropertyDescriptor(keyboardPrototype, "isComposing")!.get!
-    .call(nativeEvent) as boolean;
-  const isDefaultPrevented = event.isDefaultPrevented;
-  const isPropagationStopped = event.isPropagationStopped;
+  const native = readNativeKeyboardFacts(nativeEvent, publication);
   if (
-    type !== "keydown" ||
-    event.type !== type ||
-    !isNavigationKey(key) ||
-    event.key !== key ||
-    event.repeat !== repeat ||
-    event.altKey !== altKey ||
-    event.ctrlKey !== ctrlKey ||
-    event.metaKey !== metaKey ||
-    event.shiftKey !== shiftKey ||
-    event.defaultPrevented !== defaultPrevented ||
-    typeof isDefaultPrevented !== "function" ||
-    typeof isPropagationStopped !== "function" ||
-    isDefaultPrevented.call(event) ||
-    isPropagationStopped.call(event) ||
-    repeat ||
-    altKey ||
-    ctrlKey ||
-    metaKey ||
-    isComposing ||
-    defaultPrevented ||
-    cancelBubble ||
-    bubbles !== true ||
-    cancelable !== true ||
-    (native.view !== null && native.view !== view) ||
+    !native ||
     !nativePathIsExact(native.path, native.target, publication.nav, ownerDocument)
   ) {
     return null;
   }
+  const react = readReactKeyboardFacts(event, nativeEvent, native, publication);
+  const activeElement = readActiveElement(publication);
+  if (!react || !activeElement) return null;
 
-  const target = native.target;
-  const activeElement = ownerDocument.activeElement;
-  const anchorIndex = publication.anchors.findIndex((anchor) => anchor === target);
-  const control = target === publication.toggle
+  const anchorIndex = publication.anchors.findIndex((anchor) => anchor === native.target);
+  const control = native.target === publication.toggle
     ? publication.toggle
     : anchorIndex >= 0 ? publication.anchors[anchorIndex] : null;
   if (
     !control ||
-    control !== target ||
+    control !== native.target ||
     activeElement !== control ||
     control.ownerDocument !== ownerDocument ||
     (control === publication.toggle && control.disabled)
@@ -1080,33 +1613,13 @@ function readKeyboardNavigation(
     }
   }
 
-  const lastIndex = publication.anchors.length - 1;
-  if (lastIndex < 0) return null;
-  let destinationIndex: number;
-  if (key === "Home") {
-    destinationIndex = 0;
-  } else if (key === "End") {
-    destinationIndex = lastIndex;
-  } else if (control === publication.toggle) {
-    const activeIndex = publication.render.visit.headings.findIndex(
-      (heading) => heading.id === publication.render.active,
-    );
-    destinationIndex = activeIndex >= 0
-      ? activeIndex
-      : key === "ArrowDown" ? 0 : lastIndex;
-  } else {
-    destinationIndex = key === "ArrowDown"
-      ? (anchorIndex + 1) % publication.anchors.length
-      : (anchorIndex - 1 + publication.anchors.length) % publication.anchors.length;
-  }
-
+  if (publication.anchors.length === 0) return null;
+  const destinationIndex = navigationDestinationIndex(publication, anchorIndex, native.key);
   const destination = publication.anchors[destinationIndex];
-  const focus = view.HTMLElement.prototype.focus;
   if (
     !destination ||
     destination.ownerDocument !== ownerDocument ||
-    !destination.isConnected ||
-    destination.focus !== focus
+    !destination.isConnected
   ) {
     return null;
   }
@@ -1114,26 +1627,131 @@ function readKeyboardNavigation(
     publication,
     document: ownerDocument,
     view,
+    reactEvent: event,
     nativeEvent,
     control,
+    controlIndex: anchorIndex,
     destination,
-    focus,
+    destinationIndex,
     activeElement,
-    target: native.target,
-    path: native.path,
-    type: "keydown",
-    bubbles: true,
-    cancelable: true,
-    key,
-    repeat,
-    altKey,
-    ctrlKey,
-    metaKey,
-    shiftKey,
-    isComposing,
-    defaultPrevented,
-    cancelBubble,
+    native,
+    react,
   });
+}
+
+function nativeKeyboardFactsAreExact(
+  current: NativeKeyboardFacts,
+  captured: NativeKeyboardFacts,
+): boolean {
+  return (
+    current.target === captured.target &&
+    current.view === captured.view &&
+    current.type === captured.type &&
+    current.bubbles === captured.bubbles &&
+    current.cancelable === captured.cancelable &&
+    current.key === captured.key &&
+    current.repeat === captured.repeat &&
+    current.altKey === captured.altKey &&
+    current.ctrlKey === captured.ctrlKey &&
+    current.metaKey === captured.metaKey &&
+    current.shiftKey === captured.shiftKey &&
+    current.isComposing === captured.isComposing &&
+    current.defaultPrevented === captured.defaultPrevented &&
+    current.cancelBubble === captured.cancelBubble &&
+    current.isTrusted === captured.isTrusted &&
+    current.path.length === captured.path.length &&
+    current.path.every((target, index) => target === captured.path[index])
+  );
+}
+
+function reactKeyboardFactsAreExact(
+  current: ReactKeyboardFacts,
+  captured: ReactKeyboardFacts,
+): boolean {
+  return (
+    current.currentTarget === captured.currentTarget &&
+    current.target === captured.target &&
+    current.nativeEvent === captured.nativeEvent &&
+    current.type === captured.type &&
+    current.key === captured.key &&
+    current.repeat === captured.repeat &&
+    current.altKey === captured.altKey &&
+    current.ctrlKey === captured.ctrlKey &&
+    current.metaKey === captured.metaKey &&
+    current.shiftKey === captured.shiftKey &&
+    current.defaultPrevented === captured.defaultPrevented &&
+    current.isDefaultPrevented === captured.isDefaultPrevented &&
+    current.isPropagationStopped === captured.isPropagationStopped
+  );
+}
+
+function keyboardNavigationIsCurrent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  publication: TocPublication,
+  navigation: KeyboardNavigation,
+): boolean {
+  if (
+    navigation.publication !== publication ||
+    navigation.document !== publication.document ||
+    navigation.view !== publication.navigationIntrinsics.view ||
+    navigation.reactEvent !== event ||
+    !publication.render.open ||
+    !publicationFocusCustodyIsExact(publication)
+  ) {
+    return false;
+  }
+  let nativeEvent: KeyboardEvent;
+  try {
+    nativeEvent = event.nativeEvent;
+  } catch {
+    return false;
+  }
+  if (nativeEvent !== navigation.nativeEvent) return false;
+  const native = readNativeKeyboardFacts(nativeEvent, publication);
+  if (
+    !native ||
+    !nativeKeyboardFactsAreExact(native, navigation.native) ||
+    !nativePathIsExact(native.path, native.target, publication.nav, publication.document)
+  ) {
+    return false;
+  }
+  const react = readReactKeyboardFacts(event, nativeEvent, native, publication);
+  const activeElement = readActiveElement(publication);
+  if (
+    !react ||
+    !reactKeyboardFactsAreExact(react, navigation.react) ||
+    activeElement !== navigation.activeElement ||
+    activeElement !== navigation.control ||
+    native.target !== navigation.control ||
+    publication.anchors[navigation.destinationIndex] !== navigation.destination ||
+    navigationDestinationIndex(publication, navigation.controlIndex, native.key) !== navigation.destinationIndex ||
+    (navigation.controlIndex < 0
+      ? navigation.control !== publication.toggle
+      : publication.anchors[navigation.controlIndex] !== navigation.control)
+  ) {
+    return false;
+  }
+  return native.isTrusted === true;
+}
+
+function performKeyboardNavigation(navigation: KeyboardNavigation): boolean {
+  const intrinsics = navigation.publication.navigationIntrinsics;
+  try {
+    applyIntrinsic<void>(
+      intrinsics,
+      intrinsics.preventDefaultMethod.method,
+      navigation.nativeEvent,
+    );
+    applyIntrinsic<void>(
+      intrinsics,
+      intrinsics.focusMethod.method,
+      navigation.destination,
+      [{ preventScroll: true }],
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function anchorHasSafeFragmentNavigation(anchor: HTMLAnchorElement, owner: VisitOwner): boolean {
@@ -1334,20 +1952,23 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
     }
 
     const navigation = readKeyboardNavigation(event, publication);
-    if (!navigation || exactPublication() !== publication) return;
-    if (
-      !publication.claim(
-        "navigate",
-        event,
-        event.nativeEvent,
-        claimsRef.current,
-        navigation,
-      )
-    ) {
-      return;
+    if (!navigation) return;
+    const navigationIsExact = () =>
+      exactPublication() === publication &&
+      keyboardNavigationIsCurrent(event, publication, navigation) &&
+      exactPublication() === publication;
+    if (!navigationIsExact()) return;
+    const claim = publication.claim(
+      "navigate",
+      event,
+      navigation.nativeEvent,
+      claimsRef.current,
+      navigation,
+    );
+    if (!claim) return;
+    if (!navigationIsExact() || !performKeyboardNavigation(navigation)) {
+      publication.releaseNavigationClaim(claim, claimsRef.current);
     }
-    event.preventDefault();
-    navigation.focus.call(navigation.destination, { preventScroll: true });
   };
 
   return (
