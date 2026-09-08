@@ -1,14 +1,24 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type ChangeEvent as ReactChangeEvent,
+  type FormEvent as ReactFormEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DocumentDto } from "@/server/dto";
 
 vi.mock("./gist-auto-update", () => ({
-  GistAutoUpdateControl: ({ doc, isOwner }: { doc: DocumentDto; isOwner: boolean }) => (
-    <div data-testid="gist-auto-update-stub" data-document={doc.id} data-owner={isOwner} />
-  ),
+  GistAutoUpdateControl: ({ doc, isOwner }: { doc: DocumentDto; isOwner: boolean }) =>
+    isOwner && doc.storage === "gist" && doc.gistId && doc.gistFile && doc.githubUrl && doc.publishedAt ? (
+      <div data-testid="gist-auto-update-stub" data-document={doc.id} data-owner={isOwner} />
+    ) : null,
 }));
 
 import { CommitDialog } from "./github-dialog";
@@ -93,6 +103,24 @@ function CommitBoundary({
   ) : null;
 }
 
+function StrictCommitReplayProbe({
+  children,
+  onFirstLayout,
+  onReplayLayout,
+}: {
+  children: ReactNode;
+  onFirstLayout: () => void;
+  onReplayLayout: () => void;
+}) {
+  const layouts = useRef(0);
+  useLayoutEffect(() => {
+    layouts.current++;
+    if (layouts.current === 1) onFirstLayout();
+    if (layouts.current === 2) onReplayLayout();
+  }, [onFirstLayout, onReplayLayout]);
+  return children;
+}
+
 function createHost() {
   const host = document.createElement("div");
   document.body.append(host);
@@ -101,7 +129,11 @@ function createHost() {
 
 async function render(root: Root, props: CommitBoundaryProps) {
   await act(async () => {
-    root.render(<CommitBoundary {...props} />);
+    root.render(
+      <StrictMode>
+        <CommitBoundary {...props} />
+      </StrictMode>,
+    );
   });
 }
 
@@ -109,8 +141,89 @@ function message() {
   return screen.getByTestId<HTMLInputElement>("commit-message");
 }
 
-function submit() {
-  fireEvent.submit(screen.getByTestId("commit-submit").closest("form")!);
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return value as T;
+}
+
+function setReactProp(element: HTMLElement, name: string, value: unknown) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const record = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const props = record[propsKey];
+  if (!props) throw new Error(`React props were empty on ${element.dataset.testid ?? element.tagName}`);
+  record[propsKey] = { ...props, [name]: value };
+}
+
+function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.dataset.testid ?? element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return fiber.ref as RefCallback<T>;
+}
+
+function nativeSubmit(form: HTMLFormElement, submitter: HTMLButtonElement | null = null) {
+  const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+  if (!SubmitEventConstructor) throw new Error("The commit form has no owner-document SubmitEvent");
+  return new SubmitEventConstructor("submit", {
+    bubbles: true,
+    cancelable: true,
+    submitter,
+  });
+}
+
+function commitForm() {
+  const submitter = screen.getByTestId("commit-submit") as HTMLButtonElement;
+  if (!submitter.form) throw new Error("The commit submit control has no form");
+  return submitter.form;
+}
+
+function commitRefBindings(host: HTMLDivElement) {
+  const bridge = host.firstElementChild;
+  const form = commitForm();
+  const elements = [
+    bridge,
+    form.children.item(0),
+    form,
+    form.children.item(1),
+    form.children.item(2),
+    form.children.item(3),
+    form.children.item(4),
+    screen.getByRole("button", { name: "Cancel" }),
+    screen.getByTestId("commit-submit"),
+  ];
+  return elements.map((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error("The commit publication is missing a ref-bound element");
+    return { element, ref: reactRef(element) };
+  });
+}
+
+async function flushPublication() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function submit() {
+  await act(async () => {
+    await Promise.resolve();
+    const submitter = screen.getByTestId("commit-submit") as HTMLButtonElement;
+    const form = submitter.form!;
+    form.dispatchEvent(nativeSubmit(form, submitter));
+    await Promise.resolve();
+  });
+}
+
+async function clickSubmit() {
+  await flushPublication();
+  fireEvent.click(screen.getByTestId("commit-submit"));
+  await flushPublication();
 }
 
 async function resolve(pending: ReturnType<typeof deferred<void>>) {
@@ -171,11 +284,10 @@ describe("CommitDialog visit authority", () => {
       expect(message()).toHaveValue("Update docs/current.md");
       expect(message()).toHaveFocus();
       fireEvent.change(message(), { target: { value: "  Publish current draft  " } });
+      expect(message()).toHaveValue("  Publish current draft  ");
 
-      act(() => {
-        submit();
-        submit();
-      });
+      await submit();
+      await submit();
 
       expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Publish current draft");
       expect(screen.getByTestId("commit-submit")).toBeDisabled();
@@ -187,7 +299,7 @@ describe("CommitDialog visit authority", () => {
       await advance(1);
       expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
 
-      submit();
+      await submit();
       expect(current.onCommit).toHaveBeenCalledTimes(1);
       await advance(5_000);
       expect(current.onOpenChange).toHaveBeenCalledTimes(1);
@@ -210,7 +322,7 @@ describe("CommitDialog visit authority", () => {
       try {
         await render(root, { visit: "old", doc, actions: current });
         fireEvent.change(message(), { target: { value: "Old draft" } });
-        submit();
+        await submit();
         fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
         expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
 
@@ -219,7 +331,7 @@ describe("CommitDialog visit authority", () => {
         expect(message()).toHaveValue("Update docs/reopen.md");
         expect(screen.getByTestId("commit-submit")).toBeEnabled();
         fireEvent.change(message(), { target: { value: "  Current pending  " } });
-        submit();
+        await submit();
         expect(current.onCommit).toHaveBeenNthCalledWith(2, "Current pending");
         expect(screen.getByTestId("commit-submit")).toBeDisabled();
 
@@ -235,7 +347,7 @@ describe("CommitDialog visit authority", () => {
         await reject(currentPending, "Current publish failed");
         expect(screen.getByText("Current publish failed")).toBeInTheDocument();
         expect(screen.getByTestId("commit-submit")).toBeEnabled();
-        submit();
+        await submit();
         expect(current.onCommit).toHaveBeenNthCalledWith(3, "Current retry");
         await resolve(retryPending);
         expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
@@ -270,10 +382,11 @@ describe("CommitDialog visit authority", () => {
         await render(root, { visit: "old", doc: oldDoc, actions: oldActions, onPassiveCleanup });
         await advance(0);
         fireEvent.change(message(), { target: { value: "Old content" } });
-        submit();
+        await submit();
         await resolve(oldPending);
         const oldTimer = commitTimerCall(timeout);
         expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+        const passiveBeforeTransition = passiveCleanups;
 
         let boundaryReached!: () => void;
         const atBoundary = new Promise<void>((done) => {
@@ -284,26 +397,28 @@ describe("CommitDialog visit authority", () => {
         let oldCloseCallsAtBoundary = -1;
         let currentCloseCallsAtBoundary = -1;
         root.render(
-          <CommitBoundary
-            visit="current"
-            doc={currentDoc}
-            actions={currentActions}
-            present={transition !== "removal"}
-            boundary={1}
-            onPassiveCleanup={onPassiveCleanup}
-            onBoundary={() => {
-              passiveAtBoundary = passiveCleanups;
-              oldTimerClearedAtBoundary = clearTimeout.mock.calls.some(([handle]) => handle === oldTimer.handle);
-              oldTimer.callback();
-              oldCloseCallsAtBoundary = oldActions.onOpenChange.mock.calls.length;
-              currentCloseCallsAtBoundary = currentActions.onOpenChange.mock.calls.length;
-              boundaryReached();
-            }}
-          />,
+          <StrictMode>
+            <CommitBoundary
+              visit="current"
+              doc={currentDoc}
+              actions={currentActions}
+              present={transition !== "removal"}
+              boundary={1}
+              onPassiveCleanup={onPassiveCleanup}
+              onBoundary={() => {
+                passiveAtBoundary = passiveCleanups;
+                oldTimerClearedAtBoundary = clearTimeout.mock.calls.some(([handle]) => handle === oldTimer.handle);
+                oldTimer.callback();
+                oldCloseCallsAtBoundary = oldActions.onOpenChange.mock.calls.length;
+                currentCloseCallsAtBoundary = currentActions.onOpenChange.mock.calls.length;
+                boundaryReached();
+              }}
+            />
+          </StrictMode>,
         );
         await atBoundary;
 
-        expect(passiveAtBoundary).toBe(0);
+        expect(passiveAtBoundary).toBe(passiveBeforeTransition);
         expect(oldTimerClearedAtBoundary).toBe(true);
         expect(oldCloseCallsAtBoundary).toBe(0);
         expect(currentCloseCallsAtBoundary).toBe(0);
@@ -318,7 +433,7 @@ describe("CommitDialog visit authority", () => {
         expect(screen.getByTestId("commit-submit")).toBeEnabled();
         expect(screen.queryByRole("button", { name: "Published" })).toBeNull();
         fireEvent.change(message(), { target: { value: "  Current content  " } });
-        submit();
+        await submit();
         expect(currentActions.onCommit).toHaveBeenCalledExactlyOnceWith("Current content");
         await resolve(currentPending);
         oldTimer.callback();
@@ -346,10 +461,10 @@ describe("CommitDialog visit authority", () => {
       try {
         await render(root, { visit: "old", doc, actions: oldActions });
         fireEvent.change(message(), { target: { value: "Old pending" } });
-        submit();
+        await submit();
         await render(root, { visit: "current", doc, actions: currentActions });
         fireEvent.change(message(), { target: { value: "Current pending" } });
-        submit();
+        await submit();
         expect(screen.getByTestId("commit-submit")).toBeDisabled();
 
         if (order === "stale-before-current") {
@@ -399,20 +514,20 @@ describe("CommitDialog visit authority", () => {
 
       try {
         await render(root, { visit: "old", doc, actions: oldActions });
-        submit();
+        await submit();
         await resolve(oldPending);
         expect(closeCallbacks).toHaveLength(1);
 
         await render(root, { visit: "current", doc, actions: currentActions });
-        expect(clearTimeout).toHaveBeenCalledExactlyOnceWith(sharedHandle);
-        submit();
+        expect(clearTimeout.mock.calls.filter(([handle]) => handle === sharedHandle)).toHaveLength(1);
+        await submit();
         await resolve(currentPending);
         expect(closeCallbacks).toHaveLength(2);
 
         if (order === "stale-before-current") {
           act(() => closeCallbacks[0]());
           expect(currentActions.onOpenChange).not.toHaveBeenCalled();
-          expect(clearTimeout).toHaveBeenCalledTimes(1);
+          expect(clearTimeout.mock.calls.filter(([handle]) => handle === sharedHandle)).toHaveLength(1);
           act(() => closeCallbacks[1]());
         } else {
           act(() => closeCallbacks[1]());
@@ -421,7 +536,7 @@ describe("CommitDialog visit authority", () => {
 
         expect(oldActions.onOpenChange).not.toHaveBeenCalled();
         expect(currentActions.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
-        expect(clearTimeout).toHaveBeenCalledTimes(1);
+        expect(clearTimeout.mock.calls.filter(([handle]) => handle === sharedHandle)).toHaveLength(1);
         expect(timeout.mock.calls.filter((call) => call[1] === 900)).toHaveLength(2);
       } finally {
         await act(async () => root.unmount());
@@ -457,6 +572,315 @@ describe("CommitDialog visit authority", () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
       expect(oldActions.onOpenChange).not.toHaveBeenCalled();
       expect(currentActions.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("publishes controls only after the complete Strict Mode ref and layout replay", async () => {
+    const pending = deferred<void>();
+    const current = actions(pending.promise);
+    const doc = repoDocument("doc-replay", "docs/replay.md");
+    const { host, root } = createHost();
+    const onFirstLayout = vi.fn();
+    const onReplayLayout = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <StrictCommitReplayProbe
+              onFirstLayout={onFirstLayout}
+              onReplayLayout={onReplayLayout}
+            >
+              <CommitDialog
+                open
+                onOpenChange={current.onOpenChange}
+                doc={doc}
+                onCommit={current.onCommit}
+                isOwner
+              />
+            </StrictCommitReplayProbe>
+          </StrictMode>,
+        );
+      });
+
+      expect(onFirstLayout).toHaveBeenCalledOnce();
+      expect(onReplayLayout).toHaveBeenCalledOnce();
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      fireEvent.click(cancel);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps a partial callback-ref replay retired and recovers only with a fresh visit", async () => {
+    const stale = actions();
+    const fresh = actions();
+    const doc = repoDocument("doc-partial-ref", "docs/partial-ref.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "stale", doc, actions: stale });
+      const messageBinding = commitRefBindings(host)[4]!;
+      act(() => {
+        messageBinding.ref(null);
+        messageBinding.ref(messageBinding.element);
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(stale.onOpenChange).not.toHaveBeenCalled();
+
+      await render(root, {
+        visit: "fresh",
+        doc: { ...doc },
+        actions: fresh,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(stale.onOpenChange).not.toHaveBeenCalled();
+      expect(fresh.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["restored control attribute", "restored ancestor placement"] as const)(
+    "retires %s history while leaving its distinct successor usable",
+    async (mutation) => {
+      const current = actions();
+      const doc = repoDocument(`doc-${mutation}`, "docs/mutation.md");
+      const { host, root } = createHost();
+
+      try {
+        await render(root, { visit: "current", doc, actions: current });
+        const cancel = screen.getByRole("button", { name: "Cancel" });
+        if (mutation === "restored control attribute") {
+          const className = cancel.className;
+          cancel.className = "mutated";
+          cancel.className = className;
+        } else {
+          const parent = host.parentNode;
+          const next = host.nextSibling;
+          if (!parent) throw new Error("The direct CommitDialog host has no parent");
+          host.remove();
+          parent.insertBefore(host, next);
+        }
+
+        fireEvent.click(cancel);
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+
+        await flushPublication();
+        fireEvent.click(cancel);
+        expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("prevents rejected rendered submits, ignores foreign provenance, and consumes reentry once", async () => {
+    const pending = deferred<void>();
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const current = actions();
+    const doc = repoDocument("doc-submit-provenance", "docs/submit-provenance.md");
+    const { host, root } = createHost();
+    const foreignForm = document.createElement("form");
+    document.body.append(foreignForm);
+
+    try {
+      await render(root, { visit: "current", doc, actions: current });
+      const form = commitForm();
+      const submitter = screen.getByTestId("commit-submit") as HTMLButtonElement;
+      const formHandler = reactProp<(event: ReactFormEvent<HTMLFormElement>) => void>(
+        form,
+        "onSubmit",
+      );
+      const foreignNative = nativeSubmit(foreignForm);
+      const preventDefault = vi.fn();
+      formHandler({
+        _reactName: "onSubmit",
+        type: "submit",
+        nativeEvent: foreignNative,
+        currentTarget: form,
+        target: form,
+        eventPhase: Event.BUBBLING_PHASE,
+        bubbles: true,
+        cancelable: true,
+        defaultPrevented: false,
+        preventDefault,
+        isDefaultPrevented: () => false,
+        isPropagationStopped: () => false,
+        persist: () => undefined,
+      } as unknown as ReactFormEvent<HTMLFormElement>);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(foreignNative.defaultPrevented).toBe(false);
+
+      const className = submitter.className;
+      submitter.className = "mutated";
+      submitter.className = className;
+      const rejected = nativeSubmit(form, submitter);
+      act(() => {
+        form.dispatchEvent(rejected);
+      });
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(current.onCommit).not.toHaveBeenCalled();
+
+      await flushPublication();
+      const nested = nativeSubmit(form, submitter);
+      current.onCommit.mockImplementationOnce(() => {
+        form.dispatchEvent(nested);
+        return pending.promise;
+      });
+      const accepted = nativeSubmit(form, submitter);
+      act(() => {
+        form.dispatchEvent(accepted);
+        form.dispatchEvent(accepted);
+      });
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nested.defaultPrevented).toBe(true);
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Update docs/submit-provenance.md");
+      await resolve(pending);
+      expect(timeout.mock.calls.filter((call) => call[1] === 900)).toHaveLength(1);
+    } finally {
+      foreignForm.remove();
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("owns one primary gist Update click and schedules one exact success close", async () => {
+    const pending = deferred<void>();
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const current = actions(pending.promise);
+    const doc = {
+      ...repoDocument("doc-gist-submit", "unused.md"),
+      storage: "gist" as const,
+      gistId: "gist-submit",
+      gistFile: "publish.md",
+      repoOwner: null,
+      repoName: null,
+      repoBranch: null,
+      repoPath: null,
+      githubUrl: "https://gist.github.com/gist-submit",
+    };
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "gist", doc, actions: current });
+      expect(screen.getByRole("button", { name: "Update gist" })).toBeEnabled();
+      fireEvent.change(message(), { target: { value: "  Publish gist description  " } });
+      await clickSubmit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Publish gist description");
+
+      await resolve(pending);
+      expect(timeout.mock.calls.filter((call) => call[1] === 900)).toHaveLength(1);
+      await advance(900);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims exact Enter provenance before one implicit native form submit", async () => {
+    const pending = deferred<void>();
+    const current = actions(pending.promise);
+    const doc = repoDocument("doc-enter-submit", "docs/enter.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "current", doc, actions: current });
+      fireEvent.change(message(), { target: { value: "  Enter commit  " } });
+      await flushPublication();
+      fireEvent.keyDown(message(), { key: "Enter" });
+      expect(current.onCommit).not.toHaveBeenCalled();
+
+      const form = commitForm();
+      const implicitSubmit = nativeSubmit(form);
+      act(() => {
+        form.dispatchEvent(implicitSubmit);
+      });
+      expect(implicitSubmit.defaultPrevented).toBe(true);
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Enter commit");
+      await resolve(pending);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["close button", "Escape"] as const)(
+    "authenticates one owner-document %s dismissal after Strict Mode replay",
+    async (dismissal) => {
+      const current = actions();
+      const doc = repoDocument(`doc-dismiss-${dismissal}`, "docs/dismiss.md");
+      const { host, root } = createHost();
+
+      try {
+        await render(root, { visit: "current", doc, actions: current });
+        if (dismissal === "close button") {
+          fireEvent.click(screen.getByRole("button", { name: "Close" }));
+        } else {
+          fireEvent.keyDown(message(), { key: "Escape" });
+        }
+
+        expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects stale equal-looking handlers after reopen and accepts the fresh message and Cancel", async () => {
+    const stale = actions();
+    const fresh = actions();
+    const doc = repoDocument("doc-equal-reopen", "docs/equal.md");
+    const { host, root } = createHost();
+    type ChangeHandler = (event: ReactChangeEvent<HTMLInputElement>) => void;
+    type CancelHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
+
+    try {
+      await render(root, { visit: "stale", doc, actions: stale });
+      const staleChange = reactProp<ChangeHandler>(message(), "onChange");
+      const staleCancel = reactProp<CancelHandler>(
+        screen.getByRole("button", { name: "Cancel" }),
+        "onClick",
+      );
+
+      await render(root, { visit: "closed", doc, actions: stale, open: false });
+      await render(root, { visit: "fresh", doc: { ...doc }, actions: fresh });
+      const currentMessage = message();
+      const currentCancel = screen.getByRole("button", { name: "Cancel" });
+      const freshChange = reactProp<ChangeHandler>(currentMessage, "onChange");
+      const freshCancel = reactProp<CancelHandler>(currentCancel, "onClick");
+
+      setReactProp(currentMessage, "onChange", staleChange);
+      fireEvent.change(currentMessage, { target: { value: "Retired value" } });
+      expect(currentMessage).toHaveValue("Update docs/equal.md");
+
+      setReactProp(currentMessage, "onChange", freshChange);
+      fireEvent.change(currentMessage, { target: { value: "Fresh value" } });
+      expect(currentMessage).toHaveValue("Fresh value");
+
+      await flushPublication();
+      const currentFreshCancel = reactProp<CancelHandler>(currentCancel, "onClick");
+      setReactProp(currentCancel, "onClick", staleCancel);
+      fireEvent.click(currentCancel);
+      expect(stale.onOpenChange).not.toHaveBeenCalled();
+      expect(fresh.onOpenChange).not.toHaveBeenCalled();
+
+      expect(currentFreshCancel).not.toBe(freshCancel);
+      setReactProp(currentCancel, "onClick", currentFreshCancel);
+      fireEvent.click(currentCancel);
+      expect(stale.onOpenChange).not.toHaveBeenCalled();
+      expect(fresh.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     } finally {
       await act(async () => root.unmount());
       host.remove();
