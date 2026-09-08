@@ -1504,6 +1504,11 @@ interface ModeSwitcherFocusGuard {
   readonly dispose: () => void;
 }
 
+interface ModeSwitcherFocusPlacement {
+  readonly snapshots: readonly ModeSwitcherPlacementSnapshot[];
+  readonly expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>;
+}
+
 interface ModeSwitcherRowPublication extends ModeSwitcherRowFacts {
   readonly capture: React.RefCallback<HTMLDivElement>;
   readonly onSelect: (event: Event) => void;
@@ -1813,10 +1818,11 @@ function createModeSwitcherFocusGuard(
   mode: EditMode,
   onInvalidated: () => void,
 ): ModeSwitcherFocusGuard {
-  const placements = new Map<Node, Node | null>();
-  for (let node: Node | null = target; node; node = node.parentNode) {
-    placements.set(node, node.parentNode);
-  }
+  const focusPlacement = snapshotModeSwitcherFocusPlacement(source, target);
+  const placementSnapshots = focusPlacement.snapshots;
+  const placements = new Map(
+    placementSnapshots.map((snapshot) => [snapshot.node, snapshot]),
+  );
   const MutationObserverConstructor = target.ownerDocument.defaultView?.MutationObserver;
   const initialDynamicAttributes = new Map(
     [...MODE_SWITCHER_DYNAMIC_ATTRIBUTES].map((name) => [name, target.getAttribute(name)]),
@@ -1856,6 +1862,7 @@ function createModeSwitcherFocusGuard(
           originalIcon,
           originalLabel,
           placements,
+          focusPlacement.expectedRemovals,
           mode,
         )
       )) {
@@ -1865,7 +1872,7 @@ function createModeSwitcherFocusGuard(
       return Boolean(
         !invalid
         && target.isConnected
-        && [...placements].every(([node, parent]) => node.parentNode === parent)
+        && placementSnapshots.every(modeSwitcherPlacementMatches)
         && modeSwitcherFocusTriggerIsExact(publication, initialDynamicAttributes)
       );
     },
@@ -1883,11 +1890,15 @@ function modeSwitcherFocusMutationIsExpected(
   trigger: HTMLButtonElement,
   originalIcon: Element | null,
   originalLabel: Element | null,
-  placements: ReadonlyMap<Node, Node | null>,
+  placements: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
+  expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
   mode: EditMode,
 ) {
   if (record.target !== trigger && !trigger.contains(record.target)) {
+    if (modeSwitcherFocusRemovalIsExpected(record, expectedRemovals)) return true;
     return record.type === "childList"
+      && (record.previousSibling === null || !placements.has(record.previousSibling))
+      && (record.nextSibling === null || !placements.has(record.nextSibling))
       && [...record.addedNodes, ...record.removedNodes].every(
         (node) => !placements.has(node) && !node.contains(trigger),
       );
@@ -1948,6 +1959,66 @@ function modeSwitcherFocusMutationIsExpected(
     && record.target.nodeValue === successor.render.rows.find(
       (row) => row.value === mode,
     )?.label
+  );
+}
+
+function snapshotModeSwitcherFocusPlacement(
+  source: ModeSwitcherPublication,
+  target: HTMLButtonElement,
+): ModeSwitcherFocusPlacement {
+  const expectedRemovals = new Map<Node, ModeSwitcherPlacementSnapshot>();
+  const snapshots = snapshotModeSwitcherPlacement([target]).map((snapshot) => {
+    let { previousSibling, nextSibling } = snapshot;
+    const content = source.dom.content;
+    if (content && previousSibling?.contains(content)) {
+      expectedRemovals.set(previousSibling, Object.freeze({
+        node: previousSibling,
+        parent: previousSibling.parentNode,
+        previousSibling: previousSibling.previousSibling,
+        nextSibling: previousSibling.nextSibling,
+      }));
+      previousSibling = previousSibling.previousSibling;
+    }
+    if (content && nextSibling?.contains(content)) {
+      expectedRemovals.set(nextSibling, Object.freeze({
+        node: nextSibling,
+        parent: nextSibling.parentNode,
+        previousSibling: nextSibling.previousSibling,
+        nextSibling: nextSibling.nextSibling,
+      }));
+      nextSibling = nextSibling.nextSibling;
+    }
+    return Object.freeze({
+      node: snapshot.node,
+      parent: snapshot.parent,
+      previousSibling,
+      nextSibling,
+    });
+  });
+  return Object.freeze({
+    snapshots: Object.freeze(snapshots),
+    expectedRemovals,
+  });
+}
+
+function modeSwitcherFocusRemovalIsExpected(
+  record: MutationRecord,
+  expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
+) {
+  if (
+    record.type !== "childList"
+    || record.addedNodes.length !== 0
+    || record.removedNodes.length !== 1
+  ) {
+    return false;
+  }
+  const removed = record.removedNodes.item(0);
+  const snapshot = removed && expectedRemovals.get(removed);
+  return Boolean(
+    snapshot
+    && record.target === snapshot.parent
+    && record.previousSibling === snapshot.previousSibling
+    && record.nextSibling === snapshot.nextSibling
   );
 }
 

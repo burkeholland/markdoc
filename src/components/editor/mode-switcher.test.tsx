@@ -889,8 +889,11 @@ describe("ModeSwitcher current behavior", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("returns focus once after a trusted Escape close commits beyond the event microtask", async () => {
-    const session = new ModeSession("escape-focus-order", "owner", "editing");
+  it.each([
+    ["Escape", "escape"],
+    ["mode selection", "mode"],
+  ] as const)("returns focus once after a trusted %s commits beyond the event microtask", async (_name, family) => {
+    const session = new ModeSession(`${family}-focus-order`, "owner", "editing");
     render(<ModeSwitcher session={session.asCollabSession()} />);
     const modeTrigger = trigger();
     openMenu();
@@ -898,12 +901,93 @@ describe("ModeSwitcher current behavior", () => {
     viewing.focus();
     const focus = vi.spyOn(modeTrigger, "focus");
 
-    dispatchTrustedEscapeOutsideAct(viewing);
+    if (family === "escape") {
+      dispatchTrustedEscapeOutsideAct(viewing);
+    } else {
+      dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    }
     await Promise.resolve();
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
+    if (family === "mode") {
+      expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    }
     expect(focus).toHaveBeenCalledTimes(1);
     expect(modeTrigger).toHaveFocus();
+  });
+
+  it.each([
+    ["Escape", "retained", "escape"],
+    ["Escape", "restored", "escape"],
+    ["mode selection", "retained", "mode"],
+    ["mode selection", "restored", "mode"],
+  ] as const)(
+    "does not focus after a trusted %s with a %s adjacent sibling mutation",
+    async (_name, mutation, family) => {
+      const session = new ModeSession(`${family}-${mutation}-adjacent-focus`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      const parent = modeTrigger.parentNode;
+      if (!parent) throw new Error("Mode trigger did not have a parent");
+      openMenu();
+      const viewing = radio("Viewing");
+      viewing.focus();
+      const focus = vi.spyOn(modeTrigger, "focus");
+
+      if (family === "escape") {
+        dispatchTrustedEscapeOutsideAct(viewing);
+      } else {
+        dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+      }
+      const adjacent = document.createElement("span");
+      parent.insertBefore(adjacent, modeTrigger.nextSibling);
+      if (mutation === "restored") adjacent.remove();
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      if (family === "mode") {
+        expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+      }
+      expect(focus).not.toHaveBeenCalled();
+      adjacent.remove();
+    },
+  );
+
+  it.each([
+    ["Escape", "escape"],
+    ["mode selection", "mode"],
+  ] as const)("keeps one focus after a trusted %s with a nonadjacent sibling mutation", async (_name, family) => {
+    const session = new ModeSession(`${family}-nonadjacent-focus`, "owner", "editing");
+    render(
+      <>
+        <ModeSwitcher session={session.asCollabSession()} />
+        <span data-testid="mode-sibling-buffer" />
+      </>,
+    );
+    const modeTrigger = trigger();
+    const parent = modeTrigger.parentNode;
+    if (!parent) throw new Error("Mode trigger did not have a parent");
+    openMenu();
+    const viewing = radio("Viewing");
+    viewing.focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    if (family === "escape") {
+      dispatchTrustedEscapeOutsideAct(viewing);
+    } else {
+      dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    }
+    const nonadjacent = document.createElement("span");
+    parent.appendChild(nonadjacent);
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    if (family === "mode") {
+      expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    }
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+    nonadjacent.remove();
   });
 
   it("returns focus once when the trusted current trigger toggles the menu closed", async () => {
