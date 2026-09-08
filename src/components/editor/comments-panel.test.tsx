@@ -226,6 +226,22 @@ function captureSuggestionActions(scope: ParentNode = document, index = 0): Capt
   };
 }
 
+function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSuggestionActions {
+  const root = scope.querySelector<HTMLElement>('[data-testid="suggestion-batch-actions"]');
+  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
+  if (!Root || !(root instanceof Root)) throw new Error("Suggestion batch actions were not rendered");
+  const accept = root.querySelector<HTMLElement>('[data-testid="accept-all"]');
+  const reject = root.querySelector<HTMLElement>('[data-testid="reject-all"]');
+  return {
+    root,
+    rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
+    rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
+    rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
+    accept: accept ? captureSuggestionControl(accept) : null,
+    reject: reject ? captureSuggestionControl(reject) : null,
+  };
+}
+
 function reviewSession(docId: string) {
   const user = makeCollabUser("alice", "Alice");
   const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
@@ -2270,6 +2286,16 @@ describe("CommentsPanel", () => {
       return { session: next, user, threadIds: next.comments.list().map((thread) => thread.id) };
     };
 
+    const addLocalBatchSuggestion = (fixture: BatchFixture, word = "delta") => {
+      const text = fixture.session.ytext.toString();
+      const from = text.indexOf(word);
+      const agent = makeCollabUser("agent:alice:Local", "Local");
+      fixture.session.suggestions.proposeEdits(
+        [{ from, to: from + word.length, insert: word.toUpperCase() }],
+        agent,
+      );
+    };
+
     const batchPanel = (current: CollabSession, onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>(), onClose = () => {}) => (
       <TooltipProvider>
         <CommentsPanel session={current} onClose={onClose} onReveal={() => {}} onToast={onToast} />
@@ -2404,6 +2430,317 @@ describe("CommentsPanel", () => {
       );
       expect(onToast).toHaveBeenCalledTimes(1);
       expect(onToast).toHaveBeenCalledWith(`${action === "accept" ? "Accepted" : "Rejected"} 2 suggestions.`, "success");
+    });
+
+    it.each([
+      ["accept", "local", 0, true],
+      ["reject", "local", 0, true],
+      ["accept", "comments", 2, false],
+      ["reject", "comments", 2, false],
+      ["accept", "mixed", 1, true],
+      ["reject", "mixed", 1, true],
+    ] as const)(
+      "publishes one exact direct-root Strict Mode %s batch for %s targets",
+      async (action, source, commentCount, withLocal) => {
+        const fixture = makeBatchSession(`strict-suggestions-${action}-${source}`, commentCount);
+        if (withLocal) addLocalBatchSuggestion(fixture);
+        const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const tab = await within(host).findByRole("tab", { name: /Suggestions/ });
+          if (tab.getAttribute("aria-selected") !== "true") {
+            await act(async () => {
+              dispatchReviewClick(tab);
+            });
+          }
+          const actions = captureSuggestionBatchActions(host);
+          const control = action === "accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`${action} all was not published`);
+
+          await act(async () => {
+            dispatchReviewClick(control.element);
+            await Promise.resolve();
+          });
+
+          if (withLocal) {
+            expect(reviewLocal).toHaveBeenCalledExactlyOnceWith(action === "accept" ? "acceptAll" : "rejectAll");
+          } else {
+            expect(reviewLocal).not.toHaveBeenCalled();
+          }
+          await waitFor(() => expect(api.documents.comment).toHaveBeenCalledTimes(commentCount));
+          expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("claims native and React traversal before repeated, crossed, reentrant, and async batch work", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      const fixture = makeBatchSession("suggestions-exact-traversal", 2);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let primary: CapturedSuggestionControl | null = null;
+      vi.mocked(api.documents.comment)
+        .mockImplementationOnce(() => {
+          primary?.element.click();
+          return requests[0].promise;
+        })
+        .mockReturnValueOnce(requests[1].promise)
+        .mockResolvedValue(response);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const actions = captureSuggestionBatchActions(host);
+        primary = actions.accept;
+        const crossed = actions.reject;
+        if (!primary || !crossed) throw new Error("Both batch actions were not published");
+
+        act(() => {
+          primary!.click(reviewMouseEvent(primary!, crossed.element));
+          crossed.click(reviewMouseEvent(crossed, primary!.element));
+        });
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        const repeated = new MouseEvent("click", { bubbles: true, cancelable: true });
+        act(() => {
+          dispatchReviewClick(primary!.element, repeated);
+          dispatchReviewClick(primary!.element, repeated);
+          crossed.element.click();
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+        await settleBatch(requests[0], "resolve");
+        expect(api.documents.comment).toHaveBeenCalledTimes(2);
+        await settleBatch(requests[1], "resolve");
+
+        const successor = await within(host).findByTestId("accept-all");
+        act(() => dispatchReviewClick(successor));
+        expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps a successor batch owned when the retired session settles late", async () => {
+      const retiredRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(retiredRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise);
+      const retired = makeBatchSession("suggestions-retired-session", 1);
+      const retiredToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const currentToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(retired.session, retiredToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+
+        auxiliarySessions.push(retired.session);
+        const current = makeBatchSession("suggestions-current-session", 1, retired.session);
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(current.session, currentToast)}</StrictMode>);
+        });
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        expect(api.documents.comment).toHaveBeenCalledTimes(2);
+
+        await settleBatch(retiredRequest, "reject", "retired failure");
+        expect(captureSuggestionBatchActions(host).reject?.element).toBeDisabled();
+        expect(retiredToast).not.toHaveBeenCalled();
+        expect(currentToast).not.toHaveBeenCalled();
+        await settleBatch(currentRequest, "resolve");
+        expect(currentToast).toHaveBeenCalledOnce();
+        expect(retiredToast).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["descendant mutation", "disabled restoration", "detach and reinsert"] as const)(
+      "retires Suggestions-tab batch history after %s and admits a fresh successor",
+      async (scenario) => {
+        const fixture = makeBatchSession(`suggestions-${scenario.replaceAll(" ", "-")}`, 1);
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          await act(async () => {
+            dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+          });
+          const stale = captureSuggestionBatchActions(host);
+          const control = stale.reject!;
+          if (scenario === "descendant mutation") {
+            const child = control.element.firstChild;
+            if (!child) throw new Error("Reject all did not have label content");
+            const replacement = child.cloneNode(true);
+            control.element.replaceChild(replacement, child);
+            control.element.replaceChild(child, replacement);
+          } else if (scenario === "disabled restoration") {
+            control.element.disabled = true;
+            control.element.disabled = false;
+          } else {
+            const parent = stale.root.parentNode;
+            const next = stale.root.nextSibling;
+            if (!parent) throw new Error("Batch actions did not have a committed parent");
+            stale.root.remove();
+            parent.insertBefore(stale.root, next);
+          }
+
+          const staleEvent = new MouseEvent("click", { bubbles: true, cancelable: true });
+          act(() => dispatchReviewClick(control.element, staleEvent));
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          await act(async () => {});
+          const current = captureSuggestionBatchActions(host);
+          expect(current.reject?.click).not.toBe(control.click);
+          act(() => dispatchReviewClick(current.reject!.element, staleEvent));
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          act(() => dispatchReviewClick(current.reject!.element));
+          expect(api.documents.comment).toHaveBeenCalledOnce();
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("requires complete same-generation refs and ignores late partial replay after a successor", async () => {
+      const fixture = makeBatchSession("suggestions-partial-replay", 1);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const stale = captureSuggestionBatchActions(host);
+        act(() => {
+          stale.rootRef(null);
+          stale.rootRef(stale.root);
+          stale.accept!.ref(null);
+          stale.accept!.ref(stale.accept!.element);
+          dispatchReviewClick(stale.reject!.element);
+        });
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
+        });
+        const current = captureSuggestionBatchActions(host);
+        expect(current.reject?.click).not.toBe(stale.reject?.click);
+        act(() => {
+          stale.reject!.ref(null);
+          stale.reject!.ref(stale.reject!.element);
+          dispatchReviewClick(current.reject!.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["reorder", "remove", "outdated"] as const)(
+      "rejects a %s target drift without poisoning the restored batch",
+      async (drift) => {
+        const fixture = makeBatchSession(`suggestions-target-${drift}`, 0);
+        addLocalBatchSuggestion(fixture, "gamma");
+        addLocalBatchSuggestion(fixture, "delta");
+        const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const stale = captureSuggestionBatchActions(host).reject!;
+          const groups = fixture.session.suggestions.groups.bind(fixture.session.suggestions);
+          const drifted = vi.spyOn(fixture.session.suggestions, "groups").mockImplementation((sourceText) => {
+            const current = groups(sourceText);
+            if (drift === "reorder") return [...current].reverse();
+            if (drift === "remove") return current.slice(1);
+            return current.map((group) => ({ ...group, outdated: true }));
+          });
+
+          act(() => dispatchReviewClick(stale.element));
+          expect(reviewLocal).not.toHaveBeenCalled();
+          drifted.mockRestore();
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const current = captureSuggestionBatchActions(host).reject!;
+          act(() => dispatchReviewClick(current.element));
+          expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("rejectAll");
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("retires permission and callback publications while preserving current recovery", async () => {
+      const fixture = makeBatchSession("suggestions-permission-callback", 1);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const firstToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const secondToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, firstToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const permissionStale = captureSuggestionBatchActions(host).accept!;
+        (fixture.session as unknown as { role: string }).role = "viewer";
+        act(() => dispatchReviewClick(permissionStale.element));
+        expect(api.documents.comment).not.toHaveBeenCalled();
+        (fixture.session as unknown as { role: string }).role = "owner";
+
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
+        });
+        const callbackStale = permissionStale;
+        const current = captureSuggestionBatchActions(host).accept!;
+        act(() => {
+          callbackStale.click(reviewMouseEvent(current));
+          dispatchReviewClick(current.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+        await waitFor(() => expect(secondToast).toHaveBeenCalledOnce());
+        expect(firstToast).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
     });
 
     it("keeps local Suggestions-tab bulk review in one text-and-annotation undo step", async () => {
