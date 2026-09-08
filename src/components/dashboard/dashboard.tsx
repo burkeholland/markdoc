@@ -6519,9 +6519,9 @@ function filterDescriptorsMatch(
   current: PropertyDescriptor | undefined,
   expected: PropertyDescriptor,
 ) {
+  if (!current) return false;
   return (
-    Boolean(current) &&
-    current?.configurable === expected.configurable &&
+    current.configurable === expected.configurable &&
     current.enumerable === expected.enumerable &&
     current.writable === expected.writable &&
     current.value === expected.value &&
