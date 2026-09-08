@@ -1309,8 +1309,6 @@ function createFailureControlPublication(
     let domGuard: RefreshControlDomGuard | null = null;
     let replayRefs: RefReplay[] = [];
     let invalidReplay = false;
-    let runtime: FailureControlRuntime;
-
     const retire = (reason: Retirement) => {
       if (retired) return false;
       if (
@@ -1398,7 +1396,7 @@ function createFailureControlPublication(
           entry.owner.element() === entry.element,
       );
 
-    runtime = Object.freeze({
+    const runtime: FailureControlRuntime = Object.freeze({
       publication,
       publish: (
         snapshot: RefreshControlDomSnapshot,
@@ -2268,8 +2266,6 @@ export function UpdatePill({
     documentAuthority &&
     authority &&
     failureState?.publication.authority === authority &&
-    failurePublicationRef.current === failureState.publication &&
-    failureAttemptRef.current === failureState.attempt &&
     !failureControlCells.invalidFailures.has(failureState.publication)
       ? failureState
       : null;
