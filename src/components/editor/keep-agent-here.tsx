@@ -320,8 +320,10 @@ interface KeepAgentPanelDomSnapshot {
 }
 
 interface KeepAgentPanelPlacement {
-  readonly child: Node;
-  readonly parent: Node;
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
 }
 
 interface KeepAgentPanelPublication {
@@ -445,14 +447,18 @@ function panelDomMatches(snapshot: KeepAgentPanelDomSnapshot): boolean {
 function connectedPlacement(panel: HTMLElement): readonly KeepAgentPanelPlacement[] | null {
   const placement: KeepAgentPanelPlacement[] = [];
   const ownerDocument = panel.ownerDocument;
-  let child: Node = panel;
-  while (child !== ownerDocument) {
-    const parent = child.parentNode;
-    if (!parent) return null;
-    placement.push(Object.freeze({ child, parent }));
-    child = parent;
+  let current: Node | null = panel;
+  while (current) {
+    placement.push(Object.freeze({
+      node: current,
+      parent: current.parentNode,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+    }));
+    if (current === ownerDocument) return Object.freeze(placement);
+    current = current.parentNode;
   }
-  return Object.freeze(placement);
+  return null;
 }
 
 function placementMatches(
@@ -460,16 +466,41 @@ function placementMatches(
   placement: readonly KeepAgentPanelPlacement[],
 ): boolean {
   const ownerDocument = panel.ownerDocument;
-  return (
-    panel.isConnected &&
-    placement.length > 0 &&
-    placement[0]?.child === panel &&
-    placement.every((edge, index) =>
-      edge.child.parentNode === edge.parent &&
-      (index === placement.length - 1
-        ? edge.parent === ownerDocument
-        : placement[index + 1]?.child === edge.parent))
-  );
+  if (!panel.isConnected || placement.length === 0 || placement[0]?.node !== panel) {
+    return false;
+  }
+  for (let index = 0; index < placement.length; index++) {
+    const current = placement[index]!;
+    const next = placement[index + 1];
+    if (
+      current.node.parentNode !== current.parent ||
+      current.node.previousSibling !== current.previousSibling ||
+      current.node.nextSibling !== current.nextSibling ||
+      (next && current.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placement.at(-1)!;
+  return last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null;
+}
+
+function mutationTouchesPlacement(
+  placement: readonly KeepAgentPanelPlacement[],
+  mutation: MutationRecord,
+): boolean {
+  if (mutation.type !== "childList") return false;
+  return placement.some(({ node, parent }) =>
+    parent === mutation.target &&
+    (
+      mutation.previousSibling === node ||
+      mutation.nextSibling === node ||
+      [...mutation.addedNodes].includes(node) ||
+      [...mutation.removedNodes].includes(node)
+    ));
 }
 
 function nativePathMatches(
@@ -1295,8 +1326,12 @@ class KeepAgentPanelCoordinator {
           });
         }
       }
+      const observedParents = new Set<Node>();
       for (const { parent } of publication.placement) {
-        observer.observe(parent, { childList: true });
+        if (parent && !observedParents.has(parent)) {
+          observedParents.add(parent);
+          observer.observe(parent, { childList: true });
+        }
       }
       publication.observer = observer;
     }
@@ -1345,11 +1380,10 @@ class KeepAgentPanelCoordinator {
     publication: KeepAgentPanelPublication,
     records: readonly MutationRecord[],
   ): boolean {
-    return records.some((record) => {
-      const placement = publication.placement.find(({ parent }) => parent === record.target);
-      if (!placement) return true;
-      return [...record.addedNodes, ...record.removedNodes].includes(placement.child);
-    });
+    const panel = publication.elements.panel;
+    return records.some((record) =>
+      Boolean(panel?.contains(record.target)) ||
+      mutationTouchesPlacement(publication.placement, record));
   }
 
   #mutationFree(publication: KeepAgentPanelPublication): boolean {

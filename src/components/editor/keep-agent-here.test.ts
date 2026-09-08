@@ -887,7 +887,8 @@ describe("KeepAgentHerePanel exact control publications", () => {
   it("ignores restored sibling placement and mutations confined to its nonadjacent branch", async () => {
     const wrapper = document.createElement("section");
     const sibling = document.createElement("aside");
-    wrapper.append(sibling);
+    const adjacent = document.createElement("span");
+    wrapper.append(sibling, adjacent);
     document.body.append(wrapper);
     const onBack = vi.fn();
     const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC, onBack }), wrapper);
