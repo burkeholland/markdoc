@@ -4,7 +4,6 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import * as ReactDOM from "react-dom";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -128,14 +127,7 @@ interface TemplateGridAttributeSnapshot {
   readonly value: string;
 }
 
-const TEMPLATE_GRID_DISCRETE_EVENT_PRIORITY = 2;
-const TEMPLATE_GRID_REACT_DOM_INTERNALS = (
-  ReactDOM as typeof ReactDOM & {
-    readonly __DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: {
-      readonly p: number;
-    };
-  }
-).__DOM_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+const TEMPLATE_GRID_XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/";
 
 const TEMPLATE_ICON_CHILDREN = {
   File: [
@@ -349,6 +341,10 @@ interface TemplateGridPublicationRuntime {
     entry: TemplateGridEntryPublication,
     event: ReactMouseEvent<HTMLLIElement>,
   ) => void;
+  readonly captureReactButtonClick: (
+    entry: TemplateGridEntryPublication,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
   readonly activate: (
     entry: TemplateGridEntryPublication,
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -391,6 +387,9 @@ interface TemplateGridPublicationSet {
     ) => void | (() => void);
     readonly captureClick: (
       event: ReactMouseEvent<HTMLLIElement>,
+    ) => void;
+    readonly captureButtonClick: (
+      event: ReactMouseEvent<HTMLButtonElement>,
     ) => void;
     readonly activate: (
       event: ReactMouseEvent<HTMLButtonElement>,
@@ -787,7 +786,9 @@ function templateGridHasExactAttributes(
           attribute.name === name &&
           attribute.localName === name &&
           attribute.prefix === null &&
-          attribute.namespaceURI === null &&
+          (attribute.namespaceURI === null ||
+            (name === "xmlns" &&
+              attribute.namespaceURI === TEMPLATE_GRID_XMLNS_NAMESPACE)) &&
           attribute.value === value,
       ),
     )
@@ -1137,6 +1138,8 @@ function createTemplateGridPublication(
     let nativeClick: TemplateGridNativeClickProof | null = null;
     let reactGridClick: TemplateGridReactClickProof | null = null;
     let reactCardClick: TemplateGridReactEntryClickProof | null = null;
+    let reactButtonClick: TemplateGridReactEntryClickProof | null = null;
+    let nativeBoundaryClick: TemplateGridNativeClickProof | null = null;
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -1169,8 +1172,6 @@ function createTemplateGridPublication(
     ) => {
       const currentTarget = native.currentTarget;
       return (
-        TEMPLATE_GRID_REACT_DOM_INTERNALS.p ===
-          TEMPLATE_GRID_DISCRETE_EVENT_PRIORITY &&
         native.eventPhase === phase &&
         currentTarget instanceof ownerWindow.Node &&
         (currentTarget === ownerDocument ||
@@ -1216,25 +1217,56 @@ function createTemplateGridPublication(
         : null;
     };
     const onNativeClickCapture = (event: MouseEvent) => {
-      nativeClick = null;
-      reactGridClick = null;
-      reactCardClick = null;
-      nativeClick = exactNativeClick(event);
+      nativeBoundaryClick = null;
+      if (nativeClick?.event !== event) {
+        reactGridClick = null;
+        reactCardClick = null;
+        reactButtonClick = null;
+        nativeClick = exactNativeClick(event);
+      }
     };
     const onNativeClickBubble = (event: MouseEvent) => {
       if (nativeClick?.event === event) {
         nativeClick = null;
         reactGridClick = null;
         reactCardClick = null;
+        reactButtonClick = null;
+        nativeBoundaryClick = null;
       }
     };
+    const nativeBoundaryListeners = entries.map((entry) => {
+      const listener = (event: MouseEvent) => {
+        nativeBoundaryClick = null;
+        if (
+          nativeClick?.event === event &&
+          reactButtonClick?.native === nativeClick &&
+          reactButtonClick.entry === entry &&
+          reactButtonClick.action === entry.action &&
+          event.currentTarget === entry.button &&
+          (event.eventPhase === ownerWindow.Event.CAPTURING_PHASE ||
+            event.eventPhase === ownerWindow.Event.AT_TARGET) &&
+          event.target === nativeClick.target &&
+          templateGridIsEffectivelyEnabled(grid, entry.button) &&
+          publicationOwnsCurrentDom()
+        ) {
+          nativeBoundaryClick = nativeClick;
+        }
+      };
+      return Object.freeze({ entry, listener });
+    });
     const addNativeListeners = () => {
       ownerDocument.addEventListener("click", onNativeClickCapture, true);
       ownerDocument.addEventListener("click", onNativeClickBubble);
+      for (const { entry, listener } of nativeBoundaryListeners) {
+        entry.button.addEventListener("click", listener, true);
+      }
     };
     const releaseNativeListeners = () => {
       ownerDocument.removeEventListener("click", onNativeClickCapture, true);
       ownerDocument.removeEventListener("click", onNativeClickBubble);
+      for (const { entry, listener } of nativeBoundaryListeners) {
+        entry.button.removeEventListener("click", listener, true);
+      }
     };
     const publishedDomMatches = () =>
       Boolean(
@@ -1250,6 +1282,8 @@ function createTemplateGridPublication(
       nativeClick = null;
       reactGridClick = null;
       reactCardClick = null;
+      reactButtonClick = null;
+      nativeBoundaryClick = null;
       guard?.release();
       guard = null;
       releaseNativeListeners();
@@ -1262,6 +1296,8 @@ function createTemplateGridPublication(
       nativeClick = null;
       reactGridClick = null;
       reactCardClick = null;
+      reactButtonClick = null;
+      nativeBoundaryClick = null;
       releaseNativeListeners();
       if (cells.active.current === publication) {
         cells.active.current = null;
@@ -1287,7 +1323,7 @@ function createTemplateGridPublication(
       isRetired: () => retired,
       publishedDomMatches,
     });
-    const exactReactProof = (
+    const exactReactCaptureProof = (
       event: ReactMouseEvent<HTMLButtonElement>,
       entry: TemplateGridDomPublication,
     ) =>
@@ -1307,6 +1343,34 @@ function createTemplateGridPublication(
           event.button === 0 &&
           event.buttons === 0 &&
           event.detail === nativeClick.event.detail &&
+          event.bubbles &&
+          !event.defaultPrevented &&
+          event.currentTarget === entry.button &&
+          event.target === nativeClick.target &&
+          nativeClick.entry === entry &&
+          nativeClick.action === entry.action &&
+          entry.targets.includes(nativeClick.target),
+      );
+    const exactReactBubbleProof = (
+      event: ReactMouseEvent<HTMLButtonElement>,
+      entry: TemplateGridDomPublication,
+    ) =>
+      Boolean(
+        nativeClick &&
+          nativeBoundaryClick === nativeClick &&
+          reactButtonClick?.native === nativeClick &&
+          reactButtonClick.entry === entry &&
+          reactButtonClick.action === entry.action &&
+          event.nativeEvent === nativeClick.event &&
+          nativeReactDispatchIsCurrent(
+            nativeClick.event,
+            ownerWindow.Event.BUBBLING_PHASE,
+          ) &&
+          event.type === "click" &&
+          event.button === 0 &&
+          event.buttons === 0 &&
+          event.detail === nativeClick.event.detail &&
+          event.eventPhase === ownerWindow.Event.BUBBLING_PHASE &&
           event.bubbles &&
           !event.defaultPrevented &&
           event.currentTarget === entry.button &&
@@ -1416,6 +1480,7 @@ function createTemplateGridPublication(
       captureReactClick: (event: ReactMouseEvent<HTMLUListElement>) => {
         reactGridClick = null;
         reactCardClick = null;
+        reactButtonClick = null;
         const capturedNative =
           nativeClick ??
           (event.nativeEvent instanceof ownerWindow.MouseEvent
@@ -1484,6 +1549,26 @@ function createTemplateGridPublication(
           action: entry.action,
         });
       },
+      captureReactButtonClick: (
+        entryAuthority: TemplateGridEntryPublication,
+        event: ReactMouseEvent<HTMLButtonElement>,
+      ) => {
+        reactButtonClick = null;
+        const entry = publication.entries[entryAuthority.index];
+        if (
+          entry &&
+          render.entries[entryAuthority.index] === entryAuthority &&
+          entry.entry === entryAuthority &&
+          exactReactCaptureProof(event, entry)
+        ) {
+          reactButtonClick = Object.freeze({
+            event,
+            native: nativeClick!,
+            entry,
+            action: entry.action,
+          });
+        }
+      },
       activate: (
         entryAuthority: TemplateGridEntryPublication,
         event: ReactMouseEvent<HTMLButtonElement>,
@@ -1503,7 +1588,7 @@ function createTemplateGridPublication(
           action.entryIdentity !== entry.identity ||
           action.index !== entryAuthority.index ||
           !templateGridIsEffectivelyEnabled(grid, entry.button) ||
-          !exactReactProof(event, entry) ||
+          !exactReactBubbleProof(event, entry) ||
           cells.claimedPublications.has(publication) ||
           cells.claimedEntries.has(entry) ||
           cells.claimedActions.has(action) ||
@@ -1622,6 +1707,11 @@ function createTemplateGridPublication(
           captureClick: (event: ReactMouseEvent<HTMLLIElement>) => {
             currentRuntime?.captureReactCardClick(owned.entry, event);
           },
+          captureButtonClick: (
+            event: ReactMouseEvent<HTMLButtonElement>,
+          ) => {
+            currentRuntime?.captureReactButtonClick(owned.entry, event);
+          },
           activate: (event: ReactMouseEvent<HTMLButtonElement>) =>
             currentRuntime?.activate(owned.entry, event) ?? false,
         }),
@@ -1712,6 +1802,9 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
               ref={owned.captureButton}
               type="button"
               onClickCapture={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                owned.captureButtonClick(event);
+              }}
+              onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
                 owned.activate(event);
               }}
               disabled={render.busy !== null}

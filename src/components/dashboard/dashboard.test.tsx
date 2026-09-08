@@ -2,7 +2,8 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { StrictMode, createElement, startTransition, useEffect, useLayoutEffect, useState } from "react";
 import { flushSync } from "react-dom";
-import { createRoot } from "react-dom/client";
+import { createRoot, hydrateRoot } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 import type { PendingNotice } from "@/lib/notice";
@@ -159,6 +160,24 @@ function TemplateGridBoundary({
 function TemplateGridLayoutTamper({ tamper }: { tamper: () => void }) {
   useLayoutEffect(tamper, [tamper]);
   return null;
+}
+
+function TemplateGridCaptureAttack({
+  attack,
+  children,
+}: {
+  attack: (event: MouseEvent) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      onClickCapture={(event) => {
+        attack(event.nativeEvent);
+      }}
+    >
+      {children}
+    </div>
+  );
 }
 
 interface TrashViewBoundaryProps {
@@ -358,11 +377,11 @@ function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
 function captureTemplateActivation(
   element: HTMLButtonElement,
 ): CapturedReactClick {
-  const onClickCapture = reactProps(element).onClickCapture;
-  if (!onClickCapture) {
+  const onClick = reactProps(element).onClick;
+  if (!onClick) {
     throw new Error("The template button did not have an activation handler");
   }
-  return onClickCapture;
+  return onClick;
 }
 
 function captureTemplateTraversal(element: Element): CapturedReactClick {
@@ -398,13 +417,13 @@ function interceptTemplateActivation(
   invoke: (original: CapturedReactClick, event: unknown) => void,
 ): () => void {
   const { key, record, props } = reactPropsEntry(element);
-  const original = props.onClickCapture;
+  const original = props.onClick;
   if (!original) {
     throw new Error("The template button did not have an activation handler");
   }
   const intercepted = {
     ...props,
-    onClickCapture: (event: unknown) => invoke(original, event),
+    onClick: (event: unknown) => invoke(original, event),
   };
   record[key] = intercepted;
   return () => {
@@ -481,6 +500,7 @@ function invokePlainTemplateTraversal(
     button: nativeEvent.button,
     buttons: nativeEvent.buttons,
     detail: nativeEvent.detail,
+    eventPhase: nativeEvent.eventPhase,
     bubbles: nativeEvent.bubbles,
     defaultPrevented: nativeEvent.defaultPrevented,
     currentTarget: grid as EventTarget,
@@ -491,6 +511,7 @@ function invokePlainTemplateTraversal(
   wrapper.currentTarget = card;
   captureTemplateTraversal(card)(wrapper);
   wrapper.currentTarget = button;
+  captureTemplateTraversal(button)(wrapper);
   captureTemplateActivation(button)(wrapper);
 }
 
@@ -868,7 +889,9 @@ describe("TemplateGrid publication ownership", () => {
     let grid!: HTMLUListElement;
     let button!: HTMLButtonElement;
     const attack = (event: MouseEvent) => {
-      invokePlainTemplateTraversal(grid, button, event);
+      flushSync(() => {
+        invokePlainTemplateTraversal(grid, button, event);
+      });
       callsDuringAttack = onPick.mock.calls.length;
     };
 
@@ -926,7 +949,9 @@ describe("TemplateGrid publication ownership", () => {
         button &&
         event instanceof ownerWindow.MouseEvent
       ) {
-        invokePlainTemplateTraversal(grid, button, event);
+        flushSync(() => {
+          invokePlainTemplateTraversal(grid!, button!, event);
+        });
         callsDuringAttack = onPick.mock.calls.length;
       }
     };
@@ -975,6 +1000,45 @@ describe("TemplateGrid publication ownership", () => {
     }
   });
 
+  it("rejects a full-hop forged wrapper from an ancestor React capture", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+    let callsDuringAttack = -1;
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGridCaptureAttack
+              attack={(event) => {
+                invokePlainTemplateTraversal(
+                  templateGrid(host),
+                  templateButton(host, template.id),
+                  event,
+                );
+                callsDuringAttack = onPick.mock.calls.length;
+              }}
+            >
+              <TemplateGrid onPick={onPick} busy={null} />
+            </TemplateGridCaptureAttack>
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        templateButton(host, template.id).click();
+      });
+      expect(callsDuringAttack).toBe(0);
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("authenticates the exact native event when React owns the owner document", async () => {
     const frame = document.createElement("iframe");
     document.body.append(frame);
@@ -1014,6 +1078,42 @@ describe("TemplateGrid publication ownership", () => {
     } finally {
       await act(async () => root.unmount());
       frame.remove();
+    }
+  });
+
+  it("publishes parser-canonical SVG namespaces after server rendering and hydration", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+    host.innerHTML = renderToString(
+      <StrictMode>
+        <TemplateGrid onPick={onPick} busy={null} />
+      </StrictMode>,
+    );
+    const serverIcon = templateButton(host, template.id).querySelector("svg");
+    expect(serverIcon?.getAttributeNode("xmlns")?.namespaceURI).toBe(
+      "http://www.w3.org/2000/xmlns/",
+    );
+    let root!: ReturnType<typeof hydrateRoot>;
+
+    try {
+      await act(async () => {
+        root = hydrateRoot(
+          host,
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        templateButton(host, template.id).click();
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
     }
   });
 
