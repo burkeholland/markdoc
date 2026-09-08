@@ -22,20 +22,20 @@ const REFRESH_MS = 30_000;
 const PAGE = 50;
 
 type ActivityVisit = {
-  session: CollabSession;
-  documentId: string;
-  onClose: () => void;
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly onClose: () => void;
+  readonly predecessor: ActivityVisit | null;
 };
 
 type CadenceOperation = {
-  visit: ActivityVisit;
-  timer: ReturnType<typeof setInterval>;
-  cleared: boolean;
+  readonly visit: ActivityVisit;
+  readonly timer: ReturnType<typeof setInterval>;
 };
 
 type RefreshOperation = {
-  visit: ActivityVisit;
-  id: number;
+  readonly visit: ActivityVisit;
+  readonly id: number;
 };
 
 type LoadMoreOperation = RefreshOperation & {
@@ -69,6 +69,9 @@ interface ActivitySourceFacts {
   readonly retrying: boolean;
   readonly loadingMore: boolean;
   readonly now: number;
+  readonly cadence: CadenceOperation | null;
+  readonly refresh: RefreshOperation | null;
+  readonly loadMore: LoadMoreOperation | null;
 }
 
 interface ActivityPresentation {
@@ -90,8 +93,14 @@ interface ActivityPresentation {
 }
 
 interface ActivityPublication {
+  readonly identity: symbol;
   readonly presentation: ActivityPresentation;
+  readonly ownerDocument: Document;
+  readonly dom: ActivityDomSnapshot;
+  readonly placement: ActivityPlacement;
   readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
 }
 
 interface ActivityPublicationSet {
@@ -114,13 +123,17 @@ interface ActivityPublicationSet {
 
 interface ActivityPublicationRuntime {
   readonly publication: ActivityPublication;
-  readonly publish: (snapshot: ActivityDomSnapshot) => void;
+  readonly publish: () => boolean;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
-  readonly isRetired: () => boolean;
-  readonly publishedDomMatches: () => boolean;
+  readonly noteRef: (
+    owner: ActivityElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
   readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
+  readonly replay: () => ActivityPublicationReplay | null;
 }
 
 interface ActivityDomSnapshot {
@@ -130,42 +143,164 @@ interface ActivityDomSnapshot {
   readonly children: readonly ActivityDomSnapshot[];
 }
 
+interface ActivityPlacement {
+  readonly document: Document;
+  readonly chain: readonly ActivityNodePlacement[];
+}
+
+interface ActivityNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly exactSiblings: boolean;
+}
+
+interface ActivityDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface ActivityElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface ActivityRefReplay {
+  readonly owner: ActivityElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface ActivityPublicationReplay {
+  readonly source: ActivityPublication;
+  readonly dom: ActivityDomSnapshot;
+  readonly placement: ActivityPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface ActivityAction {
+  readonly identity: symbol;
+  readonly kind: ActivityActionKind;
+}
+
 class ActivityPublicationCoordinator {
+  readonly #mount: symbol;
   #active: ActivityPublication | null = null;
   #successorOf: ActivityPublication | null = null;
-  #claimedEvents = new WeakSet<Event>();
+  #replay: ActivityPublicationReplay | null = null;
+  #retired = new WeakSet<ActivityPublication>();
+  #claimedVisits = new WeakMap<ActivityVisit, ActivityPublication>();
+  #claimedPublications = new WeakSet<ActivityPublication>();
+  #claimedActions = new WeakSet<ActivityAction>();
+  #claimedEvents = new WeakSet<object>();
+
+  constructor(mount: symbol) {
+    this.#mount = mount;
+  }
 
   active() {
     return this.#active;
   }
 
+  replay() {
+    return this.#replay;
+  }
+
   publish(publication: ActivityPublication) {
+    if (
+      publication.presentation.mount !== this.#mount ||
+      this.#retired.has(publication)
+    ) {
+      return false;
+    }
+    const previous = this.#active;
+    if (previous && previous !== publication) previous.retire();
     this.#active = publication;
     this.#successorOf = null;
+    this.#replay = null;
+    this.#claimedVisits.delete(publication.presentation.visit);
+    return true;
   }
 
   retire(publication: ActivityPublication) {
-    if (this.#active !== publication) return;
-    this.#active = null;
-    this.#successorOf = publication;
+    if (this.#retired.has(publication)) return false;
+    this.#retired.add(publication);
+    if (this.#active === publication) {
+      this.#active = null;
+      this.#successorOf = publication;
+    }
+    return true;
   }
 
   acceptsSuccessorOf(publication: ActivityPublication) {
-    return this.#active === null && this.#successorOf === publication;
+    return (
+      this.#active === null &&
+      this.#successorOf === publication &&
+      this.#retired.has(publication) &&
+      !this.#claimedPublications.has(publication)
+    );
   }
 
-  hasClaimed(event: Event) {
-    return this.#claimedEvents.has(event);
+  stageReplay(replay: ActivityPublicationReplay) {
+    if (!this.acceptsSuccessorOf(replay.source)) return false;
+    this.#replay = replay;
+    return true;
   }
 
-  claim(event: Event) {
+  abandonReplay(publication: ActivityPublication) {
+    if (this.#replay?.source === publication) this.#replay = null;
+    if (this.#successorOf === publication) this.#successorOf = null;
+  }
+
+  isCurrent(publication: ActivityPublication) {
+    return this.#active === publication && !this.#retired.has(publication);
+  }
+
+  hasClaimed(
+    visit: ActivityVisit,
+    publication: ActivityPublication,
+    action: ActivityAction,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    return (
+      this.#claimedVisits.get(visit) === publication ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedActions.has(action) ||
+      this.#claimedEvents.has(event) ||
+      this.#claimedEvents.has(nativeEvent)
+    );
+  }
+
+  claim(
+    visit: ActivityVisit,
+    publication: ActivityPublication,
+    action: ActivityAction,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    if (
+      !this.isCurrent(publication) ||
+      this.hasClaimed(visit, publication, action, event, nativeEvent)
+    ) {
+      return false;
+    }
+    this.#claimedVisits.set(visit, publication);
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(action);
     this.#claimedEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    return true;
   }
 }
 
 class ActivityCurrent {
   #activeVisit: ActivityVisit | null = null;
+  #hasActivatedVisit = false;
   #retiredVisits = new WeakSet<ActivityVisit>();
+  #startedVisits = new WeakSet<ActivityVisit>();
   #cadenceOperations = new Map<ActivityVisit, CadenceOperation>();
   #refreshOperations = new Map<ActivityVisit, RefreshOperation>();
   #loadMoreOperations = new Map<ActivityVisit, LoadMoreOperation>();
@@ -175,10 +310,13 @@ class ActivityCurrent {
   #loadMoreSequence = 0;
 
   activateVisit(visit: ActivityVisit) {
-    this.#retiredVisits.delete(visit);
+    if (this.#retiredVisits.has(visit) || this.#activeVisit !== null) return null;
+    const activation = this.#hasActivatedVisit ? "replacement" : "initial";
+    this.#hasActivatedVisit = true;
     this.#activeVisit = visit;
     this.#cursors.set(visit, null);
     this.#expandedVisits.delete(visit);
+    return activation;
   }
 
   retireVisit(visit: ActivityVisit) {
@@ -198,12 +336,30 @@ class ActivityCurrent {
     return !this.#retiredVisits.has(visit) && this.#activeVisit === visit;
   }
 
+  isRetired(visit: ActivityVisit) {
+    return this.#retiredVisits.has(visit);
+  }
+
+  startVisit(visit: ActivityVisit) {
+    if (!this.ownsVisit(visit) || this.#startedVisits.has(visit)) return false;
+    this.#startedVisits.add(visit);
+    return true;
+  }
+
   publishCadence(visit: ActivityVisit, operation: CadenceOperation) {
     this.#cadenceOperations.set(visit, operation);
   }
 
+  cadence(visit: ActivityVisit) {
+    return this.#cadenceOperations.get(visit) ?? null;
+  }
+
   hasRefresh(visit: ActivityVisit) {
     return this.#refreshOperations.has(visit);
+  }
+
+  refresh(visit: ActivityVisit) {
+    return this.#refreshOperations.get(visit) ?? null;
   }
 
   publishRefresh(operation: RefreshOperation) {
@@ -223,6 +379,10 @@ class ActivityCurrent {
 
   hasLoadMore(visit: ActivityVisit) {
     return this.#loadMoreOperations.has(visit);
+  }
+
+  loadMore(visit: ActivityVisit) {
+    return this.#loadMoreOperations.get(visit) ?? null;
   }
 
   publishLoadMore(operation: LoadMoreOperation) {
@@ -277,12 +437,13 @@ class ActivityCurrent {
   }
 }
 
-class ActivityElementOwner<T extends HTMLElement> {
+class ActivityElementOwner<T extends HTMLElement> implements ActivityElementOwnerView {
   #current: T | null = null;
   #last: T | null = null;
 
   constructor(
     private readonly onChange: (
+      owner: ActivityElementOwnerView,
       element: T | null,
       previous: T | null,
       last: T | null,
@@ -297,7 +458,7 @@ class ActivityElementOwner<T extends HTMLElement> {
     const last = this.#last;
     this.#current = element;
     if (element) this.#last = element;
-    this.onChange(element, previous, last);
+    this.onChange(this, element, previous, last);
   };
 }
 
@@ -555,6 +716,174 @@ function activityDomMatches(snapshot: ActivityDomSnapshot): boolean {
       node.childNodes.item(index) === child.node && activityDomMatches(child));
 }
 
+function captureActivityPlacement(node: HTMLElement): ActivityPlacement | null {
+  if (!node.isConnected) return null;
+  const document = node.ownerDocument;
+  const chain: ActivityNodePlacement[] = [];
+  let current: Node = node;
+  while (current !== document) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    chain.push(Object.freeze({
+      node: current,
+      parent,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+      exactSiblings: current === node,
+    }));
+    current = parent;
+  }
+  const root = chain[0];
+  if (!root) return null;
+  return Object.freeze({
+    document,
+    chain: Object.freeze(chain),
+  });
+}
+
+function activityPlacementMatches(node: HTMLElement, placement: ActivityPlacement) {
+  return (
+    node.ownerDocument === placement.document &&
+    node.isConnected &&
+    placement.chain[0]?.node === node &&
+    placement.chain.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        (!entry.exactSiblings ||
+          (entry.node.previousSibling === entry.previousSibling &&
+            entry.node.nextSibling === entry.nextSibling)),
+    )
+  );
+}
+
+function activityPlacementRecordChanged(
+  record: MutationRecord,
+  placement: ActivityNodePlacement,
+) {
+  if (record.type !== "childList" || record.target !== placement.parent) {
+    return false;
+  }
+  if (
+    placement.exactSiblings &&
+    (record.previousSibling === placement.node ||
+      record.nextSibling === placement.node)
+  ) {
+    return true;
+  }
+  return [...record.addedNodes, ...record.removedNodes].some(
+    (node) => node === placement.node || node.contains(placement.node),
+  );
+}
+
+function createActivityDomGuard(
+  root: HTMLElement,
+  placement: ActivityPlacement,
+): ActivityDomGuard | null {
+  const MutationObserverConstructor =
+    placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+       if (record.target === root || root.contains(record.target)) return true;
+       return placement.chain.some((entry) =>
+         activityPlacementRecordChanged(record, entry),
+       );
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (const entry of placement.chain) {
+    observer.observe(entry.parent, { childList: true });
+  }
+  return Object.freeze({
+    isClean: () => {
+       recordChanges(observer.takeRecords());
+       return !changed;
+    },
+    release: () => {
+       recordChanges(observer.takeRecords());
+       observer.disconnect();
+    },
+  });
+}
+
+function frozenActivityItemsMatch(
+  left: readonly ActivityItemFacts[] | null,
+  right: readonly ActivityItemFacts[] | null,
+) {
+  if (!left || !right) return left === right;
+  return left.length === right.length && left.every((item, index) => {
+    const candidate = right[index];
+    return Boolean(
+       candidate &&
+       item.id === candidate.id &&
+       item.actorId === candidate.actorId &&
+       item.actorName === candidate.actorName &&
+       item.actorKind === candidate.actorKind &&
+       item.action === candidate.action &&
+       item.createdAt === candidate.createdAt &&
+       activityValuesMatch(item.detail, candidate.detail)
+    );
+  });
+}
+
+function activityReplayFactsMatch(
+  source: ActivityPresentation,
+  successor: ActivityPresentation,
+) {
+  const sameVisit = successor.visit === source.visit;
+  return (
+    source.mount === successor.mount &&
+    (sameVisit || successor.visit.predecessor === source.visit) &&
+    source.session === successor.session &&
+    source.documentId === successor.documentId &&
+    source.onClose === successor.onClose &&
+    source.nextBefore === successor.nextBefore &&
+    source.error === successor.error &&
+    source.listError === successor.listError &&
+    source.retrying === successor.retrying &&
+    source.loadingMore === successor.loadingMore &&
+    source.contentMode === successor.contentMode &&
+    source.source.stateVisit === source.visit &&
+    successor.source.stateVisit === successor.visit &&
+    (sameVisit
+      ? source.source.cadence === successor.source.cadence &&
+        source.source.refresh === successor.source.refresh &&
+        source.source.loadMore === successor.source.loadMore
+      : successor.source.cadence === null &&
+        successor.source.refresh === null &&
+        successor.source.loadMore === null) &&
+    frozenActivityItemsMatch(source.items, successor.items)
+  );
+}
+
+function replayAllowsActivityPublication(
+  coordinator: ActivityPublicationCoordinator,
+  presentation: ActivityPresentation,
+  panel: HTMLElement,
+) {
+  const replay = coordinator.replay();
+  if (!replay) return true;
+  const exactReplay =
+    activityReplayFactsMatch(replay.source.presentation, presentation) &&
+    coordinator.acceptsSuccessorOf(replay.source) &&
+    replay.historyIsClean() &&
+    panel === replay.dom.node &&
+    activityPlacementMatches(panel, replay.placement) &&
+    activityDomMatches(replay.dom);
+  coordinator.abandonReplay(replay.source);
+  replay.release();
+  return exactReplay;
+}
+
 function createActivityPublication({
   presentation,
   coordinator,
@@ -562,7 +891,9 @@ function createActivityPublication({
   retireVisit,
   refresh,
   requestMore,
-  requestSuccessor,
+  startVisit,
+  requestPublicationSuccessor,
+  requestVisitSuccessor,
 }: {
   presentation: ActivityPresentation;
   coordinator: ActivityPublicationCoordinator;
@@ -570,32 +901,47 @@ function createActivityPublication({
   retireVisit: (visit: ActivityVisit) => void;
   refresh: (visit: ActivityVisit, isRetry: boolean) => void;
   requestMore: (visit: ActivityVisit, cursor: string) => void;
-  requestSuccessor: () => void;
+  startVisit: (visit: ActivityVisit) => void;
+  requestPublicationSuccessor: () => void;
+  requestVisitSuccessor: (visit: ActivityVisit) => void;
 }): ActivityPublicationSet {
   let layoutPassed = false;
   let currentRuntime: ActivityPublicationRuntime | null = null;
   let lastRuntime: ActivityPublicationRuntime | null = null;
   let successorRequested = false;
-  const claimedActions = new Set<ActivityActionKind>();
+  const actions: Readonly<Record<ActivityActionKind, ActivityAction>> = Object.freeze({
+    close: Object.freeze({ identity: Symbol("activity-close"), kind: "close" }),
+    retry: Object.freeze({ identity: Symbol("activity-retry"), kind: "retry" }),
+    "load-more": Object.freeze({
+      identity: Symbol("activity-load-more"),
+      kind: "load-more",
+    }),
+  });
   const retireForElementChange = (
+    owner: ActivityElementOwnerView,
     element: HTMLElement | null,
     previous: HTMLElement | null,
     last: HTMLElement | null,
   ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
     if (element === null || (layoutPassed && element !== previous) || (element && last && element !== last)) {
       currentRuntime?.retireForElement();
+      currentRuntime = null;
     }
-    // Strict Mode can replay a newly mounted callback ref after layout effects.
-    const runtime = lastRuntime;
     if (
       !successorRequested &&
       runtime?.isExactElementReplay() &&
       coordinator.acceptsSuccessorOf(runtime.publication) &&
-      factsAreCurrent() &&
-      exactDomIsCurrent()
+      exactDomIsCurrent() &&
+      stageReplay(runtime)
     ) {
       successorRequested = true;
-      requestSuccessor();
+      if (current.isRetired(presentation.visit)) {
+        requestVisitSuccessor(presentation.visit);
+      } else {
+        requestPublicationSuccessor();
+      }
     }
   };
   const panel = new ActivityElementOwner<HTMLElement>(retireForElementChange);
@@ -612,7 +958,7 @@ function createActivityPublication({
     new ActivityElementOwner<HTMLLIElement>(retireForElementChange));
   const loadMore = new ActivityElementOwner<HTMLButtonElement>(retireForElementChange);
 
-  const factsAreCurrent = () => {
+  const frozenFactsAreCurrent = () => {
     const { source, visit } = presentation;
     return (
       presentation.session === visit.session &&
@@ -627,9 +973,24 @@ function createActivityPublication({
       source.loadingMore === presentation.loadingMore &&
       source.now === presentation.now &&
       activityItemsMatch(source.items, presentation.items) &&
+      (!source.cadence || source.cadence.visit === visit) &&
+      (!source.refresh || source.refresh.visit === visit) &&
+      (!source.loadMore ||
+        (source.loadMore.visit === visit &&
+          source.loadMore.cursor === presentation.nextBefore))
+    );
+  };
+
+  const factsAreCurrent = () => {
+    const { source, visit } = presentation;
+    return (
+      frozenFactsAreCurrent() &&
       current.ownsVisit(visit) &&
       current.cursor(visit) === presentation.nextBefore &&
-      current.hasLoadMore(visit) === presentation.loadingMore
+      current.cadence(visit) === source.cadence &&
+      current.refresh(visit) === source.refresh &&
+      current.loadMore(visit) === source.loadMore &&
+      Boolean(source.loadMore) === presentation.loadingMore
     );
   };
 
@@ -771,19 +1132,52 @@ function createActivityPublication({
     return contentIndex === contentChildren.length;
   };
 
+  const expectedOwners = (): readonly ActivityElementOwnerView[] => {
+    const owners: ActivityElementOwnerView[] = [
+      panel,
+      header,
+      close,
+      scroll,
+      content,
+    ];
+    if (presentation.listError) owners.push(listError, retry);
+    if (presentation.error) owners.push(pageError);
+    if (presentation.contentMode === "list") {
+      owners.push(...groups, ...rows);
+      if (presentation.nextBefore) owners.push(loadMore);
+    }
+    return owners;
+  };
+
+  const stageReplay = (runtime: ActivityPublicationRuntime) => {
+    const replay = runtime.replay();
+    const retiredVisitIsClean =
+      current.isRetired(presentation.visit) &&
+      current.cadence(presentation.visit) === null &&
+      current.refresh(presentation.visit) === null &&
+      current.loadMore(presentation.visit) === null;
+    return Boolean(
+      replay &&
+      frozenFactsAreCurrent() &&
+      (retiredVisitIsClean || factsAreCurrent()) &&
+      runtime.publication.publishedDomMatches() &&
+      coordinator.stageReplay(replay)
+    );
+  };
+
   const claim = (
     kind: ActivityActionKind,
     event: ReactMouseEvent<HTMLButtonElement>,
   ): ActivityPublication | null => {
     const runtime = currentRuntime;
     const publication = runtime?.publication;
+    const action = actions[kind];
     if (
       !runtime ||
       !publication ||
-      runtime.isRetired() ||
+      publication.isRetired() ||
       !event ||
-      typeof event !== "object" ||
-      claimedActions.has(kind)
+      typeof event !== "object"
     ) {
       return null;
     }
@@ -808,11 +1202,10 @@ function createActivityPublication({
       !element.contains(event.target) ||
       !element.isConnected ||
       element.disabled ||
-      coordinator.active() !== publication ||
+      !coordinator.isCurrent(publication) ||
       !factsAreCurrent() ||
       !exactDomIsCurrent() ||
-      !runtime.publishedDomMatches() ||
-      coordinator.hasClaimed(nativeEvent)
+      !publication.publishedDomMatches()
     ) {
       return null;
     }
@@ -831,45 +1224,101 @@ function createActivityPublication({
     ) {
       return null;
     }
-    coordinator.claim(nativeEvent);
-    claimedActions.add(kind);
+    if (
+      !coordinator.claim(
+        presentation.visit,
+        publication,
+        action,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return null;
+    }
     return publication;
   };
 
-  const createRuntime = (): ActivityPublicationRuntime => {
+  const createRuntime = (): ActivityPublicationRuntime | null => {
     type Retirement = "element" | "layout" | "other";
+    const panelElement = panel.element();
+    const placement = panelElement
+      ? captureActivityPlacement(panelElement)
+      : null;
+    if (!panelElement || !placement) return null;
+    const dom = snapshotActivityDom(panelElement);
     let retired = false;
     let retirement: Retirement | null = null;
     let established = false;
-    let domSnapshot: ActivityDomSnapshot | null = null;
+    let invalidReplay = false;
+    let replayRefs: ActivityRefReplay[] = [];
+    let domGuard: ActivityDomGuard | null = null;
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+        domGuard.isClean() &&
+        panel.element() === panelElement &&
+        panelElement === dom.node &&
+        panelElement.isConnected &&
+        activityPlacementMatches(panelElement, placement) &&
+        activityDomMatches(dom)
+      );
     const retire = (reason: Retirement) => {
       if (retired) return false;
       retired = true;
       retirement = reason;
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (coordinator.replay()?.source !== publication) domGuard?.release();
+      });
       return true;
     };
     const publication: ActivityPublication = Object.freeze({
+      identity: Symbol("activity-publication"),
       presentation,
+      ownerDocument: panelElement.ownerDocument,
+      dom,
+      placement,
       retire: () => retire("other"),
+      isRetired: () => retired,
+      publishedDomMatches,
     });
-    const publishedDomMatches = () => {
-      const panelElement = panel.element();
-      return Boolean(
-        domSnapshot &&
-        panelElement &&
-        panelElement === domSnapshot.node &&
-        panelElement.isConnected &&
-        activityDomMatches(domSnapshot)
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every(
+        (entry) =>
+          !entry.detached &&
+          !entry.reattached &&
+          entry.owner.element() === entry.element,
       );
-    };
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.some((entry) => entry.detached && entry.reattached) &&
+      replayRefs.every(
+        (entry) =>
+          ((!entry.detached && !entry.reattached) ||
+            (entry.detached && entry.reattached)) &&
+          entry.owner.element() === entry.element,
+      );
     const runtime: ActivityPublicationRuntime = Object.freeze({
       publication,
-      publish: (snapshot: ActivityDomSnapshot) => {
+      publish: () => {
         established = true;
-        domSnapshot = snapshot;
-        coordinator.publish(publication);
+        replayRefs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish Activity controls without every committed ref",
+            );
+          }
+          return { owner, element, detached: false, reattached: false };
+        });
+        domGuard = createActivityDomGuard(panelElement, placement);
+        if (!domGuard || !coordinator.publish(publication)) {
+          domGuard?.release();
+          return false;
+        }
+        return true;
       },
       retireForElement: () => {
         retire("element");
@@ -877,12 +1326,62 @@ function createActivityPublication({
       retireForLayout: () => {
         retire("layout");
       },
-      isRetired: () => retired,
-      publishedDomMatches,
+      noteRef: (
+        owner: ActivityElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+        if (
+          !retired &&
+          replayRefs.every((entry) => entry.owner.element() === entry.element)
+        ) {
+          for (const entry of replayRefs) {
+            entry.detached = false;
+            entry.reattached = false;
+          }
+          invalidReplay = false;
+        }
+      },
       isExactElementReplay: () =>
-        retired && retirement === "element" && established && publishedDomMatches(),
+        retired &&
+        retirement === "element" &&
+        established &&
+        refsHaveExactReplay() &&
+        publishedDomMatches(),
       isExactLayoutReplay: () =>
-        retired && retirement === "layout" && established && publishedDomMatches(),
+        retired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      replay: () =>
+        domGuard
+          ? Object.freeze({
+              source: publication,
+              dom,
+              placement,
+              historyIsClean: domGuard.isClean,
+              release: domGuard.release,
+            })
+          : null,
     });
     return runtime;
   };
@@ -890,22 +1389,46 @@ function createActivityPublication({
   return Object.freeze({
     establish: () => {
       layoutPassed = true;
+      if (lastRuntime) {
+        if (
+          !successorRequested &&
+          (lastRuntime.isExactLayoutReplay() ||
+            lastRuntime.isExactElementReplay()) &&
+          coordinator.acceptsSuccessorOf(lastRuntime.publication) &&
+          exactDomIsCurrent() &&
+          stageReplay(lastRuntime)
+        ) {
+          successorRequested = true;
+          if (current.isRetired(presentation.visit)) {
+            requestVisitSuccessor(presentation.visit);
+          } else {
+            requestPublicationSuccessor();
+          }
+        }
+        return undefined;
+      }
+      if (!factsAreCurrent() || !exactDomIsCurrent()) return undefined;
+      const panelElement = panel.element();
       if (
-        (lastRuntime && !lastRuntime.isExactLayoutReplay()) ||
-        !factsAreCurrent() ||
-        !exactDomIsCurrent()
+        !panelElement ||
+        !replayAllowsActivityPublication(
+          coordinator,
+          presentation,
+          panelElement,
+        )
       ) {
         return undefined;
       }
-      const panelElement = panel.element();
-      if (!panelElement) return undefined;
       const runtime = createRuntime();
-      const publication = runtime.publication;
-      const previous = coordinator.active();
-      if (previous && previous !== publication) previous.retire();
+      if (!runtime) return undefined;
       currentRuntime = runtime;
       lastRuntime = runtime;
-      runtime.publish(snapshotActivityDom(panelElement));
+      if (!runtime.publish()) {
+        runtime.retireForElement();
+        currentRuntime = null;
+        return undefined;
+      }
+      startVisit(presentation.visit);
       return runtime.retireForLayout;
     },
     capturePanel: panel.capture,
@@ -954,17 +1477,25 @@ export function ActivityPanel(props: ActivityPanelProps) {
 
 function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const documentId = session.docId;
-  const visit = useMemo<ActivityVisit>(
+  const sourceVisit = useMemo<ActivityVisit>(
     () => Object.freeze({
       session,
       documentId,
       onClose,
+      predecessor: null,
     }),
     [session, documentId, onClose],
   );
   const [mount] = useState(() => Symbol("activity-panel"));
-  const [coordinator] = useState(() => new ActivityPublicationCoordinator());
+  const [coordinator] = useState(() => new ActivityPublicationCoordinator(mount));
   const [current] = useState(() => new ActivityCurrent());
+  const [replayVisit, setReplayVisit] = useState<ActivityVisit | null>(null);
+  const visit =
+    replayVisit?.session === session &&
+    replayVisit.documentId === documentId &&
+    replayVisit.onClose === onClose
+      ? replayVisit
+      : sourceVisit;
   const [, setPublicationRevision] = useState(0);
   const [stateVisit, setStateVisit] = useState(visit);
   const [items, setItems] = useState<ActivityItemDto[] | null>(null);
@@ -974,15 +1505,34 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [retrying, setRetrying] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const requestPublicationSuccessor = useCallback(() => {
+  const [clearedCadences] = useState(() => new WeakSet<CadenceOperation>());
+  const requestPublicationRevision = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
   }, []);
+  const requestVisitSuccessor = useCallback((predecessor: ActivityVisit) => {
+    if (!current.isRetired(predecessor)) return;
+    setReplayVisit((existing) => {
+      const candidate =
+        existing?.session === session &&
+        existing.documentId === documentId &&
+        existing.onClose === onClose
+          ? existing
+          : sourceVisit;
+      if (candidate !== predecessor) return existing;
+      return Object.freeze({
+        session: predecessor.session,
+        documentId: predecessor.documentId,
+        onClose: predecessor.onClose,
+        predecessor,
+      });
+    });
+  }, [current, documentId, onClose, session, sourceVisit]);
 
   const clearCadence = useCallback((operation: CadenceOperation) => {
-    if (operation.cleared) return;
-    operation.cleared = true;
+    if (clearedCadences.has(operation)) return;
+    clearedCadences.add(operation);
     clearInterval(operation.timer);
-  }, []);
+  }, [clearedCadences]);
 
   const retireVisit = useCallback(
     (owner: ActivityVisit) => {
@@ -1012,9 +1562,13 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   // Reload the first page; older pages the user has already expanded are kept below it.
   const refresh = useCallback((owner: ActivityVisit, isRetry = false) => {
     if (!ownsVisit(owner) || current.hasRefresh(owner)) return;
-    const operation = { visit: owner, id: current.nextRefreshId() };
+    const operation = Object.freeze({
+      visit: owner,
+      id: current.nextRefreshId(),
+    });
     current.publishRefresh(operation);
     if (isRetry) setRetrying(true);
+    requestPublicationRevision();
 
     void (async () => {
       try {
@@ -1041,9 +1595,10 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         if (!ownsRefresh(operation)) return;
         current.retireRefresh(operation);
         if (isRetry) setRetrying(false);
+        requestPublicationRevision();
       }
     })();
-  }, [current, ownsRefresh, ownsVisit]);
+  }, [current, ownsRefresh, ownsVisit, requestPublicationRevision]);
 
   const loadMore = useCallback((owner: ActivityVisit, cursor: string) => {
     if (
@@ -1053,7 +1608,11 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     ) {
       return;
     }
-    const operation = { visit: owner, id: current.nextLoadMoreId(), cursor };
+    const operation = Object.freeze({
+      visit: owner,
+      id: current.nextLoadMoreId(),
+      cursor,
+    });
     current.publishLoadMore(operation);
     setLoadingMore(true);
 
@@ -1080,9 +1639,19 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     })();
   }, [current, ownsLoadMoreRequest, ownsLoadMoreSettlement, ownsVisit]);
 
-  useLayoutEffect(() => {
-    current.activateVisit(visit);
+  const startVisit = useCallback((owner: ActivityVisit) => {
+    if (!current.startVisit(owner)) return;
+    const timer = setInterval(() => {
+      refresh(owner);
+    }, REFRESH_MS);
+    current.publishCadence(owner, Object.freeze({ visit: owner, timer }));
+    refresh(owner);
+    requestPublicationRevision();
+  }, [current, refresh, requestPublicationRevision]);
 
+  useLayoutEffect(() => {
+    const activation = current.activateVisit(visit);
+    if (!activation) return undefined;
     setStateVisit(visit);
     setItems(null);
     setNextBefore(null);
@@ -1091,18 +1660,24 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     setRetrying(false);
     setLoadingMore(false);
     setNow(Date.now());
-
-    const timer = setInterval(() => {
-      refresh(visit);
-    }, REFRESH_MS);
-    current.publishCadence(visit, { visit, timer, cleared: false });
-    refresh(visit);
+    if (activation === "replacement" && visit.predecessor === null) {
+      startVisit(visit);
+    }
 
     return () => retireVisit(visit);
-  }, [current, refresh, retireVisit, visit]);
+  }, [current, retireVisit, startVisit, visit]);
 
+  const stateVisitMatches =
+    stateVisit === visit ||
+    stateVisit === visit.predecessor ||
+    (stateVisit.predecessor === null &&
+      visit.predecessor === null &&
+      stateVisit.session === visit.session &&
+      stateVisit.documentId === visit.documentId &&
+      stateVisit.onClose === visit.onClose);
+  const presentationStateVisit = stateVisitMatches ? visit : stateVisit;
   const presentation = createActivityPresentation(mount, visit, {
-    stateVisit,
+    stateVisit: presentationStateVisit,
     items,
     nextBefore,
     error,
@@ -1110,6 +1685,9 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     retrying,
     loadingMore,
     now,
+    cadence: current.cadence(visit),
+    refresh: current.refresh(visit),
+    loadMore: current.loadMore(visit),
   });
   const publicationSet = createActivityPublication({
     presentation,
@@ -1118,7 +1696,9 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     retireVisit,
     refresh,
     requestMore: loadMore,
-    requestSuccessor: requestPublicationSuccessor,
+    startVisit,
+    requestPublicationSuccessor: requestPublicationRevision,
+    requestVisitSuccessor,
   });
   const {
     establish,
