@@ -53,12 +53,20 @@ interface CapturedActions {
   open: ClickHandler;
   dismiss: ClickHandler;
   readAll: ClickHandler;
+  section: HTMLElement;
+  list: HTMLUListElement;
+  item: HTMLLIElement;
+  openButton: HTMLButtonElement;
+  dismissButton: HTMLButtonElement;
+  readAllButton: HTMLButtonElement;
 }
 
 interface DirectView {
   root: Root;
   host: HTMLDivElement;
 }
+
+type CapturedPart = "section" | "readAllButton" | "list" | "item" | "openButton" | "dismissButton";
 
 const ITEM: NotificationDto = {
   id: "notification-one",
@@ -142,19 +150,59 @@ function reactHandler(element: HTMLElement, name = "onClick"): ClickHandler {
   return handler as ClickHandler;
 }
 
-function captureActions(rowIndex = 0): CapturedActions {
-  const row = screen.getAllByTestId("notification-item")[rowIndex];
+function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  const props = propsKey
+    ? (element as unknown as Record<string, { ref?: unknown }>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref as (node: T | null) => void;
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.dataset.testid ?? element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown }>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`React ref was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return fiber.ref as (node: T | null) => void;
+}
+
+const clickTargets = new WeakMap<ClickHandler, HTMLButtonElement>();
+
+function captureActions(rowIndex = 0, container: HTMLElement = document.body): CapturedActions {
+  const section = container.matches('[data-testid="notifications-strip"]')
+    ? container
+    : container.querySelector<HTMLElement>('[data-testid="notifications-strip"]');
+  if (!section) throw new Error("Notification strip was not rendered");
+  const rows = section.querySelectorAll<HTMLLIElement>('[data-testid="notification-item"]');
+  const row = rows.item(rowIndex);
+  const list = row.parentElement;
+  const openButton = row.querySelector<HTMLButtonElement>('[data-testid="notification-open"]');
+  const dismissButton = row.querySelector<HTMLButtonElement>('[data-testid="notification-dismiss"]');
+  const readAllButton = section.querySelector<HTMLButtonElement>('[data-testid="notifications-strip-read-all"]');
+  if (!(list instanceof HTMLUListElement) || !openButton || !dismissButton || !readAllButton) {
+    throw new Error("Notification strip hierarchy was incomplete");
+  }
+  const open = reactHandler(openButton);
+  const dismiss = reactHandler(dismissButton);
+  const readAll = reactHandler(readAllButton);
+  clickTargets.set(open, openButton);
+  clickTargets.set(dismiss, dismissButton);
+  clickTargets.set(readAll, readAllButton);
   return {
-    open: reactHandler(within(row).getByTestId("notification-open")),
-    dismiss: reactHandler(within(row).getByTestId("notification-dismiss")),
-    readAll: reactHandler(screen.getByTestId("notifications-strip-read-all")),
+    open,
+    dismiss,
+    readAll,
+    section,
+    list,
+    item: row,
+    openButton,
+    dismissButton,
+    readAllButton,
   };
 }
 
-function eventProbe() {
+function eventProbe(currentTarget: HTMLButtonElement) {
   const preventDefault = vi.fn();
   const stopPropagation = vi.fn();
   const event = {
+    currentTarget,
     preventDefault,
     stopPropagation,
     isDefaultPrevented: () => preventDefault.mock.calls.length > 0,
@@ -163,8 +211,17 @@ function eventProbe() {
   return { event, preventDefault, stopPropagation };
 }
 
-function invoke(callback: ClickHandler) {
-  callback(eventProbe().event);
+function invoke(callback: ClickHandler, currentTarget = clickTargets.get(callback)) {
+  if (!currentTarget) throw new Error("Click target was not captured");
+  callback(eventProbe(currentTarget).event);
+}
+
+function connectedButton(label = "Other") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("aria-label", label);
+  document.body.append(button);
+  return button;
 }
 
 function PassiveCleanupProbe({ generation, onCleanup }: { generation: string; onCleanup: () => void }) {
@@ -178,6 +235,15 @@ function InitialStripMount() {
 
 function ReplacementStripMount() {
   return <NotificationsStrip />;
+}
+
+function SiblingStrips() {
+  return (
+    <>
+      <NotificationsStrip />
+      <NotificationsStrip />
+    </>
+  );
 }
 
 function StripBoundary({
@@ -236,7 +302,11 @@ function expectStaleInert(actions: CapturedActions, view: DirectView, routers: R
   const markCalls = store.markNotificationRead.mock.calls.length;
   const markAllCalls = store.markAllNotificationsRead.mock.calls.length;
   const pushCalls = routers.map((router) => router.push.mock.calls.length);
-  const events = [eventProbe(), eventProbe(), eventProbe()];
+  const events = [
+    eventProbe(actions.openButton),
+    eventProbe(actions.dismissButton),
+    eventProbe(actions.readAllButton),
+  ];
 
   actions.open(events[0].event);
   actions.dismiss(events[1].event);
@@ -323,6 +393,104 @@ describe("notification strip current actions", () => {
     expect(store.markNotificationRead).toHaveBeenCalledWith(ITEM.id);
     expect(router.push).not.toHaveBeenCalled();
   });
+
+  it("rejects crossed, foreign, detached, disabled, and replacement controls before accepting each exact source once", () => {
+    const router = createRouter("exact-controls");
+    const view = createDirectView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const first = captureActions(0);
+    const second = captureActions(1);
+    const foreign = connectedButton("Open");
+    const detached = document.createElement("button");
+    const replacement = first.openButton.cloneNode(true) as HTMLButtonElement;
+    document.body.append(replacement);
+    const focusTarget = connectedButton("Focus sentinel");
+    focusTarget.focus();
+    const markup = view.host.innerHTML;
+    const wrongEvents = [
+      eventProbe(first.dismissButton),
+      eventProbe(second.openButton),
+      eventProbe(foreign),
+      eventProbe(detached),
+      eventProbe(replacement),
+      eventProbe(first.openButton),
+      eventProbe(first.openButton),
+    ];
+
+    first.open(wrongEvents[0].event);
+    first.open(wrongEvents[1].event);
+    first.open(wrongEvents[2].event);
+    first.open(wrongEvents[3].event);
+    first.open(wrongEvents[4].event);
+    first.openButton.disabled = true;
+    first.open(wrongEvents[5].event);
+    first.openButton.disabled = false;
+    first.dismiss(wrongEvents[6].event);
+    first.readAll(eventProbe(first.openButton).event);
+    first.readAll(eventProbe(foreign).event);
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(view.host.innerHTML).toBe(markup);
+    expect(document.activeElement).toBe(focusTarget);
+    wrongEvents.forEach(({ preventDefault, stopPropagation }) => {
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+    });
+
+    const reused = eventProbe(foreign);
+    first.open(reused.event);
+    (reused.event as unknown as { currentTarget: HTMLButtonElement }).currentTarget = first.openButton;
+    first.open(reused.event);
+    first.open(reused.event);
+    invoke(first.dismiss);
+    invoke(second.dismiss);
+    invoke(second.open);
+
+    first.readAllButton.disabled = true;
+    invoke(first.readAll);
+    first.readAllButton.disabled = false;
+    invoke(first.readAll);
+    invoke(first.readAll);
+
+    expect(store.markNotificationRead.mock.calls).toEqual([[ITEM.id], [ITEM_TWO.id]]);
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
+    expect(document.activeElement).toBe(focusTarget);
+  });
+
+  it("isolates equal-looking sibling strips and their exact controls", () => {
+    const router = createRouter("siblings");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directViews.push({ root, host });
+    currentRouter = router;
+    currentSnapshot = snapshot([ITEM]);
+    act(() => root.render(<SiblingStrips />));
+    const sections = screen.getAllByTestId("notifications-strip");
+    const first = captureActions(0, sections[0]);
+    const second = captureActions(0, sections[1]);
+
+    invoke(first.open, second.openButton);
+    invoke(second.open, first.openButton);
+    invoke(first.dismiss, second.dismissButton);
+    invoke(second.dismiss, first.dismissButton);
+    invoke(first.readAll, second.readAllButton);
+    invoke(second.readAll, first.readAllButton);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    invoke(second.dismiss);
+    invoke(first.open);
+    invoke(second.readAll);
+    invoke(first.readAll);
+
+    expect(store.markNotificationRead.mock.calls).toEqual([[ITEM.id], [ITEM.id]]);
+    expect(store.markAllNotificationsRead).toHaveBeenCalledTimes(2);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
+  });
 });
 
 describe("notification strip snapshot authority", () => {
@@ -403,6 +571,126 @@ describe("notification strip snapshot authority", () => {
     expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
   });
 
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "freezes the exact push method and leaves the replacement usable %s",
+    (order) => {
+      const passiveCleanup = vi.fn();
+      const router = createRouter("push-replacement");
+      const firstPush = router.push;
+      const sharedSnapshot = snapshot([ITEM]);
+      const view = createDirectView(router, sharedSnapshot, passiveCleanup);
+      const stale = captureActions();
+      const replacementPush = vi.fn<(href: string) => void>();
+      router.push = replacementPush;
+
+      expectStaleInert(stale, view, [router]);
+      let current!: CapturedActions;
+      renderDirect(view, router, sharedSnapshot, {
+        boundary: 1,
+        passiveGeneration: `push-${order}`,
+        onPassiveCleanup: passiveCleanup,
+        onBoundary: () => {
+          current = captureActions();
+          if (order === "stale-before-current") expectStaleInert(stale, view, [router]);
+          invoke(current.open);
+          invoke(current.readAll);
+          if (order === "current-before-stale") expectStaleInert(stale, view, [router]);
+        },
+      });
+
+      expect(firstPush).not.toHaveBeenCalled();
+      expect(replacementPush).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+      expect(passiveCleanup).toHaveBeenCalledOnce();
+      invoke(current.open);
+      invoke(current.dismiss);
+      invoke(current.readAll);
+      expect(store.markNotificationRead).toHaveBeenCalledOnce();
+      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects an in-place primitive mutation immediately and publishes only the newly rendered facts", () => {
+    const passiveCleanup = vi.fn();
+    const router = createRouter("primitive-mutation");
+    const item = { ...ITEM };
+    const sharedSnapshot = snapshot([item]);
+    const view = createDirectView(router, sharedSnapshot, passiveCleanup);
+    const stale = captureActions();
+    const markup = view.host.innerHTML;
+
+    item.kind = "reply";
+    item.documentId = "document-mutated";
+    item.documentTitle = "Mutated launch plan";
+    item.actorName = "Morgan";
+    item.refId = "thread-mutated";
+    item.snippet = "Mutated snippet";
+    item.createdAt = "2026-09-07T14:00:00.000Z";
+    expectStaleInert(stale, view, [router]);
+    expect(view.host.innerHTML).toBe(markup);
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      boundary: 1,
+      passiveGeneration: "primitive-mutation",
+      onPassiveCleanup: passiveCleanup,
+      onBoundary: () => {
+        current = captureActions();
+        expectStaleInert(stale, view, [router]);
+        expect(current.item).toHaveAttribute("data-kind", "reply");
+        expect(current.openButton).toHaveTextContent("Morgan reply sentence in Mutated launch plan");
+        invoke(current.open);
+        invoke(current.readAll);
+      },
+    });
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(item.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith("/d/document-mutated?thread=thread-mutated");
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(passiveCleanup).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an in-place reorder and binds each current handler to its exact ordered row", () => {
+    const passiveCleanup = vi.fn();
+    const router = createRouter("reorder");
+    const items = [{ ...ITEM }, { ...ITEM_TWO }];
+    const sharedSnapshot = snapshot(items);
+    const view = createDirectView(router, sharedSnapshot, passiveCleanup);
+    const staleFirst = captureActions(0);
+    const staleSecond = captureActions(1);
+
+    items.reverse();
+    expectStaleInert(staleFirst, view, [router]);
+    expectStaleInert(staleSecond, view, [router]);
+    let currentFirst!: CapturedActions;
+    let currentSecond!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      boundary: 1,
+      passiveGeneration: "reorder",
+      onPassiveCleanup: passiveCleanup,
+      onBoundary: () => {
+        currentFirst = captureActions(0);
+        currentSecond = captureActions(1);
+        expect([currentFirst.item.dataset.notificationId, currentSecond.item.dataset.notificationId]).toEqual([
+          ITEM_TWO.id,
+          ITEM.id,
+        ]);
+        invoke(staleFirst.open, currentFirst.openButton);
+        invoke(staleSecond.dismiss, currentSecond.dismissButton);
+        invoke(currentFirst.open, currentSecond.openButton);
+        invoke(currentSecond.dismiss, currentFirst.dismissButton);
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        invoke(currentFirst.open);
+        invoke(currentSecond.dismiss);
+      },
+    });
+
+    expect(store.markNotificationRead.mock.calls).toEqual([[ITEM_TWO.id], [ITEM.id]]);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM_TWO.documentId}?thread=${ITEM_TWO.refId}`);
+    expect(passiveCleanup).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["stale before current", false],
     ["current before stale", true],
@@ -464,6 +752,14 @@ describe("notification strip snapshot authority", () => {
         expect(passiveCleanup).not.toHaveBeenCalled();
         current = captureActions();
         expectStaleInert(stale, view, [router]);
+        invoke(stale.open, current.openButton);
+        invoke(stale.dismiss, current.dismissButton);
+        invoke(stale.readAll, current.readAllButton);
+        invoke(current.open, stale.openButton);
+        invoke(current.dismiss, stale.dismissButton);
+        invoke(current.readAll, stale.readAllButton);
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
         invoke(current.dismiss);
         invoke(current.readAll);
       },
@@ -480,11 +776,62 @@ describe("notification strip snapshot authority", () => {
     expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ["section", "section"],
+    ["read-all", "readAllButton"],
+    ["list", "list"],
+    ["item", "item"],
+    ["open", "openButton"],
+    ["dismiss", "dismissButton"],
+  ] as const)("retires an exact %s callback-ref replacement without letting late A refs clear B", (_label, part: CapturedPart) => {
+    const passiveCleanup = vi.fn();
+    const router = createRouter(`ref-${part}`);
+    const sharedSnapshot = snapshot([ITEM]);
+    const view = createDirectView(router, sharedSnapshot, passiveCleanup);
+    const stale = captureActions();
+    const staleElement = stale[part];
+    const staleRef = reactRef(staleElement);
+    const replacement = staleElement.cloneNode(true) as typeof staleElement;
+    document.body.append(replacement);
+
+    staleRef(replacement);
+    expectStaleInert(stale, view, [router]);
+    replacement.remove();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      boundary: 1,
+      passiveGeneration: `ref-${part}`,
+      onPassiveCleanup: passiveCleanup,
+      onBoundary: () => {
+        current = captureActions();
+        const currentElement = current[part];
+        staleRef(currentElement);
+        staleRef(null);
+        expectStaleInert(stale, view, [router]);
+        invoke(stale.open, current.openButton);
+        invoke(current.open, stale.openButton);
+        invoke(current.readAll);
+      },
+    });
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
+    expect(passiveCleanup).toHaveBeenCalledOnce();
+    expectStaleInert(stale, view, [router]);
+    invoke(current.dismiss);
+    invoke(current.readAll);
+    expect(store.markNotificationRead).toHaveBeenCalledOnce();
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+  });
+
   it("retires every callback before removal reaches the parent layout boundary", () => {
     const passiveCleanup = vi.fn();
     const router = createRouter("removed");
     const view = createDirectView(router, snapshot([ITEM]), passiveCleanup);
     const stale = captureActions();
+    const staleSectionRef = reactRef(stale.section);
 
     renderDirect(view, router, snapshot([]), {
       present: false,
@@ -503,5 +850,24 @@ describe("notification strip snapshot authority", () => {
     expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, snapshot([ITEM]), {
+      mount: "replacement",
+      boundary: 2,
+      passiveGeneration: "current",
+      onPassiveCleanup: passiveCleanup,
+      onBoundary: () => {
+        current = captureActions();
+        staleSectionRef(current.section);
+        staleSectionRef(null);
+        expectStaleInert(stale, view, [router]);
+        invoke(current.open);
+        invoke(current.readAll);
+      },
+    });
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
   });
 });
