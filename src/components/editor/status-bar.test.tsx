@@ -1,12 +1,23 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  StrictMode,
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { act, fireEvent, screen } from "@testing-library/react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import type { CollabSession } from "@/editor/collab/session";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { DocumentDto } from "@/server/dto";
 import type { Layout } from "@/lib/viewport";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/primitives";
 
 const controlled = vi.hoisted(() => ({
   hydrated: true,
@@ -27,42 +38,27 @@ vi.mock("@/editor/markdown/lint", () => ({
 vi.mock("@/lib/hooks", () => ({
   useHydrated: () => controlled.hydrated,
 }));
-vi.mock("./use-session", () => ({
-  useDebouncedSessionValue: (...args: unknown[]) => {
-    controlled.sessionHook(...args);
-    return controlled.sessionValue;
-  },
-}));
-vi.mock("./stats-popover", () => ({
-  StatsPopover: ({ session, source, hydrated }: { session: CollabSession; source: string; hydrated: boolean }) => (
-    <output data-testid="stats-popover" data-session={session === null ? "none" : "present"} data-source={source} data-hydrated={hydrated} />
-  ),
-  useLocalSelection: () => null,
-}));
+vi.mock("./use-session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./use-session")>();
+  return {
+    ...actual,
+    useDebouncedSessionValue: (...args: unknown[]) => {
+      controlled.sessionHook(...args);
+      return controlled.sessionValue;
+    },
+  };
+});
 vi.mock("@/components/ui/theme-toggle", () => ({
-  ThemeToggle: ({ className }: { className?: string }) => <button type="button" className={className} data-testid="theme-toggle">Theme</button>,
+  ThemeToggle: ({ className }: { className?: string }) => (
+    <button type="button" className={className} data-testid="theme-toggle">
+      Theme
+    </button>
+  ),
   useTheme: () => [controlled.themePreference, controlled.themeSetter],
 }));
 
 import { StatusBar, type StatusBarProps } from "./status-bar";
-
-type ValueHandler<T> = (value: T) => void;
-type ClickHandler = (event: ReactMouseEvent<HTMLElement>) => void;
-type SelectHandler = (event: Event) => void;
-type SourceHandler = (event: { currentTarget: EventTarget | null }) => void;
-type OutsideHandler = (event: CustomEvent<{ originalEvent: Event }>) => void;
-
-interface ValueAction<T> {
-  (value: T): void;
-  raw: ValueHandler<T>;
-  items: Map<string, { element: HTMLElement; select: SelectHandler }>;
-}
-
-interface DirectAction<T> {
-  (event: T): void;
-  raw: (event: T) => void;
-  element: HTMLElement;
-}
+import { setGoal } from "@/editor/collab/meta";
 
 interface StatusCallbacks {
   layout: ReturnType<typeof vi.fn<(layout: Layout) => void>>;
@@ -73,29 +69,6 @@ interface StatusCallbacks {
   storage: ReturnType<typeof vi.fn<() => void>>;
 }
 
-interface CapturedActions {
-  menuOpen: ValueHandler<boolean>;
-  issuesOpen?: ValueHandler<boolean>;
-  menuTrigger: HTMLElement;
-  authorizeMenu: SourceHandler;
-  menuContent: HTMLElement;
-  authorizeMenuContent: SourceHandler;
-  authorizeMenuOutside: OutsideHandler;
-  issuesTrigger?: HTMLElement;
-  authorizeIssues?: SourceHandler;
-  issuesContent?: HTMLElement;
-  authorizeIssuesContent?: SourceHandler;
-  authorizeIssuesOutside?: OutsideHandler;
-  layout: ValueAction<string>;
-  wrapping: ValueAction<boolean | "indeterminate">;
-  syncScroll: ValueAction<boolean | "indeterminate">;
-  theme?: ValueAction<string>;
-  compactShortcuts?: DirectAction<Event>;
-  desktopShortcuts?: DirectAction<ReactMouseEvent<HTMLElement>>;
-  storage?: DirectAction<ReactMouseEvent<HTMLElement>>;
-  issue?: DirectAction<ReactMouseEvent<HTMLElement>>;
-}
-
 interface DirectView {
   host: HTMLDivElement;
   root: Root;
@@ -103,10 +76,33 @@ interface DirectView {
 
 interface ReactFiber {
   alternate?: ReactFiber | null;
-  elementType?: { displayName?: string; name?: string } | string;
   memoizedProps?: Record<string, unknown>;
   return: ReactFiber | null;
-  type?: { displayName?: string; name?: string } | string;
+}
+
+interface CapturedClick {
+  capture: (event: ReactMouseEvent<HTMLElement>) => void;
+  click: (event: ReactMouseEvent<HTMLElement>) => void;
+  element: HTMLElement;
+}
+
+interface CapturedDisclosure {
+  authorize: (event: ReactMouseEvent<HTMLElement>) => void;
+  change: (open: boolean) => void;
+  element: HTMLElement;
+}
+
+class StatusBarPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: PointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
 }
 
 const ISSUE_A: LintIssue = {
@@ -117,7 +113,7 @@ const ISSUE_A: LintIssue = {
   rule: "descriptive-link",
   severity: "warning",
 };
-const ISSUE_B: LintIssue = { ...ISSUE_A };
+
 const ISSUE_OTHER: LintIssue = {
   line: 7,
   column: 1,
@@ -128,12 +124,80 @@ const ISSUE_OTHER: LintIssue = {
 };
 
 const directViews: DirectView[] = [];
+const fakeSessionDisposals: (() => void)[] = [];
+const fakeSessionSelections = new WeakMap<
+  CollabSession,
+  (from: number, to: number) => void
+>();
 
 function fakeSession(name: string) {
-  return {
+  const ydoc = new Y.Doc();
+  const ytext = ydoc.getText("source");
+  ytext.insert(0, controlled.sessionValue.text);
+  const meta = ydoc.getMap("meta");
+  const subscribers = new Set<() => void>();
+  const awarenessListeners = new Set<() => void>();
+  let localState: { cursor?: { anchor: unknown; head: unknown } } | null = null;
+  let version = 0;
+  const notify = () => {
+    version += 1;
+    [...subscribers].forEach((listener) => listener());
+  };
+  ydoc.on("update", notify);
+  const session = {
     name,
     binding: { getTree: () => controlled.sessionValue.tree },
+    ydoc,
+    ytext,
+    meta,
+    canEdit: true,
+    user: {
+      id: "alice",
+      name: "Alice",
+      login: "alice",
+      image: null,
+    },
+    awareness: {
+      getLocalState: () => localState,
+      on: (event: string, listener: () => void) => {
+        if (event === "change") awarenessListeners.add(listener);
+      },
+      off: (event: string, listener: () => void) => {
+        if (event === "change") awarenessListeners.delete(listener);
+      },
+    },
+    subscribe: (listener: () => void) => {
+      subscribers.add(listener);
+      return () => subscribers.delete(listener);
+    },
+    get version() {
+      return version;
+    },
   } as unknown as CollabSession;
+  fakeSessionSelections.set(session, (from, to) => {
+    localState = {
+      cursor: {
+        anchor: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(ytext, from),
+        ),
+        head: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(ytext, to),
+        ),
+      },
+    };
+    [...awarenessListeners].forEach((listener) => listener());
+  });
+  fakeSessionDisposals.push(() => {
+    ydoc.off("update", notify);
+    ydoc.destroy();
+  });
+  return session;
+}
+
+function setFakeSelection(session: CollabSession, from: number, to: number) {
+  const setSelection = fakeSessionSelections.get(session);
+  if (!setSelection) throw new Error("Unknown fake session");
+  setSelection(from, to);
 }
 
 function documentDto(overrides: Partial<DocumentDto> = {}): DocumentDto {
@@ -190,41 +254,6 @@ function statusProps(
   };
 }
 
-function InitialStatusBar({ props }: { props: StatusBarProps }) {
-  return <StatusBar {...props} />;
-}
-
-function ReplacementStatusBar({ props }: { props: StatusBarProps }) {
-  return <StatusBar {...props} />;
-}
-
-function StatusBoundary({
-  props,
-  mount = "initial",
-  present = true,
-  boundary = 0,
-  passiveGeneration = "initial",
-  onBoundary,
-  onPassiveCleanup,
-}: {
-  props: StatusBarProps;
-  mount?: "initial" | "replacement";
-  present?: boolean;
-  boundary?: number;
-  passiveGeneration?: string;
-  onBoundary?: () => void;
-  onPassiveCleanup: () => void;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-  useEffect(() => onPassiveCleanup, [onPassiveCleanup, passiveGeneration]);
-  if (!present) return null;
-  return mount === "initial"
-    ? <InitialStatusBar props={props} />
-    : <ReplacementStatusBar props={props} />;
-}
-
 async function renderDirect(node: ReactNode) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -237,153 +266,35 @@ async function renderDirect(node: ReactNode) {
   return view;
 }
 
-async function renderBoundary(
+async function renderStatus(
+  props: StatusBarProps,
+  key = "initial",
+  strict = true,
+) {
+  return renderDirect(
+    strict
+      ? (
+          <StrictMode>
+            <StatusBar key={key} {...props} />
+          </StrictMode>
+        )
+      : <StatusBar key={key} {...props} />,
+  );
+}
+
+async function rerenderStatus(
   view: DirectView,
   props: StatusBarProps,
-  options: Omit<Parameters<typeof StatusBoundary>[0], "props" | "onPassiveCleanup"> & {
-    onPassiveCleanup: () => void;
-  },
+  key = "initial",
 ) {
   await act(async () => {
-    view.root.render(<StatusBoundary props={props} {...options} />);
+    view.root.render(
+      <StrictMode>
+        <StatusBar key={key} {...props} />
+      </StrictMode>,
+    );
     await Promise.resolve();
   });
-}
-
-function fiberFor(element: Element): ReactFiber {
-  const fiberKey = Object.keys(element).find((candidate) => candidate.startsWith("__reactFiber$"));
-  const propsKey = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
-  if (!fiberKey || !propsKey) throw new Error(`React internals were not attached to ${element.tagName}`);
-  const record = element as unknown as Record<string, ReactFiber | Record<string, unknown>>;
-  const fiber = record[fiberKey] as ReactFiber;
-  const props = record[propsKey] as Record<string, unknown>;
-  const alternate = fiber.alternate;
-  if (!alternate) return fiber;
-  const eventProps = ["onClick", "onPointerDown", "onKeyDown", "onFocus"];
-  const alternateIsCurrent = eventProps.some(
-    (name) => typeof props[name] === "function" && alternate.memoizedProps?.[name] === props[name],
-  );
-  return alternateIsCurrent ? alternate : fiber;
-}
-
-function nearestHandler<T extends (...args: never[]) => unknown>(element: Element, name: string): T {
-  let fiber: ReactFiber | null = fiberFor(element);
-  while (fiber) {
-    const handler = fiber.memoizedProps?.[name];
-    if (typeof handler === "function") return handler as T;
-    fiber = fiber.return;
-  }
-
-  throw new Error(`${name} was not found above ${element.tagName}`);
-}
-
-function handlerOwnedBy<T extends (...args: never[]) => unknown>(
-  element: Element,
-  name: string,
-  owner: string,
-): T {
-  let fiber: ReactFiber | null = fiberFor(element);
-  while (fiber) {
-    const type = fiber.elementType;
-    const typeName = typeof type === "string" ? type : type?.displayName ?? type?.name;
-    const handler = fiber.memoizedProps?.[name];
-    if (typeName === owner && typeof handler === "function") return handler as T;
-    fiber = fiber.return;
-  }
-  throw new Error(`${name} owned by ${owner} was not found above ${element.tagName}`);
-}
-
-function reactHandler<T extends (...args: never[]) => unknown = ClickHandler>(element: Element, name = "onClick"): T {
-  const key = Object.keys(element).find((candidate) => candidate.startsWith("__reactProps$"));
-  if (!key) throw new Error(`React props were not attached to ${element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown>>)[key];
-  const handler = props[name];
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
-  return handler as T;
-}
-
-function withCurrentTarget<T extends { currentTarget: EventTarget | null }>(
-  event: T,
-  currentTarget: EventTarget | null,
-) {
-  return { ...event, currentTarget } as T;
-}
-
-function directAction<T extends { currentTarget: EventTarget | null }>(
-  element: HTMLElement,
-  handler: (event: T) => void,
-): DirectAction<T> {
-  const action = ((event: T) => handler(withCurrentTarget(event, element))) as DirectAction<T>;
-  action.raw = handler;
-  action.element = element;
-  return action;
-}
-
-function selectEvent(currentTarget: EventTarget | null) {
-  return {
-    currentTarget,
-    preventDefault: vi.fn(),
-    defaultPrevented: false,
-  } as unknown as Event;
-}
-
-function sourceEvent(currentTarget: EventTarget | null) {
-  return {
-    currentTarget,
-    target: currentTarget,
-    key: "Escape",
-    button: 0,
-    ctrlKey: false,
-    defaultPrevented: false,
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-    isDefaultPrevented: () => false,
-    isPropagationStopped: () => false,
-  };
-}
-
-function valueAction<T>(
-  raw: ValueHandler<T>,
-  items: Map<string, { element: HTMLElement; select: SelectHandler }>,
-  represented: (value: T) => string | null,
-): ValueAction<T> {
-  const action = ((value: T) => {
-    const itemValue = represented(value);
-    const item = itemValue === null ? undefined : items.get(itemValue);
-    if (item) item.select(selectEvent(item.element));
-    else raw(value);
-  }) as ValueAction<T>;
-  action.raw = raw;
-  action.items = items;
-  return action;
-}
-
-async function openDisclosures(compact = false, alreadyOpen = false) {
-  const menuTrigger = screen.getByTestId("layout-menu");
-  const menuOpen = nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange");
-  const authorizeMenu = reactHandler<SourceHandler>(menuTrigger, "onPointerDownCapture");
-  if (!alreadyOpen && menuTrigger.getAttribute("aria-expanded") !== "true") {
-    await act(async () => {
-      fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
-      await Promise.resolve();
-    });
-  }
-  let issuesOpen: ValueHandler<boolean> | undefined;
-  let issuesTrigger: HTMLElement | undefined;
-  let authorizeIssues: SourceHandler | undefined;
-  if (!compact) {
-    const currentIssuesTrigger = screen.getByTestId("issues-button");
-    issuesTrigger = currentIssuesTrigger;
-    issuesOpen = nearestHandler<ValueHandler<boolean>>(currentIssuesTrigger, "onOpenChange");
-    authorizeIssues = reactHandler<SourceHandler>(currentIssuesTrigger, "onClickCapture");
-    if (!alreadyOpen && currentIssuesTrigger.getAttribute("aria-expanded") !== "true") {
-      await act(async () => {
-        fireEvent.click(currentIssuesTrigger);
-        await Promise.resolve();
-      });
-    }
-  }
-  return { menuOpen, issuesOpen, menuTrigger, authorizeMenu, issuesTrigger, authorizeIssues };
 }
 
 function elementWithText(selector: string, text: string) {
@@ -393,306 +304,241 @@ function elementWithText(selector: string, text: string) {
   return element;
 }
 
-async function captureActions({
-  alreadyOpen = false,
-  compact = false,
-  issueMessage,
-  storage = true,
-}: {
-  alreadyOpen?: boolean;
-  compact?: boolean;
-  issueMessage?: string;
-  storage?: boolean;
-} = {}): Promise<CapturedActions> {
-  const disclosures = await openDisclosures(compact, alreadyOpen);
-  const codeItem = elementWithText('[role="menuitemradio"]', "Code only");
-  const wrapItem = elementWithText('[role="menuitemcheckbox"]', "Wrap long lines");
-  const syncItem = screen.getByTestId("sync-scroll-toggle");
-  const storageButton = screen.getByTestId("storage-indicator");
-  const layoutItems = new Map([
-    ["code", { element: codeItem, select: nearestHandler<SelectHandler>(codeItem, "onSelect") }],
-    ["rich", (() => {
-      const element = elementWithText('[role="menuitemradio"]', "Preview only");
-      return { element, select: nearestHandler<SelectHandler>(element, "onSelect") };
-    })()],
-  ]);
-  if (!compact) {
-    const element = elementWithText('[role="menuitemradio"]', "Code and preview");
-    layoutItems.set("split", { element, select: nearestHandler<SelectHandler>(element, "onSelect") });
-  }
-  const wrappingItems = new Map([
-    ["change", { element: wrapItem, select: nearestHandler<SelectHandler>(wrapItem, "onSelect") }],
-  ]);
-  const syncItems = new Map([
-    ["change", { element: syncItem, select: nearestHandler<SelectHandler>(syncItem, "onSelect") }],
-  ]);
-  const wrappingNext = wrapItem.getAttribute("aria-checked") !== "true";
-  const syncNext = syncItem.getAttribute("aria-checked") !== "true";
-  const menuContent = screen.getByTestId("status-menu-content");
-  const issueContent = disclosures.issuesTrigger
-    ? screen.getByTestId("status-issues-content")
-    : undefined;
-  const actions: CapturedActions = {
-    ...disclosures,
-    menuContent,
-    authorizeMenuContent: handlerOwnedBy<SourceHandler>(menuContent, "onPointerDownCapture", "MenuContent"),
-    authorizeMenuOutside: handlerOwnedBy<OutsideHandler>(menuContent, "onPointerDownOutside", "MenuContent"),
-    issuesContent: issueContent,
-    authorizeIssuesContent: issueContent
-      ? handlerOwnedBy<SourceHandler>(issueContent, "onKeyDownCapture", "PopoverContent")
-      : undefined,
-    authorizeIssuesOutside: issueContent
-      ? handlerOwnedBy<OutsideHandler>(issueContent, "onPointerDownOutside", "PopoverContent")
-      : undefined,
-    layout: valueAction(
-      nearestHandler<ValueHandler<string>>(codeItem, "onValueChange"),
-      layoutItems,
-      (value) => layoutItems.has(value) ? value : null,
-    ),
-    wrapping: valueAction(
-      nearestHandler<ValueHandler<boolean | "indeterminate">>(wrapItem, "onCheckedChange"),
-      wrappingItems,
-      (value) => value === wrappingNext ? "change" : null,
-    ),
-    syncScroll: valueAction(
-      nearestHandler<ValueHandler<boolean | "indeterminate">>(syncItem, "onCheckedChange"),
-      syncItems,
-      (value) => value === syncNext ? "change" : null,
-    ),
-    storage: storage
-      ? directAction(storageButton, reactHandler<ClickHandler>(storageButton))
-      : undefined,
-  };
-  if (compact) {
-    const themeItems = new Map(
-      ["light", "dark", "system"].map((theme) => {
-        const element = screen.getByTestId(`menu-theme-${theme}`);
-        return [theme, { element, select: nearestHandler<SelectHandler>(element, "onSelect") }] as const;
-      }),
-    );
-    actions.theme = valueAction(
-      nearestHandler<ValueHandler<string>>(screen.getByTestId("menu-theme-dark"), "onValueChange"),
-      themeItems,
-      (value) => themeItems.has(value) ? value : null,
-    );
-    const compactShortcuts = elementWithText('[role="menuitem"]', "Help and shortcuts");
-    actions.compactShortcuts = directAction(
-      compactShortcuts,
-      nearestHandler<SelectHandler>(compactShortcuts, "onSelect"),
-    );
-  } else {
-    const desktopShortcuts = document.querySelector<HTMLButtonElement>('button[aria-label="Help and shortcuts"]');
-    if (!desktopShortcuts) throw new Error("Desktop shortcuts were not rendered");
-    actions.desktopShortcuts = directAction(desktopShortcuts, reactHandler<ClickHandler>(desktopShortcuts));
-    const issueButton = [...document.querySelectorAll<HTMLButtonElement>("button")]
-      .findLast((button) => button.textContent?.includes(issueMessage ?? ISSUE_A.message));
-    actions.issue = issueButton
-      ? directAction(issueButton, reactHandler<ClickHandler>(issueButton))
-      : undefined;
-  }
-  return actions;
+function desktopShortcuts() {
+  const element = document.querySelector<HTMLButtonElement>(
+    'button[aria-label="Help and shortcuts"]',
+  );
+  if (!element) throw new Error("Desktop shortcuts were not rendered");
+  return element;
 }
 
-function clickProbe() {
+function openMenu() {
+  const trigger = screen.getByTestId("layout-menu");
+  if (trigger.getAttribute("aria-expanded") !== "true")
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return trigger;
+}
+
+function selectMenuItem(selector: string, text: string) {
+  const trigger = openMenu();
+  const item = elementWithText(selector, text);
+  fireEvent.click(item);
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+}
+
+function openIssues() {
+  const trigger = screen.getByTestId("issues-button");
+  if (trigger.getAttribute("aria-expanded") !== "true") fireEvent.click(trigger);
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return trigger;
+}
+
+function closeIssues() {
+  const trigger = screen.getByTestId("issues-button");
+  if (trigger.getAttribute("aria-expanded") === "true") fireEvent.click(trigger);
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+}
+
+async function nextTask() {
+  await act(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function outsidePointerClick(
+  pointerDownTarget: HTMLElement,
+  releaseTarget = pointerDownTarget,
+) {
+  fireEvent(pointerDownTarget, pointerEvent("pointerdown", 7));
+  await nextTask();
+  fireEvent(releaseTarget, pointerEvent("pointerup", 7));
+  fireEvent(releaseTarget, pointerEvent("click", 7));
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
+function pointerEvent(
+  type: "pointerdown" | "pointerup" | "pointercancel" | "click",
+  pointerId = 1,
+  overrides: PointerEventInit = {},
+) {
+  return new StatusBarPointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button: type === "pointercancel" ? -1 : 0,
+    detail: type === "click" ? 1 : 0,
+    pointerId,
+    pointerType: "mouse",
+    isPrimary: true,
+    ...overrides,
+  });
+}
+
+function fiberFor(element: Element): ReactFiber {
+  const fiberKey = Object.keys(element).find((candidate) =>
+    candidate.startsWith("__reactFiber$"),
+  );
+  const propsKey = Object.keys(element).find((candidate) =>
+    candidate.startsWith("__reactProps$"),
+  );
+  if (!fiberKey || !propsKey)
+    throw new Error(`React internals were not attached to ${element.tagName}`);
+  const record = element as unknown as Record<
+    string,
+    ReactFiber | Record<string, unknown>
+  >;
+  const fiber = record[fiberKey] as ReactFiber;
+  const props = record[propsKey] as Record<string, unknown>;
+  const alternate = fiber.alternate;
+  if (!alternate) return fiber;
+  const handlerNames = [
+    "onClick",
+    "onClickCapture",
+    "onPointerDown",
+    "onPointerDownCapture",
+    "onKeyDown",
+  ];
+  const alternateIsCurrent = handlerNames.some(
+    (name) =>
+      typeof props[name] === "function"
+      && alternate.memoizedProps?.[name] === props[name],
+  );
+  return alternateIsCurrent ? alternate : fiber;
+}
+
+function nearestHandler<T extends (...args: never[]) => unknown>(
+  element: Element,
+  name: string,
+): T {
+  let fiber: ReactFiber | null = fiberFor(element);
+  while (fiber) {
+    const handler = fiber.memoizedProps?.[name];
+    if (typeof handler === "function") return handler as T;
+    fiber = fiber.return;
+  }
+  throw new Error(`${name} was not found above ${element.tagName}`);
+}
+
+function reactHandler<T extends (...args: never[]) => unknown>(
+  element: Element,
+  name: string,
+): T {
+  const key = Object.keys(element).find((candidate) =>
+    candidate.startsWith("__reactProps$"),
+  );
+  if (!key) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown>>)[key];
+  const handler = props[name];
+  if (typeof handler !== "function")
+    throw new Error(`${name} was not attached to ${element.tagName}`);
+  return handler as T;
+}
+
+function captureClick(element: HTMLElement): CapturedClick {
+  return {
+    capture: reactHandler(element, "onClickCapture"),
+    click: reactHandler(element, "onClick"),
+    element,
+  };
+}
+
+function captureDisclosure(element: HTMLElement): CapturedDisclosure {
+  return {
+    authorize: reactHandler(element, "onPointerDownCapture"),
+    change: nearestHandler(element, "onOpenChange"),
+    element,
+  };
+}
+
+function fabricatedClick(
+  currentTarget: EventTarget | null,
+  target: EventTarget | null = currentTarget,
+) {
   const preventDefault = vi.fn();
   const stopPropagation = vi.fn();
   return {
     event: {
+      nativeEvent: {
+        type: "click",
+        target,
+        composedPath: () => [target, currentTarget, document, window],
+      },
+      type: "click",
+      target,
+      currentTarget,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      timeStamp: 1,
       preventDefault,
       stopPropagation,
-      isDefaultPrevented: () => preventDefault.mock.calls.length > 0,
-      isPropagationStopped: () => stopPropagation.mock.calls.length > 0,
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
     } as unknown as ReactMouseEvent<HTMLElement>,
     preventDefault,
     stopPropagation,
   };
 }
 
-function activateCurrent(actions: CapturedActions, props: StatusBarProps) {
-  actions.layout(props.layout === "code" ? "rich" : "code");
-  actions.wrapping(!props.lineWrapping);
-  actions.syncScroll(!props.syncScroll);
-  actions.issue?.(clickProbe().event);
-  actions.desktopShortcuts?.(clickProbe().event);
-  actions.compactShortcuts?.(new Event("select"));
-  actions.storage?.(clickProbe().event);
-  actions.theme?.(controlled.themePreference === "dark" ? "light" : "dark");
-}
-
-function invokeWrongSources(actions: CapturedActions) {
-  const foreign = document.createElement("button");
-  const detached = document.createElement("button");
-  document.body.prepend(foreign);
-  const code = actions.layout.items.get("code");
-  const rich = actions.layout.items.get("rich");
-  const wrapping = actions.wrapping.items.get("change");
-  const syncScroll = actions.syncScroll.items.get("change");
-  if (!code || !rich || !wrapping || !syncScroll) throw new Error("Expected status menu controls");
-
-  code.select(selectEvent(rich.element));
-  code.select(selectEvent(foreign));
-  code.select(selectEvent(detached));
-  wrapping.select(selectEvent(syncScroll.element));
-  wrapping.select(selectEvent(foreign));
-  syncScroll.select(selectEvent(wrapping.element));
-  syncScroll.select(selectEvent(detached));
-  actions.issue?.raw(withCurrentTarget(clickProbe().event, actions.storage?.element ?? foreign));
-  actions.desktopShortcuts?.raw(withCurrentTarget(clickProbe().event, actions.issue?.element ?? foreign));
-  actions.compactShortcuts?.raw(selectEvent(actions.theme?.items.get("dark")?.element ?? foreign));
-  actions.storage?.raw(withCurrentTarget(clickProbe().event, actions.desktopShortcuts?.element ?? foreign));
-
-  const dark = actions.theme?.items.get("dark");
-  const light = actions.theme?.items.get("light");
-  if (dark && light) {
-    dark.select(selectEvent(light.element));
-    dark.select(selectEvent(foreign));
-    dark.select(selectEvent(detached));
-  }
-
-  actions.authorizeMenu(sourceEvent(actions.issuesTrigger ?? foreign));
-  actions.menuOpen(false);
-  actions.authorizeMenu(sourceEvent(foreign));
-  actions.menuOpen(false);
-  actions.authorizeMenuContent(sourceEvent(actions.issuesContent ?? foreign));
-  actions.menuOpen(false);
-  actions.authorizeMenuContent(sourceEvent(detached));
-  actions.menuOpen(false);
-  actions.authorizeMenuOutside(sourceEvent(foreign) as unknown as CustomEvent<{ originalEvent: Event }>);
-  actions.menuOpen(false);
-  if (actions.authorizeIssues && actions.issuesOpen) {
-    actions.authorizeIssues(sourceEvent(actions.menuTrigger));
-    actions.issuesOpen(false);
-    actions.authorizeIssues(sourceEvent(foreign));
-    actions.issuesOpen(false);
-    actions.authorizeIssuesContent?.(sourceEvent(actions.menuContent));
-    actions.issuesOpen(false);
-    actions.authorizeIssuesContent?.(sourceEvent(detached));
-    actions.issuesOpen(false);
-    actions.authorizeIssuesOutside?.(sourceEvent(foreign) as unknown as CustomEvent<{ originalEvent: Event }>);
-    actions.issuesOpen(false);
-  }
-
-  foreign.remove();
-}
-
-function invokeCrossPublicationSources(stale: CapturedActions, current: CapturedActions) {
-  const staleCode = stale.layout.items.get("code");
-  const currentCode = current.layout.items.get("code");
-  const staleWrapping = stale.wrapping.items.get("change");
-  const currentWrapping = current.wrapping.items.get("change");
-  const staleSync = stale.syncScroll.items.get("change");
-  const currentSync = current.syncScroll.items.get("change");
-  if (!staleCode || !currentCode || !staleWrapping || !currentWrapping || !staleSync || !currentSync)
-    throw new Error("Expected cross-publication status controls");
-
-  staleCode.select(selectEvent(currentCode.element));
-  currentCode.select(selectEvent(staleCode.element));
-  staleWrapping.select(selectEvent(currentWrapping.element));
-  currentWrapping.select(selectEvent(staleWrapping.element));
-  staleSync.select(selectEvent(currentSync.element));
-  currentSync.select(selectEvent(staleSync.element));
-  if (stale.issue && current.issue) {
-    stale.issue.raw(withCurrentTarget(clickProbe().event, current.issue.element));
-    current.issue.raw(withCurrentTarget(clickProbe().event, stale.issue.element));
-  }
-  if (stale.desktopShortcuts && current.desktopShortcuts) {
-    stale.desktopShortcuts.raw(withCurrentTarget(clickProbe().event, current.desktopShortcuts.element));
-    current.desktopShortcuts.raw(withCurrentTarget(clickProbe().event, stale.desktopShortcuts.element));
-  }
-  if (stale.storage && current.storage) {
-    stale.storage.raw(withCurrentTarget(clickProbe().event, current.storage.element));
-    current.storage.raw(withCurrentTarget(clickProbe().event, stale.storage.element));
-  }
-
-  stale.authorizeMenu(sourceEvent(current.menuTrigger));
-  stale.menuOpen(false);
-  current.authorizeMenu(sourceEvent(stale.menuTrigger));
-  current.menuOpen(false);
-  stale.authorizeMenuContent(sourceEvent(current.menuContent));
-  stale.menuOpen(false);
-  current.authorizeMenuContent(sourceEvent(stale.menuContent));
-  current.menuOpen(false);
-  if (
-    stale.issuesTrigger
-    && current.issuesTrigger
-    && stale.authorizeIssues
-    && current.authorizeIssues
-    && stale.issuesOpen
-    && current.issuesOpen
-  ) {
-    stale.authorizeIssues(sourceEvent(current.issuesTrigger));
-    stale.issuesOpen(false);
-    current.authorizeIssues(sourceEvent(stale.issuesTrigger));
-    current.issuesOpen(false);
-    stale.authorizeIssuesContent?.(sourceEvent(current.issuesContent ?? current.issuesTrigger));
-    stale.issuesOpen(false);
-    current.authorizeIssuesContent?.(sourceEvent(stale.issuesContent ?? stale.issuesTrigger));
-    current.issuesOpen(false);
-  }
-}
-
-function allCallCounts(callbackSets: StatusCallbacks[]) {
-  return {
-    callbacks: callbackSets.flatMap((set) => [
-      set.layout.mock.calls.length,
-      set.wrapping.mock.calls.length,
-      set.syncScroll.mock.calls.length,
-      set.issue.mock.calls.length,
-      set.shortcuts.mock.calls.length,
-      set.storage.mock.calls.length,
-    ]),
-    theme: controlled.themeSetter.mock.calls.length,
-  };
-}
-
-function expectStaleInert(
-  actions: CapturedActions,
-  staleProps: StatusBarProps,
-  view: DirectView,
-  callbackSets: StatusCallbacks[],
-  trackRenderWork = false,
+function invokeFabricatedClick(
+  action: CapturedClick,
+  currentTarget: EventTarget | null = action.element,
+  target: EventTarget | null = currentTarget,
 ) {
-  const focused = document.activeElement;
-  const probes = [clickProbe(), clickProbe(), clickProbe()];
-  const before = allCallCounts(callbackSets);
-  const lintCalls = controlled.lint.mock.calls.length;
-  const sessionCalls = controlled.sessionHook.mock.calls.length;
-  const html = view.host.innerHTML;
-  const menuItems = document.querySelectorAll('[role^="menuitem"]').length;
-  const issueRows = [...document.querySelectorAll("button")]
-    .filter((button) => [ISSUE_A.message, ISSUE_B.message, ISSUE_OTHER.message]
-      .some((message) => button.textContent?.includes(message))).length;
+  const probe = fabricatedClick(currentTarget, target);
+  action.capture(probe.event);
+  action.click(probe.event);
+  return probe;
+}
 
-  actions.menuOpen(false);
-  actions.issuesOpen?.(false);
-  actions.layout(staleProps.layout === "code" ? "rich" : "code");
-  actions.wrapping(!staleProps.lineWrapping);
-  actions.syncScroll(!staleProps.syncScroll);
-  actions.issue?.(probes[0].event);
-  actions.desktopShortcuts?.(probes[1].event);
-  actions.compactShortcuts?.(new Event("select"));
-  actions.storage?.(probes[2].event);
-  actions.theme?.(controlled.themePreference === "dark" ? "light" : "dark");
+function invokeFabricatedDisclosure(disclosure: CapturedDisclosure) {
+  const probe = fabricatedClick(disclosure.element);
+  disclosure.authorize(probe.event);
+  disclosure.change(true);
+  return probe;
+}
 
-  expect(allCallCounts(callbackSets)).toEqual(before);
-  if (trackRenderWork) {
-    expect(controlled.lint).toHaveBeenCalledTimes(lintCalls);
-    expect(controlled.sessionHook).toHaveBeenCalledTimes(sessionCalls);
-  }
-  expect(view.host.innerHTML).toBe(html);
-  expect(document.querySelectorAll('[role^="menuitem"]')).toHaveLength(menuItems);
-  expect([...document.querySelectorAll("button")]
-    .filter((button) => [ISSUE_A.message, ISSUE_B.message, ISSUE_OTHER.message]
-      .some((message) => button.textContent?.includes(message)))).toHaveLength(issueRows);
-  expect(document.activeElement).toBe(focused);
-  probes.forEach(({ preventDefault, stopPropagation }) => {
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(stopPropagation).not.toHaveBeenCalled();
-  });
-  expect(view.host.querySelector('[data-testid="status-bar"]')).not.toBeNull();
+function allCallbackCounts(sets: StatusCallbacks[]) {
+  return sets.flatMap((set) => [
+    set.layout.mock.calls.length,
+    set.wrapping.mock.calls.length,
+    set.syncScroll.mock.calls.length,
+    set.issue.mock.calls.length,
+    set.shortcuts.mock.calls.length,
+    set.storage.mock.calls.length,
+  ]);
+}
+
+function LayoutReplayProbe({ inspect }: { inspect: () => void }) {
+  useLayoutEffect(() => {
+    inspect();
+  }, [inspect]);
+  return null;
+}
+
+function UnrelatedPresencePopover() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" data-testid="presence-trigger">
+          Presence
+        </button>
+      </PopoverTrigger>
+      <PopoverContent data-testid="presence-content">
+        Current collaborators
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 beforeEach(() => {
+  Object.defineProperty(window, "PointerEvent", {
+    configurable: true,
+    value: StatusBarPointerEvent,
+  });
   controlled.hydrated = true;
   controlled.issues = [ISSUE_A];
   controlled.lint.mockReset();
@@ -711,427 +557,994 @@ afterEach(async () => {
     });
     view.host.remove();
   }
+  while (fakeSessionDisposals.length) fakeSessionDisposals.pop()!();
   document.body.replaceChildren();
+  Reflect.deleteProperty(window, "PointerEvent");
 });
 
-describe("status bar current publications", () => {
-  it("admits each desktop control once and rejects selected, invalid, same-value, and repeated input", async () => {
+describe("status bar Strict Mode controls", () => {
+  it("publishes a distinct complete replay before desktop controls act exactly once", async () => {
     const current = callbacks();
     const props = statusProps(current);
-    const view = await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
-    const actions = await captureActions();
+    const staleStorage: CapturedClick[] = [];
+    const staleMenu: CapturedDisclosure[] = [];
+    const inspect = () => {
+      staleStorage.push(captureClick(screen.getByTestId("storage-indicator")));
+      staleMenu.push(captureDisclosure(screen.getByTestId("layout-menu")));
+    };
+    await renderDirect(
+      <StrictMode>
+        <StatusBar {...props} />
+        <LayoutReplayProbe inspect={inspect} />
+      </StrictMode>,
+    );
 
-    actions.layout("split");
-    actions.layout("invalid");
-    actions.layout("code");
-    actions.layout("rich");
-    actions.wrapping("indeterminate");
-    actions.wrapping(false);
-    actions.wrapping(true);
-    actions.wrapping(true);
-    actions.syncScroll("indeterminate");
-    actions.syncScroll(true);
-    actions.syncScroll(false);
-    actions.syncScroll(false);
-    actions.issue?.(clickProbe().event);
-    actions.issue?.(clickProbe().event);
-    actions.desktopShortcuts?.(clickProbe().event);
-    actions.desktopShortcuts?.(clickProbe().event);
-    actions.storage?.(clickProbe().event);
-    actions.storage?.(clickProbe().event);
+    expect(staleStorage).toHaveLength(2);
+    expect(staleMenu).toHaveLength(2);
+    const staleStorageProbe = invokeFabricatedClick(staleStorage[0]);
+    const staleMenuProbe = invokeFabricatedDisclosure(staleMenu[0]);
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(screen.getByTestId("layout-menu")).toHaveAttribute("aria-expanded", "false");
+    expect(staleStorageProbe.preventDefault).not.toHaveBeenCalled();
+    expect(staleStorageProbe.stopPropagation).not.toHaveBeenCalled();
+    expect(staleMenuProbe.preventDefault).not.toHaveBeenCalled();
 
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    fireEvent.click(desktopShortcuts());
+    openIssues();
+    const issueEvent = new MouseEvent("click", { bubbles: true, cancelable: true });
+    const issueRow = elementWithText("button", ISSUE_A.message);
+    act(() => {
+      issueRow.dispatchEvent(issueEvent);
+      issueRow.dispatchEvent(issueEvent);
+    });
+    closeIssues();
+    selectMenuItem('[role="menuitemradio"]', "Code only");
+    selectMenuItem('[role="menuitemcheckbox"]', "Wrap long lines");
+    selectMenuItem('[role="menuitemcheckbox"]', "Sync scrolling");
+
+    expect(current.storage).toHaveBeenCalledOnce();
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+    expect(current.issue).toHaveBeenCalledOnce();
+    expect(current.issue).toHaveBeenCalledWith(ISSUE_A);
     expect(current.layout).toHaveBeenCalledOnce();
     expect(current.layout).toHaveBeenCalledWith("code");
     expect(current.wrapping).toHaveBeenCalledOnce();
     expect(current.wrapping).toHaveBeenCalledWith(true);
     expect(current.syncScroll).toHaveBeenCalledOnce();
     expect(current.syncScroll).toHaveBeenCalledWith(false);
-    expect(current.issue).toHaveBeenCalledOnce();
-    expect(current.issue).toHaveBeenCalledWith(ISSUE_A);
-    expect(current.shortcuts).toHaveBeenCalledOnce();
-    expect(current.storage).toHaveBeenCalledOnce();
-    expect(view.host.querySelector('[data-testid="status-bar"]')).not.toHaveAttribute("data-compact");
+    expect(screen.getByTestId("status-bar")).not.toHaveAttribute("data-compact");
+    expect(screen.getByTestId("theme-toggle")).toBeInTheDocument();
   });
 
-  it("binds compact theme and shortcuts separately and keeps missing storage disabled and inert", async () => {
+  it("keeps compact layout, wrapping, sync, theme, shortcuts, and storage authority exact", async () => {
     const current = callbacks();
-    const props = statusProps(current, { compact: true, layout: "code", onStorage: undefined });
-    await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
-    const actions = await captureActions({ compact: true, storage: false });
-    const storageButton = screen.getByTestId("storage-indicator");
+    const props = statusProps(current, { compact: true, layout: "code" });
+    await renderStatus(props);
 
-    actions.layout("split");
-    actions.layout("code");
-    actions.layout("rich");
-    actions.layout("rich");
-    actions.theme?.("sepia");
-    actions.theme?.("system");
-    actions.theme?.("dark");
-    actions.theme?.("light");
-    actions.compactShortcuts?.(new Event("select"));
-    actions.compactShortcuts?.(new Event("select"));
-
-    expect(current.layout).toHaveBeenCalledOnce();
-    expect(current.layout).toHaveBeenCalledWith("rich");
-    expect(controlled.themeSetter).toHaveBeenCalledOnce();
-    expect(controlled.themeSetter).toHaveBeenCalledWith("dark");
-    expect(current.shortcuts).toHaveBeenCalledOnce();
-    expect(current.storage).not.toHaveBeenCalled();
-    expect(storageButton).toBeDisabled();
-    expect(reactHandler.bind(null, storageButton)).toThrow("onClick was not attached");
+    const trigger = screen.getByTestId("layout-menu");
+    expect(trigger).toHaveAccessibleName("View options");
     expect(screen.queryByTestId("issues-button")).toBeNull();
     expect(screen.queryByTestId("theme-toggle")).toBeNull();
+
+    openMenu();
+    expect(
+      document.querySelector('[role="menuitemradio"]')?.parentElement?.textContent,
+    ).not.toContain("Code and preview");
+    fireEvent.click(screen.getByTestId("menu-theme-dark"));
+    selectMenuItem('[role="menuitemradio"]', "Preview only");
+    selectMenuItem('[role="menuitemcheckbox"]', "Wrap long lines");
+    selectMenuItem('[role="menuitemcheckbox"]', "Sync scrolling");
+    selectMenuItem('[role="menuitem"]', "Help and shortcuts");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+
+    expect(controlled.themeSetter).toHaveBeenCalledOnce();
+    expect(controlled.themeSetter).toHaveBeenCalledWith("dark");
+    expect(current.layout).toHaveBeenCalledOnce();
+    expect(current.layout).toHaveBeenCalledWith("rich");
+    expect(current.wrapping).toHaveBeenCalledOnce();
+    expect(current.syncScroll).toHaveBeenCalledOnce();
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+    expect(current.storage).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("status-bar")).toHaveAttribute("data-compact", "true");
   });
 
-  it.each([
-    ["desktop, wrong before current", false, true],
-    ["desktop, current before wrong", false, false],
-    ["compact, wrong before current", true, true],
-    ["compact, current before wrong", true, false],
-  ] as const)(
-    "rejects sibling, foreign, and detached event sources without suppressing %s",
-    async (_name, compact, wrongFirst) => {
-      const current = callbacks();
-      const props = statusProps(current, compact ? { compact: true, layout: "code" } : {});
-      const view = await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
-      const actions = await captureActions({ compact });
-      const beforeWrongHtml = view.host.innerHTML;
-      const beforeWrongFocus = document.activeElement;
-
-      if (!wrongFirst) act(() => activateCurrent(actions, props));
-      const beforeWrong = allCallCounts([current]);
-      invokeWrongSources(actions);
-
-      expect(allCallCounts([current])).toEqual(beforeWrong);
-      expect(view.host.innerHTML).toBe(beforeWrongHtml);
-      expect(document.activeElement).toBe(beforeWrongFocus);
-      expect(actions.menuTrigger).toHaveAttribute("aria-expanded", "true");
-      if (actions.issuesTrigger) expect(actions.issuesTrigger).toHaveAttribute("aria-expanded", "true");
-
-      if (wrongFirst) act(() => activateCurrent(actions, props));
-      expect(current.layout).toHaveBeenCalledOnce();
-      expect(current.wrapping).toHaveBeenCalledOnce();
-      expect(current.syncScroll).toHaveBeenCalledOnce();
-      expect(current.issue).toHaveBeenCalledTimes(compact ? 0 : 1);
-      expect(current.shortcuts).toHaveBeenCalledOnce();
-      expect(current.storage).toHaveBeenCalledOnce();
-      expect(controlled.themeSetter).toHaveBeenCalledTimes(compact ? 1 : 0);
-
-      act(() => {
-        actions.authorizeMenu(sourceEvent(actions.menuTrigger));
-        actions.menuOpen(false);
-      });
-      if (actions.issuesTrigger && actions.authorizeIssues && actions.issuesOpen) {
-        act(() => {
-          fireEvent.click(actions.issuesTrigger!);
-        });
-      }
-      expect(actions.menuTrigger).toHaveAttribute("aria-expanded", "false");
-      if (actions.issuesTrigger) expect(actions.issuesTrigger).toHaveAttribute("aria-expanded", "false");
-
-      const afterClose = allCallCounts([current]);
-      const closedHtml = view.host.innerHTML;
-      invokeWrongSources(actions);
-      expect(allCallCounts([current])).toEqual(afterClose);
-      expect(view.host.innerHTML).toBe(closedHtml);
-    },
-  );
-
-  it("retains current Escape and outside disclosure transitions from exact content events", async () => {
+  it("preserves keyboard selection, Escape focus return, labels, and ARIA", async () => {
     const current = callbacks();
-    const props = statusProps(current);
-    await renderDirect(<StatusBoundary props={props} onPassiveCleanup={() => {}} />);
-    const issuesTrigger = screen.getByTestId("issues-button");
+    await renderStatus(statusProps(current));
+
+    const trigger = openMenu();
+    const code = elementWithText('[role="menuitemradio"]', "Code only");
+    code.focus();
+    fireEvent.keyDown(code, { key: "Escape" });
     await act(async () => {
-      fireEvent.click(issuesTrigger);
       await Promise.resolve();
     });
-    expect(issuesTrigger).toHaveAttribute("aria-expanded", "true");
-    const issuesContent = screen.getByTestId("status-issues-content");
-    const issueEscape = handlerOwnedBy<SourceHandler>(
-      issuesContent,
-      "onKeyDownCapture",
-      "PopoverContent",
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveFocus();
+
+    openMenu();
+    const rich = elementWithText('[role="menuitemradio"]', "Preview only");
+    rich.focus();
+    fireEvent.keyDown(rich, { key: "Enter" });
+    expect(current.layout).toHaveBeenCalledOnce();
+    expect(current.layout).toHaveBeenCalledWith("rich");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    const issuesTrigger = openIssues();
+    expect(issuesTrigger).toHaveTextContent("1 issue");
+    expect(screen.getByTestId("status-issues-content")).toHaveTextContent(
+      "Markdown issues",
     );
-    const issueOpen = nearestHandler<ValueHandler<boolean>>(issuesTrigger, "onOpenChange");
-    issueEscape(sourceEvent(issuesContent));
-    act(() => issueOpen(false));
+    fireEvent.keyDown(screen.getByTestId("status-issues-content"), {
+      key: "Escape",
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(issuesTrigger).toHaveAttribute("aria-expanded", "false");
-
-    const menuTrigger = screen.getByTestId("layout-menu");
-    fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
-    expect(menuTrigger).toHaveAttribute("aria-expanded", "true");
-    const code = elementWithText('[role="menuitemradio"]', "Code only");
-    const menuContent = screen.getByTestId("status-menu-content");
-    const menuEscape = handlerOwnedBy<(event: KeyboardEvent) => void>(
-      menuContent,
-      "onEscapeKeyDown",
-      "MenuContent",
-    );
-    const menuOpen = nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange");
-    menuContent.ownerDocument.addEventListener("keydown", menuEscape, { once: true });
-    code.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
-    act(() => menuOpen(false));
-    expect(menuTrigger).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.pointerDown(menuTrigger, { button: 0, ctrlKey: false });
-    expect(menuTrigger).toHaveAttribute("aria-expanded", "true");
-    const outside = document.createElement("button");
-    document.body.prepend(outside);
-    const currentMenuContent = screen.getByTestId("status-menu-content");
-    const menuOutside = handlerOwnedBy<OutsideHandler>(
-      currentMenuContent,
-      "onPointerDownOutside",
-      "MenuContent",
-    );
-    const originalEvent = { target: outside } as unknown as Event;
-    outside.addEventListener("dismissableLayer.pointerDownOutside", menuOutside as EventListener, { once: true });
-    outside.dispatchEvent(new CustomEvent("dismissableLayer.pointerDownOutside", {
-      detail: { originalEvent },
-    }));
-    act(() => nearestHandler<ValueHandler<boolean>>(menuTrigger, "onOpenChange")(false));
-    expect(menuTrigger).toHaveAttribute("aria-expanded", "false");
-    outside.remove();
+    expect(issuesTrigger).toHaveFocus();
   });
 });
 
-describe("status bar replacement authority", () => {
+describe("status bar nested StatsPopover reconciliation", () => {
+  it("keeps current controls usable after an Escape statistics close", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const stats = screen.getByTestId("stats-button");
+
+    expect(screen.getByTestId("word-count")).toHaveTextContent("2 words");
+    fireEvent.click(stats);
+    const content = screen.getByTestId("stats-popover");
+    expect(content).toBeInTheDocument();
+    fireEvent.keyDown(content, {
+      code: "Escape",
+      key: "Escape",
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("preserves outer controls through local statistics form updates", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const stats = screen.getByTestId("stats-button");
+    fireEvent.click(stats);
+    const content = screen.getByTestId("stats-popover");
+
+    fireEvent.input(screen.getByTestId("goal-value"), {
+      target: { value: "250" },
+    });
+    expect(screen.getByTestId("goal-set")).toBeEnabled();
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles an already-open placement transition after an outer replay", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const openContent = screen.getByTestId("stats-popover");
+    expect(openContent).toBeInTheDocument();
+    act(() => openContent.setAttribute("data-side", "top"));
+
+    await rerenderStatus(view, {
+      ...props,
+      doc: {
+        ...props.doc,
+        title: "Updated while statistics stay open",
+      },
+    });
+    act(() => {
+      screen.getByTestId("stats-button").setAttribute(
+        "data-radix-popper-side",
+        "top",
+      );
+    });
+    await act(async () => Promise.resolve());
+    const content = screen.getByTestId("stats-popover");
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the split Escape close emitted by the browser", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const trigger = screen.getByTestId("stats-button");
+    fireEvent.click(trigger);
+    const content = screen.getByTestId("stats-popover");
+    const portal = content.parentElement;
+    if (!portal) throw new Error("Statistics portal wrapper missing");
+
+    const splitClose = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopImmediatePropagation();
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.removeAttribute("aria-controls");
+      trigger.setAttribute("data-state", "closed");
+      trigger.dispatchEvent(new FocusEvent("focusin", {
+        bubbles: true,
+        composed: true,
+      }));
+      trigger.removeAttribute("data-radix-popper-side");
+      trigger.removeAttribute("data-radix-popper-align");
+      portal.remove();
+    };
+    window.addEventListener("keydown", splitClose, { capture: true, once: true });
+
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    try {
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).toHaveBeenCalledOnce();
+    } finally {
+      if (!portal.isConnected) document.body.append(portal);
+    }
+  });
+
+  it("keeps current controls usable after an asynchronous statistics placement flip", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const trigger = screen.getByTestId("stats-button");
+    fireEvent.click(trigger);
+    const content = screen.getByTestId("stats-popover");
+    await act(async () => Promise.resolve());
+
+    act(() => {
+      content.setAttribute("data-side", "top");
+      trigger.setAttribute("data-radix-popper-side", "top");
+    });
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("expires an unpaired statistics content placement synchronously", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const content = screen.getByTestId("stats-popover");
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+
+    try {
+      act(() => content.setAttribute("data-side", "top"));
+      await act(async () => Promise.resolve());
+      now += 1_001;
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+
+    await rerenderStatus(view, props, "fresh-after-unpaired-placement");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("rejects fake Radix-shaped content inserted during a genuine statistics lease", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const attackerContainer = document.createElement("div");
+    document.body.prepend(attackerContainer);
+    const view = await renderStatus(props);
+    const trigger = screen.getByTestId("stats-button");
+    trigger.addEventListener("click", () => {
+      const fakePortal = document.createElement("div");
+      const fakeContent = document.createElement("div");
+      fakePortal.setAttribute("data-radix-popper-content-wrapper", "");
+      fakeContent.id = "fake-stats-content";
+      fakeContent.setAttribute("data-testid", "stats-popover");
+      fakeContent.setAttribute("data-state", "open");
+      fakeContent.setAttribute("role", "dialog");
+      fakeContent.setAttribute("data-side", "bottom");
+      fakeContent.setAttribute("data-align", "start");
+      fakePortal.append(fakeContent);
+      attackerContainer.append(fakePortal);
+    }, { capture: true, once: true });
+
+    fireEvent.click(trigger);
+    expect(screen.getAllByTestId("stats-popover")).toHaveLength(2);
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-after-fake-stats");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a replay bound to the original statistics portal", async () => {
+    const original = callbacks();
+    const replacement = callbacks();
+    const props = statusProps(original);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const replacementProps = {
+      ...props,
+      onStorage: replacement.storage,
+    };
+    await rerenderStatus(view, replacementProps);
+    const content = screen.getByTestId("stats-popover");
+    const portal = content.parentElement;
+    if (!portal) throw new Error("Statistics portal wrapper missing");
+    const clone = portal.cloneNode(true) as HTMLElement;
+
+    portal.replaceWith(clone);
+    try {
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(original.storage).not.toHaveBeenCalled();
+      expect(replacement.storage).not.toHaveBeenCalled();
+    } finally {
+      if (clone.isConnected) clone.replaceWith(portal);
+    }
+
+    await rerenderStatus(view, replacementProps, "fresh-after-stats-clone");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(replacement.storage).toHaveBeenCalledOnce();
+  });
+
+  it("retires an open statistics boundary when its session is replaced", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+
+    await rerenderStatus(view, {
+      ...props,
+      session: fakeSession("session-b"),
+    });
+
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+
+    await nextTask();
+    fireEvent.click(screen.getByTestId("stats-button"));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("stats-popover"), {
+      code: "Escape",
+      key: "Escape",
+    });
+    await act(async () => Promise.resolve());
+    fireEvent.click(desktopShortcuts());
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+  });
+
+  it("retires after an unrelated fake popper wrapper is added and removed", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const fakePortal = document.createElement("div");
+    fakePortal.setAttribute("data-radix-popper-content-wrapper", "");
+    const fakeContent = document.createElement("div");
+    fakeContent.setAttribute("data-testid", "stats-popover");
+    fakePortal.append(fakeContent);
+
+    act(() => {
+      document.body.append(fakePortal);
+      fakePortal.remove();
+    });
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-after-fake-wrapper");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("publishes an internal successor after an unrelated body portal opens and closes", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    await renderDirect(
+      <StrictMode>
+        <UnrelatedPresencePopover />
+        <StatusBar {...props} />
+      </StrictMode>,
+    );
+    const root = screen.getByTestId("status-bar");
+    const presence = screen.getByTestId("presence-trigger");
+
+    fireEvent.click(presence);
+    expect(screen.getByTestId("presence-content")).toBeVisible();
+    await nextTask();
+    expect(screen.getByTestId("status-bar")).toBe(root);
+
+    fireEvent.click(presence);
+    expect(screen.queryByTestId("presence-content")).toBeNull();
+    await nextTask();
+    expect(screen.getByTestId("status-bar")).toBe(root);
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    fireEvent.click(desktopShortcuts());
+    expect(current.storage).toHaveBeenCalledOnce();
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+  });
+
+  it("accepts an immediate secondary-pointer disclosure close once", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    const trigger = openIssues();
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 31, { button: 2 }));
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("does not lease a statistics close rejected for a secondary pointer", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    fireEvent.click(screen.getByTestId("stats-button"));
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 32, { button: 2 }));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("expires a statistics lease synchronously when its timer is starved", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const trigger = screen.getByTestId("stats-button");
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+    trigger.addEventListener("click", () => {
+      now += 1_001;
+    }, { capture: true, once: true });
+
+    try {
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+
+    await rerenderStatus(view, props, "fresh-after-expired-stats");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps current controls usable after real selection-label and goal reconciliation", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    await renderStatus(props);
+    const beforeSelection = captureClick(screen.getByTestId("storage-indicator"));
+
+    act(() => setFakeSelection(props.session, 2, 8));
+    expect(screen.getByTestId("selection-count")).toHaveTextContent(
+      "1 of 2 selected",
+    );
+    const beforeGoal = captureClick(screen.getByTestId("storage-indicator"));
+
+    act(() => {
+      setGoal(props.session, {
+        kind: "words",
+        mode: "min",
+        value: 100,
+        setBy: "alice",
+        setAt: 100,
+      });
+    });
+    expect(screen.getByTestId("goal-ring")).toBeInTheDocument();
+    expect(screen.getByTestId("stats-button")).toHaveAttribute(
+      "title",
+      "2 / 100 words",
+    );
+
+    invokeFabricatedClick(beforeSelection);
+    invokeFabricatedClick(beforeGoal);
+    expect(current.storage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+});
+
+describe("status bar permanent retirement", () => {
   it.each([
-    ["stale before current", true],
-    ["current before stale", false],
-  ] as const)("retires exact session, document, callback, layout, flags, and equal-looking issue A before parent layout: %s", async (_name, staleFirst) => {
-    const passiveCleanup = vi.fn();
+    ["root mutation and restore", () => {
+      const root = screen.getByTestId("status-bar");
+      const className = root.className;
+      root.className = `${className} altered`;
+      root.className = className;
+    }],
+    ["root detach and reinsert", () => {
+      const root = screen.getByTestId("status-bar");
+      const parent = root.parentNode;
+      if (!parent) throw new Error("Status bar parent missing");
+      root.remove();
+      parent.appendChild(root);
+    }],
+    ["higher ancestor detach and reinsert", (view: DirectView) => {
+      view.host.remove();
+      document.body.append(view.host);
+    }],
+    ["nonadjacent ancestor churn", () => {
+      const sibling = document.createElement("aside");
+      document.body.prepend(sibling);
+      sibling.remove();
+    }],
+    ["statistics trigger mutation and restore", () => {
+      const trigger = screen.getByTestId("stats-button");
+      const title = trigger.title;
+      trigger.title = "altered";
+      trigger.title = title;
+    }],
+    ["statistics placement mutation and restore", () => {
+      const trigger = screen.getByTestId("stats-button");
+      trigger.setAttribute("data-radix-popper-side", "top");
+      trigger.removeAttribute("data-radix-popper-side");
+    }],
+    ["statistics descendant replacement and restore", () => {
+      const label = screen.getByTestId("word-count");
+      const text = label.firstChild;
+      if (!text) throw new Error("Statistics label text missing");
+      const replacement = text.cloneNode(true);
+      label.replaceChild(replacement, text);
+      label.replaceChild(text, replacement);
+    }],
+  ])("retires after %s and lets an equal fresh remount recover", async (_name, mutate) => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    mutate(view);
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "replacement");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("retires a restored partial portal without letting late controls revive it", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    openMenu();
+    const content = screen.getByTestId("status-menu-content");
+    const extra = document.createElement("span");
+    content.append(extra);
+    extra.remove();
+    fireEvent.click(elementWithText('[role="menuitemradio"]', "Code only"));
+    expect(current.layout).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-menu");
+    selectMenuItem('[role="menuitemradio"]', "Code only");
+    expect(current.layout).toHaveBeenCalledOnce();
+  });
+
+  it("latches document and issue fact drift even when the values are restored", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const originalPath = props.doc.repoPath;
+    props.doc.repoPath = "MUTATED.md";
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+    props.doc.repoPath = originalPath;
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-document");
+    openIssues();
+    const originalMessage = ISSUE_A.message;
+    const issueButton = elementWithText("button", originalMessage);
+    ISSUE_A.message = "Mutated issue";
+    fireEvent.click(issueButton);
+    expect(current.issue).not.toHaveBeenCalled();
+    ISSUE_A.message = originalMessage;
+    fireEvent.click(issueButton);
+    expect(current.issue).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-issue");
+    openIssues();
+    fireEvent.click(elementWithText("button", ISSUE_A.message));
+    expect(current.issue).toHaveBeenCalledOnce();
+    expect(current.issue).toHaveBeenCalledWith(ISSUE_A);
+  });
+});
+
+describe("status bar event and replacement claims", () => {
+  it("rejects fabricated, crossed, and repeated direct events without poisoning controls", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const storage = captureClick(screen.getByTestId("storage-indicator"));
+    const shortcuts = captureClick(desktopShortcuts());
+    const storageProbe = invokeFabricatedClick(
+      storage,
+      shortcuts.element,
+      storage.element,
+    );
+    const shortcutsProbe = invokeFabricatedClick(
+      shortcuts,
+      storage.element,
+      shortcuts.element,
+    );
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(storageProbe.preventDefault).not.toHaveBeenCalled();
+    expect(storageProbe.stopPropagation).not.toHaveBeenCalled();
+    expect(shortcutsProbe.preventDefault).not.toHaveBeenCalled();
+
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    act(() => {
+      storage.element.dispatchEvent(event);
+      storage.element.dispatchEvent(event);
+    });
+    fireEvent.click(shortcuts.element);
+    expect(current.storage).toHaveBeenCalledOnce();
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+  });
+
+  it("rejects fabricated and crossed menu items before a genuine selection", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    openMenu();
+    const code = elementWithText('[role="menuitemradio"]', "Code only");
+    const rich = elementWithText('[role="menuitemradio"]', "Preview only");
+    const codeCapture = reactHandler<(event: ReactMouseEvent<HTMLElement>) => void>(
+      code,
+      "onClickCapture",
+    );
+    const codeSelect = nearestHandler<(event: Event) => void>(code, "onSelect");
+    const valueChange = nearestHandler<(value: string) => void>(
+      code,
+      "onValueChange",
+    );
+    codeCapture(fabricatedClick(rich, code).event);
+    codeSelect({
+      currentTarget: rich,
+      target: code,
+      preventDefault: vi.fn(),
+    } as unknown as Event);
+    valueChange("code");
+    valueChange("invalid");
+    expect(current.layout).not.toHaveBeenCalled();
+    expect(screen.getByTestId("layout-menu")).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(code);
+    expect(current.layout).toHaveBeenCalledOnce();
+    expect(current.layout).toHaveBeenCalledWith("code");
+  });
+
+  it("binds ordered issue rows, rejects crossed handlers, and claims each row once", async () => {
+    controlled.issues = [ISSUE_A, ISSUE_OTHER];
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    openIssues();
+    const rows = [...screen.getByTestId("status-issues-content").querySelectorAll("button")];
+    expect(rows.map((row) => row.textContent)).toEqual([
+      `${ISSUE_A.message}L${ISSUE_A.line}`,
+      `${ISSUE_OTHER.message}L${ISSUE_OTHER.line}`,
+    ]);
+    const first = captureClick(rows[0]);
+    invokeFabricatedClick(first, rows[1], rows[0]);
+    expect(current.issue).not.toHaveBeenCalled();
+
+    fireEvent.click(rows[0]);
+    fireEvent.click(rows[0]);
+    fireEvent.click(rows[1]);
+    fireEvent.click(rows[1]);
+    expect(current.issue).toHaveBeenCalledTimes(2);
+    expect(current.issue.mock.calls).toEqual([[ISSUE_A], [ISSUE_OTHER]]);
+  });
+
+  it("bridges deferred outside pointer timing and rejects stale or crossed chains", async () => {
+    controlled.issues = [ISSUE_A, ISSUE_OTHER];
+    const current = callbacks();
+    const firstOutside = document.createElement("button");
+    const secondOutside = document.createElement("button");
+    document.body.prepend(firstOutside, secondOutside);
+    await renderStatus(statusProps(current));
+
+    openIssues();
+    await nextTask();
+    const staleContent = screen.getByTestId("status-issues-content");
+    const staleAuthorize = nearestHandler<
+      (event: CustomEvent<{ originalEvent: Event }>) => void
+    >(staleContent, "onPointerDownOutside");
+    const staleChange = nearestHandler<(open: boolean) => void>(
+      staleContent,
+      "onOpenChange",
+    );
+    let genuineOutsideEvent: CustomEvent<{ originalEvent: Event }> | null = null;
+    firstOutside.addEventListener(
+      "dismissableLayer.pointerDownOutside",
+      (event) => {
+        genuineOutsideEvent =
+          event as CustomEvent<{ originalEvent: Event }>;
+      },
+    );
+
+    await outsidePointerClick(firstOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(genuineOutsideEvent).not.toBeNull();
+
+    openIssues();
+    await nextTask();
+    act(() => {
+      staleAuthorize(genuineOutsideEvent!);
+      staleChange(false);
+    });
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    await outsidePointerClick(firstOutside, secondOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    await outsidePointerClick(secondOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(current.issue).not.toHaveBeenCalled();
+  });
+
+  it("accepts Chromium's non-primary synthesized click after a primary pointer chain", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 9));
+    await nextTask();
+    fireEvent(outside, pointerEvent("pointerup", 9));
+    fireEvent(outside, pointerEvent("click", 9, { isPrimary: false }));
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the Radix fallback lease and expires an incomplete outside gesture", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+
+    openIssues();
+    await nextTask();
+    const stopClick = (event: Event) => event.stopImmediatePropagation();
+    document.addEventListener("click", stopClick);
+    fireEvent(outside, pointerEvent("pointerdown", 11));
+    fireEvent(outside, pointerEvent("pointerup", 11));
+    fireEvent(outside, pointerEvent("click", 11));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await nextTask();
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    document.removeEventListener("click", stopClick);
+
+    openIssues();
+    await nextTask();
+    vi.useFakeTimers();
+    try {
+      fireEvent(outside, pointerEvent("pointerdown", 12));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      fireEvent(outside, pointerEvent("pointerup", 12));
+      fireEvent(outside, pointerEvent("click", 12));
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+
+      fireEvent(outside, pointerEvent("pointerdown", 13));
+      fireEvent(outside, pointerEvent("pointerup", 13));
+      fireEvent(outside, pointerEvent("click", 13));
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects named MouseEvents, cancelled pointers, and mixed final clicks", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+
+    fireEvent(outside, new MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+    }));
+    fireEvent(outside, new MouseEvent("pointerup", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+    }));
+    fireEvent(outside, new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+      detail: 1,
+    }));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent(outside, pointerEvent("pointerdown", 41));
+    fireEvent(outside, pointerEvent("pointercancel", 41));
+    fireEvent(outside, pointerEvent("pointerup", 41));
+    fireEvent(outside, pointerEvent("click", 41));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent(outside, pointerEvent("pointerdown", 42));
+    fireEvent(outside, pointerEvent("pointerup", 42));
+    fireEvent(outside, new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+      detail: 1,
+    }));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+    closeIssues();
+    openIssues();
+    await nextTask();
+    await outsidePointerClick(outside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("enforces monotonic gesture and callback deadlines with starved timers", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+    const stopClick = (event: Event) => event.stopImmediatePropagation();
+
+    try {
+      fireEvent(outside, pointerEvent("pointerdown", 51));
+      now += 5_001;
+      fireEvent(outside, pointerEvent("pointerup", 51));
+      fireEvent(outside, pointerEvent("click", 51));
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+
+      document.addEventListener("click", stopClick);
+      fireEvent(outside, pointerEvent("pointerdown", 52));
+      fireEvent(outside, pointerEvent("pointerup", 52));
+      fireEvent(outside, pointerEvent("click", 52));
+      now += 1_001;
+      await nextTask();
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+    } finally {
+      document.removeEventListener("click", stopClick);
+      clock.mockRestore();
+    }
+
+    await outsidePointerClick(outside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("retires callback A before the same DOM publishes callback B", async () => {
     const oldCallbacks = callbacks();
     const newCallbacks = callbacks();
     const oldProps = statusProps(oldCallbacks);
-    const view = await renderDirect(<StatusBoundary props={oldProps} onPassiveCleanup={passiveCleanup} />);
-    const stale = await captureActions();
+    const view = await renderStatus(oldProps);
     const root = screen.getByTestId("status-bar");
-    const menuTrigger = screen.getByTestId("layout-menu");
-    controlled.issues = [ISSUE_B];
-    controlled.sessionValue = { text: "# Replacement", tree: {} };
+    const staleStorage = captureClick(screen.getByTestId("storage-indicator"));
+    const staleMenu = captureDisclosure(screen.getByTestId("layout-menu"));
     const newProps = statusProps(newCallbacks, {
-      session: fakeSession("session-b"),
-      doc: documentDto({
-        id: "document-b",
-        storage: "gist",
-        gistId: "gist-b",
-        repoOwner: null,
-        repoName: null,
-        repoBranch: null,
-        repoPath: null,
-        githubUrl: "https://gist.github.com/gist-b",
-        hasUnpublishedChanges: false,
-      }),
-      layout: "code",
-      lineWrapping: true,
-      syncScroll: false,
-    });
-    let boundaryReached = false;
-
-    await renderBoundary(view, newProps, {
-      boundary: 1,
-      passiveGeneration: "replacement",
-      onPassiveCleanup: passiveCleanup,
-      onBoundary: () => {
-        expect(passiveCleanup).not.toHaveBeenCalled();
-        expect(screen.getByTestId("status-bar")).toBe(root);
-        expect(screen.getByTestId("layout-menu")).toBe(menuTrigger);
-        if (!staleFirst) {
-          reactHandler(screen.getByTestId("storage-indicator"))(clickProbe().event);
-          const shortcut = view.host.querySelector<HTMLButtonElement>('button[aria-label="Help and shortcuts"]');
-          if (!shortcut) throw new Error("Current desktop shortcut was not rendered");
-          reactHandler(shortcut)(clickProbe().event);
-        }
-        expectStaleInert(stale, oldProps, view, [oldCallbacks, newCallbacks], true);
-        boundaryReached = true;
-      },
-    });
-
-    expect(boundaryReached).toBe(true);
-    const current = await captureActions();
-    if (staleFirst) {
-      expectStaleInert(stale, oldProps, view, [oldCallbacks, newCallbacks]);
-      act(() => activateCurrent(current, newProps));
-    } else {
-      act(() => activateCurrent(current, newProps));
-      expectStaleInert(stale, oldProps, view, [oldCallbacks, newCallbacks]);
-    }
-    expect(passiveCleanup).toHaveBeenCalledOnce();
-    expect(oldCallbacks.layout).not.toHaveBeenCalled();
-    expect(oldCallbacks.wrapping).not.toHaveBeenCalled();
-    expect(oldCallbacks.syncScroll).not.toHaveBeenCalled();
-    expect(oldCallbacks.issue).not.toHaveBeenCalled();
-    expect(oldCallbacks.shortcuts).not.toHaveBeenCalled();
-    expect(oldCallbacks.storage).not.toHaveBeenCalled();
-    expect(newCallbacks.layout).toHaveBeenCalledOnce();
-    expect(newCallbacks.wrapping).toHaveBeenCalledOnce();
-    expect(newCallbacks.syncScroll).toHaveBeenCalledOnce();
-    expect(newCallbacks.issue).toHaveBeenCalledOnce();
-    expect(newCallbacks.issue).toHaveBeenCalledWith(ISSUE_B);
-    expect(newCallbacks.shortcuts).toHaveBeenCalledOnce();
-    expect(newCallbacks.storage).toHaveBeenCalledOnce();
-    expect(screen.getByTestId("storage-indicator")).toHaveTextContent("gist");
-    expect(screen.getByTestId("storage-indicator")).toHaveAttribute("title", "Gist gist-b");
-    expectStaleInert(stale, oldProps, view, [oldCallbacks, newCallbacks]);
-    act(() => activateCurrent(current, newProps));
-    expect(newCallbacks.layout).toHaveBeenCalledOnce();
-    expect(newCallbacks.issue).toHaveBeenCalledOnce();
-  });
-
-  it("keeps reused parent callbacks and DOM usable while an issue moves behind a changed snapshot", async () => {
-    const passiveCleanup = vi.fn();
-    const sharedCallbacks = callbacks();
-    const props = statusProps(sharedCallbacks);
-    const view = await renderDirect(<StatusBoundary props={props} onPassiveCleanup={passiveCleanup} />);
-    const stale = await captureActions();
-    const root = screen.getByTestId("status-bar");
-    controlled.issues = [ISSUE_OTHER, ISSUE_A];
-    controlled.sessionValue = { text: "# Moved issue", tree: {} };
-    const newProps = { ...props, doc: documentDto() };
-    let boundaryReached = false;
-
-    await renderBoundary(view, newProps, {
-      boundary: 1,
-      passiveGeneration: "moved-issue",
-      onPassiveCleanup: passiveCleanup,
-      onBoundary: () => {
-        expect(screen.getByTestId("status-bar")).toBe(root);
-        expectStaleInert(stale, props, view, [sharedCallbacks], true);
-        boundaryReached = true;
-      },
-    });
-
-    expect(boundaryReached).toBe(true);
-    const current = await captureActions({ issueMessage: ISSUE_OTHER.message });
-    act(() => activateCurrent(current, newProps));
-    expect(passiveCleanup).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.issue).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.issue).toHaveBeenCalledWith(ISSUE_OTHER);
-    expectStaleInert(stale, props, view, [sharedCallbacks]);
-  });
-
-  it("retires desktop A across compact and hydration publication changes without reaching the current theme setter", async () => {
-    const passiveCleanup = vi.fn();
-    const sharedCallbacks = callbacks();
-    const oldProps = statusProps(sharedCallbacks);
-    const view = await renderDirect(<StatusBoundary props={oldProps} onPassiveCleanup={passiveCleanup} />);
-    const stale = await captureActions();
-    controlled.hydrated = false;
-    controlled.issues = [];
-    controlled.themePreference = "dark";
-    const compactProps = statusProps(sharedCallbacks, {
       ...oldProps,
-      compact: true,
-      layout: "code",
-    });
-    let boundaryReached = false;
-
-    await renderBoundary(view, compactProps, {
-      boundary: 1,
-      passiveGeneration: "compact-hydration",
-      onPassiveCleanup: passiveCleanup,
-      onBoundary: () => {
-        expect(screen.queryByTestId("issues-button")).toBeNull();
-        expectStaleInert(stale, oldProps, view, [sharedCallbacks]);
-        boundaryReached = true;
-      },
+      onLayout: newCallbacks.layout,
+      onLineWrapping: newCallbacks.wrapping,
+      onSyncScroll: newCallbacks.syncScroll,
+      onIssueSelect: newCallbacks.issue,
+      onShortcuts: newCallbacks.shortcuts,
+      onStorage: newCallbacks.storage,
     });
 
-    expect(boundaryReached).toBe(true);
-    const current = await captureActions({ compact: true });
-    act(() => activateCurrent(current, compactProps));
-    expect(passiveCleanup).toHaveBeenCalledOnce();
-    expect(controlled.themeSetter).toHaveBeenCalledOnce();
-    expect(controlled.themeSetter).toHaveBeenCalledWith("light");
-    expect(sharedCallbacks.shortcuts).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.issue).not.toHaveBeenCalled();
-    expectStaleInert(stale, oldProps, view, [sharedCallbacks]);
+    await rerenderStatus(view, newProps);
+    expect(screen.getByTestId("status-bar")).toBe(root);
+    invokeFabricatedClick(staleStorage);
+    invokeFabricatedDisclosure(staleMenu);
+    expect(allCallbackCounts([oldCallbacks, newCallbacks])).toEqual(
+      new Array(12).fill(0),
+    );
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    selectMenuItem('[role="menuitemradio"]', "Code only");
+    expect(oldCallbacks.storage).not.toHaveBeenCalled();
+    expect(oldCallbacks.layout).not.toHaveBeenCalled();
+    expect(newCallbacks.storage).toHaveBeenCalledOnce();
+    expect(newCallbacks.layout).toHaveBeenCalledOnce();
   });
 
-  it("gives an equal-value remount and replacement DOM isolated claims", async () => {
-    const passiveCleanup = vi.fn();
-    const sharedCallbacks = callbacks();
-    const sharedProps = statusProps(sharedCallbacks);
-    const view = await renderDirect(<StatusBoundary props={sharedProps} onPassiveCleanup={passiveCleanup} />);
-    const stale = await captureActions();
+  it("isolates equal-looking remount DOM and ignores old late handlers", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
     const oldRoot = screen.getByTestId("status-bar");
-    let boundaryReached = false;
+    const staleStorage = captureClick(screen.getByTestId("storage-indicator"));
 
-    await renderBoundary(view, sharedProps, {
-      mount: "replacement",
-      boundary: 1,
-      passiveGeneration: "equal-remount",
-      onPassiveCleanup: passiveCleanup,
-      onBoundary: () => {
-        expect(screen.getByTestId("status-bar")).not.toBe(oldRoot);
-        expectStaleInert(stale, sharedProps, view, [sharedCallbacks]);
-        boundaryReached = true;
-      },
-    });
+    await rerenderStatus(view, props, "replacement");
+    expect(screen.getByTestId("status-bar")).not.toBe(oldRoot);
+    invokeFabricatedClick(staleStorage);
+    expect(current.storage).not.toHaveBeenCalled();
 
-    expect(boundaryReached).toBe(true);
-    const current = await captureActions();
-    const beforeCrossPublication = allCallCounts([sharedCallbacks]);
-    const html = view.host.innerHTML;
-    invokeCrossPublicationSources(stale, current);
-    expect(allCallCounts([sharedCallbacks])).toEqual(beforeCrossPublication);
-    expect(view.host.innerHTML).toBe(html);
-    act(() => activateCurrent(current, sharedProps));
-    expect(passiveCleanup).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.layout).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.wrapping).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.syncScroll).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.issue).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.shortcuts).toHaveBeenCalledOnce();
-    expect(sharedCallbacks.storage).toHaveBeenCalledOnce();
-    const afterCurrent = allCallCounts([sharedCallbacks]);
-    invokeCrossPublicationSources(stale, current);
-    expect(allCallCounts([sharedCallbacks])).toEqual(afterCurrent);
-    expectStaleInert(stale, sharedProps, view, [sharedCallbacks]);
-  });
-
-  it("retires every control before removal reaches the parent layout boundary and passive cleanup", async () => {
-    const passiveCleanup = vi.fn();
-    const currentCallbacks = callbacks();
-    const props = statusProps(currentCallbacks);
-    const view = await renderDirect(<StatusBoundary props={props} onPassiveCleanup={passiveCleanup} />);
-    const stale = await captureActions();
-
-    await renderBoundary(view, props, {
-      present: false,
-      boundary: 1,
-      passiveGeneration: "removed",
-      onPassiveCleanup: passiveCleanup,
-      onBoundary: () => {
-        expect(passiveCleanup).not.toHaveBeenCalled();
-        expect(screen.queryByTestId("status-bar")).toBeNull();
-        const focusTarget = document.createElement("button");
-        document.body.prepend(focusTarget);
-        focusTarget.focus();
-        const html = document.body.innerHTML;
-        const before = allCallCounts([currentCallbacks]);
-        stale.menuOpen(false);
-        stale.issuesOpen?.(false);
-        stale.layout("code");
-        stale.wrapping(true);
-        stale.syncScroll(false);
-        stale.issue?.(clickProbe().event);
-        stale.desktopShortcuts?.(clickProbe().event);
-        stale.storage?.(clickProbe().event);
-        expect(allCallCounts([currentCallbacks])).toEqual(before);
-        expect(document.body.innerHTML).toBe(html);
-        expect(document.activeElement).toBe(focusTarget);
-        focusTarget.remove();
-      },
-    });
-
-    expect(passiveCleanup).toHaveBeenCalledOnce();
-    expect(currentCallbacks.layout).not.toHaveBeenCalled();
-    expect(currentCallbacks.wrapping).not.toHaveBeenCalled();
-    expect(currentCallbacks.syncScroll).not.toHaveBeenCalled();
-    expect(currentCallbacks.issue).not.toHaveBeenCalled();
-    expect(currentCallbacks.shortcuts).not.toHaveBeenCalled();
-    expect(currentCallbacks.storage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
   });
 });
