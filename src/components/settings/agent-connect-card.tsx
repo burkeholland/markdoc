@@ -1,9 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+} from "react";
 import { Check, Copy, ExternalLink, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useCopy } from "@/lib/hooks";
+import { useCopy, type CopyStatus } from "@/lib/hooks";
 import { AGENT_DOCS_URL, MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 import { CopilotPermissionsHint } from "@/components/settings/copilot-permissions-hint";
 
@@ -93,22 +103,401 @@ export function useOrigin(fallback = ""): string {
   return origin;
 }
 
+const COPY_BLOCK_CLASS = "min-w-0";
+const COPY_BLOCK_PRE_CLASS = "select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 p-3 font-mono text-xs leading-5 text-ink-2";
+const COPY_BLOCK_BUTTON_CLASS = "btn btn-outline btn-sm mt-2 h-auto max-w-full gap-1.5 whitespace-normal text-left";
+
+interface CopyBlockRender {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly value: string;
+  readonly label: string;
+  readonly testId: string | undefined;
+  readonly copyTestId: string | undefined;
+  readonly copySetup: ReturnType<typeof useCopy>;
+  readonly copy: () => void;
+  readonly status: CopyStatus;
+  readonly buttonLabel: string;
+  readonly copied: boolean;
+  readonly ariaLabel: string;
+}
+
+interface CopyBlockElements {
+  wrapper: HTMLDivElement | null;
+  pre: HTMLPreElement | null;
+  button: HTMLButtonElement | null;
+}
+
+type CopyBlockElementRole = keyof CopyBlockElements;
+
+interface CopyBlockDraft {
+  readonly render: CopyBlockRender;
+  readonly elements: CopyBlockElements;
+  readonly lastElements: CopyBlockElements;
+  committed: boolean;
+  retired: boolean;
+}
+
+interface CopyBlockPublication {
+  readonly render: CopyBlockRender;
+  readonly draft: CopyBlockDraft;
+  readonly target: RefObject<HTMLPreElement | null>;
+  readonly wrapper: HTMLDivElement;
+  readonly pre: HTMLPreElement;
+  readonly button: HTMLButtonElement;
+  readonly nodes: readonly Node[];
+  readonly buttonTargets: readonly Node[];
+}
+
+interface CopyBlockElementOwner {
+  readonly draft: CopyBlockDraft;
+  readonly role: CopyBlockElementRole;
+  readonly element: HTMLElement;
+}
+
+interface CopyBlockPreOwner {
+  readonly draft: CopyBlockDraft;
+  readonly target: RefObject<HTMLPreElement | null>;
+  readonly element: HTMLPreElement;
+}
+
+function copyBlockDescendants(element: HTMLElement): readonly Node[] {
+  const nodes: Node[] = [];
+  const collect = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) collect(child);
+  };
+  collect(element);
+  return Object.freeze(nodes);
+}
+
+function sameCopyBlockNodes(expected: readonly Node[], element: HTMLElement): boolean {
+  const current = copyBlockDescendants(element);
+  return current.length === expected.length && current.every((node, index) => node === expected[index]);
+}
+
+class CopyBlockCoordinator {
+  readonly #mount: symbol;
+  #current: CopyBlockPublication | null = null;
+  #elementOwners = new WeakMap<HTMLElement, CopyBlockElementOwner>();
+  #preOwner: CopyBlockPreOwner | null = null;
+  #claimedPublications = new WeakSet<CopyBlockPublication>();
+  #claimedEvents = new WeakSet<Event>();
+
+  constructor(mount: symbol) {
+    this.#mount = mount;
+  }
+
+  createDraft(render: CopyBlockRender): CopyBlockDraft {
+    return {
+      render,
+      elements: { wrapper: null, pre: null, button: null },
+      lastElements: { wrapper: null, pre: null, button: null },
+      committed: false,
+      retired: false,
+    };
+  }
+
+  deactivate(draft: CopyBlockDraft) {
+    if (this.#current?.draft === draft) this.#current = null;
+  }
+
+  retire(draft: CopyBlockDraft) {
+    draft.retired = true;
+    this.deactivate(draft);
+    for (const role of ["wrapper", "pre", "button"] as const) {
+      const element = draft.elements[role];
+      if (!element) continue;
+      const owner = this.#elementOwners.get(element);
+      if (owner?.draft === draft && owner.role === role && owner.element === element) {
+        this.#elementOwners.delete(element);
+      }
+    }
+    const preOwner = this.#preOwner;
+    if (preOwner?.draft === draft) {
+      this.#preOwner = null;
+      if (preOwner.target.current === preOwner.element) preOwner.target.current = null;
+    }
+  }
+
+  bindElement<Role extends "wrapper" | "button">(
+    draft: CopyBlockDraft,
+    role: Role,
+    element: CopyBlockElements[Role],
+  ) {
+    const previous = draft.elements[role];
+    if (element === null) {
+      if (previous) {
+        const owner = this.#elementOwners.get(previous);
+        if (owner?.draft === draft && owner.role === role && owner.element === previous) {
+          this.#elementOwners.delete(previous);
+        }
+      }
+      draft.elements[role] = null;
+      if (previous) this.retire(draft);
+      return;
+    }
+
+    if (draft.retired) {
+      const current = this.#current;
+      const owner = this.#elementOwners.get(element);
+      if (
+        !draft.committed ||
+        draft.lastElements[role] !== element ||
+        (current && current.draft !== draft) ||
+        (owner && owner.draft !== draft)
+      ) {
+        return;
+      }
+    }
+    if (previous && previous !== element) {
+      this.retire(draft);
+      return;
+    }
+
+    const displaced = this.#elementOwners.get(element);
+    if (displaced && (displaced.draft !== draft || displaced.role !== role)) {
+      this.retire(displaced.draft);
+    }
+    draft.elements[role] = element;
+    draft.lastElements[role] = element;
+    this.#elementOwners.set(element, { draft, role, element });
+  }
+
+  bindPre(
+    draft: CopyBlockDraft,
+    target: RefObject<HTMLPreElement | null>,
+    element: HTMLPreElement | null,
+  ) {
+    const previous = draft.elements.pre;
+    if (element === null) {
+      if (previous) {
+        const owner = this.#elementOwners.get(previous);
+        if (owner?.draft === draft && owner.role === "pre" && owner.element === previous) {
+          this.#elementOwners.delete(previous);
+        }
+      }
+      draft.elements.pre = null;
+      const preOwner = this.#preOwner;
+      if (previous && preOwner?.draft === draft && preOwner.element === previous) {
+        this.#preOwner = null;
+        if (target.current === previous) target.current = null;
+      }
+      if (previous) this.retire(draft);
+      return;
+    }
+
+    if (draft.retired) {
+      const current = this.#current;
+      const owner = this.#elementOwners.get(element);
+      if (
+        !draft.committed ||
+        draft.lastElements.pre !== element ||
+        (current && current.draft !== draft) ||
+        (owner && owner.draft !== draft)
+      ) {
+        return;
+      }
+    }
+    if (previous && previous !== element) {
+      this.retire(draft);
+      return;
+    }
+
+    const displaced = this.#elementOwners.get(element);
+    if (displaced && (displaced.draft !== draft || displaced.role !== "pre")) {
+      this.retire(displaced.draft);
+    }
+    draft.elements.pre = element;
+    draft.lastElements.pre = element;
+    this.#elementOwners.set(element, { draft, role: "pre", element });
+    this.#preOwner = { draft, target, element };
+    target.current = element;
+  }
+
+  #ownsElement(
+    publication: CopyBlockPublication,
+    role: CopyBlockElementRole,
+    element: HTMLElement,
+  ): boolean {
+    const owner = this.#elementOwners.get(element);
+    return owner?.draft === publication.draft && owner.role === role && owner.element === element;
+  }
+
+  #renderIsCurrent(render: CopyBlockRender): boolean {
+    const setup = render.copySetup;
+    return (
+      render.mount === this.#mount &&
+      setup.copy === render.copy &&
+      setup.status === render.status &&
+      setup.label === render.buttonLabel &&
+      setup.copied === render.copied &&
+      render.ariaLabel === `Copy ${render.label}`
+    );
+  }
+
+  #hierarchyIsCurrent(publication: CopyBlockPublication): boolean {
+    const { render, draft, target, wrapper, pre, button } = publication;
+    const document = wrapper.ownerDocument;
+    const icon = button.firstElementChild;
+    if (
+      new Set([wrapper, pre, button]).size !== 3 ||
+      !wrapper.isConnected ||
+      !pre.isConnected ||
+      !button.isConnected ||
+      pre.ownerDocument !== document ||
+      button.ownerDocument !== document ||
+      !this.#ownsElement(publication, "wrapper", wrapper) ||
+      !this.#ownsElement(publication, "pre", pre) ||
+      !this.#ownsElement(publication, "button", button) ||
+      this.#preOwner?.draft !== draft ||
+      this.#preOwner.target !== target ||
+      this.#preOwner.element !== pre ||
+      target.current !== pre ||
+      wrapper.className !== COPY_BLOCK_CLASS ||
+      wrapper.children.length !== 2 ||
+      wrapper.firstElementChild !== pre ||
+      wrapper.lastElementChild !== button ||
+      pre.parentElement !== wrapper ||
+      pre.nextElementSibling !== button ||
+      pre.className !== COPY_BLOCK_PRE_CLASS ||
+      pre.dataset.testid !== render.testId ||
+      pre.children.length !== 0 ||
+      pre.textContent !== render.value ||
+      button.parentElement !== wrapper ||
+      button.className !== COPY_BLOCK_BUTTON_CLASS ||
+      button.dataset.testid !== render.copyTestId ||
+      button.type !== "button" ||
+      button.disabled ||
+      button.getAttribute("aria-label") !== render.ariaLabel ||
+      button.textContent !== render.buttonLabel ||
+      button.children.length !== 1 ||
+      !icon ||
+      icon.tagName.toLowerCase() !== "svg" ||
+      !icon.classList.contains(render.copied ? "lucide-check" : "lucide-copy") ||
+      icon.getAttribute("width") !== "14" ||
+      icon.getAttribute("height") !== "14" ||
+      icon.getAttribute("aria-hidden") !== "true" ||
+      !sameCopyBlockNodes(publication.nodes, wrapper) ||
+      !sameCopyBlockNodes(publication.buttonTargets, button)
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  establish(draft: CopyBlockDraft, target: RefObject<HTMLPreElement | null>) {
+    const previous = this.#current;
+    if (previous && previous.draft !== draft) this.retire(previous.draft);
+    const { wrapper, pre, button } = draft.elements;
+    if (draft.retired || !wrapper || !pre || !button) {
+      this.retire(draft);
+      return;
+    }
+    const publication: CopyBlockPublication = Object.freeze({
+      render: draft.render,
+      draft,
+      target,
+      wrapper,
+      pre,
+      button,
+      nodes: copyBlockDescendants(wrapper),
+      buttonTargets: copyBlockDescendants(button),
+    });
+    if (!this.#renderIsCurrent(draft.render) || !this.#hierarchyIsCurrent(publication)) {
+      this.retire(draft);
+      return;
+    }
+    draft.committed = true;
+    draft.retired = false;
+    this.#current = publication;
+  }
+
+  activate(render: CopyBlockRender, event: ReactMouseEvent<HTMLButtonElement>) {
+    const publication = this.#current;
+    const button = publication?.button;
+    const document = button?.ownerDocument;
+    const view = document?.defaultView;
+    const nativeEvent = event?.nativeEvent;
+    const target = event?.target;
+    if (
+      !publication ||
+      publication.render !== render ||
+      !button ||
+      !document ||
+      !view ||
+      event.type !== "click" ||
+      !(nativeEvent instanceof view.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      event.currentTarget !== button ||
+      nativeEvent.target !== target ||
+      !(target instanceof view.Node) ||
+      target.ownerDocument !== document ||
+      !button.contains(target) ||
+      !publication.buttonTargets.includes(target) ||
+      !button.isConnected ||
+      button.disabled ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedEvents.has(nativeEvent) ||
+      !this.#hierarchyIsCurrent(publication) ||
+      !this.#renderIsCurrent(render)
+    ) {
+      return;
+    }
+
+    this.#claimedPublications.add(publication);
+    this.#claimedEvents.add(nativeEvent);
+    publication.render.copy();
+  }
+}
+
 export function CopyBlock({ value, label, testId, copyTestId }: { value: string; label: string; testId?: string; copyTestId?: string }) {
   const pre = useRef<HTMLPreElement>(null);
-  const { copy, label: buttonLabel, copied } = useCopy(value, pre);
+  const copySetup = useCopy(value, pre);
+  const [mount] = useState(() => Symbol("copy-block"));
+  const [coordinator] = useState(() => new CopyBlockCoordinator(mount));
+  const render: CopyBlockRender = Object.freeze({
+    identity: Symbol("copy-block-render"),
+    mount,
+    value,
+    label,
+    testId,
+    copyTestId,
+    copySetup,
+    copy: copySetup.copy,
+    status: copySetup.status,
+    buttonLabel: copySetup.label,
+    copied: copySetup.copied,
+    ariaLabel: `Copy ${label}`,
+  });
+  const draft = coordinator.createDraft(render);
+
+  useLayoutEffect(() => {
+    coordinator.establish(draft, pre);
+    return () => coordinator.deactivate(draft);
+  }, [coordinator, draft, pre]);
+
   return (
-    <div className="min-w-0">
+    <div ref={(element) => coordinator.bindElement(draft, "wrapper", element)} className={COPY_BLOCK_CLASS}>
       {/* pre-wrap + break-all: the Bearer line wraps instead of being clipped; what is copied is `value`, not this rendering. */}
       <pre
-        ref={pre}
-        className="select-text whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-2 p-3 font-mono text-xs leading-5 text-ink-2"
-        data-testid={testId}
+        ref={(element) => coordinator.bindPre(draft, pre, element)}
+        className={COPY_BLOCK_PRE_CLASS}
+        data-testid={render.testId}
       >
-        {value}
+        {render.value}
       </pre>
-      <button type="button" className="btn btn-outline btn-sm mt-2 h-auto max-w-full gap-1.5 whitespace-normal text-left" onClick={copy} aria-label={`Copy ${label}`} data-testid={copyTestId}>
-        {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-        {buttonLabel}
+      <button
+        ref={(element) => coordinator.bindElement(draft, "button", element)}
+        type="button"
+        className={COPY_BLOCK_BUTTON_CLASS}
+        onClick={(event) => coordinator.activate(render, event)}
+        aria-label={render.ariaLabel}
+        data-testid={render.copyTestId}
+      >
+        {render.copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+        {render.buttonLabel}
       </button>
     </div>
   );

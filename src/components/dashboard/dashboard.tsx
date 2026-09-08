@@ -496,11 +496,16 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [trashBusyOperation, setTrashBusyOperation] = useState<TrashActionOperation | null>(null);
   const [trashLoading, setTrashLoading] = useState(false);
   const [trashError, setTrashError] = useState<string | null>(null);
+  const trashErrorRef = useRef<string | null>(null);
   const trashVisitId = useRef(0);
   const trashRequestId = useRef(0);
   const trashRequestPending = useRef(false);
   const trashAction = useRef<TrashActionOperation | null>(null);
   const trashBusy = trashBusyOperation?.documentId ?? null;
+  const replaceTrashError = useCallback((error: string | null) => {
+    trashErrorRef.current = error;
+    setTrashError(error);
+  }, []);
 
   const replaceTrash = useCallback((documents: Doc[]) => {
     const operation = trashAction.current;
@@ -525,19 +530,19 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       .then((res) => {
         if (!isCurrent()) return;
         replaceTrash(res.documents);
-        setTrashError(null);
+        replaceTrashError(null);
       })
       .catch((err: unknown) => {
         if (!isCurrent()) return;
         console.error(err);
-        setTrashError(apiErrorText(err, "Could not load trash"));
+        replaceTrashError(apiErrorText(err, "Could not load trash"));
       })
       .finally(() => {
         if (!isCurrent()) return;
         trashRequestPending.current = false;
         setTrashLoading(false);
       });
-  }, [replaceTrash]);
+  }, [replaceTrash, replaceTrashError]);
 
   const changeFilter = useCallback((next: Filter) => {
     const previous = filterRef.current;
@@ -552,10 +557,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       trashAction.current = null;
       setTrashBusyOperation((current) => (current === operation ? null : current));
       setTrashLoading(false);
-      setTrashError(null);
+      replaceTrashError(null);
     }
     setFilter(next);
-  }, []);
+  }, [replaceTrashError]);
 
   useEffect(() => {
     if (filter !== "trash") return;
@@ -570,17 +575,34 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       trashRequestPending.current = false;
       trashAction.current = null;
       trashRef.current = null;
+      trashErrorRef.current = null;
     },
     [],
   );
 
+  const canRetryTrash = useCallback(
+    (error: string) =>
+      filterRef.current === "trash" &&
+      trashErrorRef.current === error &&
+      !trashRequestPending.current &&
+      trashAction.current === null,
+    [],
+  );
   const retryTrash = useCallback(() => {
-    if (!trashError) return;
+    const error = trashErrorRef.current;
+    if (error === null || !canRetryTrash(error)) return;
     loadTrash();
-  }, [trashError, loadTrash]);
+  }, [canRetryTrash, loadTrash]);
 
+  const canRunTrashAction = useCallback(
+    (doc: Doc) =>
+      filterRef.current === "trash" &&
+      trashAction.current === null &&
+      trashRef.current?.some((document) => document === doc) === true,
+    [],
+  );
   const runTrashAction = useCallback(async (doc: Doc, kind: TrashActionKind) => {
-    if (filterRef.current !== "trash" || trashAction.current || !trashRef.current?.some((document) => document === doc)) return;
+    if (!canRunTrashAction(doc)) return;
     const operation: TrashActionOperation = { visit: trashVisitId.current, documentId: doc.id, kind, document: doc };
     trashAction.current = operation;
     trashRequestId.current += 1;
@@ -616,15 +638,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       trashAction.current = null;
       setTrashBusyOperation((current) => (current === operation ? null : current));
     }
-  }, [publishNotice, router]);
+  }, [canRunTrashAction, publishNotice, router]);
   const restore = useCallback((doc: Doc) => void runTrashAction(doc, "restore"), [runTrashAction]);
   const purge = useCallback(
     (doc: Doc) => {
-      if (filterRef.current !== "trash" || trashAction.current || !trashRef.current?.some((document) => document === doc)) return;
+      if (!canRunTrashAction(doc)) return;
       if (!confirm(`Delete “${doc.title}” forever? This cannot be undone.`)) return;
       void runTrashAction(doc, "purge");
     },
-    [runTrashAction],
+    [canRunTrashAction, runTrashAction],
   );
 
   // One shared state per id keeps duplicate cards in lockstep and synchronously rejects overlapping writes.
@@ -1253,7 +1275,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           )}
 
           {filter === "trash" ? (
-            <TrashView documents={trash} busy={trashBusy} loading={trashLoading} error={trashError} onRetry={retryTrash} onRestore={restore} onPurge={purge} />
+            <TrashView
+              documents={trash}
+              busy={trashBusy}
+              loading={trashLoading}
+              error={trashError}
+              canRetry={canRetryTrash}
+              canAct={canRunTrashAction}
+              onRetry={retryTrash}
+              onRestore={restore}
+              onPurge={purge}
+            />
           ) : filtered.length === 0 && !trimmed && documents.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-8" data-testid="empty-state">
               <div className="mb-5 text-center">
@@ -1355,12 +1387,283 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   );
 }
 
+interface TrashCardPresentation {
+  readonly index: number;
+  readonly document: Doc;
+  readonly id: string;
+  readonly title: string;
+  readonly excerpt: string;
+  readonly storage: Doc["storage"];
+  readonly repoOwner: string | null;
+  readonly repoName: string | null;
+  readonly repoPath: string | null;
+  readonly gistId: string | null;
+  readonly updatedAt: string;
+  readonly deletedAt: string | null;
+  readonly busy: boolean;
+}
+
+interface TrashRenderPresentation {
+  readonly documents: Doc[] | null;
+  readonly busy: string | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  readonly retentionDays: number;
+  readonly canRetry: (error: string) => boolean;
+  readonly canAct: (document: Doc, kind: TrashActionKind) => boolean;
+  readonly onRetry: () => void;
+  readonly onRestore: (document: Doc) => void;
+  readonly onPurge: (document: Doc) => void;
+  readonly cards: readonly TrashCardPresentation[];
+}
+
+type TrashRootElementName = "root" | "note" | "error" | "retry" | "loading" | "empty" | "list";
+type TrashCardElementName = "card" | "restore" | "purge";
+
+interface TrashCardRuntime {
+  card: HTMLLIElement | null;
+  restore: HTMLButtonElement | null;
+  purge: HTMLButtonElement | null;
+}
+
+interface TrashPresentationRuntime {
+  active: boolean;
+  elements: Record<TrashRootElementName, HTMLElement | null>;
+  cards: Map<TrashCardPresentation, TrashCardRuntime>;
+}
+
+interface TrashDomSnapshot {
+  readonly node: Node;
+  readonly children: readonly TrashDomSnapshot[];
+}
+
+interface TrashPublication {
+  readonly render: TrashRenderPresentation;
+  readonly runtime: TrashPresentationRuntime;
+  readonly ownerDocument: Document;
+  readonly rootParent: Node;
+  readonly dom: TrashDomSnapshot;
+}
+
+const allowTrashRetry = () => true;
+const allowTrashAction = () => true;
+
+function snapshotTrashDom(node: Node): TrashDomSnapshot {
+  return {
+    node,
+    children: Object.freeze(Array.from(node.childNodes, snapshotTrashDom)),
+  };
+}
+
+function trashDomMatches(snapshot: TrashDomSnapshot, ownerDocument: Document): boolean {
+  const { node, children } = snapshot;
+  if (!node.isConnected || node.ownerDocument !== ownerDocument || node.childNodes.length !== children.length) return false;
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index];
+    if (node.childNodes.item(index) !== child.node || !trashDomMatches(child, ownerDocument)) return false;
+  }
+  return true;
+}
+
+function trashCardMatches(card: TrashCardPresentation, documents: Doc[], busy: string | null): boolean {
+  const document = documents[card.index];
+  return (
+    document === card.document &&
+    document.id === card.id &&
+    document.title === card.title &&
+    document.excerpt === card.excerpt &&
+    document.storage === card.storage &&
+    document.repoOwner === card.repoOwner &&
+    document.repoName === card.repoName &&
+    document.repoPath === card.repoPath &&
+    document.gistId === card.gistId &&
+    document.updatedAt === card.updatedAt &&
+    document.deletedAt === card.deletedAt &&
+    card.busy === (busy === card.id)
+  );
+}
+
+function trashRenderMatches(render: TrashRenderPresentation): boolean {
+  if (render.retentionDays !== TRASH_RETENTION_DAYS) return false;
+  const { documents } = render;
+  if (documents === null) return render.cards.length === 0;
+  if (documents.length !== render.cards.length) return false;
+  return render.cards.every((card) => trashCardMatches(card, documents, render.busy));
+}
+
+function commitTrashPresentation(render: TrashRenderPresentation, runtime: TrashPresentationRuntime): TrashPublication | null {
+  const root = runtime.elements.root as HTMLDivElement | null;
+  const note = runtime.elements.note as HTMLParagraphElement | null;
+  if (!root?.isConnected || !note?.isConnected || root.ownerDocument !== note.ownerDocument || root.firstElementChild !== note) return null;
+
+  const ownerDocument = root.ownerDocument;
+  const rootParent = root.parentNode;
+  if (!rootParent) return null;
+
+  let nextRootChild = 1;
+  if (render.error !== null) {
+    const error = runtime.elements.error as HTMLDivElement | null;
+    const retry = runtime.elements.retry as HTMLButtonElement | null;
+    if (
+      !error?.isConnected ||
+      !retry?.isConnected ||
+      error.ownerDocument !== ownerDocument ||
+      retry.ownerDocument !== ownerDocument ||
+      root.children.item(nextRootChild) !== error ||
+      error.lastElementChild !== retry
+    ) {
+      return null;
+    }
+    nextRootChild += 1;
+  } else if (runtime.elements.error !== null || runtime.elements.retry !== null) {
+    return null;
+  }
+
+  const hasLoading = render.documents === null && render.error === null;
+  const hasEmpty = render.documents !== null && render.documents.length === 0;
+  const hasList = render.documents !== null && render.documents.length > 0;
+  const stateElement = hasLoading ? runtime.elements.loading : hasEmpty ? runtime.elements.empty : hasList ? runtime.elements.list : null;
+  if (stateElement !== null) {
+    if (!stateElement.isConnected || stateElement.ownerDocument !== ownerDocument || root.children.item(nextRootChild) !== stateElement) return null;
+    nextRootChild += 1;
+  }
+  if (
+    root.children.length !== nextRootChild ||
+    (hasLoading ? runtime.elements.loading === null : runtime.elements.loading !== null) ||
+    (hasEmpty ? runtime.elements.empty === null : runtime.elements.empty !== null) ||
+    (hasList ? runtime.elements.list === null : runtime.elements.list !== null)
+  ) {
+    return null;
+  }
+
+  if (hasList) {
+    const list = runtime.elements.list as HTMLUListElement;
+    if (list.children.length !== render.cards.length || runtime.cards.size !== render.cards.length) return null;
+    for (const card of render.cards) {
+      const cardRuntime = runtime.cards.get(card);
+      const cardElement = cardRuntime?.card;
+      const restore = cardRuntime?.restore;
+      const purge = cardRuntime?.purge;
+      if (
+        !cardElement?.isConnected ||
+        !restore?.isConnected ||
+        !purge?.isConnected ||
+        cardElement.ownerDocument !== ownerDocument ||
+        restore.ownerDocument !== ownerDocument ||
+        purge.ownerDocument !== ownerDocument ||
+        list.children.item(card.index) !== cardElement ||
+        cardElement.parentElement !== list ||
+        !cardElement.contains(restore) ||
+        !cardElement.contains(purge)
+      ) {
+        return null;
+      }
+    }
+  } else if (runtime.cards.size !== 0) {
+    return null;
+  }
+
+  if (!trashRenderMatches(render)) return null;
+  return Object.freeze({
+    render,
+    runtime,
+    ownerDocument,
+    rootParent,
+    dom: snapshotTrashDom(root),
+  });
+}
+
+function currentTrashPublication(
+  active: TrashPublication | null,
+  render: TrashRenderPresentation,
+  card: TrashCardPresentation | null,
+  action: "retry" | TrashActionKind,
+  event: unknown,
+  claimedEvents: WeakSet<object>,
+): TrashPublication | null {
+  if (!active || active.render !== render || !trashRenderMatches(render)) return null;
+  if (active.rootParent !== active.runtime.elements.root?.parentNode || !trashDomMatches(active.dom, active.ownerDocument)) return null;
+  if (typeof event !== "object" || event === null) return null;
+
+  const ownerWindow = active.ownerDocument.defaultView;
+  if (!ownerWindow) return null;
+  const reactEvent = event as Partial<ReactMouseEvent<HTMLButtonElement>> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  const nativeEvent = reactEvent.nativeEvent;
+  const source = reactEvent.currentTarget;
+  const target = reactEvent.target;
+  const reactEventPrototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
+  if (
+    !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+    !(source instanceof ownerWindow.HTMLButtonElement) ||
+    !(target instanceof ownerWindow.Node) ||
+    nativeEvent.type !== "click" ||
+    nativeEvent.button !== 0 ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
+    reactEvent._reactName !== "onClick" ||
+    typeof reactEvent.isDefaultPrevented !== "function" ||
+    typeof reactEvent.isPropagationStopped !== "function" ||
+    typeof reactEvent.persist !== "function" ||
+    reactEvent.type !== "click" ||
+    reactEvent.button !== 0 ||
+    !reactEvent.bubbles ||
+    target !== nativeEvent.target ||
+    target.ownerDocument !== active.ownerDocument ||
+    !source.isConnected ||
+    source.ownerDocument !== active.ownerDocument ||
+    source.disabled ||
+    !source.contains(target) ||
+    claimedEvents.has(event) ||
+    claimedEvents.has(nativeEvent)
+  ) {
+    return null;
+  }
+
+  if (action === "retry") {
+    if (
+      card !== null ||
+      render.error === null ||
+      render.loading ||
+      active.runtime.elements.retry !== source ||
+      !active.runtime.elements.error?.contains(source) ||
+      !render.canRetry(render.error)
+    ) {
+      return null;
+    }
+  } else {
+    const cardRuntime = card === null ? null : active.runtime.cards.get(card);
+    if (
+      card === null ||
+      render.busy !== null ||
+      render.cards[card.index] !== card ||
+      !trashCardMatches(card, render.documents!, render.busy) ||
+      cardRuntime?.card === null ||
+      !cardRuntime?.card?.contains(target) ||
+      (action === "restore" ? cardRuntime?.restore : cardRuntime?.purge) !== source ||
+      !render.canAct(card.document, action)
+    ) {
+      return null;
+    }
+  }
+
+  claimedEvents.add(event);
+  claimedEvents.add(nativeEvent);
+  return active;
+}
+
 /** The caller's trashed documents: not openable; restore or delete forever. `documents` is null until the first successful load. */
-function TrashView({
+export function TrashView({
   documents,
   busy,
   loading,
   error,
+  canRetry = allowTrashRetry,
+  canAct = allowTrashAction,
   onRetry,
   onRestore,
   onPurge,
@@ -1369,52 +1672,194 @@ function TrashView({
   busy: string | null;
   loading: boolean;
   error: string | null;
+  canRetry?: (error: string) => boolean;
+  canAct?: (document: Doc, kind: TrashActionKind) => boolean;
   onRetry: () => void;
   onRestore: (d: Doc) => void;
   onPurge: (d: Doc) => void;
 }) {
+  const activePublication = useRef<TrashPublication | null>(null);
+  const claimedEvents = useRef(new WeakSet<object>());
+  const presentationRuntimes = useRef(new WeakMap<TrashRenderPresentation, TrashPresentationRuntime>());
+  const cards = Object.freeze(
+    (documents ?? []).map(
+      (document, index): TrashCardPresentation =>
+        Object.freeze({
+          index,
+          document,
+          id: document.id,
+          title: document.title,
+          excerpt: document.excerpt,
+          storage: document.storage,
+          repoOwner: document.repoOwner,
+          repoName: document.repoName,
+          repoPath: document.repoPath,
+          gistId: document.gistId,
+          updatedAt: document.updatedAt,
+          deletedAt: document.deletedAt,
+          busy: busy === document.id,
+        }),
+    ),
+  );
+  const presentation: TrashRenderPresentation = Object.freeze({
+    documents,
+    busy,
+    loading,
+    error,
+    retentionDays: TRASH_RETENTION_DAYS,
+    canRetry,
+    canAct,
+    onRetry,
+    onRestore,
+    onPurge,
+    cards,
+  });
+
+  const runtimeFor = useCallback((candidate: TrashRenderPresentation) => {
+    const runtimes = presentationRuntimes.current;
+    let runtime = runtimes.get(candidate);
+    if (!runtime) {
+      runtime = {
+        active: false,
+        elements: { root: null, note: null, error: null, retry: null, loading: null, empty: null, list: null },
+        cards: new Map(),
+      };
+      runtimes.set(candidate, runtime);
+    }
+    return runtime;
+  }, []);
+  const retirePresentation = useCallback((candidate: TrashRenderPresentation) => {
+    const runtime = presentationRuntimes.current.get(candidate);
+    if (runtime) runtime.active = false;
+    if (activePublication.current?.render === candidate) activePublication.current = null;
+  }, []);
+  const bindElement = useCallback(
+    (candidate: TrashRenderPresentation, name: TrashRootElementName, element: HTMLElement | null) => {
+      const runtime = runtimeFor(candidate);
+      if (runtime.active && runtime.elements[name] !== element) retirePresentation(candidate);
+      runtime.elements[name] = element;
+      if (!element) retirePresentation(candidate);
+    },
+    [retirePresentation, runtimeFor],
+  );
+  const bindCardElement = useCallback(
+    (candidate: TrashRenderPresentation, card: TrashCardPresentation, name: TrashCardElementName, element: HTMLElement | null) => {
+      const runtime = runtimeFor(candidate);
+      let cardRuntime = runtime.cards.get(card);
+      if (!cardRuntime) {
+        cardRuntime = { card: null, restore: null, purge: null };
+        runtime.cards.set(card, cardRuntime);
+      }
+      if (runtime.active && cardRuntime[name] !== element) retirePresentation(candidate);
+      if (name === "card") cardRuntime.card = element as HTMLLIElement | null;
+      else cardRuntime[name] = element as HTMLButtonElement | null;
+      if (!element) retirePresentation(candidate);
+    },
+    [retirePresentation, runtimeFor],
+  );
+  const rootRef = useCallback((element: HTMLDivElement | null) => bindElement(presentation, "root", element), [bindElement, presentation]);
+  const noteRef = useCallback((element: HTMLParagraphElement | null) => bindElement(presentation, "note", element), [bindElement, presentation]);
+  const errorRef = useCallback((element: HTMLDivElement | null) => bindElement(presentation, "error", element), [bindElement, presentation]);
+  const retryRef = useCallback((element: HTMLButtonElement | null) => bindElement(presentation, "retry", element), [bindElement, presentation]);
+  const loadingRef = useCallback((element: HTMLDivElement | null) => bindElement(presentation, "loading", element), [bindElement, presentation]);
+  const emptyRef = useCallback((element: HTMLDivElement | null) => bindElement(presentation, "empty", element), [bindElement, presentation]);
+  const listRef = useCallback((element: HTMLUListElement | null) => bindElement(presentation, "list", element), [bindElement, presentation]);
+
+  useLayoutEffect(() => {
+    const runtime = runtimeFor(presentation);
+    const committed = commitTrashPresentation(presentation, runtime);
+    if (!committed) return;
+    runtime.active = true;
+    activePublication.current = committed;
+    return () => retirePresentation(presentation);
+  }, [presentation, retirePresentation, runtimeFor]);
+
   return (
-    <div data-testid="trash-view" aria-busy={loading || undefined}>
-      <p className="mb-3 flex items-center gap-1.5 text-xs text-ink-3" data-testid="trash-note">
-        <Trash2 size={12} /> Items are deleted forever after {TRASH_RETENTION_DAYS} days.
+    <div ref={rootRef} data-testid="trash-view" aria-busy={presentation.loading || undefined}>
+      <p ref={noteRef} className="mb-3 flex items-center gap-1.5 text-xs text-ink-3" data-testid="trash-note">
+        <Trash2 size={12} /> Items are deleted forever after {presentation.retentionDays} days.
       </p>
-      {error && (
-        <div className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="trash-error">
-          <span className="min-w-0 flex-1">{error}</span>
-          <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5" onClick={onRetry} disabled={loading} aria-busy={loading || undefined}>
-            {loading && <Loader2 size={13} className="animate-spin" />}
-            {loading ? "Retrying…" : "Retry"}
+      {presentation.error && (
+        <div
+          ref={errorRef}
+          className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+          role="alert"
+          aria-atomic="true"
+          data-testid="trash-error"
+        >
+          <span className="min-w-0 flex-1">{presentation.error}</span>
+          <button
+            ref={retryRef}
+            type="button"
+            className="btn btn-sm btn-outline shrink-0 gap-1.5"
+            onClick={(event) => {
+              if (!currentTrashPublication(activePublication.current, presentation, null, "retry", event, claimedEvents.current)) return;
+              presentation.onRetry();
+            }}
+            disabled={presentation.loading}
+            aria-busy={presentation.loading || undefined}
+          >
+            {presentation.loading && <Loader2 size={13} className="animate-spin" />}
+            {presentation.loading ? "Retrying…" : "Retry"}
           </button>
         </div>
       )}
-      {documents === null && !error ? (
-        <div className="flex items-center gap-2 py-10 text-sm text-ink-3">
+      {presentation.documents === null && !presentation.error ? (
+        <div ref={loadingRef} className="flex items-center gap-2 py-10 text-sm text-ink-3">
           <Loader2 size={16} className="animate-spin" /> Loading trash…
         </div>
-      ) : documents?.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
+      ) : presentation.documents?.length === 0 ? (
+        <div ref={emptyRef} className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
           <Trash2 className="mx-auto mb-3 text-ink-4" size={28} />
           <p className="text-sm font-medium text-ink-2">The trash is empty</p>
-          <p className="mt-1 text-sm text-ink-3">Documents you move to the trash can be restored here for {TRASH_RETENTION_DAYS} days.</p>
+          <p className="mt-1 text-sm text-ink-3">Documents you move to the trash can be restored here for {presentation.retentionDays} days.</p>
         </div>
-      ) : documents ? (
-        <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="trash-list">
-          {documents.map((d) => {
-            const isBusy = busy === d.id;
+      ) : presentation.documents ? (
+        <ul ref={listRef} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="trash-list">
+          {presentation.cards.map((card) => {
+            const d = card.document;
             return (
-              <li key={d.id} className="flex h-full min-w-0 flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm" data-testid="trash-card" aria-busy={isBusy || undefined}>
+              <li
+                ref={(element) => bindCardElement(presentation, card, "card", element)}
+                key={card.id}
+                className="flex h-full min-w-0 flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm"
+                data-testid="trash-card"
+                aria-busy={card.busy || undefined}
+              >
                 <div className="mb-2 flex items-start justify-between gap-2">
-                  <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">{d.title}</h3>
+                  <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">{card.title}</h3>
                   <StorageBadge doc={d} />
                 </div>
-                <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
+                <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{card.excerpt || "Empty document"}</p>
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-ink-4">
-                  <span className="whitespace-nowrap">{d.deletedAt ? <RelativeTime date={d.deletedAt} prefix="Trashed " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
+                  <span className="whitespace-nowrap">
+                    {card.deletedAt ? <RelativeTime date={card.deletedAt} prefix="Trashed " /> : <RelativeTime date={card.updatedAt} prefix="Edited " />}
+                  </span>
                   <div className="ml-auto flex items-center gap-1.5">
-                    <button type="button" className="btn btn-sm btn-outline gap-1 whitespace-nowrap" disabled={busy !== null} onClick={() => onRestore(d)} data-testid="restore-button">
-                      {isBusy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Restore
+                    <button
+                      ref={(element) => bindCardElement(presentation, card, "restore", element)}
+                      type="button"
+                      className="btn btn-sm btn-outline gap-1 whitespace-nowrap"
+                      disabled={presentation.busy !== null}
+                      onClick={(event) => {
+                        if (!currentTrashPublication(activePublication.current, presentation, card, "restore", event, claimedEvents.current)) return;
+                        presentation.onRestore(card.document);
+                      }}
+                      data-testid="restore-button"
+                    >
+                      {card.busy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Restore
                     </button>
-                    <button type="button" className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50 dark:hover:bg-red-950/40" disabled={busy !== null} onClick={() => onPurge(d)} data-testid="purge-button">
+                    <button
+                      ref={(element) => bindCardElement(presentation, card, "purge", element)}
+                      type="button"
+                      className="btn btn-sm gap-1 whitespace-nowrap text-danger hover:bg-red-50 dark:hover:bg-red-950/40"
+                      disabled={presentation.busy !== null}
+                      onClick={(event) => {
+                        if (!currentTrashPublication(activePublication.current, presentation, card, "purge", event, claimedEvents.current)) return;
+                        presentation.onPurge(card.document);
+                      }}
+                      data-testid="purge-button"
+                    >
                       <Trash2 size={13} /> Delete forever
                     </button>
                   </div>
