@@ -14,7 +14,13 @@ import {
 } from "../highlight-activation";
 import { isRefresh, refreshNow, scheduleRefresh } from "./refresh";
 
-const key = new PluginKey<DecorationSet>("sourceHighlights");
+interface RichHighlightsState {
+  decorations: DecorationSet;
+  selectionVersion: number;
+  pointerSelectionVersion: number;
+}
+
+const key = new PluginKey<RichHighlightsState>("sourceHighlights");
 
 /** Highlights derived from the session's comments, suggestions and focus state. */
 export function collectHighlights(session: CollabSession, focusRange: { from: number; to: number } | null): SourceHighlight[] {
@@ -136,6 +142,7 @@ export interface HighlightHandlers {
 
 export interface PositionedHighlightTarget extends HighlightTarget {
   sourcePosition: number;
+  editorPosition: number;
   from: number;
   to: number;
 }
@@ -151,10 +158,16 @@ function richHighlightAtPosition(
   const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
   const ownsRange = range && key
     .getState(view.state)
+    ?.decorations
     ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
     .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
   if (!ownsRange) return null;
-  return { ...target, sourcePosition: session.binding.getSourceMap().pmToSrc(position), ...range };
+  return {
+    ...target,
+    sourcePosition: session.binding.getSourceMap().pmToSrc(position),
+    editorPosition: position,
+    ...range,
+  };
 }
 
 export function richHighlightAtPointer(
@@ -202,6 +215,7 @@ function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlig
     a.kind === b.kind &&
     a.id === b.id &&
     a.sourcePosition === b.sourcePosition &&
+    a.editorPosition === b.editorPosition &&
     a.from === b.from &&
     a.to === b.to;
 }
@@ -214,12 +228,29 @@ function movedPastClickTolerance(start: MouseEvent, current: MouseEvent): boolea
 function richHighlightIsCurrent(view: EditorView, target: PositionedHighlightTarget): boolean {
   return !!key
     .getState(view.state)
+    ?.decorations
     ?.find(
       target.from,
       target.to,
       (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id,
     )
     .some((decoration) => decoration.from <= target.from && target.to <= decoration.to);
+}
+
+function isExactPointerSelectionUpdate(
+  currentView: EditorView,
+  previousState: EditorView["state"],
+  target: PositionedHighlightTarget,
+): boolean {
+  const previous = key.getState(previousState);
+  const current = key.getState(currentView.state);
+  const selection = currentView.state.selection;
+  return !!previous &&
+    !!current &&
+    current.selectionVersion === previous.selectionVersion + 1 &&
+    current.pointerSelectionVersion === previous.pointerSelectionVersion + 1 &&
+    selection.empty &&
+    selection.from === target.editorPosition;
 }
 
 function installRichHighlightActivation(
@@ -390,6 +421,16 @@ function installRichHighlightActivation(
       if (press && currentView.state.doc !== previousState.doc) clearPress();
       if (
         pending &&
+        !pending.confirmed &&
+        press?.released &&
+        pending.target === press.target &&
+        !pending.selection.eq(currentView.state.selection) &&
+        isExactPointerSelectionUpdate(currentView, previousState, pending.target)
+      ) {
+        pending.selection = currentView.state.selection;
+      }
+      if (
+        pending &&
         (currentView.state.doc !== previousState.doc ||
           !pending.selection.eq(currentView.state.selection))
       ) {
@@ -412,22 +453,34 @@ function installRichHighlightActivation(
 }
 
 /** Comments, suggestions and cross-pane focus rendered as inline decorations in the rich editor. */
-export function richHighlightsPlugin(session: CollabSession, handlers: HighlightHandlers = {}): Plugin<DecorationSet> {
+export function richHighlightsPlugin(session: CollabSession, handlers: HighlightHandlers = {}): Plugin<RichHighlightsState> {
   const getFocus = () => handlers.getFocusSource?.() ?? null;
-  return new Plugin<DecorationSet>({
+  return new Plugin<RichHighlightsState>({
     key,
     state: {
-      init: (_config, state) => build(session, state.doc, getFocus),
-      apply(tr, old, _oldState, newState) {
-        if (isRefresh(tr)) return build(session, newState.doc, getFocus);
+      init: (_config, state): RichHighlightsState => ({
+        decorations: build(session, state.doc, getFocus),
+        selectionVersion: 0,
+        pointerSelectionVersion: 0,
+      }),
+      apply(tr, old, _oldState, newState): RichHighlightsState {
         // The text (and therefore the source map) only changes after this transaction has
         // been applied; follow the edit for now and rebuild on the refresh that follows.
-        if (tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return old;
+        const decorations = isRefresh(tr)
+          ? build(session, newState.doc, getFocus)
+          : tr.docChanged
+            ? old.decorations.map(tr.mapping, tr.doc)
+            : old.decorations;
+        return {
+          decorations,
+          selectionVersion: old.selectionVersion + (tr.selectionSet ? 1 : 0),
+          pointerSelectionVersion:
+            old.pointerSelectionVersion + (tr.selectionSet && tr.getMeta("pointer") === true ? 1 : 0),
+        };
       },
     },
     props: {
-      decorations: (state) => key.getState(state),
+      decorations: (state) => key.getState(state)?.decorations,
     },
     view(view) {
       let activationSignature = highlightSignature(session);
