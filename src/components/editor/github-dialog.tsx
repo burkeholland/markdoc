@@ -1430,7 +1430,11 @@ function pickerReplayFactsMatch(
   );
 }
 
-function pickerSyntheticEventShape(event: unknown, reactName: "onClick" | "onChange" | "onSubmit"): boolean {
+function pickerSyntheticEventShape(
+  event: unknown,
+  reactName: "onClick" | "onChange" | "onSubmit",
+  defaultPrevented: boolean,
+): boolean {
   if (typeof event !== "object" || event === null) return false;
   const candidate = event as {
     _reactName?: unknown;
@@ -1438,58 +1442,120 @@ function pickerSyntheticEventShape(event: unknown, reactName: "onClick" | "onCha
     isPropagationStopped?: unknown;
     persist?: unknown;
   };
-  const prototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
   return (
-    prototype?.constructor?.name === "SyntheticBaseEvent" &&
     candidate._reactName === reactName &&
     typeof candidate.isDefaultPrevented === "function" &&
+    candidate.isDefaultPrevented() === defaultPrevented &&
     typeof candidate.isPropagationStopped === "function" &&
+    candidate.isPropagationStopped() === false &&
     typeof candidate.persist === "function"
   );
 }
 
-function exactPickerClick(event: ReactMouseEvent<HTMLButtonElement>, control: HTMLButtonElement): boolean {
-  const ownerWindow = control.ownerDocument.defaultView;
+function exactPickerEventPath(
+  nativeEvent: Event,
+  target: EventTarget,
+  control: HTMLElement,
+  publication: GitHubPickerPublication,
+): boolean {
+  const root = publication.runtime.elements.root;
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(root instanceof ownerWindow.HTMLDivElement) ||
+    !root.isConnected ||
+    root.ownerDocument !== publication.ownerDocument
+  ) {
+    return false;
+  }
+  const path = nativeEvent.composedPath();
+  return path[0] === target && path.includes(control) && path.includes(root);
+}
+
+function pickerNativeMouseConstructorMatches(
+  nativeEvent: MouseEvent,
+  ownerWindow: Window & typeof globalThis,
+): boolean {
+  const PointerEventConstructor = ownerWindow.PointerEvent;
+  return (
+    nativeEvent.constructor === ownerWindow.MouseEvent ||
+    (!!PointerEventConstructor && nativeEvent.constructor === PointerEventConstructor)
+  );
+}
+
+function exactPickerClick(
+  event: ReactMouseEvent<HTMLButtonElement>,
+  control: HTMLButtonElement,
+  publication: GitHubPickerPublication,
+): boolean {
+  if (!event || typeof event !== "object") return false;
+  const ownerDocument = publication.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
   const target = event.target;
   return (
     !!ownerWindow &&
-    pickerSyntheticEventShape(event, "onClick") &&
+    pickerSyntheticEventShape(event, "onClick", false) &&
     event.type === "click" &&
+    event.button === nativeEvent.button &&
+    nativeEvent.bubbles &&
+    event.bubbles === nativeEvent.bubbles &&
+    event.cancelable === nativeEvent.cancelable &&
+    event.eventPhase === nativeEvent.eventPhase &&
     event.currentTarget === control &&
     !event.defaultPrevented &&
     nativeEvent instanceof ownerWindow.MouseEvent &&
+    pickerNativeMouseConstructorMatches(nativeEvent, ownerWindow) &&
     nativeEvent.type === "click" &&
     nativeEvent.button === 0 &&
     nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
     !nativeEvent.defaultPrevented &&
     target instanceof ownerWindow.Node &&
     target === nativeEvent.target &&
-    target.ownerDocument === control.ownerDocument &&
+    target.ownerDocument === ownerDocument &&
+    control.ownerDocument === ownerDocument &&
     control.isConnected &&
     !control.disabled &&
-    control.contains(target)
+    control.contains(target) &&
+    exactPickerEventPath(nativeEvent, target, control, publication)
   );
 }
 
 function exactPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
   event: ReactChangeEvent<T>,
   control: T,
+  publication: GitHubPickerPublication,
 ): boolean {
-  const ownerWindow = control.ownerDocument.defaultView;
+  if (!event || typeof event !== "object") return false;
+  const ownerDocument = publication.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
   const checkableInput =
     control.tagName === "INPUT" &&
     ((control as HTMLInputElement).type === "checkbox" || (control as HTMLInputElement).type === "radio");
-  const controlIsUsable = control.isConnected && !control.disabled;
-  const nativeTypeAllowed =
-    nativeEvent.type === "input" ||
-    nativeEvent.type === "change" ||
-    (checkableInput && nativeEvent.type === "click" && nativeEvent instanceof ownerWindow!.MouseEvent);
+  const controlIsUsable =
+    control.ownerDocument === ownerDocument &&
+    control.isConnected &&
+    !control.disabled;
+  const nativeTypeAllowed = Boolean(
+    ownerWindow &&
+      ((nativeEvent.type === "change" && nativeEvent.constructor === ownerWindow.Event) ||
+        (nativeEvent.type === "input" &&
+          (nativeEvent.constructor === ownerWindow.Event ||
+            (!!ownerWindow.InputEvent && nativeEvent.constructor === ownerWindow.InputEvent))) ||
+        (checkableInput &&
+          nativeEvent.type === "click" &&
+          nativeEvent instanceof ownerWindow.MouseEvent &&
+          pickerNativeMouseConstructorMatches(nativeEvent, ownerWindow))),
+  );
   return (
     !!ownerWindow &&
-    pickerSyntheticEventShape(event, "onChange") &&
-    (event.type === "input" || event.type === "change") &&
+    pickerSyntheticEventShape(event, "onChange", false) &&
+    event.type === "change" &&
+    nativeEvent.bubbles &&
+    event.bubbles === nativeEvent.bubbles &&
+    event.cancelable === nativeEvent.cancelable &&
+    event.eventPhase === nativeEvent.eventPhase &&
     event.currentTarget === control &&
     event.target === control &&
     !event.defaultPrevented &&
@@ -1498,7 +1564,8 @@ function exactPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
     nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
     nativeEvent.target === control &&
     !nativeEvent.defaultPrevented &&
-    controlIsUsable
+    controlIsUsable &&
+    exactPickerEventPath(nativeEvent, control, control, publication)
   );
 }
 
@@ -1506,26 +1573,38 @@ function exactPickerSubmit(
   event: ReactFormEvent<HTMLFormElement>,
   form: HTMLFormElement,
   submit: HTMLButtonElement,
+  publication: GitHubPickerPublication,
 ): boolean {
-  const ownerWindow = form.ownerDocument.defaultView;
+  if (!event || typeof event !== "object") return false;
+  const ownerDocument = publication.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
   return (
     !!ownerWindow?.SubmitEvent &&
-    pickerSyntheticEventShape(event, "onSubmit") &&
+    pickerSyntheticEventShape(event, "onSubmit", true) &&
     event.type === "submit" &&
+    nativeEvent.bubbles &&
+    event.bubbles === nativeEvent.bubbles &&
+    event.cancelable === nativeEvent.cancelable &&
+    event.eventPhase === nativeEvent.eventPhase &&
     event.currentTarget === form &&
     event.target === form &&
     event.defaultPrevented &&
     nativeEvent instanceof ownerWindow.SubmitEvent &&
+    nativeEvent.constructor === ownerWindow.SubmitEvent &&
     nativeEvent.type === "submit" &&
     nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
     nativeEvent.target === form &&
     nativeEvent.defaultPrevented &&
     (nativeEvent.submitter === null || nativeEvent.submitter === submit) &&
+    form.ownerDocument === ownerDocument &&
     form.isConnected &&
+    submit.ownerDocument === ownerDocument &&
     submit.isConnected &&
     !submit.disabled &&
-    submit.form === form
+    submit.form === form &&
+    form.contains(submit) &&
+    exactPickerEventPath(nativeEvent, form, form, publication)
   );
 }
 
@@ -2356,12 +2435,16 @@ function GitHubPickerVisit({
     expected: HTMLButtonElement | null | undefined,
   ): GitHubPickerPublication | null => {
     const runtime = publicationRuntimes.get(candidate);
+    const activePublication = publicationCoordinator.active();
     const nativeEvent = event?.nativeEvent;
     if (
       !runtime ||
       runtime.claimed ||
+      !activePublication ||
+      activePublication.presentation !== candidate ||
+      activePublication.runtime !== runtime ||
       !expected ||
-      !exactPickerClick(event, expected) ||
+      !exactPickerClick(event, expected, activePublication) ||
       publicationCoordinator.hasClaimed(event) ||
       publicationCoordinator.hasClaimed(nativeEvent)
     ) {
@@ -2383,11 +2466,15 @@ function GitHubPickerVisit({
     destinationMatches: (control: T) => boolean,
   ): GitHubPickerPublication | null => {
     const runtime = publicationRuntimes.get(candidate);
+    const activePublication = publicationCoordinator.active();
     if (
       !runtime ||
       runtime.claimed ||
+      !activePublication ||
+      activePublication.presentation !== candidate ||
+      activePublication.runtime !== runtime ||
       !expected ||
-      !exactPickerChange(event, expected) ||
+      !exactPickerChange(event, expected, activePublication) ||
       !destinationMatches(expected) ||
       publicationCoordinator.hasClaimed(event) ||
       publicationCoordinator.hasClaimed(event.nativeEvent)
@@ -2407,16 +2494,20 @@ function GitHubPickerVisit({
     event: ReactFormEvent<HTMLFormElement>,
   ): GitHubPickerPublication | null => {
     const runtime = publicationRuntimes.get(candidate);
+    const activePublication = publicationCoordinator.active();
     const form = runtime?.elements.pathForm;
     const submit = runtime?.elements.pathSubmit;
     const ownerWindow = form?.ownerDocument.defaultView;
     if (
       !runtime ||
       runtime.claimed ||
+      !activePublication ||
+      activePublication.presentation !== candidate ||
+      activePublication.runtime !== runtime ||
       !ownerWindow ||
       !(form instanceof ownerWindow.HTMLFormElement) ||
       !(submit instanceof ownerWindow.HTMLButtonElement) ||
-      !exactPickerSubmit(event, form, submit) ||
+      !exactPickerSubmit(event, form, submit, activePublication) ||
       publicationCoordinator.hasClaimed(event) ||
       publicationCoordinator.hasClaimed(event.nativeEvent)
     ) {

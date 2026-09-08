@@ -244,8 +244,22 @@ function replaceReactProp(element: HTMLElement, name: string, value: unknown) {
   };
 }
 
+function clonePickerSyntheticEvent<T extends object>(
+  event: T,
+  overrides: Partial<T> = {},
+  syntheticConstructor?: new () => object,
+): T {
+  const prototype = syntheticConstructor
+    ? Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: syntheticConstructor },
+      })
+    : Object.getPrototypeOf(event);
+  return Object.assign(Object.create(prototype) as T, event, overrides);
+}
+
 type PickerClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type PickerChangeHandler<T extends HTMLInputElement | HTMLSelectElement> = (event: ChangeEvent<T>) => void;
+type PickerSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
 
 function nativePickerClick(control: HTMLButtonElement, target: EventTarget | null = control, type = "click") {
   const MouseEventConstructor = control.ownerDocument.defaultView?.MouseEvent;
@@ -310,13 +324,13 @@ function directPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
 function dispatchPickerSubmit(form: HTMLFormElement, submitter: HTMLButtonElement) {
   const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
   if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
-  form.dispatchEvent(
-    new SubmitEventConstructor("submit", {
-      bubbles: true,
-      cancelable: true,
-      submitter,
-    }),
-  );
+  const event = new SubmitEventConstructor("submit", {
+    bubbles: true,
+    cancelable: true,
+    submitter,
+  });
+  form.dispatchEvent(event);
+  return event;
 }
 
 async function renderStrictPicker(children: ReactNode) {
@@ -980,6 +994,132 @@ describe("GitHubPicker list recovery", () => {
 });
 
 describe("GitHubPicker exact control publication", () => {
+  it("accepts each production-mangled React event family once while rejecting invalid provenance", async () => {
+    const doc = documentDto();
+    const mangledConstructor = class a {};
+    branches.mockResolvedValue({ branches: ["main", "next"] });
+    const view = render(
+      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
+    );
+    const foreignButton = document.createElement("button");
+    const foreignSelect = document.createElement("select");
+    const foreignForm = document.createElement("form");
+    document.body.append(foreignButton, foreignSelect, foreignForm);
+
+    try {
+      const repoTab = view.getByTestId("picker-tab-repo") as HTMLButtonElement;
+      const click = reactProp<PickerClickHandler>(repoTab, "onClick");
+      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
+        click(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        click(clonePickerSyntheticEvent(event, { currentTarget: foreignButton }, mangledConstructor));
+        click(
+          clonePickerSyntheticEvent(
+            event,
+            { nativeEvent: nativePickerClick(repoTab) },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      fireEvent.click(repoTab);
+      expect(repos).not.toHaveBeenCalled();
+      expect(view.queryByTestId("repo-list")).toBeNull();
+
+      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        click(structuralEvent);
+        click(structuralEvent);
+      });
+      fireEvent.click(repoTab);
+      expect(await view.findByTestId("repo-list")).toBeInTheDocument();
+      expect(repos).toHaveBeenCalledOnce();
+
+      fireEvent.click(await view.findByTestId("repo-item"));
+      const branch = (await view.findByTestId("branch-select")) as HTMLSelectElement;
+      await waitFor(() =>
+        expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"),
+      );
+      const change = reactProp<PickerChangeHandler<HTMLSelectElement>>(branch, "onChange");
+      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
+        change(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        change(clonePickerSyntheticEvent(event, { currentTarget: foreignSelect }, mangledConstructor));
+        change(
+          clonePickerSyntheticEvent(
+            event,
+            { nativeEvent: nativePickerChange(branch) },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      fireEvent.change(branch, { target: { value: "next" } });
+      expect(files).toHaveBeenCalledOnce();
+
+      branch.value = "main";
+      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        change(structuralEvent);
+        change(structuralEvent);
+      });
+      fireEvent.change(branch, { target: { value: "next" } });
+      await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
+      expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
+
+      const path = view.getByTestId("repo-path") as HTMLInputElement;
+      fireEvent.change(path, { target: { value: "docs/production.md" } });
+      const form = path.form;
+      const submit = view.getByTestId("repo-link") as HTMLButtonElement;
+      if (!form) throw new Error("The production-mangled repository path has no form");
+      const submitHandler = reactProp<PickerSubmitHandler>(form, "onSubmit");
+      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
+        submitHandler(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        submitHandler(clonePickerSyntheticEvent(event, { currentTarget: foreignForm }, mangledConstructor));
+        const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+        if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
+        submitHandler(
+          clonePickerSyntheticEvent(
+            event,
+            {
+              nativeEvent: new SubmitEventConstructor("submit", {
+                bubbles: true,
+                cancelable: true,
+                submitter: submit,
+              }),
+            },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      const rejectedSubmit = dispatchPickerSubmit(form, submit);
+      expect(rejectedSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        submitHandler(structuralEvent);
+        submitHandler(structuralEvent);
+      });
+      const acceptedSubmit = dispatchPickerSubmit(form, submit);
+
+      expect(acceptedSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
+        storage: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "next",
+        path: "docs/production.md",
+      });
+    } finally {
+      foreignButton.remove();
+      foreignSelect.remove();
+      foreignForm.remove();
+    }
+  });
+
   it("retires the first Strict Mode publication before an exact successor handles the replayed tab", async () => {
     const host = document.createElement("div");
     document.body.append(host);
