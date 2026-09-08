@@ -223,19 +223,46 @@ interface StatusBarStatsPlacementLease {
   cancelExpiry: () => void;
 }
 
+interface StatusBarStatsBoundaryPublication {
+  identity: symbol;
+  session: CollabSession;
+  side: string;
+  align: string;
+  ownerDocument: Document;
+  trigger: HTMLButtonElement;
+  content: HTMLElement;
+  portal: HTMLElement;
+}
+
+type StatusBarPortalSlot = "menu-content" | "issues-content";
+
+interface StatusBarPortalBoundaryPublication {
+  identity: symbol;
+  authority: StatusBarAuthority;
+  slot: StatusBarPortalSlot;
+  ownerDocument: Document;
+  root: HTMLElement;
+  content: HTMLElement;
+  portal: HTMLElement;
+}
+
 interface StatusBarGeneration {
+  manager: StatusBarPublicationManager;
   authority: StatusBarAuthority;
   epoch: number;
   identity: symbol;
   root: HTMLElement;
   ownerDocument: Document;
   controls: Map<string, StatusBarControlPublication>;
+  portalBoundaries: Map<StatusBarPortalSlot, StatusBarPortalBoundaryPublication>;
   actions: Set<string>;
   nativeEvents: WeakMap<Event, StatusBarNativeEventPublication>;
   reactEvents: WeakMap<object, StatusBarReactEventPublication>;
   pendingIntents: Set<StatusBarEventIntent>;
   outsidePointerChain: StatusBarOutsidePointerChain | null;
   statsTrigger: HTMLButtonElement;
+  statsBoundary: StatusBarStatsBoundaryPublication | null;
+  retiredStatsBoundary: StatusBarStatsBoundaryPublication | null;
   statsContent: HTMLElement | null;
   statsPortalRoot: HTMLElement | null;
   statsSide: string | null;
@@ -254,6 +281,8 @@ interface StatusBarPublicationManager {
   epoch: number;
   candidates: Map<string, StatusBarControlPublication>;
   active: StatusBarGeneration | null;
+  statsBoundary: StatusBarStatsBoundaryPublication | null;
+  portalBoundaries: Map<StatusBarPortalSlot, StatusBarPortalBoundaryPublication>;
 }
 
 interface StatusBarValueIntent<T> {
@@ -308,6 +337,8 @@ function createPublicationManager(): StatusBarPublicationManager {
     epoch: 0,
     candidates: new Map(),
     active: null,
+    statsBoundary: null,
+    portalBoundaries: new Map(),
   };
 }
 
@@ -517,6 +548,20 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
     retireGeneration(generation);
     return false;
   }
+  if (
+    generation.manager.statsBoundary !== generation.statsBoundary
+    || (
+      !generation.statsMutationLease
+      && generation.statsBoundary
+      && !statsBoundaryPublicationIsExact(
+        generation,
+        generation.statsBoundary,
+      )
+    )
+  ) {
+    retireGeneration(generation);
+    return false;
+  }
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
@@ -595,26 +640,131 @@ function isStatusBarFocusGuard(node: Node) {
   );
 }
 
+function isStatusBarPortalSlot(slot: string): slot is StatusBarPortalSlot {
+  return slot === "menu-content" || slot === "issues-content";
+}
+
+function statusBarPortalTestId(slot: StatusBarPortalSlot) {
+  return slot === "menu-content"
+    ? "status-menu-content"
+    : "status-issues-content";
+}
+
+function statusBarPortalBoundaryIsExact(
+  publication: StatusBarPortalBoundaryPublication,
+  connected: boolean,
+) {
+  const { content, ownerDocument, portal, root, slot } = publication;
+  const matchingContents = connected
+    ? [...ownerDocument.querySelectorAll<HTMLElement>(
+      `[data-testid="${statusBarPortalTestId(slot)}"]`,
+    )]
+    : [];
+  return (
+    Object.isFrozen(publication)
+    && typeof publication.identity === "symbol"
+    && root.ownerDocument === ownerDocument
+    && content.ownerDocument === ownerDocument
+    && portal.ownerDocument === ownerDocument
+    && content.getAttribute("data-testid") === statusBarPortalTestId(slot)
+    && content.parentElement === portal
+    && portal.hasAttribute("data-radix-popper-content-wrapper")
+    && (
+      connected
+        ? root.isConnected
+          && content.isConnected
+          && portal.isConnected
+          && portal.parentElement === ownerDocument.body
+          && matchingContents.length === 1
+          && matchingContents[0] === content
+        : !content.isConnected
+          && !portal.isConnected
+          && portal.parentElement === null
+    )
+  );
+}
+
+function publishStatusBarPortalBoundary(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  slot: StatusBarPortalSlot,
+  root: HTMLElement,
+  content: HTMLElement,
+) {
+  const ownerDocument = root.ownerDocument;
+  const portal = content.parentElement;
+  if (
+    authority.mount !== manager.mount
+    || !authorityIsExact(authority)
+    || !expectedStatusBarSlots(authority).includes(slot)
+    || !root.isConnected
+    || content.ownerDocument !== ownerDocument
+    || !content.isConnected
+    || content.getAttribute("data-testid") !== statusBarPortalTestId(slot)
+    || !(portal instanceof HTMLElement)
+    || portal.parentElement !== ownerDocument.body
+    || !portal.hasAttribute("data-radix-popper-content-wrapper")
+  )
+    return false;
+  const publication = Object.freeze({
+    identity: Symbol(`status-bar-${slot}-portal`),
+    authority,
+    slot,
+    ownerDocument,
+    root,
+    content,
+    portal,
+  });
+  manager.portalBoundaries.set(slot, publication);
+  return statusBarPortalBoundaryIsExact(publication, true);
+}
+
+function publishedStatusBarPortalForNode(
+  generation: StatusBarGeneration,
+  node: Node,
+) {
+  const publications = new Set([
+    ...generation.portalBoundaries.values(),
+    ...generation.manager.portalBoundaries.values(),
+  ]);
+  return [...publications].some((publication) => (
+    publication.ownerDocument === generation.ownerDocument
+    && publication.portal === node
+    && (
+      statusBarPortalBoundaryIsExact(publication, true)
+      || statusBarPortalBoundaryIsExact(publication, false)
+    )
+  ));
+}
+
+function publishedStatusBarPlacementTarget(
+  generation: StatusBarGeneration,
+  target: Element,
+) {
+  const publications = new Set([
+    ...generation.portalBoundaries.values(),
+    ...generation.manager.portalBoundaries.values(),
+  ]);
+  return [...publications].some((publication) => (
+    publication.ownerDocument === generation.ownerDocument
+    && statusBarPortalBoundaryIsExact(publication, true)
+    && (publication.portal === target || publication.content === target)
+  ));
+}
+
 function mutationIsRadixOwned(
   generation: StatusBarGeneration,
   record: MutationRecord,
+  openingStatsPortal: HTMLElement | null = null,
 ) {
   if (record.type === "childList") {
     const changed = [...record.addedNodes, ...record.removedNodes];
-    if (
-      generation.statsMutationLease
-      && changed.length > 0
-      && changed.every((node) => (
-        isStatusBarFocusGuard(node)
-        || node instanceof HTMLElement
-          && node.hasAttribute("data-radix-popper-content-wrapper")
-      ))
-    )
-      return true;
     return changed.length > 0 && changed.every((node) => (
       isStatusBarFocusGuard(node)
-      || node instanceof HTMLElement
-        && node.hasAttribute("data-radix-popper-content-wrapper")
+      || publishedStatusBarPortalForNode(generation, node)
+      || node === openingStatsPortal
+      || node === generation.statsPortalRoot
+      || node === generation.retiredStatsBoundary?.portal
     ));
   }
   if (record.type !== "attributes" || !(record.target instanceof Element) || !record.attributeName)
@@ -624,10 +774,8 @@ function mutationIsRadixOwned(
     return true;
   if (
     (
-      record.target.hasAttribute("data-radix-popper-content-wrapper")
-      || ["status-menu-content", "status-issues-content"].includes(
-        record.target.getAttribute("data-testid") ?? "",
-      )
+      publishedStatusBarPlacementTarget(generation, record.target)
+      || record.target === generation.statsPortalRoot
     )
     && ["style", "data-side", "data-align"].includes(record.attributeName)
   )
@@ -644,16 +792,28 @@ function mutationIsRadixOwned(
   )
     return true;
   if (["data-radix-popper-side", "data-radix-popper-align"].includes(record.attributeName)) {
-    return true;
+    return [...generation.controls.values()].some(
+      ({ control }) => control === record.target,
+    );
   }
   return false;
 }
 
 function statsBoundContentIsExact(generation: StatusBarGeneration) {
   const { statsContent: content, statsPortalRoot: portal } = generation;
+  const publication = generation.statsBoundary;
   const controlsId = generation.statsTrigger.getAttribute("aria-controls");
   return (
-    content !== null
+    publication !== null
+    && generation.manager.statsBoundary === publication
+    && publication.session === generation.authority.session
+    && publication.ownerDocument === generation.ownerDocument
+    && publication.trigger === generation.statsTrigger
+    && publication.content === content
+    && publication.portal === portal
+    && Object.isFrozen(publication)
+    && typeof publication.identity === "symbol"
+    && content !== null
     && portal !== null
     && controlsId !== null
     && generation.ownerDocument.getElementById(controlsId) === content
@@ -671,29 +831,116 @@ function statsBoundContentIsExact(generation: StatusBarGeneration) {
   );
 }
 
-function findStatsPortalBoundary(
+function statsBoundaryPublicationIsExact(
   generation: StatusBarGeneration,
-  controlsId: string,
+  publication: StatusBarStatsBoundaryPublication,
 ) {
-  const content = generation.ownerDocument.getElementById(controlsId);
-  const portal = content?.parentElement;
+  const { content, ownerDocument, portal, trigger } = publication;
+  const controlsId = trigger.getAttribute("aria-controls");
   return (
-    content instanceof HTMLElement
+    generation.manager.statsBoundary === publication
+    && generation.statsBoundary === publication
+    && publication.session === generation.authority.session
+    && ownerDocument === generation.ownerDocument
+    && trigger === generation.statsTrigger
+    && Object.isFrozen(publication)
+    && typeof publication.identity === "symbol"
+    && content instanceof HTMLElement
     && portal instanceof HTMLElement
+    && controlsId !== null
+    && ownerDocument.getElementById(controlsId) === content
     && content.getAttribute("data-testid") === "stats-popover"
     && content.getAttribute("role") === "dialog"
     && content.getAttribute("data-state") === "open"
-    && content.ownerDocument === generation.ownerDocument
+    && content.ownerDocument === ownerDocument
     && content.isConnected
-    && portal.parentElement === generation.ownerDocument.body
+    && content.parentElement === portal
+    && portal.parentElement === ownerDocument.body
     && portal.hasAttribute("data-radix-popper-content-wrapper")
-    && portal.ownerDocument === generation.ownerDocument
+    && portal.ownerDocument === ownerDocument
     && portal.isConnected
-    && [...generation.ownerDocument.querySelectorAll<HTMLElement>("[id]")]
+    && [...ownerDocument.querySelectorAll<HTMLElement>("[id]")]
       .filter((element) => element.id === controlsId).length === 1
-      ? { content, portal }
-      : null
   );
+}
+
+function statsBoundaryCanRetireForSession(
+  generation: StatusBarGeneration,
+  publication: StatusBarStatsBoundaryPublication,
+) {
+  const { content, ownerDocument, portal, session, trigger } = publication;
+  return (
+    Object.isFrozen(publication)
+    && typeof publication.identity === "symbol"
+    && session !== generation.authority.session
+    && ownerDocument === generation.ownerDocument
+    && trigger === generation.statsTrigger
+    && content.ownerDocument === ownerDocument
+    && portal.ownerDocument === ownerDocument
+    && content.parentElement === portal
+    && !content.isConnected
+    && !portal.isConnected
+    && portal.parentElement === null
+  );
+}
+
+function statsTriggerAfterSessionRetirementIsExact(
+  generation: StatusBarGeneration,
+  publication: StatusBarStatsBoundaryPublication,
+) {
+  const trigger = generation.statsTrigger;
+  return (
+    trigger.ownerDocument === generation.ownerDocument
+    && trigger.parentElement === generation.root
+    && trigger.isConnected
+    && trigger.tagName === "BUTTON"
+    && trigger.type === "button"
+    && trigger.getAttribute("data-testid") === "stats-button"
+    && trigger.getAttribute("aria-haspopup") === "dialog"
+    && trigger.getAttribute("aria-expanded") === "false"
+    && trigger.getAttribute("data-state") === "closed"
+    && trigger.getAttribute("aria-controls") === null
+    && trigger.getAttribute("data-radix-popper-side") === publication.side
+    && trigger.getAttribute("data-radix-popper-align") === publication.align
+    && generation.statsContent === null
+    && generation.statsPortalRoot === null
+    && generation.statsSide === null
+    && generation.statsAlign === null
+  );
+}
+
+function retiredStatsTriggerMutationIsExact(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  const publication = generation.retiredStatsBoundary;
+  const exact = Boolean(
+    publication
+    && records.length >= 1
+    && records.length <= 2
+    && new Set(records.map((record) => record.attributeName)).size === records.length
+    && records.every((record) => (
+      record.type === "attributes"
+      && record.target === generation.statsTrigger
+      && record.attributeNamespace === null
+      && ["data-radix-popper-side", "data-radix-popper-align"].includes(
+        record.attributeName ?? "",
+      )
+      && record.oldValue === (
+        record.attributeName === "data-radix-popper-side"
+          ? publication.side
+          : publication.align
+      )
+      && generation.statsTrigger.getAttribute(record.attributeName ?? "") === null
+    ))
+  );
+  if (
+    exact
+    && generation.statsTrigger.getAttribute("data-radix-popper-side") === null
+    && generation.statsTrigger.getAttribute("data-radix-popper-align") === null
+  )
+    generation.retiredStatsBoundary = null;
+  return exact;
 }
 
 function clearStatsPlacementLease(generation: StatusBarGeneration) {
@@ -956,13 +1203,22 @@ function statsOpeningPortalIsExact(
     && topAdditions[0].hasAttribute("data-radix-popper-content-wrapper")
       ? topAdditions[0]
       : null;
-  const boundary = findStatsPortalBoundary(generation, controlsId);
-  const content = boundary?.content ?? null;
+  const content = portal?.firstElementChild;
   return (
     records.length > 0
     && records.every((record) => record.type === "childList")
     && portal !== null
-    && boundary?.portal === portal
+    && portal.childElementCount === 1
+    && content instanceof HTMLElement
+    && content.id === controlsId
+    && generation.ownerDocument.getElementById(controlsId) === content
+    && content.getAttribute("data-testid") === "stats-popover"
+    && content.getAttribute("role") === "dialog"
+    && content.getAttribute("data-state") === "open"
+    && content.ownerDocument === generation.ownerDocument
+    && content.isConnected
+    && [...generation.ownerDocument.querySelectorAll<HTMLElement>("[id]")]
+      .filter((element) => element.id === controlsId).length === 1
     && records.every((record) => (
       [...record.removedNodes].every(isStatusBarFocusGuard)
       && [...record.addedNodes].every((node) => (
@@ -1075,6 +1331,17 @@ function statsPlacementMutationIsExact(
   clearStatsPlacementLease(generation);
   generation.statsSide = side;
   generation.statsAlign = align;
+  const publication = generation.statsBoundary;
+  if (publication) {
+    const nextBoundary = Object.freeze({
+      ...publication,
+      identity: Symbol("status-bar-stats-boundary"),
+      side,
+      align,
+    });
+    generation.manager.statsBoundary = nextBoundary;
+    generation.statsBoundary = nextBoundary;
+  }
   return true;
 }
 
@@ -1142,6 +1409,8 @@ function statsMutationIsExact(
     return false;
   lease.triggerRecords.push(...records);
   const currentControlsId = generation.statsTrigger.getAttribute("aria-controls");
+  const currentSide = generation.statsTrigger.getAttribute("data-radix-popper-side");
+  const currentAlign = generation.statsTrigger.getAttribute("data-radix-popper-align");
   const expectedAttributes = new Map(triggerSeal.attributes);
   if (triggerRecords.length >= 1)
     expectedAttributes.set("aria-expanded", String(lease.expectedOpen));
@@ -1166,18 +1435,39 @@ function statsMutationIsExact(
   const openingPortal = lease.expectedOpen && currentControlsId
     ? statsOpeningPortalIsExact(generation, currentControlsId, portalRecords)
     : null;
+  const currentBoundary = generation.statsBoundary;
   if (
-    (lease.expectedOpen ? !currentControlsId : currentControlsId !== null)
+    (
+      lease.expectedOpen
+        ? !currentControlsId || !currentSide || !currentAlign
+        : currentControlsId !== null
+    )
     || (
       lease.expectedOpen
         ? !openingPortal
-        : !statsClosingPortalIsExact(generation, portalRecords)
+        : !currentBoundary
+          || generation.manager.statsBoundary !== currentBoundary
+          || !statsClosingPortalIsExact(generation, portalRecords)
           || !statsClosingSubtreeRecordsAreExact(generation, lease.subtreeRecords)
     )
   )
     return false;
   drainStatsAncestorRecords(generation);
   clearStatsMutationLease(generation, true);
+  const nextBoundary = openingPortal && currentSide && currentAlign
+    ? Object.freeze({
+      identity: Symbol("status-bar-stats-boundary"),
+      session: generation.authority.session,
+      side: currentSide,
+      align: currentAlign,
+      ownerDocument: generation.ownerDocument,
+      trigger: generation.statsTrigger,
+      content: openingPortal.content,
+      portal: openingPortal.portal,
+    })
+    : null;
+  generation.manager.statsBoundary = nextBoundary;
+  generation.statsBoundary = nextBoundary;
   generation.statsContent = openingPortal?.content ?? null;
   generation.statsPortalRoot = openingPortal?.portal ?? null;
   generation.statsSide = lease.expectedOpen
@@ -1198,6 +1488,32 @@ function mutationsAreOwned(
   records: readonly MutationRecord[],
 ) {
   if (records.length === 0) return true;
+  const addedWrappers = new Set<Node>();
+  const removedWrappers = new Set<Node>();
+  records.forEach((record) => {
+    if (record.type !== "childList") return;
+    record.addedNodes.forEach((node) => {
+      if (
+        node instanceof HTMLElement
+        && node.hasAttribute("data-radix-popper-content-wrapper")
+      )
+        addedWrappers.add(node);
+    });
+    record.removedNodes.forEach((node) => {
+      if (
+        node instanceof HTMLElement
+        && node.hasAttribute("data-radix-popper-content-wrapper")
+      )
+        removedWrappers.add(node);
+    });
+  });
+  if ([...addedWrappers].some((node) => removedWrappers.has(node)))
+    return false;
+  const lease = generation.statsMutationLease;
+  const controlsId = generation.statsTrigger.getAttribute("aria-controls");
+  const openingStatsPortal = lease?.expectedOpen && controlsId
+    ? statsOpeningPortalIsExact(generation, controlsId, records)?.portal ?? null
+    : null;
   const statsRecords = records.filter((record) => (
     record.target === generation.statsTrigger
     || generation.statsTrigger.contains(record.target)
@@ -1210,7 +1526,9 @@ function mutationsAreOwned(
     !statsRecords.includes(record)
     && !statsContentPlacementRecords.includes(record)
   ));
-  if (otherRecords.some((record) => !mutationIsRadixOwned(generation, record)))
+  if (otherRecords.some(
+    (record) => !mutationIsRadixOwned(generation, record, openingStatsPortal),
+  ))
     return false;
   if (
     statsContentPlacementRecords.length > 0
@@ -1221,6 +1539,8 @@ function mutationsAreOwned(
   )
     return false;
   if (statsRecords.length === 0) return true;
+  if (generation.retiredStatsBoundary)
+    return retiredStatsTriggerMutationIsExact(generation, statsRecords);
   return generation.statsMutationLease
     ? statsMutationIsExact(generation, statsRecords)
     : statsPlacementMutationIsExact(generation, statsRecords);
@@ -1437,7 +1757,10 @@ function pointerChainEventIsExact(
     && next.shiftKey === pointerDown.shiftKey
     && next.pointerId === pointerDown.pointerId
     && next.pointerType === pointerDown.pointerType
-    && next.isPrimary === pointerDown.isPrimary
+    && (
+      next.type === "click"
+      || next.isPrimary === pointerDown.isPrimary
+    )
     && (next.type !== "click" || typeof next.detail === "number" && next.detail > 0)
   );
 }
@@ -1747,6 +2070,35 @@ function activateGeneration(
   const portalContents = ["menu-content", "issues-content"]
     .map((slot) => controls.get(slot)?.control)
     .filter((control): control is HTMLElement => Boolean(control));
+  for (const slot of ["menu-content", "issues-content"] as const) {
+    const content = controls.get(slot)?.control;
+    const publication = manager.portalBoundaries.get(slot);
+    if (content) {
+      if (
+        !publication
+        || publication.authority !== authority
+        || publication.root !== root
+        || publication.content !== content
+        || !statusBarPortalBoundaryIsExact(publication, true)
+      )
+        return;
+    } else if (publication) {
+      if (statusBarPortalBoundaryIsExact(publication, true)) {
+        const wasOpen = slot === "menu-content"
+          ? publication.authority.menuOpen
+          : publication.authority.issuesOpen;
+        const remainsOpen = slot === "menu-content"
+          ? authority.menuOpen
+          : authority.issuesOpen;
+        if (
+          publication.root !== root
+          || !wasOpen
+          || remainsOpen
+        )
+          return;
+      } else if (!statusBarPortalBoundaryIsExact(publication, false)) return;
+    }
+  }
   if ([...controls.values()].some((publication) => (
     publication.epoch !== manager.epoch
     || publication.root !== root
@@ -1760,18 +2112,22 @@ function activateGeneration(
   )))
     return;
   const generation: StatusBarGeneration = {
+    manager,
     authority,
     epoch: manager.epoch,
     identity: Symbol("status-bar-publication"),
     root,
     ownerDocument,
     controls,
+    portalBoundaries: new Map(manager.portalBoundaries),
     actions: new Set(),
     nativeEvents: new WeakMap(),
     reactEvents: new WeakMap(),
     pendingIntents: new Set(),
     outsidePointerChain: null,
     statsTrigger,
+    statsBoundary: manager.statsBoundary,
+    retiredStatsBoundary: null,
     statsContent: null,
     statsPortalRoot: null,
     statsSide: null,
@@ -1784,21 +2140,26 @@ function activateGeneration(
     removeEventListeners: [],
     retired: false,
   };
+  for (const slot of ["menu-content", "issues-content"] as const) {
+    if (!controls.has(slot)) manager.portalBoundaries.delete(slot);
+  }
   const expanded = statsTrigger.getAttribute("aria-expanded");
+  let retiredStatsBoundary: StatusBarStatsBoundaryPublication | null = null;
   if (expanded === "true") {
-    const controlsId = statsTrigger.getAttribute("aria-controls");
     const side = statsTrigger.getAttribute("data-radix-popper-side");
     const align = statsTrigger.getAttribute("data-radix-popper-align");
-    const boundary = controlsId
-      ? findStatsPortalBoundary(generation, controlsId)
-      : null;
-    if (!boundary) return;
-    generation.statsContent = boundary.content;
-    generation.statsPortalRoot = boundary.portal;
+    const publication = generation.statsBoundary;
+    if (
+      !publication
+      || !statsBoundaryPublicationIsExact(generation, publication)
+    )
+      return;
+    generation.statsContent = publication.content;
+    generation.statsPortalRoot = publication.portal;
     generation.statsSide = side;
     generation.statsAlign = align;
-    const contentSide = boundary.content.getAttribute("data-side");
-    const contentAlign = boundary.content.getAttribute("data-align");
+    const contentSide = publication.content.getAttribute("data-side");
+    const contentAlign = publication.content.getAttribute("data-align");
     if (
       !contentSide
       || !contentAlign
@@ -1808,11 +2169,23 @@ function activateGeneration(
       )
     )
       return;
+  } else if (manager.statsBoundary !== null) {
+    if (!statsBoundaryCanRetireForSession(generation, manager.statsBoundary))
+      return;
+    retiredStatsBoundary = manager.statsBoundary;
+    generation.retiredStatsBoundary = retiredStatsBoundary;
+    manager.statsBoundary = null;
+    generation.statsBoundary = null;
   }
   if (
-    generation.statsPlacementLease
-      ? !statsPendingPlacementIsExact(generation, generation.statsPlacementLease)
-      : !statsTriggerStateIsExact(generation, expanded === "true")
+    retiredStatsBoundary
+      ? !statsTriggerAfterSessionRetirementIsExact(
+        generation,
+        retiredStatsBoundary,
+      )
+      : generation.statsPlacementLease
+        ? !statsPendingPlacementIsExact(generation, generation.statsPlacementLease)
+        : !statsTriggerStateIsExact(generation, expanded === "true")
   )
     return;
   const relationNodes = new Set<Node>();
@@ -2013,6 +2386,21 @@ function useStatusBarControl<T extends HTMLElement>(
   const [refVersion, setRefVersion] = useState(0);
   const setControl = useCallback((control: T | null) => {
     if (!control) return;
+    const root = rootRef.current;
+    if (
+      isStatusBarPortalSlot(slot)
+      && (
+        !root
+        || !publishStatusBarPortalBoundary(
+          manager,
+          authority,
+          slot,
+          root,
+          control,
+        )
+      )
+    )
+      return;
     const publication = publicationRef.current;
     if (
       publication
@@ -2023,7 +2411,7 @@ function useStatusBarControl<T extends HTMLElement>(
     if (controlRef.current === control) return;
     controlRef.current = control;
     if (layoutAttemptedRef.current) setRefVersion((version) => version + 1);
-  }, [manager]);
+  }, [authority, manager, rootRef, slot]);
 
   useLayoutEffect(() => {
     layoutAttemptedRef.current = true;

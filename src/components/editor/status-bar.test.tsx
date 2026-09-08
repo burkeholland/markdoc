@@ -850,6 +850,86 @@ describe("status bar nested StatsPopover reconciliation", () => {
     expect(current.storage).toHaveBeenCalledOnce();
   });
 
+  it("keeps a replay bound to the original statistics portal", async () => {
+    const original = callbacks();
+    const replacement = callbacks();
+    const props = statusProps(original);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const replacementProps = {
+      ...props,
+      onStorage: replacement.storage,
+    };
+    await rerenderStatus(view, replacementProps);
+    const content = screen.getByTestId("stats-popover");
+    const portal = content.parentElement;
+    if (!portal) throw new Error("Statistics portal wrapper missing");
+    const clone = portal.cloneNode(true) as HTMLElement;
+
+    portal.replaceWith(clone);
+    try {
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(original.storage).not.toHaveBeenCalled();
+      expect(replacement.storage).not.toHaveBeenCalled();
+    } finally {
+      if (clone.isConnected) clone.replaceWith(portal);
+    }
+
+    await rerenderStatus(view, replacementProps, "fresh-after-stats-clone");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(replacement.storage).toHaveBeenCalledOnce();
+  });
+
+  it("retires an open statistics boundary when its session is replaced", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+
+    await rerenderStatus(view, {
+      ...props,
+      session: fakeSession("session-b"),
+    });
+
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+
+    await nextTask();
+    fireEvent.click(screen.getByTestId("stats-button"));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+    fireEvent.keyDown(screen.getByTestId("stats-popover"), {
+      code: "Escape",
+      key: "Escape",
+    });
+    await act(async () => Promise.resolve());
+    fireEvent.click(desktopShortcuts());
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+  });
+
+  it("retires after an unrelated fake popper wrapper is added and removed", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const fakePortal = document.createElement("div");
+    fakePortal.setAttribute("data-radix-popper-content-wrapper", "");
+    const fakeContent = document.createElement("div");
+    fakeContent.setAttribute("data-testid", "stats-popover");
+    fakePortal.append(fakeContent);
+
+    act(() => {
+      document.body.append(fakePortal);
+      fakePortal.remove();
+    });
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-after-fake-wrapper");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
   it("accepts an immediate secondary-pointer disclosure close once", async () => {
     const current = callbacks();
     const outside = document.createElement("button");
@@ -1184,6 +1264,28 @@ describe("status bar event and replacement claims", () => {
       "false",
     );
     expect(current.issue).not.toHaveBeenCalled();
+  });
+
+  it("accepts Chromium's non-primary synthesized click after a primary pointer chain", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 9));
+    await nextTask();
+    fireEvent(outside, pointerEvent("pointerup", 9));
+    fireEvent(outside, pointerEvent("click", 9, { isPrimary: false }));
+    await act(async () => Promise.resolve());
+
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
   });
 
   it("keeps the Radix fallback lease and expires an incomplete outside gesture", async () => {
