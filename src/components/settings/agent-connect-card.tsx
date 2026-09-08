@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
 import { Check, Copy, ExternalLink, KeyRound, Plug, TerminalSquare, X } from "lucide-react";
@@ -25,12 +26,18 @@ const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs
 type ConnectTarget = "copilot-cli" | "mcp-clients" | "other-clients" | "copilot-app";
 type ConnectTargetDefinition = { id: ConnectTarget; label: string };
 
-const CONNECT_TARGETS: ConnectTargetDefinition[] = [
-  { id: "copilot-cli", label: "Copilot CLI" },
-  { id: "mcp-clients", label: "VS Code" },
-  { id: "other-clients", label: "Other MCP clients" },
-  { id: "copilot-app", label: "Copilot app" },
-];
+const CONNECT_TARGETS = Object.freeze([
+  Object.freeze({ id: "copilot-cli", label: "Copilot CLI" }),
+  Object.freeze({ id: "mcp-clients", label: "VS Code" }),
+  Object.freeze({ id: "other-clients", label: "Other MCP clients" }),
+  Object.freeze({ id: "copilot-app", label: "Copilot app" }),
+]) satisfies readonly ConnectTargetDefinition[];
+const CONNECT_TARGET_IDS = Object.freeze(CONNECT_TARGETS.map(({ id }) => id));
+const AGENT_TAB_ROLES = Object.freeze(["list", ...CONNECT_TARGET_IDS] as const);
+const AGENT_TABLIST_CLASS = "mt-3 flex flex-wrap gap-1 rounded-lg bg-surface-2 p-1";
+const AGENT_TAB_CLASS = "rounded-md px-2.5 py-1.5 text-xs font-medium";
+const queueAgentTabCoordinatorDisposal =
+  globalThis.queueMicrotask.bind(globalThis);
 
 interface AgentConnectAuthority {
   mount: symbol;
@@ -39,6 +46,7 @@ interface AgentConnectAuthority {
   onCreateToken: (() => void) | undefined;
   onDismiss: (() => void) | undefined;
   hideTokenStep: boolean | undefined;
+  className: string | undefined;
 }
 
 interface TabOwner {
@@ -1125,6 +1133,1449 @@ export function CopyBlock({ value, label, testId, copyTestId }: { value: string;
   );
 }
 
+type AgentTabRole = typeof AGENT_TAB_ROLES[number];
+
+interface AgentTabElements {
+  list: HTMLDivElement | null;
+  tabs: Record<ConnectTarget, HTMLButtonElement | null>;
+}
+
+interface AgentTabRender {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly authority: AgentConnectAuthority;
+  readonly authorityRef: RefObject<AgentConnectAuthority | null>;
+  readonly selectedRef: RefObject<ConnectTarget>;
+  readonly selected: ConnectTarget;
+  readonly tabsId: string;
+  readonly order: readonly ConnectTarget[];
+  readonly setTarget: (target: ConnectTarget) => void;
+}
+
+interface AgentTabBinding {
+  readonly identity: symbol;
+  readonly generation: AgentTabGeneration;
+  readonly role: AgentTabRole;
+  readonly element: HTMLElement;
+  active: boolean;
+}
+
+interface AgentTabGeneration {
+  readonly identity: symbol;
+  readonly render: AgentTabRender;
+  readonly elements: AgentTabElements;
+  readonly bindings: Record<AgentTabRole, AgentTabBinding | null>;
+  authority: AgentTabDraft | null;
+}
+
+interface AgentTabDraft {
+  readonly identity: symbol;
+  readonly render: AgentTabRender;
+  readonly generation: AgentTabGeneration;
+  committed: boolean;
+  retired: boolean;
+}
+
+interface AgentTabPlacement {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface AgentTabDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly AgentTabDomSnapshot[];
+}
+
+interface AgentTabEventIntrinsics {
+  readonly keyboardPrototype: object;
+  readonly bubblingPhase: number;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: AgentTabTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: KeyboardEvent) => string;
+    code: (this: KeyboardEvent) => string;
+    location: (this: KeyboardEvent) => number;
+    altKey: (this: KeyboardEvent) => boolean;
+    ctrlKey: (this: KeyboardEvent) => boolean;
+    metaKey: (this: KeyboardEvent) => boolean;
+    shiftKey: (this: KeyboardEvent) => boolean;
+    repeat: (this: KeyboardEvent) => boolean;
+    isComposing: (this: KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly setTimeout: Window["setTimeout"];
+  readonly clearTimeout: Window["clearTimeout"];
+}
+
+interface AgentTabTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface AgentTabAction {
+  readonly identity: symbol;
+  readonly generation: AgentTabGeneration;
+  readonly render: AgentTabRender;
+  readonly sourceId: ConnectTarget;
+  readonly sourceIndex: number;
+  readonly source: HTMLButtonElement;
+  readonly ownerDocument: Document;
+  readonly order: readonly ConnectTarget[];
+}
+
+interface AgentTabPublication {
+  readonly identity: symbol;
+  readonly draft: AgentTabDraft;
+  readonly generation: AgentTabGeneration;
+  readonly render: AgentTabRender;
+  readonly list: HTMLDivElement;
+  readonly tabs: Readonly<Record<ConnectTarget, HTMLButtonElement>>;
+  readonly bindings: Readonly<Record<AgentTabRole, AgentTabBinding>>;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly placement: readonly AgentTabPlacement[];
+  readonly dom: AgentTabDomSnapshot;
+  readonly intrinsics: AgentTabEventIntrinsics;
+  readonly actions: Readonly<Record<ConnectTarget, AgentTabAction>>;
+  retired: boolean;
+  mutated: boolean;
+  observer: MutationObserver | null;
+}
+
+interface AgentTabReplay {
+  readonly identity: symbol;
+  readonly publication: AgentTabPublication;
+  readonly generation: AgentTabGeneration;
+  readonly expected: Readonly<Record<AgentTabRole, AgentTabBinding>>;
+  readonly released: Set<AgentTabRole>;
+  readonly rebound: Map<AgentTabRole, AgentTabBinding>;
+  readonly expiry: AgentTabReplayExpiry;
+  layoutRetired: boolean;
+  invalid: boolean;
+}
+
+interface AgentTabReplayExpiry {
+  readonly identity: symbol;
+  active: boolean;
+  handle: number | null;
+  cancel: ((handle: number) => void) | null;
+}
+
+interface AgentTabDisposalToken {
+  readonly identity: symbol;
+  readonly coordinator: AgentTabCoordinator;
+  active: boolean;
+}
+
+interface AgentTabNativeSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+type AgentTabReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
+  readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
+};
+
+function emptyAgentTabElements(): AgentTabElements {
+  return {
+    list: null,
+    tabs: {
+      "copilot-cli": null,
+      "mcp-clients": null,
+      "other-clients": null,
+      "copilot-app": null,
+    },
+  };
+}
+
+function emptyAgentTabBindings(): Record<AgentTabRole, AgentTabBinding | null> {
+  return {
+    list: null,
+    "copilot-cli": null,
+    "mcp-clients": null,
+    "other-clients": null,
+    "copilot-app": null,
+  };
+}
+
+function agentTabAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotAgentTabDom(node: Node): AgentTabDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: agentTabAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotAgentTabDom)),
+  });
+}
+
+function agentTabDomMatches(snapshot: AgentTabDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = agentTabAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && agentTabDomMatches(child));
+}
+
+function snapshotAgentTabPlacement(
+  list: HTMLDivElement,
+  ownerDocument: Document,
+): readonly AgentTabPlacement[] | null {
+  const placement: AgentTabPlacement[] = [];
+  let current: Node | null = list;
+  while (current) {
+    placement.push(Object.freeze({
+      node: current,
+      parent: current.parentNode,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+    }));
+    if (current === ownerDocument) return Object.freeze(placement);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function agentTabPlacementMatches(
+  list: HTMLDivElement,
+  ownerDocument: Document,
+  placement: readonly AgentTabPlacement[],
+): boolean {
+  if (
+    !list.isConnected ||
+    list.ownerDocument !== ownerDocument ||
+    list.getRootNode() !== ownerDocument ||
+    placement.length < 2 ||
+    placement[0]?.node !== list
+  ) {
+    return false;
+  }
+  for (let index = 0; index < placement.length; index++) {
+    const current = placement[index]!;
+    const next = placement[index + 1];
+    if (
+      !current.node.isConnected ||
+      current.node.parentNode !== current.parent ||
+      current.node.previousSibling !== current.previousSibling ||
+      current.node.nextSibling !== current.nextSibling ||
+      (next && current.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placement.at(-1)!;
+  return last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null;
+}
+
+function agentTabMutationTouchesPlacement(
+  placement: readonly AgentTabPlacement[],
+  mutation: MutationRecord,
+): boolean {
+  if (mutation.type !== "childList") return false;
+  return placement.some(({ node, parent }) =>
+    parent === mutation.target &&
+    (
+      mutation.previousSibling === node ||
+      mutation.nextSibling === node ||
+      [...mutation.addedNodes].includes(node) ||
+      [...mutation.removedNodes].includes(node)
+    ));
+}
+
+function agentTabGetter<This extends object, Value>(
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = Object.getOwnPropertyDescriptor(prototype, property)?.get;
+  return typeof getter === "function" ? getter as (this: This) => Value : null;
+}
+
+function agentTabDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+    current.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.get === expected.get &&
+    current.set === expected.set &&
+    current.value === expected.value &&
+    current.writable === expected.writable
+  );
+}
+
+function captureAgentTabTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): AgentTabTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("agent-tab-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    agentTabDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureAgentTabIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): AgentTabEventIntrinsics | null {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiEventPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const trusted = captureAgentTabTrustedAuthority(ownerWindow);
+  const type = agentTabGetter<Event, string>(eventPrototype, "type");
+  const target = agentTabGetter<Event, EventTarget | null>(eventPrototype, "target");
+  const currentTarget = agentTabGetter<Event, EventTarget | null>(eventPrototype, "currentTarget");
+  const eventPhase = agentTabGetter<Event, number>(eventPrototype, "eventPhase");
+  const bubbles = agentTabGetter<Event, boolean>(eventPrototype, "bubbles");
+  const cancelable = agentTabGetter<Event, boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = agentTabGetter<Event, boolean>(eventPrototype, "defaultPrevented");
+  const cancelBubble = agentTabGetter<Event, boolean>(eventPrototype, "cancelBubble");
+  const key = agentTabGetter<KeyboardEvent, string>(keyboardPrototype, "key");
+  const code = agentTabGetter<KeyboardEvent, string>(keyboardPrototype, "code");
+  const location = agentTabGetter<KeyboardEvent, number>(keyboardPrototype, "location");
+  const altKey = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "shiftKey");
+  const repeat = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "repeat");
+  const isComposing = agentTabGetter<KeyboardEvent, boolean>(keyboardPrototype, "isComposing");
+  const view = agentTabGetter<UIEvent, Window | null>(uiEventPrototype, "view");
+  const activeElement = agentTabGetter<Document, Element | null>(documentPrototype, "activeElement");
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const focus = htmlElementPrototype.focus;
+  const setTimeout = ownerWindow.setTimeout;
+  const clearTimeout = ownerWindow.clearTimeout;
+  const isPrototypeOf = Object.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof focus !== "function" ||
+    typeof setTimeout !== "function" ||
+    typeof clearTimeout !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    keyboardPrototype,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+    setTimeout,
+    clearTimeout,
+  });
+}
+
+function readAgentTabNativeEvent(
+  event: Event,
+  intrinsics: AgentTabEventIntrinsics,
+): AgentTabNativeSnapshot | null {
+  try {
+    if (
+      !Reflect.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.trusted.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: Reflect.apply(intrinsics.event.type, event, []),
+      target: Reflect.apply(intrinsics.event.target, event, []),
+      currentTarget: Reflect.apply(intrinsics.event.currentTarget, event, []),
+      eventPhase: Reflect.apply(intrinsics.event.eventPhase, event, []),
+      bubbles: Reflect.apply(intrinsics.event.bubbles, event, []),
+      cancelable: Reflect.apply(intrinsics.event.cancelable, event, []),
+      defaultPrevented: Reflect.apply(intrinsics.event.defaultPrevented, event, []),
+      cancelBubble: Reflect.apply(intrinsics.event.cancelBubble, event, []),
+      path: Object.freeze(Reflect.apply(intrinsics.event.composedPath, event, [])),
+      key: Reflect.apply(intrinsics.keyboard.key, event, []),
+      code: Reflect.apply(intrinsics.keyboard.code, event, []),
+      location: Reflect.apply(intrinsics.keyboard.location, event, []),
+      altKey: Reflect.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: Reflect.apply(intrinsics.keyboard.ctrlKey, event, []),
+      metaKey: Reflect.apply(intrinsics.keyboard.metaKey, event, []),
+      shiftKey: Reflect.apply(intrinsics.keyboard.shiftKey, event, []),
+      repeat: Reflect.apply(intrinsics.keyboard.repeat, event, []),
+      isComposing: Reflect.apply(intrinsics.keyboard.isComposing, event, []),
+      isTrusted: intrinsics.trusted.read(event),
+      view: Reflect.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function agentTabPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    (
+      terminal === ownerWindow ||
+      (
+        typeof terminal === "object" &&
+        terminal !== null &&
+        "document" in terminal &&
+        terminal.document === ownerDocument
+      )
+    );
+}
+
+function agentTabDestination(key: string, sourceIndex: number): number {
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    return (sourceIndex + 1) % CONNECT_TARGET_IDS.length;
+  }
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return (sourceIndex - 1 + CONNECT_TARGET_IDS.length) % CONNECT_TARGET_IDS.length;
+  }
+  if (key === "Home") return 0;
+  if (key === "End") return CONNECT_TARGET_IDS.length - 1;
+  return -1;
+}
+
+function setAgentTabElement(
+  elements: AgentTabElements,
+  role: AgentTabRole,
+  element: HTMLElement | null,
+) {
+  if (role === "list") elements.list = element as HTMLDivElement | null;
+  else elements.tabs[role] = element as HTMLButtonElement | null;
+}
+
+class AgentTabCoordinator {
+  readonly #mount: symbol;
+  #disposed = false;
+  #pendingDisposal: AgentTabDisposalToken | null = null;
+  #current: AgentTabPublication | null = null;
+  #replay: AgentTabReplay | null = null;
+  #elementOwners = new WeakMap<HTMLElement, AgentTabBinding>();
+  #publishedGenerations = new WeakSet<AgentTabGeneration>();
+  #replayedGenerations = new WeakSet<AgentTabGeneration>();
+  #claimedPublications = new WeakSet<AgentTabPublication>();
+  #claimedActions = new WeakSet<AgentTabAction>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedNativeEvents = new WeakSet<Event>();
+
+  constructor(mount: symbol) {
+    this.#mount = mount;
+  }
+
+  establishLifetime() {
+    if (this.#disposed) return;
+    const pending = this.#pendingDisposal;
+    if (pending) {
+      pending.active = false;
+      this.#pendingDisposal = null;
+    }
+    return () => this.#scheduleDisposal();
+  }
+
+  createDraft(render: AgentTabRender): AgentTabDraft {
+    const generation: AgentTabGeneration = {
+      identity: Symbol("agent-tab-generation"),
+      render,
+      elements: emptyAgentTabElements(),
+      bindings: emptyAgentTabBindings(),
+      authority: null,
+    };
+    const draft: AgentTabDraft = {
+      identity: Symbol("agent-tab-draft"),
+      render,
+      generation,
+      committed: false,
+      retired: false,
+    };
+    generation.authority = draft;
+    return draft;
+  }
+
+  bindList(draft: AgentTabDraft, element: HTMLDivElement | null) {
+    return this.#bind(draft.generation, "list", element);
+  }
+
+  bindTab(
+    draft: AgentTabDraft,
+    target: ConnectTarget,
+    element: HTMLButtonElement | null,
+  ) {
+    return this.#bind(draft.generation, target, element);
+  }
+
+  establish(initialDraft: AgentTabDraft) {
+    if (this.#disposed) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    if (initialDraft.retired) {
+      const successor = this.#replaySuccessor(initialDraft);
+      return successor ? () => this.retire(successor) : undefined;
+    }
+    const { generation } = initialDraft;
+    if (
+      generation.authority !== initialDraft ||
+      this.#publishedGenerations.has(generation)
+    ) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    this.#publishedGenerations.add(generation);
+    if (this.#current && this.#current.generation !== generation) {
+      this.#retirePublication(this.#current, false);
+    }
+    const publication = this.#createPublication(initialDraft);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    return () => this.retire(publication);
+  }
+
+  retire(publication: AgentTabPublication) {
+    const existingReplay = this.#replay;
+    if (existingReplay?.publication === publication) {
+      existingReplay.layoutRetired = true;
+      return;
+    }
+    if (publication.retired) return;
+    const replay = this.#beginReplay(publication);
+    if (replay) replay.layoutRetired = true;
+    this.#retirePublication(publication, Boolean(replay));
+  }
+
+  dispose() {
+    if (this.#disposed) return;
+    const pending = this.#pendingDisposal;
+    if (pending) {
+      pending.active = false;
+      this.#pendingDisposal = null;
+    }
+    this.#disposed = true;
+    const replay = this.#replay;
+    if (replay) {
+      this.#invalidateReplay(replay);
+    }
+    const publication = this.#current;
+    if (publication) {
+      this.#retirePublication(publication, false);
+      this.#retireGeneration(publication.generation);
+    }
+  }
+
+  activate(
+    generation: AgentTabGeneration,
+    sourceId: ConnectTarget,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    const publication = this.#current;
+    const action = publication?.actions[sourceId];
+    const source = action?.source;
+    const nativeEvent = event?.nativeEvent;
+    const snapshot = publication && nativeEvent
+      ? readAgentTabNativeEvent(nativeEvent, publication.intrinsics)
+      : null;
+    const destinationIndex = snapshot && action
+      ? agentTabDestination(snapshot.key, action.sourceIndex)
+      : -1;
+    const destinationId = destinationIndex >= 0
+      ? publication?.render.order[destinationIndex]
+      : undefined;
+    const destination = destinationId ? publication?.tabs[destinationId] : undefined;
+    const proof = event as AgentTabReactEvent;
+    const reactPrototype = event && typeof event === "object"
+      ? Object.getPrototypeOf(event)
+      : null;
+    if (
+      !publication ||
+      !action ||
+      !source ||
+      !snapshot ||
+      !destinationId ||
+      !destination ||
+      publication.generation !== generation ||
+      publication.draft !== generation.authority ||
+      publication.retired ||
+      publication.draft.retired ||
+      publication.render.selected !== sourceId ||
+      publication.render.selectedRef.current !== sourceId ||
+      action.generation !== generation ||
+      action.render !== publication.render ||
+      action.sourceId !== sourceId ||
+      action.sourceIndex !== CONNECT_TARGET_IDS.indexOf(sourceId) ||
+      action.source !== source ||
+      action.ownerDocument !== publication.ownerDocument ||
+      action.order !== publication.render.order ||
+      destinationId === sourceId ||
+      !Object.isFrozen(action) ||
+      !reactPrototype ||
+      reactPrototype === Object.prototype ||
+      event.type !== snapshot.type ||
+      event.type !== "keydown" ||
+      event.nativeEvent !== nativeEvent ||
+      event.currentTarget !== source ||
+      event.target !== source ||
+      event.eventPhase !== snapshot.eventPhase ||
+      event.bubbles !== snapshot.bubbles ||
+      event.cancelable !== snapshot.cancelable ||
+      event.defaultPrevented ||
+      event.isTrusted !== snapshot.isTrusted ||
+      event.key !== snapshot.key ||
+      event.code !== snapshot.code ||
+      event.location !== snapshot.location ||
+      event.altKey !== snapshot.altKey ||
+      event.ctrlKey !== snapshot.ctrlKey ||
+      event.metaKey !== snapshot.metaKey ||
+      event.shiftKey !== snapshot.shiftKey ||
+      event.repeat !== snapshot.repeat ||
+      proof._reactName !== "onKeyDown" ||
+      typeof event.isDefaultPrevented !== "function" ||
+      event.isDefaultPrevented() ||
+      typeof event.isPropagationStopped !== "function" ||
+      event.isPropagationStopped() ||
+      typeof proof.isPersistent !== "function" ||
+      !proof.isPersistent() ||
+      typeof event.persist !== "function" ||
+      typeof event.preventDefault !== "function" ||
+      typeof event.stopPropagation !== "function" ||
+      snapshot.type !== "keydown" ||
+      snapshot.target !== source ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== publication.intrinsics.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null && snapshot.view !== publication.ownerWindow) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !agentTabPathMatches(
+        snapshot.path,
+        source,
+        publication.ownerDocument,
+        publication.ownerWindow,
+      ) ||
+      Reflect.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedActions.has(action) ||
+      this.#claimedReactEvents.has(event) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      !this.#actionIsCurrent(publication, action) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      return;
+    }
+
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(event);
+    this.#claimedNativeEvents.add(nativeEvent);
+    Reflect.apply(publication.intrinsics.event.preventDefault, nativeEvent, []);
+    if (
+      !Reflect.apply(
+        publication.intrinsics.event.defaultPrevented,
+        nativeEvent,
+        [],
+      )
+    ) {
+      return;
+    }
+    publication.render.selectedRef.current = destinationId;
+    publication.render.setTarget(destinationId);
+    Reflect.apply(publication.intrinsics.focus, destination, [
+      { preventScroll: true },
+    ]);
+  }
+
+  #bind(
+    generation: AgentTabGeneration,
+    role: AgentTabRole,
+    element: HTMLElement | null,
+  ): (() => void) | undefined {
+    const previous = generation.bindings[role];
+    if (element === null) {
+      if (previous) this.#release(previous, "null");
+      return;
+    }
+    if (previous?.active && previous.element === element) return;
+    if (
+      previous?.active &&
+      (
+        !element.isConnected ||
+        element.ownerDocument !== previous.element.ownerDocument
+      )
+    ) {
+      return;
+    }
+    if (previous) this.#release(previous, "replace");
+    if (this.#replay && this.#replay.generation !== generation) {
+      this.#invalidateReplay(this.#replay);
+    }
+    if (!this.#canBind(generation)) return;
+
+    const replay = this.#replay;
+    if (replay?.generation === generation) {
+      const expected = replay.expected[role];
+      if (
+        replay.invalid ||
+        !replay.released.has(role) ||
+        replay.rebound.has(role) ||
+        expected.element !== element
+      ) {
+        this.#invalidateReplay(replay);
+        return;
+      }
+    }
+
+    const displaced = this.#elementOwners.get(element);
+    if (displaced) {
+      if (
+        displaced.generation !== generation &&
+        this.#current?.generation === displaced.generation &&
+        generation.authority?.retired
+      ) {
+        return;
+      }
+      this.#release(displaced, "replace");
+      if (!this.#canBind(generation)) return;
+    }
+
+    const binding: AgentTabBinding = {
+      identity: Symbol(`agent-tab-${role}-binding`),
+      generation,
+      role,
+      element,
+      active: true,
+    };
+    generation.bindings[role] = binding;
+    setAgentTabElement(generation.elements, role, element);
+    this.#elementOwners.set(element, binding);
+    if (replay?.generation === generation) replay.rebound.set(role, binding);
+    return () => this.#release(binding, "cleanup");
+  }
+
+  #scheduleDisposal() {
+    if (this.#disposed || this.#pendingDisposal) return;
+    const token: AgentTabDisposalToken = {
+      identity: Symbol("agent-tab-disposal"),
+      coordinator: this,
+      active: true,
+    };
+    this.#pendingDisposal = token;
+    queueAgentTabCoordinatorDisposal(() => {
+      if (
+        !token.active ||
+        token.coordinator !== this ||
+        this.#pendingDisposal !== token ||
+        this.#pendingDisposal.identity !== token.identity
+      ) {
+        return;
+      }
+      token.active = false;
+      this.#pendingDisposal = null;
+      this.dispose();
+    });
+  }
+
+  #release(
+    binding: AgentTabBinding,
+    source: "cleanup" | "null" | "replace",
+  ) {
+    if (!binding.active) return;
+    const publication = this.#current;
+    const startsReplay =
+      publication?.generation === binding.generation &&
+      publication.bindings[binding.role] === binding
+        ? this.#beginReplay(publication)
+        : null;
+    const replay = this.#replay;
+    binding.active = false;
+    const { generation, role, element } = binding;
+    if (generation.bindings[role] === binding) {
+      generation.bindings[role] = null;
+      setAgentTabElement(generation.elements, role, null);
+    }
+    if (this.#elementOwners.get(element) === binding) {
+      this.#elementOwners.delete(element);
+    }
+
+    if (replay?.generation === generation) {
+      if (
+        source !== "cleanup" ||
+        replay.expected[role] !== binding ||
+        replay.released.has(role) ||
+        replay.rebound.has(role)
+      ) {
+        replay.invalid = true;
+      } else {
+        replay.released.add(role);
+      }
+    }
+
+    if (publication?.generation === generation) {
+      this.#retirePublication(
+        publication,
+        Boolean(startsReplay && !startsReplay.invalid),
+      );
+    } else if (!replay && generation.authority && !generation.authority.retired) {
+      this.#retireDraft(generation.authority);
+    }
+    if (replay?.invalid) this.#invalidateReplay(replay);
+  }
+
+  #canBind(generation: AgentTabGeneration): boolean {
+    const authority = generation.authority;
+    return Boolean(
+      authority &&
+      (
+        !authority.retired ||
+        this.#current?.generation === generation ||
+        (this.#replay?.generation === generation && !this.#replay.invalid)
+      ),
+    );
+  }
+
+  #beginReplay(publication: AgentTabPublication): AgentTabReplay | null {
+    if (this.#replay?.publication === publication) return this.#replay;
+    if (
+      this.#replay ||
+      publication.retired ||
+      this.#claimedPublications.has(publication) ||
+      this.#current !== publication ||
+      this.#replayedGenerations.has(publication.generation) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      return null;
+    }
+    const replay: AgentTabReplay = {
+      identity: Symbol("agent-tab-replay"),
+      publication,
+      generation: publication.generation,
+      expected: publication.bindings,
+      released: new Set(),
+      rebound: new Map(),
+      expiry: {
+        identity: Symbol("agent-tab-replay-expiry"),
+        active: true,
+        handle: null,
+        cancel: null,
+      },
+      layoutRetired: false,
+      invalid: false,
+    };
+    this.#replay = replay;
+    const { expiry, identity } = replay;
+    const expiryIdentity = expiry.identity;
+    expiry.cancel = (handle) => {
+      Reflect.apply(
+        publication.intrinsics.clearTimeout,
+        publication.ownerWindow,
+        [handle],
+      );
+    };
+    expiry.handle = Reflect.apply(
+      publication.intrinsics.setTimeout,
+      publication.ownerWindow,
+      [
+        () => {
+          if (!expiry.active) return;
+          const current = this.#replay;
+          if (
+            !current ||
+            current.identity !== identity ||
+            current.expiry !== expiry ||
+            current.expiry.identity !== expiryIdentity
+          ) {
+            return;
+          }
+          expiry.handle = null;
+          expiry.cancel = null;
+          this.#invalidateReplay(current);
+        },
+        0,
+      ],
+    );
+    return replay;
+  }
+
+  #replaySuccessor(initialDraft: AgentTabDraft): AgentTabPublication | null {
+    const replay = this.#replay;
+    const { generation } = initialDraft;
+    if (
+      !replay ||
+      replay.publication.draft !== initialDraft ||
+      replay.generation !== generation ||
+      generation.authority !== initialDraft ||
+      !initialDraft.committed ||
+      !initialDraft.retired ||
+      !replay.publication.retired ||
+      replay.invalid ||
+      !replay.layoutRetired ||
+      this.#current ||
+      this.#replayedGenerations.has(generation) ||
+      replay.released.size !== AGENT_TAB_ROLES.length ||
+      replay.rebound.size !== AGENT_TAB_ROLES.length ||
+      AGENT_TAB_ROLES.some((role) => {
+        const expected = replay.expected[role];
+        const rebound = replay.rebound.get(role);
+        return (
+          !rebound ||
+          rebound.element !== expected.element ||
+          generation.bindings[role] !== rebound ||
+          !this.#ownsBinding(rebound)
+        );
+      }) ||
+      !this.#renderIsCurrent(initialDraft.render) ||
+      !this.#mutationFree(replay.publication) ||
+      !this.#hierarchyIsCurrent(
+        generation,
+        initialDraft.render,
+        replay.publication.dom,
+        replay.publication.placement,
+      )
+    ) {
+      if (replay) this.#invalidateReplay(replay);
+      return null;
+    }
+
+    const successor: AgentTabDraft = {
+      identity: Symbol("agent-tab-successor-draft"),
+      render: initialDraft.render,
+      generation,
+      committed: false,
+      retired: false,
+    };
+    this.#replayedGenerations.add(generation);
+    generation.authority = successor;
+    const publication = this.#createPublication(
+      successor,
+      replay.publication.dom,
+      replay.publication.placement,
+      replay.publication.intrinsics,
+    );
+    this.#finishReplay(replay);
+    this.#disconnect(replay.publication);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(successor);
+      return null;
+    }
+    return publication;
+  }
+
+  #createPublication(
+    draft: AgentTabDraft,
+    expectedDom?: AgentTabDomSnapshot,
+    expectedPlacement?: readonly AgentTabPlacement[],
+    expectedIntrinsics?: AgentTabEventIntrinsics,
+  ): AgentTabPublication | null {
+    const { generation, render } = draft;
+    if (!this.#hierarchyIsCurrent(
+      generation,
+      render,
+      expectedDom,
+      expectedPlacement,
+    )) {
+      return null;
+    }
+    const list = generation.elements.list!;
+    const tabs = Object.freeze({
+      "copilot-cli": generation.elements.tabs["copilot-cli"]!,
+      "mcp-clients": generation.elements.tabs["mcp-clients"]!,
+      "other-clients": generation.elements.tabs["other-clients"]!,
+      "copilot-app": generation.elements.tabs["copilot-app"]!,
+    });
+    const bindings = Object.freeze({
+      list: generation.bindings.list!,
+      "copilot-cli": generation.bindings["copilot-cli"]!,
+      "mcp-clients": generation.bindings["mcp-clients"]!,
+      "other-clients": generation.bindings["other-clients"]!,
+      "copilot-app": generation.bindings["copilot-app"]!,
+    });
+    const ownerDocument = list.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const placement = expectedPlacement ??
+      snapshotAgentTabPlacement(list, ownerDocument);
+    const intrinsics = expectedIntrinsics ??
+      (ownerWindow ? captureAgentTabIntrinsics(ownerWindow) : null);
+    if (!ownerWindow || !placement || !intrinsics) return null;
+    const actions = Object.freeze(Object.fromEntries(
+      CONNECT_TARGETS.map(({ id }, sourceIndex) => [
+        id,
+        Object.freeze({
+          identity: Symbol(`agent-tab-${id}-action`),
+          generation,
+          render,
+          sourceId: id,
+          sourceIndex,
+          source: tabs[id],
+          ownerDocument,
+          order: render.order,
+        } satisfies AgentTabAction),
+      ]),
+    ) as Record<ConnectTarget, AgentTabAction>);
+    return {
+      identity: Symbol("agent-tab-publication"),
+      draft,
+      generation,
+      render,
+      list,
+      tabs,
+      bindings,
+      ownerDocument,
+      ownerWindow,
+      placement,
+      dom: expectedDom ?? snapshotAgentTabDom(list),
+      intrinsics,
+      actions,
+      retired: false,
+      mutated: false,
+      observer: null,
+    };
+  }
+
+  #publish(publication: AgentTabPublication): boolean {
+    if (
+      this.#current ||
+      publication.retired ||
+      publication.draft.retired ||
+      publication.generation.authority !== publication.draft
+    ) {
+      return false;
+    }
+    const MutationObserverConstructor =
+      publication.ownerWindow.MutationObserver;
+    if (!MutationObserverConstructor) return false;
+    const observer = new MutationObserverConstructor((records) => {
+      this.#recordMutations(publication, records);
+    });
+    observer.observe(publication.list, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    const observedParents = new Set<Node>();
+    for (const { parent } of publication.placement) {
+      if (parent && !observedParents.has(parent)) {
+        observedParents.add(parent);
+        observer.observe(parent, { childList: true });
+      }
+    }
+    publication.observer = observer;
+    publication.draft.committed = true;
+    this.#current = publication;
+    return true;
+  }
+
+  #retirePublication(
+    publication: AgentTabPublication,
+    preserveObserver: boolean,
+  ) {
+    if (!publication.retired) {
+      publication.retired = true;
+      publication.draft.retired = true;
+    }
+    if (this.#current === publication) this.#current = null;
+    if (!preserveObserver) this.#disconnect(publication);
+  }
+
+  #retireDraft(draft: AgentTabDraft) {
+    draft.retired = true;
+    if (this.#current?.draft === draft) {
+      this.#retirePublication(this.#current, false);
+    }
+  }
+
+  #invalidateReplay(replay: AgentTabReplay) {
+    if (this.#replay === replay) this.#replay = null;
+    replay.invalid = true;
+    this.#deactivateReplayExpiry(replay);
+    this.#disconnect(replay.publication);
+    if (this.#current === replay.publication) this.#current = null;
+    replay.publication.retired = true;
+    replay.publication.draft.retired = true;
+    const bindings = new Set<AgentTabBinding>([
+      ...Object.values(replay.expected),
+      ...replay.rebound.values(),
+      ...Object.values(replay.generation.bindings).filter(
+        (binding): binding is AgentTabBinding => binding !== null,
+      ),
+    ]);
+    for (const binding of bindings) {
+      binding.active = false;
+      if (this.#elementOwners.get(binding.element) === binding) {
+        this.#elementOwners.delete(binding.element);
+      }
+    }
+    this.#retireGeneration(replay.generation);
+    replay.released.clear();
+    replay.rebound.clear();
+  }
+
+  #finishReplay(replay: AgentTabReplay) {
+    if (this.#replay === replay) this.#replay = null;
+    this.#deactivateReplayExpiry(replay);
+    replay.released.clear();
+    replay.rebound.clear();
+  }
+
+  #deactivateReplayExpiry(replay: AgentTabReplay) {
+    const { expiry } = replay;
+    if (!expiry.active) return;
+    expiry.active = false;
+    const { handle, cancel } = expiry;
+    expiry.handle = null;
+    expiry.cancel = null;
+    if (handle !== null && cancel) cancel(handle);
+  }
+
+  #retireGeneration(generation: AgentTabGeneration) {
+    generation.authority = null;
+    for (const role of AGENT_TAB_ROLES) {
+      const binding = generation.bindings[role];
+      if (binding) {
+        binding.active = false;
+        if (this.#elementOwners.get(binding.element) === binding) {
+          this.#elementOwners.delete(binding.element);
+        }
+      }
+      generation.bindings[role] = null;
+      setAgentTabElement(generation.elements, role, null);
+    }
+  }
+
+  #disconnect(publication: AgentTabPublication) {
+    publication.observer?.disconnect();
+    publication.observer = null;
+  }
+
+  #recordMutations(
+    publication: AgentTabPublication,
+    records: readonly MutationRecord[],
+  ) {
+    if (publication.mutated) return;
+    publication.mutated = records.some((record) =>
+      publication.list.contains(record.target) ||
+      agentTabMutationTouchesPlacement(publication.placement, record));
+    if (publication.mutated && this.#replay?.publication === publication) {
+      this.#invalidateReplay(this.#replay);
+    }
+  }
+
+  #mutationFree(publication: AgentTabPublication): boolean {
+    const records = publication.observer?.takeRecords();
+    if (records?.length) this.#recordMutations(publication, records);
+    return !publication.mutated;
+  }
+
+  #ownsBinding(binding: AgentTabBinding): boolean {
+    return binding.active &&
+      binding.generation.bindings[binding.role] === binding &&
+      this.#elementOwners.get(binding.element) === binding;
+  }
+
+  #renderIsCurrent(render: AgentTabRender): boolean {
+    const authority = render.authority;
+    return render.mount === this.#mount &&
+      Object.isFrozen(render) &&
+      Object.isFrozen(authority) &&
+      render.authorityRef.current === authority &&
+      authority.mount === this.#mount &&
+      render.selectedRef.current === render.selected &&
+      render.order === CONNECT_TARGET_IDS &&
+      render.order.length === 4 &&
+      render.order.every((target, index) =>
+        target === CONNECT_TARGETS[index]?.id) &&
+      typeof render.tabsId === "string" &&
+      render.tabsId.length > 0 &&
+      typeof render.setTarget === "function";
+  }
+
+  #hierarchyIsCurrent(
+    generation: AgentTabGeneration,
+    render: AgentTabRender,
+    expectedDom?: AgentTabDomSnapshot,
+    expectedPlacement?: readonly AgentTabPlacement[],
+  ): boolean {
+    const list = generation.elements.list;
+    const listBinding = generation.bindings.list;
+    if (
+      !list ||
+      !listBinding ||
+      listBinding.element !== list ||
+      !this.#ownsBinding(listBinding) ||
+      generation.render !== render ||
+      !this.#renderIsCurrent(render)
+    ) {
+      return false;
+    }
+    const ownerDocument = list.ownerDocument;
+    if (
+      !list.isConnected ||
+      list.getRootNode() !== ownerDocument ||
+      list.tagName.toLowerCase() !== "div" ||
+      list.className !== AGENT_TABLIST_CLASS ||
+      list.getAttribute("role") !== "tablist" ||
+      list.getAttribute("aria-label") !== "Agent client" ||
+      list.children.length !== CONNECT_TARGETS.length ||
+      (expectedDom && expectedDom.node !== list) ||
+      (expectedDom && !agentTabDomMatches(expectedDom)) ||
+      (expectedPlacement && expectedPlacement[0]?.node !== list) ||
+      (expectedPlacement &&
+        !agentTabPlacementMatches(list, ownerDocument, expectedPlacement))
+    ) {
+      return false;
+    }
+
+    const elements = new Set<HTMLElement>([list]);
+    for (let index = 0; index < CONNECT_TARGETS.length; index++) {
+      const definition = CONNECT_TARGETS[index]!;
+      const tab = generation.elements.tabs[definition.id];
+      const binding = generation.bindings[definition.id];
+      const selected = definition.id === render.selected;
+      if (
+        !tab ||
+        !binding ||
+        binding.element !== tab ||
+        !this.#ownsBinding(binding) ||
+        elements.has(tab) ||
+        !tab.isConnected ||
+        tab.ownerDocument !== ownerDocument ||
+        tab.getRootNode() !== ownerDocument ||
+        tab.parentElement !== list ||
+        list.children.item(index) !== tab ||
+        tab.tagName.toLowerCase() !== "button" ||
+        tab.getAttribute("type") !== "button" ||
+        tab.type !== "button" ||
+        tab.disabled ||
+        tab.matches(":disabled") ||
+        tab.getAttribute("role") !== "tab" ||
+        tab.id !== `${render.tabsId}-${definition.id}` ||
+        tab.getAttribute("aria-selected") !== String(selected) ||
+        tab.getAttribute("aria-controls") !== `${render.tabsId}-panel` ||
+        tab.tabIndex !== (selected ? 0 : -1) ||
+        tab.className !== cn(
+          AGENT_TAB_CLASS,
+          selected
+            ? "bg-surface text-ink shadow-sm"
+            : "text-ink-3 hover:text-ink",
+        ) ||
+        tab.getAttribute("data-testid") !==
+          `agent-connect-tab-${definition.id}` ||
+        tab.children.length !== 0 ||
+        tab.textContent !== definition.label
+      ) {
+        return false;
+      }
+      elements.add(tab);
+    }
+    return true;
+  }
+
+  #actionIsCurrent(
+    publication: AgentTabPublication,
+    action: AgentTabAction,
+  ): boolean {
+    return Object.isFrozen(publication.actions) &&
+      Object.isFrozen(action) &&
+      publication.actions[action.sourceId] === action &&
+      action.generation === publication.generation &&
+      action.render === publication.render &&
+      action.source === publication.tabs[action.sourceId] &&
+      action.ownerDocument === publication.ownerDocument &&
+      action.order === publication.render.order &&
+      action.sourceIndex === publication.render.order.indexOf(action.sourceId) &&
+      !this.#claimedActions.has(action);
+  }
+
+  #publicationIsCurrent(publication: AgentTabPublication): boolean {
+    return this.#current === publication &&
+      !publication.retired &&
+      !publication.draft.retired &&
+      publication.generation.authority === publication.draft &&
+      publication.render === publication.generation.render &&
+      publication.bindings.list === publication.generation.bindings.list &&
+      CONNECT_TARGET_IDS.every((id) =>
+        publication.bindings[id] === publication.generation.bindings[id] &&
+        publication.tabs[id] === publication.generation.elements.tabs[id]) &&
+      publication.dom.node === publication.list &&
+      publication.placement[0]?.node === publication.list &&
+      agentTabPlacementMatches(
+        publication.list,
+        publication.ownerDocument,
+        publication.placement,
+      ) &&
+      this.#mutationFree(publication) &&
+      agentTabDomMatches(publication.dom) &&
+      this.#hierarchyIsCurrent(
+        publication.generation,
+        publication.render,
+        publication.dom,
+        publication.placement,
+      );
+  }
+}
+
 export interface AgentConnectCardProps {
   /** Server origin to put in the config (window.location.origin in the browser). */
   origin: string;
@@ -1148,16 +2599,30 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
   const [target, setTarget] = useState<ConnectTarget>("copilot-cli");
   const [mount] = useState(() => Symbol("agent-connect-card"));
   const authority = useMemo<AgentConnectAuthority>(
-    () => ({ mount, origin, scope, onCreateToken, onDismiss, hideTokenStep }),
-    [hideTokenStep, mount, onCreateToken, onDismiss, origin, scope],
+    () => Object.freeze({ mount, origin, scope, onCreateToken, onDismiss, hideTokenStep, className }),
+    [className, hideTokenStep, mount, onCreateToken, onDismiss, origin, scope],
   );
   const authorityRef = useRef<AgentConnectAuthority | null>(null);
   const tabOwnersRef = useRef(new Map<ConnectTarget, TabOwner>());
   const createTokenOwnerRef = useRef<ControlOwner | null>(null);
   const dismissOwnerRef = useRef<ControlOwner | null>(null);
   const selectedTargetRef = useRef<ConnectTarget>("copilot-cli");
+  const [tabCoordinator] = useState(() => new AgentTabCoordinator(mount));
   const stdioConfig = mcpConfigFor(base, TOKEN_PLACEHOLDER, target === "mcp-clients" ? "servers" : "mcpServers");
   const tabsId = useId();
+  // eslint-disable-next-line react-hooks/refs -- authorityRef/selectedTargetRef pass by identity; only committed coordinator layout/event paths dereference them.
+  const tabRender: AgentTabRender = Object.freeze({
+    identity: Symbol("agent-tab-render"),
+    mount,
+    authority,
+    authorityRef,
+    selectedRef: selectedTargetRef,
+    selected: target,
+    tabsId,
+    order: CONNECT_TARGET_IDS,
+    setTarget,
+  });
+  const tabDraft = tabCoordinator.createDraft(tabRender);
   const config = target === "mcp-clients" ? mcpVsCodeConfigFor(base) : mcpHttpConfigFor(base);
   const ownsAuthority = (candidate: AgentConnectAuthority) =>
     authorityRef.current === candidate &&
@@ -1166,7 +2631,8 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
     Object.is(candidate.scope, scope) &&
     candidate.onCreateToken === onCreateToken &&
     candidate.onDismiss === onDismiss &&
-    Object.is(candidate.hideTokenStep, hideTokenStep);
+    Object.is(candidate.hideTokenStep, hideTokenStep) &&
+    candidate.className === className;
   const ownsTab = (candidate: AgentConnectAuthority, tab: ConnectTarget, element: HTMLButtonElement) => {
     const owner = tabOwnersRef.current.get(tab);
     return ownsAuthority(candidate) && owner?.authority === candidate && owner.element === element && element.isConnected;
@@ -1194,34 +2660,24 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
     selectedTargetRef.current = next;
     setTarget(next);
   };
-  const moveTarget = (candidate: AgentConnectAuthority, current: ConnectTarget, event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (!ownsTab(candidate, current, event.currentTarget)) return;
-    const index = CONNECT_TARGETS.findIndex(({ id }) => id === current);
-    if (index < 0) return;
-    let next = index;
-    if (event.key === "ArrowRight") next = (index + 1) % CONNECT_TARGETS.length;
-    else if (event.key === "ArrowLeft") next = (index - 1 + CONNECT_TARGETS.length) % CONNECT_TARGETS.length;
-    else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = CONNECT_TARGETS.length - 1;
-    else return;
-    const nextTarget = CONNECT_TARGETS[next]?.id;
-    const destination = nextTarget ? tabOwnersRef.current.get(nextTarget) : undefined;
-    if (
-      !nextTarget ||
-      nextTarget === selectedTargetRef.current ||
-      destination?.authority !== candidate ||
-      !destination.element.isConnected ||
-      !ownsAuthority(candidate)
-    ) return;
-    event.preventDefault();
-    selectedTargetRef.current = nextTarget;
-    setTarget(nextTarget);
-    destination.element.focus();
-  };
+
+  useLayoutEffect(() => {
+    authorityRef.current = authority;
+    selectedTargetRef.current = target;
+  }, [authority, target]);
+
+  useLayoutEffect(
+    () => tabCoordinator.establish(tabDraft),
+    [tabCoordinator, tabDraft],
+  );
+
+  useEffect(
+    () => tabCoordinator.establishLifetime(),
+    [tabCoordinator],
+  );
 
   useLayoutEffect(() => {
     const tabOwners = tabOwnersRef.current;
-    authorityRef.current = authority;
     return () => {
       if (authorityRef.current === authority) authorityRef.current = null;
       for (const target of CONNECT_TARGETS) {
@@ -1231,10 +2687,6 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
       if (dismissOwnerRef.current?.authority === authority) dismissOwnerRef.current = null;
     };
   }, [authority]);
-
-  useLayoutEffect(() => {
-    if (authorityRef.current === authority) selectedTargetRef.current = target;
-  }, [authority, target]);
 
   return (
     <section className={cn("relative min-w-0 rounded-xl border border-violet-200 bg-violet-50/60 p-3 dark:border-violet-900 dark:bg-violet-950/30", className)} data-testid="agent-connect-card" aria-label="Connect an MCP client">
@@ -1270,20 +2722,32 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
         Requests you send from the editor are picked up by your own agent — GitHub Copilot CLI by default — through the Markdoc MCP server. Nothing runs on
         the Markdoc side; your agent does the work and proposes it back as suggestions.
       </p>
-      <div className="mt-3 flex flex-wrap gap-1 rounded-lg bg-surface-2 p-1" role="tablist" aria-label="Agent client">
+      <div
+        ref={(element) => tabCoordinator.bindList(tabDraft, element)}
+        className={AGENT_TABLIST_CLASS}
+        role="tablist"
+        aria-label="Agent client"
+      >
         {CONNECT_TARGETS.map((item) => (
           <button
             key={item.id}
-            ref={(element) => setTabElement(authority, item.id, element)}
+            ref={(element) => {
+              const cleanup = tabCoordinator.bindTab(tabDraft, item.id, element);
+              setTabElement(authority, item.id, element);
+              return () => {
+                cleanup?.();
+                setTabElement(authority, item.id, null);
+              };
+            }}
             id={`${tabsId}-${item.id}`}
             type="button"
             role="tab"
             aria-selected={target === item.id}
             aria-controls={`${tabsId}-panel`}
             tabIndex={target === item.id ? 0 : -1}
-            className={cn("rounded-md px-2.5 py-1.5 text-xs font-medium", target === item.id ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink")}
+            className={cn(AGENT_TAB_CLASS, target === item.id ? "bg-surface text-ink shadow-sm" : "text-ink-3 hover:text-ink")}
             onClick={(event) => selectTarget(authority, item.id, event.currentTarget)}
-            onKeyDown={(event) => moveTarget(authority, item.id, event)}
+            onKeyDown={(event) => tabCoordinator.activate(tabDraft.generation, item.id, event)}
             data-testid={`agent-connect-tab-${item.id}`}
           >
             {item.label}
