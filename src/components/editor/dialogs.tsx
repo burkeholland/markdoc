@@ -48,6 +48,238 @@ function linkDraft(visit: DialogActionVisit, open: boolean, href: string, text: 
   return { visit, open, initialHref: href, initialText: text, href, text };
 }
 
+interface LinkRender {
+  readonly identity: object;
+  readonly mount: symbol;
+  readonly visit: DialogActionVisit;
+  readonly open: boolean;
+  readonly initialHref: string;
+  readonly initialText: string;
+  readonly href: string;
+  readonly text: string;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onSubmit: (href: string, text: string) => void;
+  readonly onRemove: (() => void) | undefined;
+  readonly apply: Readonly<{ href: string; text: string }>;
+  readonly removeAvailable: boolean;
+  readonly title: "Edit link" | "Insert link";
+  readonly applyDisabled: boolean;
+}
+
+interface LinkPresentation {
+  readonly render: LinkRender;
+  readonly content: HTMLDivElement;
+  readonly form: HTMLFormElement;
+  readonly url: HTMLInputElement;
+  readonly text: HTMLInputElement;
+  readonly removeSlot: HTMLButtonElement | HTMLSpanElement;
+  readonly remove: HTMLButtonElement | null;
+  readonly cancel: HTMLButtonElement;
+  readonly apply: HTMLButtonElement;
+}
+
+interface LinkCloseOwner {
+  readonly visit: DialogActionVisit;
+  readonly source: object;
+  readonly allowedClosers: WeakSet<object>;
+}
+
+class LinkPublicationAuthority {
+  #active: LinkPresentation | null = null;
+  #pendingClose: LinkCloseOwner | null = null;
+  readonly #claimed = new WeakSet<LinkPresentation>();
+
+  active() {
+    return this.#active;
+  }
+
+  publish(presentation: LinkPresentation) {
+    this.#active = presentation;
+  }
+
+  retire(identity: object) {
+    if (this.#active?.render.identity === identity) this.#active = null;
+  }
+
+  claim(presentation: LinkPresentation) {
+    if (this.#claimed.has(presentation)) return false;
+    this.#claimed.add(presentation);
+    return true;
+  }
+
+  scheduleClose(visit: DialogActionVisit, source: object) {
+    const allowedClosers = new WeakSet<object>();
+    allowedClosers.add(source);
+    this.#pendingClose = Object.freeze({ visit, source, allowedClosers });
+  }
+
+  authorizeClose(visit: DialogActionVisit, source: object) {
+    if (this.#pendingClose?.visit === visit) this.#pendingClose.allowedClosers.add(source);
+  }
+
+  consumeClose(visit: DialogActionVisit, source: object) {
+    const pending = this.#pendingClose;
+    if (!pending || pending.visit !== visit || !pending.allowedClosers.has(source)) return false;
+    this.#pendingClose = null;
+    return true;
+  }
+
+  retireVisit(visit: DialogActionVisit) {
+    if (this.#pendingClose?.visit === visit) this.#pendingClose = null;
+  }
+}
+
+class LinkElementOwner<T extends HTMLElement> {
+  private current: T | null = null;
+
+  constructor(private readonly retire: () => void) {}
+
+  readonly element = () => this.current;
+  readonly capture: React.RefCallback<T> = (element) => {
+    if (this.current === element) return;
+    this.current = element;
+    this.retire();
+    if (!element) return;
+    return () => {
+      if (this.current !== element) return;
+      this.current = null;
+      this.retire();
+    };
+  };
+}
+
+function createLinkElementOwners(authority: LinkPublicationAuthority, identity: object) {
+  const retire = () => authority.retire(identity);
+  const form = new LinkElementOwner<HTMLFormElement>(retire);
+  const url = new LinkElementOwner<HTMLInputElement>(retire);
+  const text = new LinkElementOwner<HTMLInputElement>(retire);
+  const remove = new LinkElementOwner<HTMLButtonElement>(retire);
+  const placeholder = new LinkElementOwner<HTMLSpanElement>(retire);
+  const cancel = new LinkElementOwner<HTMLButtonElement>(retire);
+  const apply = new LinkElementOwner<HTMLButtonElement>(retire);
+  return Object.freeze({
+    form,
+    url,
+    text,
+    remove,
+    placeholder,
+    cancel,
+    apply,
+    captureForm: form.capture,
+    captureUrl: url.capture,
+    captureText: text.capture,
+    captureRemove: remove.capture,
+    capturePlaceholder: placeholder.capture,
+    captureCancel: cancel.capture,
+    captureApply: apply.capture,
+    retire,
+  });
+}
+
+function normalizeLinkHref(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (/^(https?:|mailto:|#|\/|\.)/i.test(trimmed)) return trimmed;
+  if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(trimmed)) return `https://${trimmed}`;
+  return trimmed;
+}
+
+function linkDomIsExact(presentation: LinkPresentation, changing: "url" | "text" | null = null) {
+  const { render, content, form, url, text, removeSlot, remove, cancel, apply } = presentation;
+  const document = content.ownerDocument;
+  const urlLabel = url.parentElement;
+  const textLabel = text.parentElement;
+  const actions = removeSlot.parentElement;
+  const closingActions = cancel.parentElement;
+  const labelledTitle = content.getAttribute("aria-label");
+  const titleElement = labelledTitle === null ? content.firstElementChild?.firstElementChild?.firstElementChild : null;
+  if (
+    !render.open ||
+    !content.isConnected ||
+    !form.isConnected ||
+    !url.isConnected ||
+    !text.isConnected ||
+    !removeSlot.isConnected ||
+    !cancel.isConnected ||
+    !apply.isConnected ||
+    content.tagName !== "DIV" ||
+    content.getAttribute("role") !== "dialog" ||
+    form.tagName !== "FORM" ||
+    form.ownerDocument !== document ||
+    url.ownerDocument !== document ||
+    text.ownerDocument !== document ||
+    removeSlot.ownerDocument !== document ||
+    cancel.ownerDocument !== document ||
+    apply.ownerDocument !== document ||
+    form.parentElement !== content ||
+    content.lastElementChild !== form ||
+    (labelledTitle === null
+      ? content.children.length !== 2 || titleElement?.textContent !== render.title
+      : content.children.length !== 1 || labelledTitle !== render.title) ||
+    form.children.length !== 3 ||
+    form.children.item(0) !== urlLabel ||
+    form.children.item(1) !== textLabel ||
+    form.children.item(2) !== actions ||
+    urlLabel?.tagName !== "LABEL" ||
+    urlLabel.children.length !== 1 ||
+    urlLabel.firstElementChild !== url ||
+    urlLabel.textContent?.trim() !== "URL" ||
+    textLabel?.tagName !== "LABEL" ||
+    textLabel.children.length !== 1 ||
+    textLabel.firstElementChild !== text ||
+    textLabel.textContent?.trim() !== "Text" ||
+    !actions ||
+    actions.children.length !== 2 ||
+    actions.children.item(0) !== removeSlot ||
+    actions.children.item(1) !== closingActions ||
+    !closingActions ||
+    closingActions.children.length !== 2 ||
+    closingActions.children.item(0) !== cancel ||
+    closingActions.children.item(1) !== apply ||
+    url.tagName !== "INPUT" ||
+    url.type !== "text" ||
+    url.form !== form ||
+    url.disabled ||
+    !url.required ||
+    url.placeholder !== "https://example.com" ||
+    url.dataset.testid !== "link-url" ||
+    (changing !== "url" && url.value !== render.href) ||
+    text.tagName !== "INPUT" ||
+    text.type !== "text" ||
+    text.form !== form ||
+    text.disabled ||
+    text.required ||
+    text.placeholder !== "Link text (optional)" ||
+    text.dataset.testid !== "link-text" ||
+    (changing !== "text" && text.value !== render.text) ||
+    cancel.tagName !== "BUTTON" ||
+    cancel.type !== "button" ||
+    cancel.form !== form ||
+    cancel.disabled ||
+    cancel.textContent?.trim() !== "Cancel" ||
+    apply.tagName !== "BUTTON" ||
+    apply.type !== "submit" ||
+    apply.form !== form ||
+    apply.disabled !== render.applyDisabled ||
+    apply.dataset.testid !== "link-submit" ||
+    apply.textContent?.trim() !== "Apply"
+  ) {
+    return false;
+  }
+  if (!render.removeAvailable) {
+    return remove === null && removeSlot.tagName === "SPAN" && removeSlot.children.length === 0;
+  }
+  return (
+    remove !== null &&
+    removeSlot === remove &&
+    remove.tagName === "BUTTON" &&
+    remove.type === "button" &&
+    remove.form === form &&
+    !remove.disabled &&
+    remove.textContent?.trim() === "Remove link"
+  );
+}
+
 export const LinkDialog = memo(function LinkDialog({
   open,
   onOpenChange,
@@ -61,9 +293,10 @@ export const LinkDialog = memo(function LinkDialog({
   onSubmit: (href: string, text: string) => void;
   onRemove?: () => void;
 }) {
+  const [mount] = useState(() => Symbol("link dialog"));
+  const [authority] = useState(() => new LinkPublicationAuthority());
   const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onRemove, onSubmit }), [onOpenChange, onRemove, onSubmit]);
   const activeVisit = useRef<DialogActionVisit | null>(null);
-  const openRef = useRef(false);
   const initialHref = initial?.href ?? "";
   const initialText = initial?.text ?? "";
   const [storedDraft, setDraft] = useState<LinkDraft>(() => linkDraft(visit, open, initialHref, initialText));
@@ -73,52 +306,257 @@ export const LinkDialog = memo(function LinkDialog({
     setDraft(draft);
   }
   const { href, text } = draft;
+  const after = useAfterClose(visit, activeVisit);
+  const identity = Object.freeze({});
+  const owners = createLinkElementOwners(authority, identity);
+  const {
+    form: formOwner,
+    url: urlOwner,
+    text: textOwner,
+    remove: removeOwner,
+    placeholder: placeholderOwner,
+    cancel: cancelOwner,
+    apply: applyOwner,
+    captureForm,
+    captureUrl,
+    captureText,
+    captureRemove,
+    capturePlaceholder,
+    captureCancel,
+    captureApply,
+    retire,
+  } = owners;
+  const render: LinkRender = Object.freeze({
+    identity,
+    mount,
+    visit,
+    open,
+    initialHref,
+    initialText,
+    href,
+    text,
+    onOpenChange,
+    onSubmit,
+    onRemove,
+    apply: Object.freeze({ href: normalizeLinkHref(href), text: text.trim() }),
+    removeAvailable: Boolean(initialHref && onRemove),
+    title: initialHref ? "Edit link" : "Insert link",
+    applyDisabled: !href.trim(),
+  });
+
   useLayoutEffect(() => {
     activeVisit.current = visit;
     return () => {
       if (activeVisit.current === visit) activeVisit.current = null;
+      authority.retireVisit(visit);
     };
-  }, [visit]);
+  }, [authority, visit]);
+
   useLayoutEffect(() => {
-    openRef.current = open;
-  }, [open]);
-  const normalize = (v: string) => {
-    const t = v.trim();
-    if (!t) return t;
-    if (/^(https?:|mailto:|#|\/|\.)/i.test(t)) return t;
-    if (/^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(t)) return `https://${t}`;
-    return t;
+    retire();
+    if (!render.open) {
+      authority.authorizeClose(visit, identity);
+      return;
+    }
+    const form = formOwner.element();
+    const url = urlOwner.element();
+    const textInput = textOwner.element();
+    const remove = removeOwner.element();
+    const placeholder = placeholderOwner.element();
+    const removeSlot = render.removeAvailable ? remove : placeholder;
+    const cancel = cancelOwner.element();
+    const apply = applyOwner.element();
+    const content = form?.parentElement;
+    const ContentElement = content?.ownerDocument.defaultView?.HTMLDivElement;
+    if (
+      !ContentElement ||
+      !(content instanceof ContentElement) ||
+      !form ||
+      !url ||
+      !textInput ||
+      !removeSlot ||
+      !cancel ||
+      !apply
+    ) {
+      return;
+    }
+    const presentation = Object.freeze<LinkPresentation>({
+      render,
+      content,
+      form,
+      url,
+      text: textInput,
+      removeSlot,
+      remove,
+      cancel,
+      apply,
+    });
+    if (!linkDomIsExact(presentation)) return;
+    authority.publish(presentation);
+    return retire;
+  });
+
+  const currentPresentation = (changing: "url" | "text" | null = null) => {
+    const presentation = authority.active();
+    if (
+      !presentation ||
+      presentation.render !== render ||
+      presentation.render.identity !== identity ||
+      presentation.render.mount !== mount ||
+      presentation.render.visit !== visit ||
+      !linkDomIsExact(presentation, changing)
+    ) {
+      return null;
+    }
+    return presentation;
   };
-  const after = useAfterClose(visit, activeVisit);
+
+  const claim = (presentation: LinkPresentation) => authority.claim(presentation);
+
+  const changePresentation = (event: React.ChangeEvent<HTMLInputElement>, expected: "url" | "text") => {
+    const input = expected === "url" ? urlOwner.element() : textOwner.element();
+    if (
+      !input ||
+      (event.type !== "input" && event.type !== "change") ||
+      event.currentTarget !== input ||
+      event.target !== input ||
+      event.defaultPrevented
+    ) {
+      return null;
+    }
+    const ownerWindow = input.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      (nativeEvent.type !== "input" && nativeEvent.type !== "change") ||
+      nativeEvent.target !== input ||
+      nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    const presentation = currentPresentation(expected);
+    if (!presentation || presentation[expected] !== input || !claim(presentation)) return null;
+    return presentation;
+  };
+
+  const clickPresentation = (event: React.MouseEvent<HTMLButtonElement>, expected: "remove" | "cancel") => {
+    const button = expected === "remove" ? removeOwner.element() : cancelOwner.element();
+    const ButtonElement = button?.ownerDocument.defaultView?.HTMLButtonElement;
+    if (
+      !ButtonElement ||
+      !(button instanceof ButtonElement) ||
+      event.type !== "click" ||
+      event.currentTarget !== button ||
+      event.defaultPrevented
+    ) {
+      return null;
+    }
+    const ownerWindow = button.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      !(target instanceof ownerWindow.Node) ||
+      nativeEvent.target !== target ||
+      nativeEvent.defaultPrevented ||
+      !button.contains(target)
+    ) {
+      return null;
+    }
+    const presentation = currentPresentation();
+    if (
+      !presentation ||
+      presentation[expected] !== button ||
+      button.disabled ||
+      !claim(presentation)
+    ) {
+      return null;
+    }
+    return presentation;
+  };
+
+  const closeWithAction = (presentation: LinkPresentation, run: () => void) => {
+    authority.scheduleClose(visit, presentation.render.identity);
+    after.defer(run);
+    presentation.render.onOpenChange(false);
+  };
+
   const setOpen = (nextOpen: boolean) => {
-    if (activeVisit.current !== visit) return;
-    onOpenChange(nextOpen);
+    const presentation = currentPresentation();
+    if (!presentation || !claim(presentation)) return;
+    presentation.render.onOpenChange(nextOpen);
   };
+
+  const onClosed = () => {
+    if (!authority.consumeClose(visit, identity)) return;
+    after.onClosed();
+  };
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent title={initial?.href ? "Edit link" : "Insert link"} onClosed={after.onClosed}>
+      <DialogContent title={render.title} onClosed={onClosed}>
         <form
+          ref={captureForm}
           className="flex flex-col gap-3"
           onSubmit={(e) => {
+            const form = formOwner.element();
+            const applyButton = applyOwner.element();
+            const nativeEvent = e.nativeEvent;
+            if (
+              !form ||
+              !applyButton ||
+              e.type !== "submit" ||
+              e.currentTarget !== form ||
+              e.target !== form ||
+              e.defaultPrevented
+            ) {
+              return;
+            }
+            const ownerWindow = form.ownerDocument.defaultView;
+            if (
+              !ownerWindow?.SubmitEvent ||
+              !(nativeEvent instanceof ownerWindow.SubmitEvent) ||
+              nativeEvent.type !== "submit" ||
+              nativeEvent.target !== form ||
+              nativeEvent.defaultPrevented ||
+              (nativeEvent.submitter !== null && nativeEvent.submitter !== applyButton)
+            ) {
+              return;
+            }
+            const presentation = currentPresentation();
+            if (
+              !presentation ||
+              presentation.form !== form ||
+              presentation.apply !== applyButton ||
+              presentation.apply.disabled ||
+              presentation.render.applyDisabled ||
+              !claim(presentation)
+            ) {
+              return;
+            }
             e.preventDefault();
-            if (activeVisit.current !== visit || !openRef.current) return;
-            if (!href.trim()) return;
-            const [h, t] = [normalize(href), text.trim()];
-            after.defer(() => onSubmit(h, t));
-            setOpen(false);
+            const applyPayload = presentation.render.apply;
+            const submit = presentation.render.onSubmit;
+            closeWithAction(presentation, () => submit(applyPayload.href, applyPayload.text));
           }}
         >
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             URL
             <input
+              ref={captureUrl}
               className="input"
               placeholder="https://example.com"
               value={href}
               onChange={(e) => {
-                if (activeVisit.current !== visit || !openRef.current) return;
-                const value = e.target.value;
-                setDraft((current) => (current.visit === visit ? { ...current, href: value } : current));
+                const presentation = changePresentation(e, "url");
+                if (!presentation) return;
+                setDraft({ ...draft, href: presentation.url.value });
               }}
+              required
               autoFocus
               data-testid="link-url"
             />
@@ -126,38 +564,56 @@ export const LinkDialog = memo(function LinkDialog({
           <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
             Text
             <input
+              ref={captureText}
               className="input"
               placeholder="Link text (optional)"
               value={text}
               onChange={(e) => {
-                if (activeVisit.current !== visit || !openRef.current) return;
-                const value = e.target.value;
-                setDraft((current) => (current.visit === visit ? { ...current, text: value } : current));
+                const presentation = changePresentation(e, "text");
+                if (!presentation) return;
+                setDraft({ ...draft, text: presentation.text.value });
               }}
               data-testid="link-text"
             />
           </label>
           <div className="flex items-center justify-between pt-1">
-            {initial?.href && onRemove ? (
+            {render.removeAvailable ? (
               <button
+                ref={captureRemove}
                 type="button"
                 className="btn btn-ghost text-danger"
-                onClick={() => {
-                  if (activeVisit.current !== visit || !openRef.current) return;
-                  after.defer(() => onRemove());
-                  setOpen(false);
+                onClick={(event) => {
+                  const presentation = clickPresentation(event, "remove");
+                  const remove = presentation?.render.onRemove;
+                  if (!presentation || !remove) return;
+                  closeWithAction(presentation, remove);
                 }}
               >
                 Remove link
               </button>
             ) : (
-              <span />
+              <span ref={capturePlaceholder} />
             )}
             <div className="flex gap-2">
-              <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
+              <button
+                ref={captureCancel}
+                type="button"
+                className="btn btn-ghost"
+                onClick={(event) => {
+                  const presentation = clickPresentation(event, "cancel");
+                  if (!presentation) return;
+                  presentation.render.onOpenChange(false);
+                }}
+              >
                 Cancel
               </button>
-              <button type="submit" className="btn btn-primary" disabled={!href.trim()} data-testid="link-submit">
+              <button
+                ref={captureApply}
+                type="submit"
+                className="btn btn-primary"
+                disabled={render.applyDisabled}
+                data-testid="link-submit"
+              >
                 Apply
               </button>
             </div>
