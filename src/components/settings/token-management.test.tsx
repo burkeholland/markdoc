@@ -155,6 +155,59 @@ function tokenClickEvent(
   } as unknown as ReactMouseEvent<HTMLButtonElement>;
 }
 
+type DocumentChooserMutationTarget =
+  | "checkbox"
+  | "row"
+  | "controls"
+  | "chooser"
+  | "button";
+
+const restoredDocumentChooserMutations = [
+  { label: "checkbox name", target: "checkbox", attribute: "name", value: "tampered" },
+  { label: "checkbox type", target: "checkbox", attribute: "type", value: "radio" },
+  { label: "checkbox checked", target: "checkbox", attribute: "checked", value: "" },
+  { label: "checkbox ARIA", target: "checkbox", attribute: "aria-label", value: "Tampered document" },
+  { label: "checkbox class", target: "checkbox", attribute: "class", value: "tampered" },
+  { label: "checkbox data", target: "checkbox", attribute: "data-tampered", value: "true" },
+  { label: "row label", target: "row", attribute: "class", value: "tampered" },
+  { label: "controls container", target: "controls", attribute: "class", value: "tampered" },
+  { label: "chooser root", target: "chooser", attribute: "class", value: "tampered" },
+  { label: "refresh button", target: "button", attribute: "data-tampered", value: "true" },
+] as const satisfies readonly {
+  label: string;
+  target: DocumentChooserMutationTarget;
+  attribute: string;
+  value: string;
+}[];
+
+function restoreDocumentChooserAttribute(
+  mutation: (typeof restoredDocumentChooserMutations)[number],
+  documentId: string,
+  button: HTMLButtonElement,
+) {
+  const checkbox = screen.getByTestId(`token-document-${documentId}`) as HTMLInputElement;
+  const target = mutation.target === "checkbox"
+    ? checkbox
+    : mutation.target === "row"
+      ? checkbox.parentElement
+      : mutation.target === "controls"
+        ? button.parentElement
+        : mutation.target === "chooser"
+          ? screen.getByTestId("token-documents")
+          : button;
+  if (!target) throw new Error(`The ${mutation.target} mutation target is missing`);
+  const original = target.getAttribute(mutation.attribute);
+  target.setAttribute(mutation.attribute, mutation.value);
+  if (original === null) target.removeAttribute(mutation.attribute);
+  else target.setAttribute(mutation.attribute, original);
+}
+
+async function settleDocumentChooserCommit() {
+  await act(async () => {
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+  });
+}
+
 function tokenInputEvent(
   currentTarget: HTMLInputElement,
   options: {
@@ -1807,6 +1860,7 @@ describe("one-time lifecycle and setup", () => {
     const refreshButton = await screen.findByRole("button", { name: "Refresh documents" });
     fireEvent.click(screen.getByTestId("token-document-doc-one"));
     fireEvent.click(screen.getByTestId("token-document-doc-two"));
+    await settleDocumentChooserCommit();
 
     act(() => {
       refreshButton.click();
@@ -1859,6 +1913,7 @@ describe("one-time lifecycle and setup", () => {
       { id: "doc-two", title: "Second document" },
     ] })));
     fireEvent.click(screen.getByTestId("token-document-doc-one"));
+    await settleDocumentChooserCommit();
     const refreshButton = await screen.findByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
     const staleRefresh = captureReactCallback<TokenClickHandler>(refreshButton, "onClick");
     act(() => staleRefresh(tokenClickEvent(refreshButton)));
@@ -1897,6 +1952,99 @@ describe("one-time lifecycle and setup", () => {
     expect(screen.getByRole("button", { name: "Refresh documents" })).toBeEnabled();
     expect(documentListCount()).toBe(3);
   });
+
+  it.each(restoredDocumentChooserMutations)(
+    "rejects restored $label history before activation and pending settlement, then admits a fresh chooser",
+    async (mutation) => {
+      const initial = deferred<Response>();
+      const pendingInitial = deferred<Response>();
+      const poisonedRefresh = deferred<Response>();
+      const recoveredInitial = deferred<Response>();
+      const recoveredRefresh = deferred<Response>();
+      const documentRequests = [
+        initial,
+        pendingInitial,
+        poisonedRefresh,
+        recoveredInitial,
+        recoveredRefresh,
+      ];
+      let documentRequestIndex = 0;
+      fetchMock.mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "/api/documents") return documentRequests[documentRequestIndex++].promise;
+        if (url === "/api/tokens?includeRevoked=true") return response({ tokens: [] });
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      const documentListCount = () =>
+        fetchMock.mock.calls.filter(([input]) => String(input) === "/api/documents").length;
+      renderDirect(
+        <StrictMode>
+          <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+        </StrictMode>,
+      );
+      await openCreate();
+      const restrict = screen.getByTestId("token-restrict");
+      fireEvent.click(restrict);
+      await act(async () => initial.resolve(response({
+        documents: [{ id: "doc-one", title: "First document" }],
+      })));
+      const staleButton = await screen.findByRole("button", {
+        name: "Refresh documents",
+      }) as HTMLButtonElement;
+      restoreDocumentChooserAttribute(mutation, "doc-one", staleButton);
+
+      fireEvent.click(staleButton);
+      expect(documentListCount()).toBe(1);
+      expect(screen.queryByRole("status")).toBeNull();
+
+      act(() => {
+        restrict.click();
+        restrict.click();
+      });
+      expect(documentListCount()).toBe(2);
+      await act(async () => pendingInitial.resolve(response({
+        documents: [{ id: "doc-two", title: "Second document" }],
+      })));
+      const pendingButton = await screen.findByRole("button", {
+        name: "Refresh documents",
+      }) as HTMLButtonElement;
+      fireEvent.click(pendingButton);
+      expect(documentListCount()).toBe(3);
+      await settleDocumentChooserCommit();
+      const disabledButton = screen.getByRole("button", {
+        name: "Refresh documents",
+      }) as HTMLButtonElement;
+      restoreDocumentChooserAttribute(mutation, "doc-two", disabledButton);
+
+      await act(async () => poisonedRefresh.resolve(response({
+        documents: [{ id: "poisoned", title: "Poisoned document" }],
+      })));
+      expect(screen.getByRole("status")).toHaveTextContent("Refreshing your documents...");
+      expect(screen.getByTestId("token-document-doc-two")).toBeVisible();
+      expect(screen.queryByText("Poisoned document")).toBeNull();
+      expect(documentListCount()).toBe(3);
+
+      act(() => {
+        restrict.click();
+        restrict.click();
+      });
+      expect(documentListCount()).toBe(4);
+      await act(async () => recoveredInitial.resolve(response({
+        documents: [{ id: "doc-three", title: "Third document" }],
+      })));
+      const recoveredButton = await screen.findByRole("button", {
+        name: "Refresh documents",
+      });
+      fireEvent.click(recoveredButton);
+      expect(documentListCount()).toBe(5);
+      await act(async () => recoveredRefresh.resolve(response({
+        documents: [{ id: "doc-four", title: "Fourth document" }],
+      })));
+      expect(screen.getByTestId("token-document-doc-four")).toBeVisible();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(documentListCount()).toBe(5);
+    },
+  );
 
   it.each([
     "restored button attribute",

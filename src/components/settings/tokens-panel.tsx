@@ -168,9 +168,10 @@ interface DocumentChooserCommit {
   readonly ownerDocument: Document;
   readonly root: HTMLDivElement;
   readonly button: HTMLButtonElement;
-  readonly dom: SecretNoticeDomSnapshot;
-  readonly placement: readonly SecretNoticePlacement[];
-  readonly buttonTargets: readonly Node[];
+  dom: SecretNoticeDomSnapshot | null;
+  placement: readonly SecretNoticePlacement[] | null;
+  buttonTargets: readonly Node[];
+  established: boolean;
   retired: boolean;
   mutated: boolean;
   observer: MutationObserver | null;
@@ -1499,7 +1500,8 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const documentCommitMatches = useCallback((commit: DocumentChooserCommit) => {
     const candidate = commit.candidate;
     const ownerWindow = commit.ownerDocument.defaultView;
-    return !commit.retired
+    return commit.established
+      && !commit.retired
       && documentMountActive.current
       && candidate.mount === documentMount
       && candidate.session === activeManagerSession.current
@@ -1522,7 +1524,9 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       && commit.button.textContent === candidate.buttonLabel
       && commit.button.disabled === (candidate.action === null)
       && commit.button.getAttribute("aria-disabled") !== "true"
+      && commit.dom !== null
       && secretNoticeDomMatches(commit.dom)
+      && commit.placement !== null
       && secretNoticePlacementMatches(commit.root, commit.ownerDocument, commit.placement);
   }, [documentMount]);
   const documentCommitIsCurrent = useCallback((commit: DocumentChooserCommit) =>
@@ -1712,54 +1716,66 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     const root = candidate.root.element;
     const button = candidate.button.element;
     if (!root || !button || button.parentElement !== root.firstElementChild) return null;
-    const placement = snapshotSecretNoticePlacement(root);
-    if (!placement) return null;
     const commit: DocumentChooserCommit = {
       candidate,
       ownerDocument: root.ownerDocument,
       root,
       button,
-      dom: snapshotSecretNoticeDom(root),
-      placement,
-      buttonTargets: secretNoticeNodes(button),
+      dom: null,
+      placement: null,
+      buttonTargets: Object.freeze([]),
+      established: false,
       retired: false,
       mutated: false,
       observer: null,
     };
-    if (!documentCommitMatches(commit)) return null;
     activeDocumentCommit.current = commit;
-    if (!documentCommitIsCurrent(commit)) {
-      retireDocumentCommit(commit);
-      return null;
-    }
-    committedDocumentCandidates.current.add(candidate);
-    if (candidate.pending && documentOwner.current === candidate.pending) {
-      candidate.pending.pendingCommit = commit;
-    }
-    if (DocumentChooserMutationObserver) {
-      const observer = new DocumentChooserMutationObserver(() => {
-        commit.mutated = true;
-      });
-      // React restores controlled checkboxes after layout; their structure stays guarded,
-      // while restored attribute mutations are relevant to the refresh/retry control itself.
-      observer.observe(root, {
-        characterData: true,
-        childList: true,
-        subtree: true,
-      });
-      observer.observe(button, {
-        attributes: true,
-        subtree: true,
-      });
-      const observed = new Set<Node>([root]);
-      for (const entry of placement) {
-        if (entry.parent && !observed.has(entry.parent)) {
-          observer.observe(entry.parent, { childList: true });
-          observed.add(entry.parent);
-        }
+    queueMicrotask(() => {
+      if (
+        commit.retired
+        || activeDocumentCommit.current !== commit
+        || candidate.root.element !== root
+        || candidate.button.element !== button
+      ) {
+        return;
       }
-      commit.observer = observer;
-    }
+      const placement = snapshotSecretNoticePlacement(root);
+      if (!placement) {
+        retireDocumentCommit(commit);
+        return;
+      }
+      commit.dom = snapshotSecretNoticeDom(root);
+      commit.placement = placement;
+      commit.buttonTargets = secretNoticeNodes(button);
+      commit.established = true;
+      if (!documentCommitMatches(commit)) {
+        retireDocumentCommit(commit);
+        return;
+      }
+      if (DocumentChooserMutationObserver) {
+        const observer = new DocumentChooserMutationObserver(() => {
+          commit.mutated = true;
+        });
+        observer.observe(root, {
+          attributes: true,
+          characterData: true,
+          childList: true,
+          subtree: true,
+        });
+        const observed = new Set<Node>([root]);
+        for (const entry of placement) {
+          if (entry.parent && !observed.has(entry.parent)) {
+            observer.observe(entry.parent, { childList: true });
+            observed.add(entry.parent);
+          }
+        }
+        commit.observer = observer;
+      }
+      committedDocumentCandidates.current.add(candidate);
+      if (candidate.pending && documentOwner.current === candidate.pending) {
+        candidate.pending.pendingCommit = commit;
+      }
+    });
     return commit;
   };
   const activateDocumentChooser = (
@@ -1812,6 +1828,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       || target.ownerDocument !== commit.ownerDocument
       || !button.contains(target)
       || !commit.buttonTargets.includes(target)
+      || !commit.dom
       || !secretNoticeDomContains(commit.dom, target)
       || !exactDocumentChooserEventPath(nativeEvent, target, commit.ownerDocument)
       || claimedDocumentEvents.current.has(event)
