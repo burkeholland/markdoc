@@ -1007,37 +1007,38 @@ describe("ReaderScrollableRegions exact content visits", () => {
     view.unmount();
   });
 
-  it("retires when the same FontFaceSet replaces ready and recovers on its fresh promise", () => {
-    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
-    const directRegions = [{ id: "target", clientWidth: 100, scrollWidth: 102 }];
-    const view = render(<ReaderFixture html={html} directRegions={directRegions} />);
-    const root = readerRoot(view.container);
-    const target = region(root, "target");
-    const oldObserver = InstrumentedResizeObserver.instances[0];
-    const oldReady = fonts.callbacks[0];
-    fonts.replaceReady();
-    tabIndexReads.length = 0;
-    tabIndexWrites.length = 0;
-    geometryReads.length = 0;
+  it("rearms a new FontFaceSet ready cycle without a render and keeps the stale cycle inert", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 101 });
+    const view = render(<ReaderFixture html={html} />);
+    const target = region(readerRoot(view.container), "target");
+    const observer = InstrumentedResizeObserver.instances[0];
+    const staleReady = fonts.callbacks[0];
 
-    oldReady();
-    expect(tabIndexReads).toHaveLength(0);
+    fonts.replaceReady();
+    setGeometry(target, 100, 102);
+    geometryReads.length = 0;
+    tabIndexWrites.length = 0;
+
+    observer.publish();
+    expect(fonts.callbacks).toHaveLength(2);
+    expect(observer.disconnect).not.toHaveBeenCalled();
     expect(tabIndexWrites).toHaveLength(0);
     expect(geometryReads).toHaveLength(0);
-    expect(oldObserver.disconnect).toHaveBeenCalledTimes(1);
-    expect(target).toHaveAttribute("tabindex", "0");
-
-    view.rerender(
-      <ReaderFixture html={html} directRegions={directRegions} commit={1} />,
-    );
-    const currentObserver = InstrumentedResizeObserver.instances[1];
-    expect(region(root, "target")).toBe(target);
-    expect(fonts.callbacks).toHaveLength(2);
-    expect(currentObserver.disconnect).not.toHaveBeenCalled();
-
-    setGeometry(target, 100, 101);
-    currentObserver.publish();
     expect(target).not.toHaveAttribute("tabindex");
-    expect(writesFor(target)).toEqual([null]);
+
+    staleReady();
+    expect(fonts.callbacks).toHaveLength(2);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+
+    fonts.publish(1);
+    expect(target).toHaveAttribute("tabindex", "0");
+    expect(writesFor(target)).toEqual(["0"]);
+    expect(geometryReads).toEqual([
+      { target, name: "clientWidth" },
+      { target, name: "scrollWidth" },
+    ]);
+    expect(observer.disconnect).not.toHaveBeenCalled();
   });
 });

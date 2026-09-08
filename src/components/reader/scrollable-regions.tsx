@@ -75,6 +75,11 @@ type MutationGuard = Readonly<{
   release: () => void;
 }>;
 
+type FontReadySubscription = Readonly<{
+  identity: symbol;
+  ready: Promise<FontFaceSet>;
+}>;
+
 type ContentVisit = {
   readonly identity: symbol;
   readonly render: RenderVisit;
@@ -95,7 +100,7 @@ type ContentVisit = {
   readonly getComputedStyle: typeof getComputedStyle;
   guard: MutationGuard | null;
   observer: ResizeObserver | null;
-  fontsReadyContinuation: ((fonts: FontFaceSet) => void) | null;
+  fontReadySubscription: FontReadySubscription | null;
   observing: boolean;
   retired: boolean;
   retirement: Retirement | null;
@@ -112,7 +117,7 @@ type VisitCandidate = Omit<
   ContentVisit,
   | "guard"
   | "observer"
-  | "fontsReadyContinuation"
+  | "fontReadySubscription"
   | "observing"
   | "retired"
   | "retirement"
@@ -280,7 +285,6 @@ function layoutMatches(visit: ContentVisit): boolean {
     visit.ownerWindow.ResizeObserver !== visit.resizeObserverConstructor ||
     visit.ownerWindow.MutationObserver !== visit.mutationObserverConstructor ||
     visit.ownerDocument.fonts !== visit.fonts ||
-    visit.fonts.ready !== visit.fontsReady ||
     visit.ownerWindow.getComputedStyle !== visit.getComputedStyle ||
     visit.marker.previousSibling !== visit.root ||
     visit.root.nextSibling !== visit.marker ||
@@ -639,7 +643,6 @@ function exactReplayMatches(source: ContentVisit, candidate: ContentVisit): bool
     source.resizeObserverConstructor !== candidate.resizeObserverConstructor ||
     source.mutationObserverConstructor !== candidate.mutationObserverConstructor ||
     source.fonts !== candidate.fonts ||
-    source.fontsReady !== candidate.fontsReady ||
     source.regions.length !== candidate.regions.length ||
     !placementsMatch(source.markerPlacement, candidate.markerPlacement) ||
     !placementsMatch(source.rootPlacement, candidate.rootPlacement)
@@ -675,6 +678,51 @@ function inheritOwnedWrites(source: ContentVisit, candidate: ContentVisit) {
   }
 }
 
+function subscribeFontReadyCycle(
+  visit: ContentVisit,
+  coordinator: VisitCoordinator,
+  ready: Promise<FontFaceSet>,
+) {
+  const identity = Symbol("reader-scrollable-regions-font-ready");
+  const continuation = (source: FontFaceSet) => {
+    if (
+      visit.retired ||
+      coordinator.active !== visit ||
+      visit.fontReadySubscription?.identity !== identity
+    ) {
+      return;
+    }
+    if (source !== visit.fonts || visit.ownerDocument.fonts !== visit.fonts) {
+      retireVisit(visit, coordinator, "authority");
+      return;
+    }
+    if (!ensureCurrentFontReadyCycle(visit, coordinator)) return;
+    syncVisit(visit, coordinator);
+  };
+  const subscription = Object.freeze({
+    identity,
+    ready,
+  });
+  visit.fontReadySubscription = subscription;
+  void ready.then(continuation);
+}
+
+function ensureCurrentFontReadyCycle(
+  visit: ContentVisit,
+  coordinator: VisitCoordinator,
+): boolean {
+  if (visit.retired || coordinator.active !== visit) return false;
+  if (visit.ownerDocument.fonts !== visit.fonts) {
+    retireVisit(visit, coordinator, "authority");
+    return false;
+  }
+  const ready = visit.fonts.ready;
+  if (visit.fontReadySubscription?.ready === ready) return true;
+  if (!visitHasAuthority(visit, coordinator)) return false;
+  subscribeFontReadyCycle(visit, coordinator, ready);
+  return false;
+}
+
 function establishVisit(
   candidate: VisitCandidate,
   coordinator: VisitCoordinator,
@@ -683,7 +731,7 @@ function establishVisit(
     ...candidate,
     guard: null,
     observer: null,
-    fontsReadyContinuation: null,
+    fontReadySubscription: null,
     observing: false,
     retired: false,
     retirement: null,
@@ -736,6 +784,7 @@ function establishVisit(
       retireVisit(visit, coordinator, "authority");
       return;
     }
+    if (!ensureCurrentFontReadyCycle(visit, coordinator)) return;
     syncVisit(visit, coordinator);
   });
   visit.observer = observer;
@@ -743,21 +792,8 @@ function establishVisit(
   visit.observing = true;
   syncVisit(visit, coordinator);
   if (!visitHasAuthority(visit, coordinator)) return visit;
-
-  const continuation = (source: FontFaceSet) => {
-    if (visit.retired || coordinator.active !== visit) return;
-    if (
-      source !== visit.fonts ||
-      visit.ownerDocument.fonts !== visit.fonts ||
-      visit.fonts.ready !== visit.fontsReady
-    ) {
-      retireVisit(visit, coordinator, "authority");
-      return;
-    }
-    syncVisit(visit, coordinator);
-  };
-  visit.fontsReadyContinuation = continuation;
-  void visit.fontsReady.then(continuation);
+  subscribeFontReadyCycle(visit, coordinator, visit.fontsReady);
+  ensureCurrentFontReadyCycle(visit, coordinator);
   return visit;
 }
 
