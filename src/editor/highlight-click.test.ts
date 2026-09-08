@@ -355,6 +355,26 @@ function performReleasedSourceInteraction(
   dispatch(harness.target, "click", { button: 0, detail: 1 });
 }
 
+function performReleasedRichInteraction(
+  harness: Harness,
+  sourcePosition: number,
+  selectionOrigin: "pointer" | "programmatic",
+  selectionPosition?: number,
+) {
+  const view = harness.view as RichView;
+  harness.view.focus();
+  harness.setSourcePosition(sourcePosition);
+  dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+  dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+  dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
+  dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+  const position = selectionPosition ?? harness.session.binding.getSourceMap().srcToPm(sourcePosition);
+  const transaction = view.state.tr.setSelection(TextSelection.create(view.state.doc, position));
+  if (selectionOrigin === "pointer") transaction.setMeta("pointer", true);
+  view.dispatch(transaction);
+  dispatch(harness.target, "click", { button: 0, detail: 1 });
+}
+
 function expectedActivation(gesture: Gesture, boundary: Boundary, mutation: Mutation): boolean {
   if (gesture !== "primary") return false;
   if (mutation === "reanchor-containing") return true;
@@ -404,6 +424,70 @@ describe("live highlight click ownership", () => {
       expect(harness.session.ytext.toString()).toBe(TEXT);
     },
   );
+
+  it("activates the moved rich successor when its pointer selection lands inside the current decoration", () => {
+    const harness = makeHarness("rich", "comment");
+    const destinationId = addCommentDestination(harness);
+    const staleTarget = harness.target;
+    harness.view.focus();
+    harness.setSourcePosition(ITEM_RANGE.from + 2);
+    dispatch(staleTarget, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(staleTarget, "mousedown", { button: 0, buttons: 1, detail: 1 });
+
+    const currentTarget = reanchorCommentToDestination(harness, destinationId);
+    dispatch(harness.plainTarget, "pointerup", { button: 0, detail: 1 });
+    dispatch(harness.plainTarget, "mouseup", { button: 0, detail: 1 });
+    dispatch(harness.plainTarget, "click", { button: 0, detail: 1 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.setActiveComment).not.toHaveBeenCalled();
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+    expect(harness.session.activeCommentId).toBeNull();
+    expect(harness.session.comments.get(destinationId)).toBeNull();
+    harness.target = currentTarget;
+    const sourcePosition = AWAY_RANGE.from + 2;
+    const view = harness.view as RichView;
+    const pointerPosition = harness.session.binding.getSourceMap().srcToPm(sourcePosition);
+    const pointerDOM = view.domAtPos(pointerPosition);
+    const pointerSelectionPosition = view.posAtDOM(pointerDOM.node, pointerDOM.offset + 1);
+    const targetFrom = view.posAtDOM(currentTarget, 0);
+    const targetTo = view.posAtDOM(currentTarget, currentTarget.childNodes.length);
+    expect(pointerSelectionPosition).not.toBe(pointerPosition);
+    expect(pointerSelectionPosition).toBeGreaterThanOrEqual(targetFrom);
+    expect(pointerSelectionPosition).toBeLessThan(targetTo);
+    const startedAt = Date.now();
+    performReleasedRichInteraction(harness, sourcePosition, "pointer", pointerSelectionPosition);
+    expect(view.state.selection.from).toBe(pointerSelectionPosition);
+
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 1);
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+
+    expect(Date.now() - startedAt).toBe(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith("comment", harness.id, sourcePosition);
+    expect(harness.setActiveComment).toHaveBeenCalledExactlyOnceWith(harness.id);
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+    expect(harness.session.activeCommentId).toBe(harness.id);
+    expect(harness.session.activeSuggestionId).toBeNull();
+    expect(harness.session.ytext.toString()).toBe(TEXT);
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a programmatic rich selection update between release and click", () => {
+    const harness = makeHarness("rich", "comment");
+    const sourcePosition = ITEM_RANGE.from + 2;
+
+    performReleasedRichInteraction(harness, sourcePosition, "programmatic");
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.setActiveComment).not.toHaveBeenCalled();
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+    expect(harness.panelIsOpen()).toBe(false);
+    expect(harness.session.ytext.toString()).toBe(TEXT);
+  });
 
   it.each(SURFACES.flatMap((surface) =>
     (["pointerdown", "press", "classification"] as const).map((phase) => [surface, phase] as const)
@@ -725,7 +809,7 @@ describe("live highlight click ownership", () => {
     },
   );
 
-  it.each(SURFACES)("retires drags and later selection movement in the %s editor", (surface) => {
+  it.each(SURFACES)("retires drags, modifiers, and later selection movement in the %s editor", (surface) => {
     const harness = makeHarness(surface, "comment");
     const sourcePosition = ITEM_RANGE.from + 2;
     harness.view.focus();
@@ -746,6 +830,14 @@ describe("live highlight click ownership", () => {
     dispatch(harness.target, "pointercancel", { button: 0, detail: 1 });
     dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
     dispatch(harness.target, "click", { button: 0, detail: 1 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).not.toHaveBeenCalled();
+
+    dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1, ctrlKey: true });
+    dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1, ctrlKey: true });
+    dispatch(harness.target, "pointerup", { button: 0, detail: 1, ctrlKey: true });
+    dispatch(harness.target, "mouseup", { button: 0, detail: 1, ctrlKey: true });
+    dispatch(harness.target, "click", { button: 0, detail: 1, ctrlKey: true });
     vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
     expect(harness.rawClick).not.toHaveBeenCalled();
 
