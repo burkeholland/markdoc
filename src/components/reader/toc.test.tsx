@@ -28,6 +28,10 @@ const documentB: TestHeading[] = [
   { id: "beta", level: 2, text: "Beta", top: 120 },
   { id: "shared", level: 3, text: "Shared in B", top: 240 },
 ];
+const documentWithMissing: TestHeading[] = [
+  ...documentA,
+  { id: "missing", level: 3, text: "Missing", top: 360 },
+];
 
 class InstrumentedIntersectionObserver {
   static instances: InstrumentedIntersectionObserver[] = [];
@@ -199,12 +203,16 @@ function DirectReaderBoundary({
   domKey,
   boundary = 0,
   onLayout,
+  omitHeadingId,
+  includeIdDecoy = false,
 }: {
   currentHeadings: TestHeading[];
   present?: boolean;
   domKey?: string;
   boundary?: number;
   onLayout?: () => void;
+  omitHeadingId?: string;
+  includeIdDecoy?: boolean;
 }) {
   useLayoutEffect(() => {
     if (boundary > 0) onLayout?.();
@@ -214,8 +222,13 @@ function DirectReaderBoundary({
   return (
     <>
       <article>
+        {includeIdDecoy && <div data-testid="reader-heading-id-decoy" />}
         {currentHeadings.map((heading) => (
-          <div id={heading.id} data-heading-top={heading.top} key={heading.id}>
+          <div
+            id={heading.id === omitHeadingId ? undefined : heading.id}
+            data-heading-top={heading.top}
+            key={heading.id}
+          >
             {heading.text}
           </div>
         ))}
@@ -1020,6 +1033,108 @@ describe("ReaderToc exact DOM publications", () => {
           successor.publish([{ target: shared, isIntersecting: true }]);
           expect(directControls(view.host).links[1]).toHaveAttribute("aria-current", "location");
         });
+
+        it("drops a retired same-visit active heading on parent replay and recovers on a fresh observer", () => {
+          const renderBoundary = (domKey: string, boundary: number) => (
+            <StrictMode>
+              <DirectReaderBoundary
+                currentHeadings={documentA}
+                domKey={domKey}
+                boundary={boundary}
+              />
+            </StrictMode>
+          );
+          const view = directRoot(renderBoundary("active-a", 0));
+          let controls = directControls(view.host);
+          const observer = InstrumentedIntersectionObserver.instances.at(-1)!;
+          const shared = document.getElementById("shared")!;
+
+          observer.publish([{ target: shared, isIntersecting: true }]);
+          expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+          shared.setAttribute("data-retire-observer", "true");
+          shared.removeAttribute("data-retire-observer");
+          observer.publish([{ target: shared, isIntersecting: true }]);
+          expect(observer.disconnect).toHaveBeenCalledOnce();
+
+          act(() => view.root.render(renderBoundary("active-a", 1)));
+          controls = directControls(view.host);
+          expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+          expect(controls.links.every((link) => !link.classList.contains("bg-accent-soft"))).toBe(true);
+
+          observer.publish([{ target: shared, isIntersecting: true }]);
+          expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+
+          act(() => view.root.render(renderBoundary("active-b", 2)));
+          controls = directControls(view.host);
+          const freshObserver = InstrumentedIntersectionObserver.instances.at(-1)!;
+          expect(freshObserver).not.toBe(observer);
+          expect(freshObserver.connected).toBe(true);
+          freshObserver.publish([{ target: shared, isIntersecting: true }]);
+          expect(controls.links.filter((link) => link.getAttribute("aria-current") === "location"))
+            .toEqual([controls.links[1]]);
+        });
+
+        it.each(["missing-id-restore", "duplicate-id"] as const)(
+          "permanently retires stale link and observer work after a %s mutation",
+          (kind) => {
+            const currentHeadings = kind === "missing-id-restore" ? documentWithMissing : documentA;
+            const renderBoundary = (domKey: string) => (
+              <StrictMode>
+                <DirectReaderBoundary
+                  currentHeadings={currentHeadings}
+                  domKey={domKey}
+                  omitHeadingId={kind === "missing-id-restore" ? "missing" : undefined}
+                  includeIdDecoy
+                />
+              </StrictMode>
+            );
+            const view = directRoot(renderBoundary("id-a"));
+            let controls = directControls(view.host);
+            fireEvent.click(controls.toggle);
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+            controls = directControls(view.host);
+            const staleLink = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[1], "onClick");
+            const staleObserver = InstrumentedIntersectionObserver.instances.at(-1)!;
+            const shared = document.getElementById("shared")!;
+            const decoy = view.host.querySelector<HTMLElement>(
+              '[data-testid="reader-heading-id-decoy"]',
+            )!;
+
+            decoy.id = kind === "missing-id-restore" ? "missing" : "shared";
+            if (kind === "missing-id-restore") {
+              decoy.removeAttribute("id");
+            } else {
+              expect(document.getElementById("shared")).toBe(decoy);
+            }
+
+            const staleEvent = clickEvent(controls.links[1]);
+            act(() => staleEvent.dispatch(staleLink));
+            expect(staleEvent.preventDefault).not.toHaveBeenCalled();
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+            decoy.removeAttribute("id");
+
+            staleObserver.publish([{ target: shared, isIntersecting: true }]);
+            expect(staleObserver.disconnect).toHaveBeenCalledOnce();
+            expect(controls.links[0]).toHaveAttribute("aria-current", "location");
+            expect(controls.links[1]).not.toHaveAttribute("aria-current");
+
+            act(() => view.root.render(renderBoundary("id-b")));
+            controls = directControls(view.host);
+            const freshObserver = InstrumentedIntersectionObserver.instances.at(-1)!;
+            expect(freshObserver).not.toBe(staleObserver);
+            expect(freshObserver.connected).toBe(true);
+            freshObserver.publish([{ target: shared, isIntersecting: true }]);
+            expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+
+            fireEvent.click(controls.toggle);
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+            const freshLink = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[1], "onClick");
+            const freshEvent = clickEvent(controls.links[1]);
+            act(() => freshEvent.dispatch(freshLink));
+            expect(freshEvent.preventDefault).not.toHaveBeenCalled();
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+          },
+        );
 
         it("prevents only unsafe retired-anchor navigation and leaves the current publication usable", () => {
           const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} domKey="a" />);

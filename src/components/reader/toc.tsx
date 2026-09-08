@@ -61,8 +61,9 @@ type ObserverOwner = PermanentOwner & Readonly<{
   nodeFacts: readonly NodeFact[];
   trackedNodes: ReadonlySet<Node>;
   trackedParents: ReadonlySet<Node>;
-  missingHeadingIds: ReadonlySet<string>;
+  headingIds: ReadonlySet<string>;
   mutationObserver: MutationObserver | null;
+  hasAuthority: () => boolean;
 }>;
 
 type ActiveHeading = Readonly<{
@@ -126,7 +127,7 @@ type TocPublication = PermanentOwner & Readonly<{
   nodeFacts: readonly NodeFact[];
   trackedNodes: ReadonlySet<Node>;
   trackedParents: ReadonlySet<Node>;
-  missingHeadingIds: ReadonlySet<string>;
+  headingIds: ReadonlySet<string>;
   mutationObserver: MutationObserver;
   claim: (
     action: Exclude<PublicationAction, "reject-link">,
@@ -242,7 +243,7 @@ function headingFactsAreExact(owner: ObserverOwner): boolean {
   const records = owner.mutationObserver?.takeRecords() ?? [];
   if (
     records.some((record) =>
-      mutationIsRelevant(record, owner.trackedNodes, owner.trackedParents, owner.missingHeadingIds)) ||
+      mutationIsRelevant(record, owner.trackedNodes, owner.trackedParents, owner.headingIds)) ||
     !nodeFactsAreExact(owner.nodeFacts, owner.document)
   ) {
     owner.retire();
@@ -250,7 +251,10 @@ function headingFactsAreExact(owner: ObserverOwner): boolean {
   }
   for (const fact of owner.headings) {
     const current = owner.document.getElementById(fact.heading.id);
-    if (current !== fact.element) return false;
+    if (current !== fact.element) {
+      owner.retire();
+      return false;
+    }
     if (
       fact.element &&
       (!fact.element.isConnected ||
@@ -285,20 +289,19 @@ function useActiveHeading(
     const trackedNodes = new Set(nodeFacts.map((fact) => fact.node));
     const trackedParents = new Set(elements.flatMap((element) =>
       element.parentNode ? [element.parentNode] : []));
-    const missingHeadingIds = new Set(
-      headingFacts.filter((fact) => !fact.element).map((fact) => fact.heading.id),
-    );
+    const headingIds = new Set(headingFacts.map((fact) => fact.heading.id));
     const visible = new Set<string>();
     let retired = false;
     let observer: IntersectionObserver | null = null;
     let mutationObserver: MutationObserver | null = null;
 
-    const isCurrent = () =>
+    const hasAuthority = () =>
       !retired &&
       !visitOwner.isRetired() &&
       visitOwnerRef.current === visitOwner &&
-      observerOwnerRef.current === owner &&
-      headingFactsAreExact(owner);
+      observerOwnerRef.current === owner;
+    const isCurrent = () =>
+      hasAuthority() && headingFactsAreExact(owner);
     const retire = () => {
       if (retired) return;
       retired = true;
@@ -356,7 +359,7 @@ function useActiveHeading(
       mutationObserver = new MutationObserverConstructor((records) => {
         if (
           records.some((record) =>
-            mutationIsRelevant(record, trackedNodes, trackedParents, missingHeadingIds))
+            mutationIsRelevant(record, trackedNodes, trackedParents, headingIds))
         ) {
           owner.retire();
         }
@@ -372,8 +375,9 @@ function useActiveHeading(
       nodeFacts,
       trackedNodes,
       trackedParents,
-      missingHeadingIds,
+      headingIds,
       mutationObserver,
+      hasAuthority,
       isRetired: () => retired,
       retire,
     });
@@ -384,13 +388,22 @@ function useActiveHeading(
       characterData: true,
       childList: true,
       subtree: true,
+      attributeOldValue: true,
     });
     elements.forEach((element) => observer?.observe(element));
     pick();
     return retire;
   }, [observerOwnerRef, visit, visitOwnerRef]);
 
-  return activeHeading?.owner.visitOwner.visit === visit ? activeHeading : null;
+  if (
+    !activeHeading ||
+    !activeHeading.owner.hasAuthority() ||
+    activeHeading.owner.visitOwner.visit !== visit ||
+    activeHeading.owner.isRetired()
+  ) {
+    return null;
+  }
+  return activeHeading;
 }
 
 function createDomGeneration(
@@ -616,24 +629,33 @@ function mutationContainsTrackedNode(node: Node, trackedNodes: ReadonlySet<Node>
   return false;
 }
 
-function mutationAddsMissingHeading(node: Node, missingHeadingIds: ReadonlySet<string>): boolean {
-  if (missingHeadingIds.size === 0 || !(node instanceof Element)) return false;
-  if (node.id && missingHeadingIds.has(node.id)) return true;
+function mutationAddsHeading(node: Node, headingIds: ReadonlySet<string>): boolean {
+  if (headingIds.size === 0 || !(node instanceof Element)) return false;
+  if (node.id && headingIds.has(node.id)) return true;
   return Array.from(node.querySelectorAll<HTMLElement>("[id]"))
-    .some((element) => missingHeadingIds.has(element.id));
+    .some((element) => headingIds.has(element.id));
 }
 
 function mutationIsRelevant(
   record: MutationRecord,
   trackedNodes: ReadonlySet<Node>,
   trackedParents: ReadonlySet<Node>,
-  missingHeadingIds: ReadonlySet<string>,
+  headingIds: ReadonlySet<string>,
 ): boolean {
   if (trackedNodes.has(record.target) || trackedParents.has(record.target)) return true;
+  if (
+    record.type === "attributes" &&
+    record.attributeName === "id" &&
+    record.target instanceof Element &&
+    (headingIds.has(record.target.id) ||
+      (record.oldValue !== null && headingIds.has(record.oldValue)))
+  ) {
+    return true;
+  }
   if (record.type !== "childList") return false;
   return [...Array.from(record.addedNodes), ...Array.from(record.removedNodes)].some((node) =>
     mutationContainsTrackedNode(node, trackedNodes) ||
-    mutationAddsMissingHeading(node, missingHeadingIds));
+    mutationAddsHeading(node, headingIds));
 }
 
 function publicationHasCurrentRefs(
@@ -674,7 +696,7 @@ function publicationIsExact(
   if (publication.isRetired()) return false;
   const records = publication.mutationObserver.takeRecords();
   if (records.some((record) =>
-    mutationIsRelevant(record, publication.trackedNodes, publication.trackedParents, publication.missingHeadingIds))
+    mutationIsRelevant(record, publication.trackedNodes, publication.trackedParents, publication.headingIds))
   ) {
     publication.retire();
     return false;
@@ -726,17 +748,13 @@ function createPublication(
   const trackedParents = new Set(
     [nav, ...headingRoots].flatMap((root) => root.parentNode ? [root.parentNode] : []),
   );
-  const missingHeadingIds = new Set(
-    observerOwner
-      ? observerOwner.headings.filter((fact) => !fact.element).map((fact) => fact.heading.id)
-      : render.visit.headings.filter((heading) => !ownerDocument.getElementById(heading.id)).map((heading) => heading.id),
-  );
+  const headingIds = new Set(render.visit.headings.map((heading) => heading.id));
   let retired = false;
   let actionClaimed = false;
   const mutationObserver = new MutationObserverConstructor((records) => {
     if (
       records.some((record) =>
-        mutationIsRelevant(record, trackedNodes, trackedParents, missingHeadingIds))
+        mutationIsRelevant(record, trackedNodes, trackedParents, headingIds))
     ) {
       publication.retire();
     }
@@ -784,7 +802,7 @@ function createPublication(
     nodeFacts,
     trackedNodes,
     trackedParents,
-    missingHeadingIds,
+    headingIds,
     mutationObserver,
     isRetired: () => retired,
     retire,
@@ -803,6 +821,7 @@ function createPublication(
     characterData: true,
     childList: true,
     subtree: true,
+    attributeOldValue: true,
   });
   return publication;
 }
