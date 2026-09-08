@@ -794,11 +794,41 @@ describe("held PostgreSQL recovery collector", () => {
       },
     );
 
+    it("prioritizes accepted identity ambiguity over a simultaneous member mismatch", async () => {
+      const receipts = [];
+      for (const order of ["forward", "reverse"] as const) {
+        const written = await writeFixture(
+          { name: "identity and member mismatch", expectedDecision: "STOP", expectedReason: "INPUT_PATH_AMBIGUOUS" },
+          `identity-member-mismatch-${order}`,
+        );
+        try {
+          written.authorities.capture.inode = (BigInt(written.authorities.capture.inode) + BigInt(1)).toString();
+          written.authorities.capture.sha256 = "0".repeat(64);
+          const receipt = await collectRecoveryReceipt(
+            written.inputRoot,
+            written.authorities,
+            undefined,
+            order,
+          );
+          expect(receipt).toMatchObject({
+            decision: "STOP",
+            reasons: ["INPUT_PATH_AMBIGUOUS"],
+            observed_at: null,
+            engine: { physical_compatible: false },
+          });
+          receipts.push(receipt);
+        } finally {
+          await rm(written.caseRoot, { recursive: true, force: true });
+        }
+      }
+      expect(receipts[1]).toEqual(receipts[0]);
+    });
+
     it("rejects a coherently rehashed capture root that is not the accepted external identity", async () => {
       const receipts = [];
       for (const order of ["forward", "reverse"] as const) {
         const written = await writeFixture(
-          { name: "coherent rehash", expectedDecision: "STOP", expectedReason: "INPUT_MEMBER_MISMATCH" },
+          { name: "coherent rehash", expectedDecision: "STOP", expectedReason: "INPUT_PATH_AMBIGUOUS" },
           `coherent-rehashed-capture-root-${order}`,
         );
         try {
@@ -818,6 +848,14 @@ describe("held PostgreSQL recovery collector", () => {
           await writeFile(fakeCapturePath, canonicalJson(capture));
           await rename(capturePath, `${capturePath}.accepted`);
           await rename(fakeCapturePath, capturePath);
+          const [currentCaptureClaim, currentStats, acceptedStats] = await Promise.all([
+            fileClaim("capture-authority.json", capturePath),
+            stat(capturePath, { bigint: true }),
+            stat(`${capturePath}.accepted`, { bigint: true }),
+          ]);
+          expect(currentCaptureClaim.sha256).not.toBe(written.authorities.capture.sha256);
+          expect(currentStats.ino.toString()).not.toBe(written.authorities.capture.inode);
+          expect(acceptedStats.ino.toString()).toBe(written.authorities.capture.inode);
           const receipt = await collectRecoveryReceipt(
             written.inputRoot,
             written.authorities,
@@ -827,6 +865,7 @@ describe("held PostgreSQL recovery collector", () => {
           expect(receipt).toMatchObject({
             decision: "STOP",
             reasons: ["INPUT_PATH_AMBIGUOUS"],
+            observed_at: null,
             engine: { physical_compatible: false },
           });
           receipts.push(receipt);

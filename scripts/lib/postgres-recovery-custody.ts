@@ -771,10 +771,28 @@ async function verifyFileIdentity(snapshot: FileSnapshot): Promise<void> {
   }
 }
 
+function assertAcceptedFileIdentity(
+  filePath: string,
+  nativeRealpath: string,
+  fileFingerprint: FileFingerprint,
+  expectedIdentity: AcceptedFileIdentity | undefined,
+): void {
+  if (
+    expectedIdentity
+    && (
+      filePath !== expectedIdentity.path
+      || nativeRealpath !== expectedIdentity.realpath
+      || fileFingerprint.device.toString() !== expectedIdentity.device
+      || fileFingerprint.inode.toString() !== expectedIdentity.inode
+    )
+  ) {
+    throw new RecoveryCustodyError("INPUT_PATH_AMBIGUOUS");
+  }
+}
+
 function assertExpectedFile(
   snapshot: FileSnapshot,
   expected: AcceptedFileIdentity | RecoveryFileClaim | undefined,
-  expectedIdentity: AcceptedFileIdentity | undefined,
 ): void {
   if (expected) {
     if (
@@ -785,16 +803,6 @@ function assertExpectedFile(
     }
     if ("logical_name" in expected && snapshot.logicalName !== expected.logical_name) {
       throw new RecoveryCustodyError("INPUT_MEMBER_MISMATCH");
-    }
-  }
-  if (expectedIdentity) {
-    if (
-      snapshot.path !== expectedIdentity.path
-      || snapshot.realpath !== expectedIdentity.realpath
-      || snapshot.fingerprint.device.toString() !== expectedIdentity.device
-      || snapshot.fingerprint.inode.toString() !== expectedIdentity.inode
-    ) {
-      throw new RecoveryCustodyError("INPUT_CUSTODY_CHANGED");
     }
   }
 }
@@ -810,6 +818,7 @@ async function openStableFile(filePath: string, options: OpenFileOptions): Promi
     const postStats = await bigintLstat(filePath);
     const nativeRealpath = await realpath(filePath);
     const initialFingerprint = fingerprint(descriptorStats);
+    assertAcceptedFileIdentity(filePath, nativeRealpath, initialFingerprint, options.expectedIdentity);
     if (
       !isRegularFile(descriptorStats)
       || descriptorStats.nlink !== BigInt(1)
@@ -839,7 +848,7 @@ async function openStableFile(filePath: string, options: OpenFileOptions): Promi
       throw new RecoveryCustodyError("INPUT_CUSTODY_CHANGED");
     }
     provisional.value = parseCanonicalJsonBytes(first);
-    assertExpectedFile(provisional, options.expected, options.expectedIdentity);
+    assertExpectedFile(provisional, options.expected);
     return provisional;
   } catch (error) {
     await handle.close();
