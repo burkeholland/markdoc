@@ -290,6 +290,7 @@ interface ImportResultPublicationRuntime {
     dom: ImportResultDomSnapshot,
     rootPlacement: ImportResultPlacement,
     owners: readonly ElementOwnerView[],
+    partialReplayElements: ReadonlySet<HTMLElement>,
   ) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
@@ -1059,6 +1060,7 @@ function createImportResultPublication(
     let domSnapshot: ImportResultDomSnapshot | null = null;
     let publishedRootPlacement: ImportResultPlacement | null = null;
     let replayRefs: RefReplay[] = [];
+    let partialReplayOwners = new Set<ElementOwnerView>();
     let invalidReplay = false;
     const pendingDialogAttributes = new Set(
       ["aria-labelledby", "aria-describedby", "style"].filter(
@@ -1161,7 +1163,7 @@ function createImportResultPublication(
         cells.successorOf.current = publication;
       }
       if (currentRuntime?.publication === publication) currentRuntime = null;
-      if (reason === "layout") {
+      if (reason === "layout" || reason === "element") {
         queueMicrotask(() => {
           if (!domObserver) return;
           recordMutations(domObserver.takeRecords());
@@ -1197,12 +1199,23 @@ function createImportResultPublication(
           entry.reattached &&
           entry.owner.element() === entry.element,
       );
+    const refsHaveExactPartialReplay = () =>
+      !invalidReplay &&
+      partialReplayOwners.size > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.owner.element() === entry.element &&
+          (partialReplayOwners.has(entry.owner)
+            ? entry.detached && entry.reattached
+            : !entry.detached && !entry.reattached),
+      );
     const runtime: ImportResultPublicationRuntime = Object.freeze({
       publication,
       publish: (
         dom: ImportResultDomSnapshot,
         nextRootPlacement: ImportResultPlacement,
         owners: readonly ElementOwnerView[],
+        partialReplayElements: ReadonlySet<HTMLElement>,
       ) => {
         established = true;
         domSnapshot = dom;
@@ -1214,6 +1227,11 @@ function createImportResultPublication(
           }
           return { owner, element, detached: false, reattached: false };
         });
+        partialReplayOwners = new Set(
+          replayRefs
+            .filter(({ element }) => partialReplayElements.has(element))
+            .map(({ owner }) => owner),
+        );
         cells.active.current = publication;
         cells.successorOf.current = null;
         cells.replay.current = null;
@@ -1273,9 +1291,10 @@ function createImportResultPublication(
       isExactElementReplay: () =>
         retired &&
         retirement === "element" &&
-        layoutRetired &&
         established &&
-        refsHaveExactReplay() &&
+        (layoutRetired
+          ? refsHaveExactReplay()
+          : refsHaveExactPartialReplay()) &&
         publishedDomMatches(),
       isExactLayoutReplay: () =>
         retired &&
@@ -1351,6 +1370,32 @@ function createImportResultPublication(
     if (!runtime) return undefined;
     const publication = runtime.publication;
     const previous = cells.active.current;
+    const predecessor = previous ?? cells.successorOf.current;
+    const predecessorControls = new Set<HTMLElement>(
+      predecessor
+        ? [
+            ...predecessor.rows.flatMap((row) =>
+              row.open ? [row.open.element] : [],
+            ),
+            ...(predecessor.retry ? [predecessor.retry.element] : []),
+          ]
+        : [],
+    );
+    const partialReplayElements = new Set<HTMLElement>(
+      predecessor?.authority.mount === mount
+        ? [
+            ...publication.rows.flatMap((row) =>
+              row.open && !predecessorControls.has(row.open.element)
+                ? [row.open.element]
+                : [],
+            ),
+            ...(publication.retry &&
+            !predecessorControls.has(publication.retry.element)
+              ? [publication.retry.element]
+              : []),
+          ]
+        : [],
+    );
     if (previous && previous !== publication) previous.retire();
     currentRuntime = runtime;
     lastRuntime = runtime;
@@ -1358,6 +1403,7 @@ function createImportResultPublication(
       snapshotImportResultDom(dialog, dialog),
       rootPlacement,
       expectedOwners(),
+      partialReplayElements,
     );
     replay?.release();
     return runtime.retireForLayout;
