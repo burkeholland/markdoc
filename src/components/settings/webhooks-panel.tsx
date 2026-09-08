@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -47,7 +48,7 @@ interface CreatedWebhook {
 }
 
 type DeliveryTone = "ok" | "bad" | "muted";
-type PanelActionKind = "add" | "cancel" | "create" | "retry";
+type PanelActionKind = "add" | "cancel" | "copy" | "create" | "retry";
 type RowActionKind = RowOperation["kind"];
 
 type ActionFacts = Readonly<{
@@ -95,6 +96,7 @@ type RowActionFacts = Readonly<{
 }>;
 
 type WebhookRowFacts = Readonly<{
+  source: WebhookRow;
   index: number;
   id: string;
   url: string;
@@ -114,6 +116,7 @@ type WebhookRowFacts = Readonly<{
 }>;
 
 type CreatedFacts = Readonly<{
+  source: CreatedWebhook;
   id: string;
   secret: string;
   url: string;
@@ -126,7 +129,13 @@ type ListFacts = Readonly<{
 
 type PanelPresentation = Readonly<{
   identity: symbol;
+  revision: number;
+  callbackToken: symbol;
   generation: MountGeneration;
+  hooksSource: WebhookRow[] | null;
+  choicesSource: string[];
+  rowOperationsSource: Map<string, RowOperation>;
+  createdSource: CreatedWebhook | null;
   adding: boolean;
   draft: DraftFacts;
   createOperation: Operation | null;
@@ -140,10 +149,21 @@ type PanelPresentation = Readonly<{
   create: ActionFacts | null;
   cancel: ActionFacts | null;
   retry: ActionFacts | null;
+  copy: ActionFacts | null;
+  copyLabel: string;
+  copied: boolean;
 }>;
 
+interface InputDomOverride {
+  input: HTMLInputElement;
+  value?: string;
+  checked?: boolean;
+}
+
 interface ElementSlot<T extends HTMLElement> {
+  readonly key: string;
   element: T | null;
+  last: T | null;
   mouseTargets: readonly Node[] | null;
 }
 
@@ -156,8 +176,6 @@ interface RowElements {
 
 interface PanelPublication {
   presentation: PanelPresentation;
-  active: boolean;
-  retired: boolean;
   card: ElementSlot<HTMLDivElement>;
   header: ElementSlot<HTMLDivElement>;
   guidance: ElementSlot<HTMLParagraphElement>;
@@ -173,65 +191,431 @@ interface PanelPublication {
   retry: ElementSlot<HTMLButtonElement>;
   actionError: ElementSlot<HTMLDivElement>;
   created: ElementSlot<HTMLDivElement>;
+  secret: ElementSlot<HTMLElement>;
+  copy: ElementSlot<HTMLButtonElement>;
   listContent: ElementSlot<HTMLElement>;
   rowsList: ElementSlot<HTMLUListElement>;
   rows: RowElements[];
+  established: boolean;
+  layoutRetired: boolean;
+  consumed: boolean;
+  successorRequested: boolean;
+  invalidReplay: boolean;
+  replayRefs: RefReplay[];
+  stableSlots: Set<ElementSlot<HTMLElement>>;
+  introducedSlots: Set<ElementSlot<HTMLElement>>;
+  dom: PanelDomSnapshot | null;
+  placement: PanelPlacement | null;
+  guard: PanelDomGuard | null;
+  guardExpiryQueued: boolean;
+  factsAreCurrent: (() => boolean) | null;
+  domIsExact: ((override?: InputDomOverride) => boolean) | null;
+  requestSuccessor: (() => void) | null;
 }
 
+interface RefReplay {
+  readonly owner: ElementSlot<HTMLElement>;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+type PanelDomSnapshot = Readonly<{
+  node: Node;
+  nodeValue: string | null;
+  attributes: readonly (readonly [string, string])[] | null;
+  children: readonly PanelDomSnapshot[];
+}>;
+
+type PanelPlacementLink = Readonly<{
+  node: Node;
+  parent: Node;
+  previousSibling: Node | null;
+  nextSibling: Node | null;
+}>;
+
+type PanelPlacement = Readonly<{
+  document: Document;
+  links: readonly PanelPlacementLink[];
+}>;
+
+type PanelDomGuard = Readonly<{
+  acceptReactCommit: (
+    inputs: readonly HTMLInputElement[],
+    finalDomIsExact: () => boolean,
+  ) => void;
+  isClean: () => boolean;
+  release: () => void;
+}>;
+
+type PanelReplay = Readonly<{
+  source: PanelPublication;
+  dom: PanelDomSnapshot;
+  placement: PanelPlacement;
+  historyIsClean: () => boolean;
+  release: () => void;
+}>;
+
 class PanelPublicationCoordinator {
+  readonly callbackToken = Symbol("webhooks-callbacks");
+  readonly #mount: MountGeneration;
   #current: PanelPublication | null = null;
+  #successorOf: PanelPublication | null = null;
+  #replay: PanelReplay | null = null;
+  #teardownRevision = 0;
+  readonly #retired = new WeakSet<PanelPublication>();
+  readonly #claimedPublications = new WeakSet<PanelPublication>();
+  readonly #claimedRows = new WeakSet<object>();
+  readonly #claimedActions = new WeakSet<object>();
+  readonly #claimedReactEvents = new WeakSet<object>();
+  readonly #claimedNativeEvents = new WeakSet<Event>();
+
+  constructor(mount: MountGeneration) {
+    this.#mount = mount;
+  }
+
+  activate() {
+    this.#teardownRevision += 1;
+  }
+
+  scheduleTeardown() {
+    const revision = ++this.#teardownRevision;
+    queueMicrotask(() => {
+      if (revision !== this.#teardownRevision) return;
+      const replay = this.#replay;
+      this.#replay = null;
+      replay?.release();
+      const publications = new Set([
+        this.#current,
+        this.#successorOf,
+        replay?.source ?? null,
+      ]);
+      for (const publication of publications) {
+        publication?.guard?.release();
+        if (publication) publication.guard = null;
+      }
+      this.#current = null;
+      this.#successorOf = null;
+    });
+  }
 
   bind<T extends HTMLElement>(
     candidate: PanelPublication,
     owner: ElementSlot<T>,
     element: T | null,
   ) {
-    if (candidate.active && owner.element !== element) this.retire(candidate);
-    if (owner.element !== element) owner.mouseTargets = null;
+    if (owner.element === element) return;
+    const previous = owner.element;
+    const last = owner.last;
+    owner.mouseTargets = null;
     owner.element = element;
-    if (!element) this.retire(candidate);
+    if (element) owner.last = element;
+    if (!candidate.established) return;
+
+    const slotOwner = owner as ElementSlot<HTMLElement>;
+    const proof = candidate.replayRefs.find((entry) => entry.owner === slotOwner);
+    if (!proof) {
+      candidate.invalidReplay = true;
+      this.retire(candidate, "element");
+      return;
+    }
+    if (element === null && previous === proof.element && proof.element.isConnected) {
+      proof.detached = true;
+      proof.reattached = false;
+    } else if (
+      element === proof.element &&
+      previous === null &&
+      proof.detached &&
+      proof.element.isConnected
+    ) {
+      proof.reattached = true;
+    } else {
+      candidate.invalidReplay = true;
+    }
+
+    const introducedReplayCompleted =
+      candidate.introducedSlots.has(slotOwner) &&
+      proof.detached &&
+      proof.reattached;
+    if (
+      candidate.stableSlots.has(slotOwner) &&
+      (element === null || (element !== null && last !== null && element !== last)) &&
+      !candidate.introducedSlots.has(slotOwner)
+    ) {
+      this.retire(candidate, "element");
+    }
+    if (introducedReplayCompleted) {
+      candidate.introducedSlots.delete(slotOwner);
+      proof.detached = false;
+      proof.reattached = false;
+      const ownerWindow = proof.element.ownerDocument.defaultView;
+      if (ownerWindow && proof.element instanceof ownerWindow.HTMLButtonElement) {
+        slotOwner.mouseTargets = snapshotMouseTargets(proof.element);
+      }
+    }
+    this.#requestReplaySuccessor(candidate);
   }
 
-  publish(candidate: PanelPublication) {
+  establish(
+    candidate: PanelPublication,
+    factsAreCurrent: () => boolean,
+    domIsExact: (override?: InputDomOverride) => boolean,
+    requestSuccessor: () => void,
+  ): (() => void) | undefined {
+    candidate.factsAreCurrent = factsAreCurrent;
+    candidate.domIsExact = domIsExact;
+    candidate.requestSuccessor = requestSuccessor;
+    if (candidate.established) {
+      this.#requestReplaySuccessor(candidate);
+      return undefined;
+    }
+    if (
+      candidate.presentation.generation !== this.#mount ||
+      !factsAreCurrent() ||
+      !domIsExact()
+    ) {
+      return undefined;
+    }
+    const root = candidate.card.element;
+    const placement = root ? capturePanelPlacement(root) : null;
+    if (!root || !placement) return undefined;
+
+    const pendingReplay = this.#replay;
+    if (pendingReplay) {
+      const sameAuthority =
+        candidate.presentation.revision === pendingReplay.source.presentation.revision + 1 &&
+        panelPresentationsMatch(pendingReplay.source.presentation, candidate.presentation);
+      const exactReplay =
+        sameAuthority &&
+        this.#acceptsSuccessorOf(pendingReplay.source) &&
+        pendingReplay.historyIsClean() &&
+        pendingReplay.dom.node === root &&
+        panelPlacementMatches(root, pendingReplay.placement) &&
+        panelDomMatches(pendingReplay.dom);
+      this.#replay = null;
+      pendingReplay.release();
+      if (this.#successorOf === pendingReplay.source) this.#successorOf = null;
+      if (sameAuthority && !exactReplay) return undefined;
+    }
+
+    const guard = createPanelDomGuard(root, placement);
+    if (!guard) return undefined;
+    const expected = expectedPanelSlots(candidate);
+    if (expected.some((owner) => !owner.element)) {
+      guard.release();
+      return undefined;
+    }
+    const predecessor = this.#current ?? this.#successorOf;
+    if (
+      predecessor &&
+      predecessor.presentation.generation === candidate.presentation.generation
+    ) {
+      const predecessorElements = new Map(
+        expectedPanelSlots(predecessor).map((owner) => [owner.key, owner.element]),
+      );
+      for (const owner of expected) {
+        if (
+          !predecessorElements.has(owner.key) ||
+          predecessorElements.get(owner.key) !== owner.element
+        ) {
+          candidate.introducedSlots.add(owner);
+        }
+      }
+    }
     const previous = this.#current;
-    if (previous && previous !== candidate) this.retire(previous);
-    candidate.active = true;
+    if (previous && previous !== candidate) this.retire(previous, "other");
+    if (
+      this.#retired.has(candidate) ||
+      candidate.presentation.generation !== this.#mount
+    ) {
+      guard.release();
+      return undefined;
+    }
+
+    candidate.established = true;
+    candidate.stableSlots = new Set(expected);
+    candidate.replayRefs = expected.map((owner) => ({
+      owner,
+      element: owner.element!,
+      detached: false,
+      reattached: false,
+    }));
+    candidate.dom = snapshotPanelDom(root);
+    candidate.placement = placement;
+    candidate.guard = guard;
+    for (const owner of panelButtonSlots(candidate)) {
+      owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
+    }
     this.#current = candidate;
+    this.#successorOf = null;
+    queueMicrotask(() => {
+      if (this.#current === candidate && !this.#retired.has(candidate)) {
+        this.#acceptInputReconciliation(candidate);
+      }
+      root.ownerDocument.defaultView?.setTimeout(
+        () => candidate.introducedSlots.clear(),
+        0,
+      );
+    });
+    return () => {
+      candidate.layoutRetired = true;
+      this.retire(candidate, "layout");
+      this.#requestReplaySuccessor(candidate);
+    };
   }
 
-  retire(candidate: PanelPublication) {
-    candidate.active = false;
-    candidate.retired = true;
-    if (this.#current === candidate) this.#current = null;
+  retire(candidate: PanelPublication, reason: "element" | "layout" | "other" = "other") {
+    if (this.#retired.has(candidate)) return false;
+    candidate.guard?.isClean();
+    this.#retired.add(candidate);
+    const wasCurrent = this.#current === candidate;
+    if (wasCurrent) {
+      this.#current = null;
+      this.#successorOf = candidate;
+    }
+    if (reason === "other") {
+      candidate.guard?.release();
+      candidate.guard = null;
+    } else {
+      this.#scheduleGuardExpiry(candidate);
+    }
+    return wasCurrent;
   }
 
   owns(candidate: PanelPublication) {
-    return this.#current === candidate && candidate.active && !candidate.retired;
+    const result =
+      this.#current === candidate &&
+      !this.#retired.has(candidate) &&
+      !this.#claimedPublications.has(candidate) &&
+      candidate.guard?.isClean() === true;
+    return result;
   }
-}
 
-interface InputDomOverride {
-  input: HTMLInputElement;
-  value?: string;
-  checked?: boolean;
-}
+  reconcileReactCommit(candidate: PanelPublication) {
+    if (
+      this.#current !== candidate ||
+      this.#retired.has(candidate) ||
+      !candidate.dom
+    ) {
+      return;
+    }
+    this.#acceptInputReconciliation(candidate);
+  }
 
-interface SecretRender {
-  identity: symbol;
-  panel: PanelPublication;
-  created: CreatedFacts;
-  copy: () => void;
-  label: string;
-  copied: boolean;
-}
+  prepareControlClaim(candidate: PanelPublication, override?: InputDomOverride) {
+    if (
+      this.#current === candidate &&
+      !this.#retired.has(candidate) &&
+      !this.#claimedPublications.has(candidate)
+    ) {
+      this.#acceptInputReconciliation(candidate, override);
+    }
+  }
 
-interface SecretPublication {
-  render: SecretRender;
-  root: HTMLDivElement;
-  code: HTMLElement;
-  button: HTMLButtonElement;
-  mouseTargets: readonly Node[];
-  claimed: boolean;
+  #acceptInputReconciliation(candidate: PanelPublication, override?: InputDomOverride) {
+    candidate.guard?.acceptReactCommit(
+      [
+        candidate.url.element,
+        ...candidate.choices.map((choice) => choice.element),
+        candidate.docs.element,
+      ].filter((input): input is HTMLInputElement => input !== null),
+      () =>
+        candidate.factsAreCurrent?.() === true &&
+        candidate.domIsExact?.(override) === true &&
+        candidate.dom !== null &&
+        panelDomMatches(candidate.dom),
+    );
+  }
+
+  claim(
+    candidate: PanelPublication,
+    row: object | null,
+    action: object,
+    reactEvent: object,
+    nativeEvent: Event,
+  ) {
+    if (
+      !this.owns(candidate) ||
+      (row !== null && this.#claimedRows.has(row)) ||
+      this.#claimedActions.has(action) ||
+      this.#claimedReactEvents.has(reactEvent) ||
+      this.#claimedNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(candidate);
+    if (row !== null) this.#claimedRows.add(row);
+    this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(reactEvent);
+    this.#claimedNativeEvents.add(nativeEvent);
+    candidate.consumed = true;
+    this.retire(candidate, "other");
+    return true;
+  }
+
+  #acceptsSuccessorOf(candidate: PanelPublication) {
+    return (
+      this.#current === null &&
+      this.#successorOf === candidate &&
+      this.#retired.has(candidate) &&
+      !this.#claimedPublications.has(candidate)
+    );
+  }
+
+  #scheduleGuardExpiry(candidate: PanelPublication) {
+    if (candidate.guardExpiryQueued) return;
+    candidate.guardExpiryQueued = true;
+    queueMicrotask(() => {
+      if (this.#replay?.source !== candidate) {
+        candidate.guard?.release();
+        candidate.guard = null;
+      }
+    });
+  }
+
+  #requestReplaySuccessor(candidate: PanelPublication) {
+    const exactReplay =
+      this.#acceptsSuccessorOf(candidate) &&
+      candidate.layoutRetired &&
+      candidate.established &&
+      !candidate.consumed &&
+      !candidate.invalidReplay &&
+      candidate.replayRefs.length > 0 &&
+      candidate.replayRefs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element === entry.element &&
+          entry.element.isConnected,
+      ) &&
+      candidate.factsAreCurrent?.() === true &&
+      candidate.domIsExact?.() === true &&
+      candidate.dom !== null &&
+      candidate.placement !== null &&
+      candidate.guard?.isClean() === true &&
+      panelPlacementMatches(candidate.dom.node as HTMLElement, candidate.placement) &&
+      panelDomMatches(candidate.dom);
+    if (
+      candidate.successorRequested ||
+      !exactReplay ||
+      !candidate.dom ||
+      !candidate.placement ||
+      !candidate.guard ||
+      !candidate.requestSuccessor
+    ) {
+      return;
+    }
+    candidate.successorRequested = true;
+    const guard = candidate.guard;
+    this.#replay = Object.freeze({
+      source: candidate,
+      dom: candidate.dom,
+      placement: candidate.placement,
+      historyIsClean: guard.isClean,
+      release: guard.release,
+    });
+    candidate.requestSuccessor();
+  }
 }
 
 /** Checkbox labels; `suggestion` covers both decisions like the long-poll does. */
@@ -282,6 +666,7 @@ function snapshotRow(h: WebhookRow, index: number, operation: RowOperation | nul
   const status = deliveryLabel(h);
   const eligible = operation === null;
   return Object.freeze({
+    source: h,
     index,
     id: h.id,
     url: h.url,
@@ -337,6 +722,7 @@ function rowMatchesSnapshot(row: WebhookRow, snapshot: WebhookRowFacts): boolean
 function createdMatchesSnapshot(created: CreatedWebhook | null, snapshot: CreatedFacts | null): boolean {
   return created
     ? snapshot !== null &&
+        created === snapshot.source &&
         created.id === snapshot.id &&
         created.secret === snapshot.secret &&
         created.url === snapshot.url
@@ -347,212 +733,484 @@ function snapshotMouseTargets(control: HTMLButtonElement): readonly Node[] {
   return Object.freeze([control, ...Array.from(control.querySelectorAll("*"))]);
 }
 
+function snapshotPanelAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotPanelDom(node: Node): PanelDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotPanelAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotPanelDom)),
+  });
+}
+
+function panelDomMatches(snapshot: PanelDomSnapshot): boolean {
+  if (snapshot.node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotPanelAttributes(snapshot.node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || expected[0] !== name || expected[1] !== value;
+    })
+  ) {
+    return false;
+  }
+  return (
+    snapshot.node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        snapshot.node.childNodes.item(index) === child.node &&
+        panelDomMatches(child),
+    )
+  );
+}
+
+function capturePanelPlacement(root: HTMLElement): PanelPlacement | null {
+  const document = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const links: PanelPlacementLink[] = [];
+  let node: Node = root;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    links.push(Object.freeze({
+      node,
+      parent,
+      previousSibling: node.previousSibling,
+      nextSibling: node.nextSibling,
+    }));
+    node = parent;
+  }
+  if (links.length === 0) return null;
+  return Object.freeze({
+    document,
+    links: Object.freeze(links),
+  });
+}
+
+function panelPlacementMatches(root: HTMLElement, placement: PanelPlacement): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.links[0]?.node === root &&
+    placement.links.every((link) =>
+      link.node.isConnected &&
+      link.node.parentNode === link.parent &&
+      link.node.previousSibling === link.previousSibling &&
+      link.node.nextSibling === link.nextSibling
+    ) &&
+    placement.links.at(-1)?.parent === placement.document
+  );
+}
+
+function createPanelDomGuard(
+  root: HTMLElement,
+  placement: PanelPlacement,
+): PanelDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  let released = false;
+  const pendingRecords: MutationRecord[] = [];
+  const takeRecords = () => {
+    const records = [...pendingRecords, ...observer.takeRecords()];
+    pendingRecords.length = 0;
+    return records;
+  };
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList") return false;
+      return placement.links.some((link) =>
+        record.target === link.parent &&
+        (
+          record.previousSibling === link.node ||
+          record.nextSibling === link.node ||
+          [...record.addedNodes, ...record.removedNodes].includes(link.node)
+        )
+      );
+    });
+  };
+  const observer = new MutationObserverConstructor((records) => {
+    pendingRecords.push(...records);
+  });
+  observer.observe(root, {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (const parent of new Set(placement.links.map((link) => link.parent))) {
+    observer.observe(parent, { childList: true });
+  }
+  const exactReactInputRecords = (
+    records: readonly MutationRecord[],
+    inputs: readonly HTMLInputElement[],
+  ) => {
+    if (records.length === 0) return true;
+    for (let index = 0; index < records.length;) {
+      const nameStart = records[index];
+      const possibleType = records[index + 1];
+      const hasTypeReset =
+        possibleType?.type === "attributes" &&
+        possibleType.attributeName === "type" &&
+        possibleType.target === nameStart?.target;
+      const nameEnd = records[index + (hasTypeReset ? 2 : 1)];
+      if (
+        nameStart?.type !== "attributes" ||
+        nameStart.attributeName !== "name" ||
+        nameStart.oldValue !== null ||
+        !(nameStart.target instanceof placement.document.defaultView!.HTMLInputElement) ||
+        !inputs.includes(nameStart.target) ||
+        nameEnd?.type !== "attributes" ||
+        nameEnd.attributeName !== "name" ||
+        nameEnd.target !== nameStart.target ||
+        nameEnd.oldValue !== "" ||
+        nameStart.target.hasAttribute("name") ||
+        (hasTypeReset &&
+          possibleType.oldValue !== nameStart.target.getAttribute("type"))
+      ) {
+        return false;
+      }
+      index += hasTypeReset ? 3 : 2;
+    }
+    return true;
+  };
+  return Object.freeze({
+    acceptReactCommit: (inputs, finalDomIsExact) => {
+      const records = takeRecords();
+      if (
+        records.length > 0 &&
+        exactReactInputRecords(records, inputs) &&
+        finalDomIsExact()
+      ) {
+        return;
+      }
+      recordChanges(records);
+    },
+    isClean: () => {
+      recordChanges(takeRecords());
+      return !changed;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      recordChanges(takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function actionFactsMatch(
+  left: ActionFacts | RowActionFacts | null,
+  right: ActionFacts | RowActionFacts | null,
+) {
+  return left === null
+    ? right === null
+    : right !== null &&
+        left.kind === right.kind &&
+        left.eligible === right.eligible &&
+        left.route === right.route;
+}
+
+function panelPresentationsMatch(
+  left: PanelPresentation,
+  right: PanelPresentation,
+): boolean {
+  if (
+    left.callbackToken !== right.callbackToken ||
+    left.generation !== right.generation ||
+    left.hooksSource !== right.hooksSource ||
+    left.choicesSource !== right.choicesSource ||
+    left.rowOperationsSource !== right.rowOperationsSource ||
+    left.createdSource !== right.createdSource ||
+    left.adding !== right.adding ||
+    left.draft.url !== right.draft.url ||
+    left.draft.docs !== right.draft.docs ||
+    !arraysMatch(left.draft.choices, right.draft.choices) ||
+    left.createOperation !== right.createOperation ||
+    left.retryOperation !== right.retryOperation ||
+    left.feedbackOperation !== right.feedbackOperation ||
+    left.listError !== right.listError ||
+    left.actionError !== right.actionError ||
+    !createdMatchesSnapshot(left.createdSource, right.created) ||
+    !createdMatchesSnapshot(right.createdSource, left.created) ||
+    left.list.kind !== right.list.kind ||
+    left.copyLabel !== right.copyLabel ||
+    left.copied !== right.copied ||
+    !actionFactsMatch(left.add, right.add) ||
+    !actionFactsMatch(left.create, right.create) ||
+    !actionFactsMatch(left.cancel, right.cancel) ||
+    !actionFactsMatch(left.retry, right.retry) ||
+    !actionFactsMatch(left.copy, right.copy)
+  ) {
+    return false;
+  }
+  if (
+    left.draft.choiceInputs.length !== right.draft.choiceInputs.length ||
+    left.draft.choiceInputs.some((choice, index) => {
+      const candidate = right.draft.choiceInputs[index];
+      return (
+        !candidate ||
+        choice.index !== candidate.index ||
+        choice.id !== candidate.id ||
+        choice.label !== candidate.label ||
+        !arraysMatch(choice.types, candidate.types) ||
+        choice.checked !== candidate.checked ||
+        choice.eligible !== candidate.eligible
+      );
+    })
+  ) {
+    return false;
+  }
+  const leftRows = left.list.rows;
+  const rightRows = right.list.rows;
+  if (leftRows === null || rightRows === null) return leftRows === rightRows;
+  return (
+    leftRows.length === rightRows.length &&
+    leftRows.every((row, index) => {
+      const candidate = rightRows[index];
+      return (
+        !!candidate &&
+        row.source === candidate.source &&
+        rowMatchesSnapshot(row.source, candidate) &&
+        row.index === candidate.index &&
+        row.details === candidate.details &&
+        row.statusText === candidate.statusText &&
+        row.statusTone === candidate.statusTone &&
+        row.operation === candidate.operation &&
+        actionFactsMatch(row.enable, candidate.enable) &&
+        actionFactsMatch(row.test, candidate.test) &&
+        actionFactsMatch(row.delete, candidate.delete)
+      );
+    })
+  );
+}
+
 function isNativeReactMouseEvent(
   event: ReactMouseEvent<HTMLButtonElement>,
   control: HTMLButtonElement | null,
   mouseTargets: readonly Node[] | null,
-): boolean {
+  root: HTMLElement | null,
+): MouseEvent | null {
   const ownerWindow = control?.ownerDocument.defaultView;
+  const nativeEvent = event?.nativeEvent;
   const target = event.target;
   return (
     !!control &&
+    !!root &&
     !!ownerWindow &&
+    root.ownerDocument === control.ownerDocument &&
     event.currentTarget === control &&
     event.type === "click" &&
+    event.button === 0 &&
+    event.bubbles &&
     !event.defaultPrevented &&
-    event.nativeEvent instanceof ownerWindow.MouseEvent &&
-    event.nativeEvent.type === "click" &&
-    !event.nativeEvent.defaultPrevented &&
-    event.nativeEvent.target === target &&
+    nativeEvent instanceof ownerWindow.MouseEvent &&
+    nativeEvent.type === "click" &&
+    nativeEvent.button === 0 &&
+    nativeEvent.bubbles &&
+    nativeEvent.cancelable &&
+    nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
+    !nativeEvent.defaultPrevented &&
+    nativeEvent.target === target &&
     target instanceof ownerWindow.Node &&
+    target.ownerDocument === control.ownerDocument &&
     control.contains(target) &&
+    root.contains(control) &&
+    nativeEvent.composedPath().includes(control) &&
+    nativeEvent.composedPath().includes(root) &&
     mouseTargets?.includes(target) === true
-  );
+  ) ? nativeEvent : null;
 }
 
-function isNativeReactSubmitEvent(event: FormEvent<HTMLFormElement>): boolean {
+function isNativeReactInputEvent(
+  event: ChangeEvent<HTMLInputElement>,
+  input: HTMLInputElement | null,
+  root: HTMLElement | null,
+): Event | null {
+  const ownerWindow = input?.ownerDocument.defaultView;
+  const nativeEvent = event?.nativeEvent;
   return (
-    event.type === "submit" &&
+    !!input &&
+    !!root &&
+    !!ownerWindow &&
+    root.ownerDocument === input.ownerDocument &&
+    (event.type === "input" || event.type === "change") &&
+    event.currentTarget === input &&
+    event.target === input &&
     !event.defaultPrevented &&
-    typeof window !== "undefined" &&
-    event.nativeEvent instanceof window.Event &&
-    event.nativeEvent.type === "submit" &&
-    !event.nativeEvent.defaultPrevented
-  );
+    nativeEvent instanceof ownerWindow.Event &&
+    (nativeEvent.type === "input" ||
+      nativeEvent.type === "change" ||
+      nativeEvent.type === "click") &&
+    (!(nativeEvent instanceof ownerWindow.MouseEvent) || nativeEvent.button === 0) &&
+    nativeEvent.bubbles &&
+    nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
+    !nativeEvent.defaultPrevented &&
+    nativeEvent.target === input &&
+    nativeEvent.composedPath().includes(input) &&
+    nativeEvent.composedPath().includes(root)
+  ) ? nativeEvent : null;
 }
 
-function slot<T extends HTMLElement>(): ElementSlot<T> {
-  return { element: null, mouseTargets: null };
+function isNativeReactSubmitEvent(
+  event: FormEvent<HTMLFormElement>,
+  form: HTMLFormElement | null,
+  root: HTMLElement | null,
+): Event | null {
+  const ownerWindow = form?.ownerDocument.defaultView;
+  const nativeEvent = event?.nativeEvent;
+  return (
+    !!form &&
+    !!root &&
+    !!ownerWindow &&
+    root.ownerDocument === form.ownerDocument &&
+    event.type === "submit" &&
+    event.currentTarget === form &&
+    event.target === form &&
+    !event.defaultPrevented &&
+    nativeEvent instanceof ownerWindow.Event &&
+    nativeEvent.type === "submit" &&
+    nativeEvent.bubbles &&
+    nativeEvent.cancelable &&
+    nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
+    nativeEvent.target === form &&
+    nativeEvent.composedPath().includes(form) &&
+    nativeEvent.composedPath().includes(root) &&
+    !nativeEvent.defaultPrevented
+  ) ? nativeEvent : null;
+}
+
+function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
+  return { key, element: null, last: null, mouseTargets: null };
 }
 
 function createPanelPublication(presentation: PanelPresentation): PanelPublication {
-  return {
+  const publication: PanelPublication = {
     presentation,
-    active: false,
-    retired: false,
-    card: slot(),
-    header: slot(),
-    guidance: slot(),
-    add: slot(),
-    form: slot(),
-    url: slot(),
-    docs: slot(),
-    choices: presentation.draft.choiceInputs.map(() => slot<HTMLInputElement>()),
-    create: slot(),
-    cancel: slot(),
-    listError: slot(),
-    listAlert: slot(),
-    retry: slot(),
-    actionError: slot(),
-    created: slot(),
-    listContent: slot(),
-    rowsList: slot(),
-    rows: presentation.list.rows?.map(() => ({
-      root: slot<HTMLLIElement>(),
-      enable: slot<HTMLButtonElement>(),
-      test: slot<HTMLButtonElement>(),
-      delete: slot<HTMLButtonElement>(),
+    card: slot("card"),
+    header: slot("header"),
+    guidance: slot("guidance"),
+    add: slot("add"),
+    form: slot("form"),
+    url: slot("url"),
+    docs: slot("docs"),
+    choices: presentation.draft.choiceInputs.map((choice) =>
+      slot<HTMLInputElement>(`choice:${choice.id}`)),
+    create: slot("create"),
+    cancel: slot("cancel"),
+    listError: slot("list-error"),
+    listAlert: slot("list-alert"),
+    retry: slot("retry"),
+    actionError: slot("action-error"),
+    created: slot("created"),
+    secret: slot("secret"),
+    copy: slot("copy"),
+    listContent: slot("list-content"),
+    rowsList: slot("rows-list"),
+    rows: presentation.list.rows?.map((row) => ({
+      root: slot<HTMLLIElement>(`row:${row.index}:${row.id}`),
+      enable: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:enable`),
+      test: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:test`),
+      delete: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:delete`),
     })) ?? [],
+    established: false,
+    layoutRetired: false,
+    consumed: false,
+    successorRequested: false,
+    invalidReplay: false,
+    replayRefs: [],
+    stableSlots: new Set(),
+    introducedSlots: new Set(),
+    dom: null,
+    placement: null,
+    guard: null,
+    guardExpiryQueued: false,
+    factsAreCurrent: null,
+    domIsExact: null,
+    requestSuccessor: null,
   };
+  return publication;
 }
 
-function SecretField({
-  panel,
-  created,
-  ownsPanel,
-}: {
-  panel: PanelPublication;
-  created: CreatedFacts;
-  ownsPanel: (
-    publication: PanelPublication,
-    override?: InputDomOverride,
-    focus?: HTMLElement,
-  ) => boolean;
-}) {
-  const codeTarget = useRef<HTMLElement>(null);
-  const { copy, label, copied } = useCopy(created.secret, codeTarget);
-  const activePublicationRef = useRef<SecretPublication | null>(null);
-  const rootOwnerRef = useRef<{ render: SecretRender; element: HTMLDivElement } | null>(null);
-  const codeOwnerRef = useRef<{ render: SecretRender; element: HTMLElement } | null>(null);
-  const buttonOwnerRef = useRef<{ render: SecretRender; element: HTMLButtonElement } | null>(null);
-  const render = Object.freeze<SecretRender>({
-    identity: Symbol("webhook-secret-render"),
-    panel,
-    created,
-    copy,
-    label,
-    copied,
-  });
-
-  const retire = (candidate: SecretPublication | null) => {
-    if (candidate && activePublicationRef.current === candidate) activePublicationRef.current = null;
-  };
-  const bind = <T extends HTMLElement>(
-    ownerRef: React.MutableRefObject<{ render: SecretRender; element: T } | null>,
-    element: T | null,
-  ) => {
-    const owner = ownerRef.current;
-    if (!element) {
-      if (owner?.render === render) ownerRef.current = null;
-      if (activePublicationRef.current?.render === render) retire(activePublicationRef.current);
-      return;
+function expectedPanelSlots(
+  publication: PanelPublication,
+): ElementSlot<HTMLElement>[] {
+  const facts = publication.presentation;
+  const slots: ElementSlot<HTMLElement>[] = [
+    publication.card,
+    publication.header,
+    publication.guidance,
+    publication.add,
+  ];
+  if (facts.adding) {
+    slots.push(
+      publication.form,
+      publication.url,
+      ...publication.choices,
+      publication.docs,
+      publication.create,
+      publication.cancel,
+    );
+  }
+  if (facts.listError) {
+    slots.push(
+      publication.listError,
+      publication.listAlert,
+      publication.retry,
+    );
+  }
+  if (facts.actionError) slots.push(publication.actionError);
+  if (facts.created) {
+    slots.push(
+      publication.created,
+      publication.secret,
+      publication.copy,
+    );
+  }
+  if (facts.list.kind === "loading" || facts.list.kind === "empty") {
+    slots.push(publication.listContent);
+  } else if (facts.list.kind === "rows") {
+    slots.push(publication.listContent, publication.rowsList);
+    for (const row of facts.list.rows ?? []) {
+      const elements = publication.rows[row.index];
+      if (!elements) continue;
+      slots.push(elements.root);
+      if (row.enable) slots.push(elements.enable);
+      slots.push(elements.test, elements.delete);
     }
-    if (owner?.render === render && owner.element !== element) retire(activePublicationRef.current);
-    ownerRef.current = { render, element };
-  };
+  }
+  return slots;
+}
 
-  useLayoutEffect(() => {
-    const root = rootOwnerRef.current?.render === render ? rootOwnerRef.current.element : null;
-    const code = codeOwnerRef.current?.render === render ? codeOwnerRef.current.element : null;
-    const button = buttonOwnerRef.current?.render === render ? buttonOwnerRef.current.element : null;
-    if (!root || !code || !button) return;
-    const publication: SecretPublication = {
-      render,
-      root,
-      code,
-      button,
-      mouseTargets: snapshotMouseTargets(button),
-      claimed: false,
-    };
-    activePublicationRef.current = publication;
-    return () => retire(publication);
-  });
-
-  const currentPublication = (button: HTMLButtonElement) => {
-    const publication = activePublicationRef.current;
-    const createdRoot = panel.created.element;
-    if (
-      !publication ||
-      publication.render !== render ||
-      publication.claimed ||
-      publication.button !== button ||
-      rootOwnerRef.current?.render !== render ||
-      rootOwnerRef.current.element !== publication.root ||
-      codeOwnerRef.current?.render !== render ||
-      codeOwnerRef.current.element !== publication.code ||
-      buttonOwnerRef.current?.render !== render ||
-      buttonOwnerRef.current.element !== publication.button ||
-      !ownsPanel(panel, undefined, publication.button) ||
-      !createdRoot ||
-      !publication.root.isConnected ||
-      !publication.code.isConnected ||
-      !publication.button.isConnected ||
-      publication.root.parentElement !== createdRoot ||
-      createdRoot.children.item(1) !== publication.root ||
-      publication.root.children.length !== 2 ||
-      publication.root.children.item(0) !== publication.code ||
-      publication.root.children.item(1) !== publication.button ||
-      publication.code.parentElement !== publication.root ||
-      publication.button.parentElement !== publication.root ||
-      publication.code.textContent !== created.secret ||
-      publication.code.dataset.testid !== "webhook-secret" ||
-      publication.button.type !== "button" ||
-      publication.button.disabled ||
-      publication.button.getAttribute("aria-label") !== "Copy secret" ||
-      publication.button.textContent?.trim() !== label
-    ) {
-      return null;
-    }
-    return publication;
-  };
-
-  return (
-    <div
-      ref={(element) => bind(rootOwnerRef, element)}
-      className="flex items-center gap-2"
-    >
-      <code
-        ref={(element) => {
-          codeTarget.current = element;
-          bind(codeOwnerRef, element);
-        }}
-        className="min-w-0 flex-1 select-text break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink"
-        data-testid="webhook-secret"
-      >
-        {created.secret}
-      </code>
-      <button
-        ref={(element) => bind(buttonOwnerRef, element)}
-        type="button"
-        className="btn btn-outline btn-sm shrink-0 gap-1.5"
-        onClick={(event) => {
-          const publication = currentPublication(event.currentTarget);
-          if (
-            !publication ||
-            !isNativeReactMouseEvent(event, publication.button, publication.mouseTargets)
-          ) {
-            return;
-          }
-          publication.claimed = true;
-          render.copy();
-        }}
-        aria-label="Copy secret"
-      >
-        {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
-        {label}
-      </button>
-    </div>
-  );
+function panelButtonSlots(
+  publication: PanelPublication,
+): ElementSlot<HTMLButtonElement>[] {
+  const facts = publication.presentation;
+  const slots = [publication.add];
+  if (facts.adding) slots.push(publication.cancel);
+  if (facts.listError) slots.push(publication.retry);
+  if (facts.created) slots.push(publication.copy);
+  for (const row of facts.list.rows ?? []) {
+    const elements = publication.rows[row.index];
+    if (!elements) continue;
+    if (row.enable) slots.push(elements.enable);
+    slots.push(elements.test, elements.delete);
+  }
+  return slots;
 }
 
 export function WebhooksPanel() {
@@ -569,6 +1227,7 @@ export function WebhooksPanel() {
   const [feedbackOperation, setFeedbackOperation] = useState<Operation | null>(null);
   const [created, setCreated] = useState<CreatedWebhook | null>(null);
   const [mountGeneration] = useState<MountGeneration>(() => Object.freeze({ identity: Symbol("webhooks-mount") }));
+  const [publicationRevision, setPublicationRevision] = useState(0);
   const activeMountRef = useRef<MountGeneration | null>(null);
   const operationSequence = useRef(0);
   const createOwner = useRef<Operation | null>(null);
@@ -576,16 +1235,38 @@ export function WebhooksPanel() {
   const feedbackOwner = useRef<Operation | null>(null);
   const retryOwner = useRef<Operation | null>(null);
   const listRequest = useRef(0);
-  const [publicationCoordinator] = useState(() => new PanelPublicationCoordinator());
-  const claimedActionsRef = useRef(new WeakSet<object>());
-  const deleteClaimsRef = useRef(new Set<RowActionFacts>());
-  const deleteEventsRef = useRef(new WeakSet<object>());
+  const [publicationCoordinator] = useState(
+    () => new PanelPublicationCoordinator(mountGeneration),
+  );
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const secretTarget = useRef<HTMLElement>(null);
+  const {
+    copy: currentCopySecret,
+    label: copyLabel,
+    copied,
+  } = useCopy(created?.secret ?? "", secretTarget);
+  const copyCallbackRef = useRef<(() => void) | null>(null);
+  const [copySecret] = useState<() => void>(
+    () => () => copyCallbackRef.current?.(),
+  );
+
+  useLayoutEffect(() => {
+    copyCallbackRef.current = currentCopySecret;
+    return () => {
+      if (copyCallbackRef.current === currentCopySecret) {
+        copyCallbackRef.current = null;
+      }
+    };
+  }, [currentCopySecret]);
 
   useLayoutEffect(() => {
     const owners = rowOwners.current;
-    const deleteClaims = deleteClaimsRef.current;
+    publicationCoordinator.activate();
     activeMountRef.current = mountGeneration;
     return () => {
+      publicationCoordinator.scheduleTeardown();
       if (activeMountRef.current !== mountGeneration) return;
       activeMountRef.current = null;
       listRequest.current += 1;
@@ -595,9 +1276,8 @@ export function WebhooksPanel() {
         if (operation.generation === mountGeneration) owners.delete(webhookId);
       }
       if (feedbackOwner.current?.generation === mountGeneration) feedbackOwner.current = null;
-      deleteClaims.clear();
     };
-  }, [mountGeneration]);
+  }, [mountGeneration, publicationCoordinator]);
 
   const load = useCallback(async (continuationIsCurrent: () => boolean = () => true) => {
     const generation = activeMountRef.current;
@@ -782,66 +1462,115 @@ export function WebhooksPanel() {
     })();
   };
 
-  const retrying = retryOperation !== null;
-  const choiceInputs = Object.freeze(
-    EVENT_CHOICES.map((choice, index) =>
-      Object.freeze<ChoiceFacts>({
-        kind: "choice",
-        index,
-        id: choice.id,
-        label: choice.label,
-        types: choice.types,
-        checked: choices.includes(choice.id),
-        eligible: createOperation === null,
-      }),
-    ),
-  );
-  const draft = Object.freeze<DraftFacts>({
-    url,
-    docs,
-    choices: Object.freeze([...choices]),
-    urlInput: Object.freeze({ kind: "url", value: url, eligible: createOperation === null }),
-    docsInput: Object.freeze({ kind: "docs", value: docs, eligible: createOperation === null }),
-    choiceInputs,
-  });
-  const rowFacts = hooks
-    ? Object.freeze(hooks.map((hook, index) => snapshotRow(hook, index, rowOperations.get(hook.id) ?? null)))
-    : null;
-  const list = Object.freeze<ListFacts>({
-    kind: hooks === null ? (listError ? "unavailable" : "loading") : hooks.length === 0 ? "empty" : "rows",
-    rows: rowFacts,
-  });
-  const createdFacts = created
-    ? Object.freeze<CreatedFacts>({ id: created.id, secret: created.secret, url: created.url })
-    : null;
-  const presentation = Object.freeze<PanelPresentation>({
-    identity: Symbol("webhooks-presentation"),
-    generation: mountGeneration,
-    adding,
-    draft,
-    createOperation,
-    retryOperation,
-    feedbackOperation,
-    listError,
-    actionError: error,
-    created: createdFacts,
-    list,
-    add: Object.freeze({ kind: "add", eligible: createOperation === null, route: null }),
-    create: adding
-      ? Object.freeze({
-          kind: "create",
-          eligible: createOperation === null && url.trim().length > 0 && choices.length > 0,
-          route: "/api/webhooks",
+  const presentation = useMemo<PanelPresentation>(() => {
+    const choiceInputs = Object.freeze(
+      EVENT_CHOICES.map((choice, index) =>
+        Object.freeze<ChoiceFacts>({
+          kind: "choice",
+          index,
+          id: choice.id,
+          label: choice.label,
+          types: choice.types,
+          checked: choices.includes(choice.id),
+          eligible: createOperation === null,
+        }),
+      ),
+    );
+    const draft = Object.freeze<DraftFacts>({
+      url,
+      docs,
+      choices: Object.freeze([...choices]),
+      urlInput: Object.freeze({ kind: "url", value: url, eligible: createOperation === null }),
+      docsInput: Object.freeze({ kind: "docs", value: docs, eligible: createOperation === null }),
+      choiceInputs,
+    });
+    const rowFacts = hooks
+      ? Object.freeze(
+          hooks.map((hook, index) =>
+            snapshotRow(hook, index, rowOperations.get(hook.id) ?? null)),
+        )
+      : null;
+    const list = Object.freeze<ListFacts>({
+      kind: hooks === null
+        ? (listError ? "unavailable" : "loading")
+        : hooks.length === 0
+          ? "empty"
+          : "rows",
+      rows: rowFacts,
+    });
+    const createdFacts = created
+      ? Object.freeze<CreatedFacts>({
+          source: created,
+          id: created.id,
+          secret: created.secret,
+          url: created.url,
         })
-      : null,
-    cancel: adding
-      ? Object.freeze({ kind: "cancel", eligible: createOperation === null, route: null })
-      : null,
-    retry: listError
-      ? Object.freeze({ kind: "retry", eligible: !retrying, route: "/api/webhooks" })
-      : null,
-  });
-  const publication = createPanelPublication(presentation);
+      : null;
+    return Object.freeze({
+      identity: Symbol("webhooks-presentation"),
+      revision: publicationRevision,
+      callbackToken: publicationCoordinator.callbackToken,
+      generation: mountGeneration,
+      hooksSource: hooks,
+      choicesSource: choices,
+      rowOperationsSource: rowOperations,
+      createdSource: created,
+      adding,
+      draft,
+      createOperation,
+      retryOperation,
+      feedbackOperation,
+      listError,
+      actionError: error,
+      created: createdFacts,
+      list,
+      add: Object.freeze({ kind: "add", eligible: createOperation === null, route: null }),
+      create: adding
+        ? Object.freeze({
+            kind: "create",
+            eligible: createOperation === null && url.trim().length > 0 && choices.length > 0,
+            route: "/api/webhooks",
+          })
+        : null,
+      cancel: adding
+        ? Object.freeze({ kind: "cancel", eligible: createOperation === null, route: null })
+        : null,
+      retry: listError
+        ? Object.freeze({
+            kind: "retry",
+            eligible: retryOperation === null,
+            route: "/api/webhooks",
+          })
+        : null,
+      copy: created
+        ? Object.freeze({ kind: "copy", eligible: true, route: null })
+        : null,
+      copyLabel,
+      copied,
+    });
+  }, [
+    adding,
+    choices,
+    copied,
+    copyLabel,
+    createOperation,
+    created,
+    docs,
+    error,
+    feedbackOperation,
+    hooks,
+    listError,
+    mountGeneration,
+    publicationCoordinator,
+    publicationRevision,
+    retryOperation,
+    rowOperations,
+    url,
+  ]);
+  const publication = useMemo(
+    () => createPanelPublication(presentation),
+    [presentation],
+  );
 
   const bindElement = <T extends HTMLElement>(
     candidate: PanelPublication,
@@ -851,7 +1580,7 @@ export function WebhooksPanel() {
     publicationCoordinator.bind(candidate, owner, element);
   };
 
-  const domIsExact = (
+  const domIsExact = useCallback((
     candidate: PanelPublication,
     override?: InputDomOverride,
     focus?: HTMLElement,
@@ -866,6 +1595,12 @@ export function WebhooksPanel() {
       !header ||
       !guidance ||
       !addButton ||
+      !card.ownerDocument.defaultView ||
+      expectedPanelSlots(candidate).some(
+        (owner) =>
+          !owner.element ||
+          owner.element.ownerDocument !== card.ownerDocument,
+      ) ||
       !card.isConnected ||
       !header.isConnected ||
       !guidance.isConnected ||
@@ -945,7 +1680,7 @@ export function WebhooksPanel() {
       const fieldset = form.children.item(1);
       const choicesContainer = fieldset?.children.item(1);
       if (
-        !(fieldset instanceof HTMLFieldSetElement) ||
+        !(fieldset instanceof card.ownerDocument.defaultView.HTMLFieldSetElement) ||
         fieldset.disabled !== (facts.createOperation !== null) ||
         !choicesContainer ||
         choicesContainer.children.length !== facts.draft.choiceInputs.length ||
@@ -1040,21 +1775,48 @@ export function WebhooksPanel() {
 
     const createdRoot = candidate.created.element;
     if (facts.created) {
+      const secret = candidate.secret.element;
+      const copyButton = candidate.copy.element;
+      const secretRow = secret?.parentElement;
       if (
+        !facts.copy ||
         !createdRoot ||
+        !secret ||
+        !copyButton ||
+        !secretRow ||
         !createdRoot.isConnected ||
+        !secret.isConnected ||
+        !copyButton.isConnected ||
         createdRoot.parentElement !== card ||
         createdRoot.dataset.testid !== "webhook-created" ||
         createdRoot.getAttribute("role") !== "status" ||
         createdRoot.getAttribute("aria-live") !== "polite" ||
         createdRoot.getAttribute("aria-atomic") !== "true" ||
         createdRoot.children.length !== 3 ||
-        createdRoot.children.item(0)?.textContent !== "Webhook added. Copy the signing secret now; it will not be shown again."
+        createdRoot.children.item(0)?.textContent !== "Webhook added. Copy the signing secret now; it will not be shown again." ||
+        createdRoot.children.item(1) !== secretRow ||
+        secretRow.parentElement !== createdRoot ||
+        secretRow.children.length !== 2 ||
+        secretRow.children.item(0) !== secret ||
+        secretRow.children.item(1) !== copyButton ||
+        secret.parentElement !== secretRow ||
+        secret.dataset.testid !== "webhook-secret" ||
+        secret.textContent !== facts.created.secret ||
+        copyButton.parentElement !== secretRow ||
+        copyButton.type !== "button" ||
+        copyButton.disabled ||
+        copyButton.getAttribute("aria-label") !== "Copy secret" ||
+        copyButton.textContent?.trim() !== facts.copyLabel
       ) {
         return false;
       }
       directChildren.push(createdRoot);
-    } else if (createdRoot) {
+    } else if (
+      createdRoot ||
+      candidate.secret.element ||
+      candidate.copy.element ||
+      facts.copy
+    ) {
       return false;
     }
 
@@ -1169,13 +1931,19 @@ export function WebhooksPanel() {
       card.children.length === directChildren.length &&
       directChildren.every((element, index) => card.children.item(index) === element)
     );
-  };
+  }, []);
 
-  const factsAreCurrent = (candidate: PanelPublication): boolean => {
+  const factsAreCurrent = useCallback((candidate: PanelPublication): boolean => {
     const facts = candidate.presentation;
     if (
       activeMountRef.current !== facts.generation ||
       facts.generation !== mountGeneration ||
+      facts.revision !== publicationRevision ||
+      facts.callbackToken !== publicationCoordinator.callbackToken ||
+      facts.hooksSource !== hooks ||
+      facts.choicesSource !== choices ||
+      facts.rowOperationsSource !== rowOperations ||
+      facts.createdSource !== created ||
       facts.adding !== adding ||
       facts.draft.url !== url ||
       facts.draft.docs !== docs ||
@@ -1186,6 +1954,8 @@ export function WebhooksPanel() {
       feedbackOperation !== feedbackOwner.current ||
       facts.listError !== listError ||
       facts.actionError !== error ||
+      facts.copyLabel !== copyLabel ||
+      facts.copied !== copied ||
       !createdMatchesSnapshot(created, facts.created) ||
       (createOperation
         ? createOwner.current !== createOperation || createOperation.generation !== mountGeneration
@@ -1221,7 +1991,25 @@ export function WebhooksPanel() {
       }
     }
     return true;
-  };
+  }, [
+    adding,
+    choices,
+    copied,
+    copyLabel,
+    createOperation,
+    created,
+    docs,
+    error,
+    feedbackOperation,
+    hooks,
+    listError,
+    mountGeneration,
+    publicationCoordinator,
+    publicationRevision,
+    retryOperation,
+    rowOperations,
+    url,
+  ]);
 
   const ownsPanel = (
     candidate: PanelPublication,
@@ -1244,35 +2032,49 @@ export function WebhooksPanel() {
     !element.disabled &&
     ownsPanel(candidate, undefined, element);
 
-  const claimAction = (action: object): boolean => {
-    if (claimedActionsRef.current.has(action)) return false;
-    claimedActionsRef.current.add(action);
-    return true;
+  const claimPublishedClick = (
+    candidate: PanelPublication,
+    row: WebhookRowFacts | CreatedFacts | null,
+    action: ActionFacts | RowActionFacts,
+    event: ReactMouseEvent<HTMLButtonElement>,
+    owner: ElementSlot<HTMLButtonElement>,
+  ) => {
+    const nativeEvent = isNativeReactMouseEvent(
+      event,
+      owner.element,
+      owner.mouseTargets,
+      candidate.card.element,
+    );
+    if (nativeEvent) publicationCoordinator.prepareControlClaim(candidate);
+    return Boolean(
+      nativeEvent &&
+      ownsPanelAction(candidate, action, event.currentTarget, owner) &&
+      publicationCoordinator.claim(
+        candidate,
+        row,
+        action,
+        event,
+        nativeEvent,
+      ),
+    );
   };
 
   useLayoutEffect(() => {
-    if (
-      publication.retired ||
-      publication.presentation.generation !== activeMountRef.current ||
-      !factsAreCurrent(publication) ||
-      !domIsExact(publication)
-    ) {
-      publicationCoordinator.retire(publication);
-      return;
-    }
-    const publishMouseTargets = (owner: ElementSlot<HTMLButtonElement>) => {
-      owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
-    };
-    publishMouseTargets(publication.add);
-    publishMouseTargets(publication.cancel);
-    publishMouseTargets(publication.retry);
-    for (const row of publication.rows) {
-      publishMouseTargets(row.enable);
-      publishMouseTargets(row.test);
-      publishMouseTargets(row.delete);
-    }
-    publicationCoordinator.publish(publication);
-    return () => publicationCoordinator.retire(publication);
+    return publicationCoordinator.establish(
+      publication,
+      () => factsAreCurrent(publication),
+      (override) => domIsExact(publication, override),
+      requestPublicationSuccessor,
+    );
+  }, [
+    domIsExact,
+    factsAreCurrent,
+    publication,
+    publicationCoordinator,
+    requestPublicationSuccessor,
+  ]);
+  useLayoutEffect(() => {
+    publicationCoordinator.reconcileReactCommit(publication);
   });
 
   return (
@@ -1292,14 +2094,15 @@ export function WebhooksPanel() {
           type="button"
           className="btn btn-outline btn-sm ml-auto gap-1.5"
           onClick={(event) => {
-            if (
-              !isNativeReactMouseEvent(event, publication.add.element, publication.add.mouseTargets) ||
-              !ownsPanelAction(publication, presentation.add, event.currentTarget, publication.add) ||
-              !claimAction(presentation.add)
-            ) {
-              return;
-            }
-            setAdding(!presentation.adding);
+           if (!claimPublishedClick(
+             publication,
+             null,
+             presentation.add,
+             event,
+             publication.add,
+           )) return;
+           requestPublicationSuccessor();
+           setAdding(!presentation.adding);
           }}
           disabled={!presentation.add.eligible}
           data-testid="webhook-add"
@@ -1323,25 +2126,50 @@ export function WebhooksPanel() {
           data-testid="webhook-form"
           aria-busy={presentation.createOperation !== null || undefined}
           onSubmit={(event) => {
-            const nativeEvent = event.nativeEvent;
-            const form = publication.form.element;
-            const createButton = publication.create.element;
-            const submitter = "submitter" in nativeEvent ? nativeEvent.submitter : null;
+            const renderedForm = publication.form.element ?? publication.form.last;
+            const renderedCreateButton = publication.create.element ?? publication.create.last;
+            const renderedRoot = publication.card.element ?? publication.card.last;
+            const nativeEvent = isNativeReactSubmitEvent(
+              event,
+              renderedForm,
+              renderedRoot,
+            );
+            const submitter = nativeEvent && "submitter" in nativeEvent
+              ? nativeEvent.submitter
+              : null;
             if (
-              !presentation.create ||
-              !form ||
-              !createButton ||
-              !isNativeReactSubmitEvent(event) ||
-              event.currentTarget !== form ||
-              event.target !== form ||
-              nativeEvent.target !== form ||
-              (submitter !== null && submitter !== createButton) ||
-              !ownsPanelAction(publication, presentation.create, createButton, publication.create) ||
-              !claimAction(presentation.create)
+              !renderedForm ||
+              !renderedCreateButton ||
+              !renderedRoot ||
+              !nativeEvent ||
+              !renderedForm.isConnected ||
+              !renderedCreateButton.isConnected ||
+              !renderedRoot.isConnected ||
+              renderedCreateButton.form !== renderedForm ||
+              (submitter !== null && submitter !== renderedCreateButton)
             ) {
               return;
             }
             event.preventDefault();
+            publicationCoordinator.prepareControlClaim(publication);
+            const form = publication.form.element;
+            const createButton = publication.create.element;
+            if (
+              !presentation.create ||
+              !form ||
+              !createButton ||
+              !ownsPanelAction(publication, presentation.create, createButton, publication.create) ||
+              !publicationCoordinator.claim(
+                publication,
+                null,
+                presentation.create,
+                event,
+                nativeEvent,
+              )
+            ) {
+              return;
+            }
+            requestPublicationSuccessor();
             startCreate(presentation);
           }}
         >
@@ -1354,17 +2182,32 @@ export function WebhooksPanel() {
               onChange={(event: ChangeEvent<HTMLInputElement>) => {
                 const input = publication.url.element;
                 const next = event.currentTarget.value;
+                const nativeEvent = isNativeReactInputEvent(
+                  event,
+                  input,
+                  publication.card.element,
+                );
+                if (nativeEvent && input) {
+                  publicationCoordinator.prepareControlClaim(publication, { input, value: next });
+                }
                 if (
                   !input ||
-                  event.currentTarget !== input ||
-                  event.target !== input ||
+                  !nativeEvent ||
+                  next !== input.value ||
                   !presentation.draft.urlInput.eligible ||
                   next === presentation.draft.url ||
                   !ownsPanel(publication, { input, value: next }, input) ||
-                  !claimAction(presentation.draft.urlInput)
+                  !publicationCoordinator.claim(
+                    publication,
+                    null,
+                    presentation.draft.urlInput,
+                    event,
+                    nativeEvent,
+                  )
                 ) {
                   return;
                 }
+                requestPublicationSuccessor();
                 setUrl(next);
               }}
               placeholder="https://example.com/markdoc"
@@ -1385,17 +2228,32 @@ export function WebhooksPanel() {
                     onChange={(event: ChangeEvent<HTMLInputElement>) => {
                       const input = publication.choices[choice.index]?.element;
                       const checked = event.currentTarget.checked;
+                      const nativeEvent = isNativeReactInputEvent(
+                        event,
+                        input ?? null,
+                        publication.card.element,
+                      );
+                      if (nativeEvent && input) {
+                        publicationCoordinator.prepareControlClaim(publication, { input, checked });
+                      }
                       if (
                         !input ||
-                        event.currentTarget !== input ||
-                        event.target !== input ||
+                        !nativeEvent ||
+                        checked !== input.checked ||
                         !choice.eligible ||
                         checked === choice.checked ||
                         !ownsPanel(publication, { input, checked }, input) ||
-                        !claimAction(choice)
+                        !publicationCoordinator.claim(
+                          publication,
+                          null,
+                          choice,
+                          event,
+                          nativeEvent,
+                        )
                       ) {
                         return;
                       }
+                      requestPublicationSuccessor();
                       setChoices(
                         checked
                           ? [...presentation.draft.choices, choice.id]
@@ -1418,17 +2276,32 @@ export function WebhooksPanel() {
               onChange={(event: ChangeEvent<HTMLInputElement>) => {
                 const input = publication.docs.element;
                 const next = event.currentTarget.value;
+                const nativeEvent = isNativeReactInputEvent(
+                  event,
+                  input,
+                  publication.card.element,
+                );
+                if (nativeEvent && input) {
+                  publicationCoordinator.prepareControlClaim(publication, { input, value: next });
+                }
                 if (
                   !input ||
-                  event.currentTarget !== input ||
-                  event.target !== input ||
+                  !nativeEvent ||
+                  next !== input.value ||
                   !presentation.draft.docsInput.eligible ||
                   next === presentation.draft.docs ||
                   !ownsPanel(publication, { input, value: next }, input) ||
-                  !claimAction(presentation.draft.docsInput)
+                  !publicationCoordinator.claim(
+                    publication,
+                    null,
+                    presentation.draft.docsInput,
+                    event,
+                    nativeEvent,
+                  )
                 ) {
                   return;
                 }
+                requestPublicationSuccessor();
                 setDocs(next);
               }}
               placeholder="Leave empty for every document you can see"
@@ -1451,14 +2324,14 @@ export function WebhooksPanel() {
               type="button"
               className="btn btn-ghost btn-sm"
               onClick={(event) => {
-                if (
-                  !presentation.cancel ||
-                  !isNativeReactMouseEvent(event, publication.cancel.element, publication.cancel.mouseTargets) ||
-                  !ownsPanelAction(publication, presentation.cancel, event.currentTarget, publication.cancel) ||
-                  !claimAction(presentation.cancel)
-                ) {
-                  return;
-                }
+                if (!presentation.cancel || !claimPublishedClick(
+                  publication,
+                  null,
+                  presentation.cancel,
+                  event,
+                  publication.cancel,
+                )) return;
+                requestPublicationSuccessor();
                 setAdding(false);
               }}
               disabled={!presentation.cancel?.eligible}
@@ -1487,14 +2360,14 @@ export function WebhooksPanel() {
             type="button"
             className="btn btn-outline btn-sm shrink-0 gap-1.5"
             onClick={(event) => {
-              if (
-                !presentation.retry ||
-                !isNativeReactMouseEvent(event, publication.retry.element, publication.retry.mouseTargets) ||
-                !ownsPanelAction(publication, presentation.retry, event.currentTarget, publication.retry) ||
-                !claimAction(presentation.retry)
-              ) {
-                return;
-              }
+             if (!presentation.retry || !claimPublishedClick(
+               publication,
+               null,
+               presentation.retry,
+               event,
+               publication.retry,
+             )) return;
+             requestPublicationSuccessor();
               startRetry(presentation.retry.route!);
             }}
             disabled={!presentation.retry?.eligible}
@@ -1527,7 +2400,40 @@ export function WebhooksPanel() {
           data-testid="webhook-created"
         >
           <div className="mb-2 text-sm font-medium text-green-900 dark:text-green-200">Webhook added. Copy the signing secret now; it will not be shown again.</div>
-          <SecretField panel={publication} created={presentation.created} ownsPanel={ownsPanel} />
+          <div className="flex items-center gap-2">
+            <code
+              ref={(element) => {
+                bindElement(publication, publication.secret, element);
+                if (element) secretTarget.current = element;
+              }}
+              className="min-w-0 flex-1 select-text break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink"
+              data-testid="webhook-secret"
+            >
+              {presentation.created.secret}
+            </code>
+            <button
+              ref={(element) => bindElement(publication, publication.copy, element)}
+              type="button"
+              className="btn btn-outline btn-sm shrink-0 gap-1.5"
+              onClick={(event) => {
+                if (!presentation.copy || !claimPublishedClick(
+                  publication,
+                  presentation.created,
+                  presentation.copy,
+                  event,
+                  publication.copy,
+                )) return;
+                requestPublicationSuccessor();
+                copySecret();
+              }}
+              aria-label="Copy secret"
+            >
+              {presentation.copied
+                ? <Check size={14} className="text-success" />
+                : <Copy size={14} />}
+              {presentation.copyLabel}
+            </button>
+          </div>
           <p className="mt-2 text-xs text-ink-3">
             Verify each delivery with <code>HMAC-SHA256(secret, raw body)</code> against <code>X-Markdoc-Signature</code>. Press <em>Send test</em> below to see a delivery land.
           </p>
@@ -1582,14 +2488,14 @@ export function WebhooksPanel() {
                     type="button"
                     className="btn btn-outline btn-sm gap-1.5"
                     onClick={(event) => {
-                      if (
-                        !row.enable ||
-                        !isNativeReactMouseEvent(event, rowElements.enable.element, rowElements.enable.mouseTargets) ||
-                        !ownsPanelAction(publication, row.enable, event.currentTarget, rowElements.enable) ||
-                        !claimAction(row.enable)
-                      ) {
-                        return;
-                      }
+                     if (!row.enable || !claimPublishedClick(
+                       publication,
+                       row,
+                       row.enable,
+                       event,
+                       rowElements.enable,
+                     )) return;
+                     requestPublicationSuccessor();
                       startEnable(row);
                     }}
                     disabled={!row.enable.eligible}
@@ -1603,14 +2509,15 @@ export function WebhooksPanel() {
                   type="button"
                   className="btn btn-outline btn-sm gap-1.5"
                   onClick={(event) => {
-                    if (
-                      !isNativeReactMouseEvent(event, rowElements.test.element, rowElements.test.mouseTargets) ||
-                      !ownsPanelAction(publication, row.test, event.currentTarget, rowElements.test) ||
-                      !claimAction(row.test)
-                    ) {
-                      return;
-                    }
-                    startTest(row);
+                   if (!claimPublishedClick(
+                     publication,
+                     row,
+                     row.test,
+                     event,
+                     rowElements.test,
+                   )) return;
+                   requestPublicationSuccessor();
+                   startTest(row);
                   }}
                   disabled={!row.test.eligible}
                   data-testid="webhook-test"
@@ -1622,21 +2529,16 @@ export function WebhooksPanel() {
                   type="button"
                   className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
                   onClick={(event) => {
-                    if (
-                      !isNativeReactMouseEvent(event, rowElements.delete.element, rowElements.delete.mouseTargets) ||
-                      !ownsPanelAction(publication, row.delete, event.currentTarget, rowElements.delete) ||
-                      deleteEventsRef.current.has(event) ||
-                      deleteClaimsRef.current.has(row.delete)
-                    ) {
-                      return;
-                    }
-                    deleteEventsRef.current.add(event);
-                    deleteClaimsRef.current.add(row.delete);
-                    if (!confirm(`Delete the webhook to ${row.url}?`)) {
-                      deleteClaimsRef.current.delete(row.delete);
-                      return;
-                    }
-                    startDelete(row);
+                   if (!claimPublishedClick(
+                     publication,
+                     row,
+                     row.delete,
+                     event,
+                     rowElements.delete,
+                   )) return;
+                   requestPublicationSuccessor();
+                   if (!confirm(`Delete the webhook to ${row.url}?`)) return;
+                   startDelete(row);
                   }}
                   disabled={!row.delete.eligible}
                   aria-label={`Delete webhook ${row.url}`}
