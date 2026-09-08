@@ -104,24 +104,86 @@ interface TokenOperation extends ManagerOperation {
   kind: TokenMutationKind;
 }
 
-type DocumentListIntent = "initial" | "retry";
+type DocumentListIntent = "initial" | "refresh" | "retry";
 
 interface DocumentListInputs {
   readonly starred?: false;
   readonly trash?: false;
 }
 
+type DocumentListApi = typeof api.documents.list;
+type BeginDocumentRequest = (
+  intent: DocumentListIntent,
+  visit: number,
+  activation?: DocumentListActivation,
+) => void;
+
 interface DocumentListRequest extends MountedOperation {
   id: number;
   inputs: Readonly<DocumentListInputs>;
+  list: DocumentListApi;
   promise: ReturnType<typeof api.documents.list>;
 }
 
 interface DocumentListOperation extends MountedOperation {
+  session: ManagerSession;
   visit: number;
   requestId: number;
   intent: DocumentListIntent;
   request: DocumentListRequest;
+  callback: BeginDocumentRequest;
+  list: DocumentListApi;
+  activation: DocumentListActivation | null;
+  pendingCommit: DocumentChooserCommit | null;
+}
+
+interface DocumentChooserAction {
+  readonly identity: symbol;
+  readonly intent: "refresh" | "retry";
+  claimed: boolean;
+}
+
+interface DocumentChooserSlot<T extends HTMLElement> {
+  element: T | null;
+}
+
+interface DocumentChooserCandidate {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly session: ManagerSession;
+  readonly visit: number;
+  readonly requestSequence: number;
+  readonly inputs: Readonly<DocumentListInputs>;
+  readonly callback: BeginDocumentRequest;
+  readonly list: DocumentListApi;
+  readonly pending: DocumentListOperation | null;
+  readonly action: DocumentChooserAction | null;
+  readonly buttonLabel: "Refresh documents" | "Retry documents";
+  readonly root: DocumentChooserSlot<HTMLDivElement>;
+  readonly button: DocumentChooserSlot<HTMLButtonElement>;
+}
+
+interface DocumentChooserCommit {
+  readonly candidate: DocumentChooserCandidate;
+  readonly ownerDocument: Document;
+  readonly root: HTMLDivElement;
+  readonly button: HTMLButtonElement;
+  readonly dom: SecretNoticeDomSnapshot;
+  readonly placement: readonly SecretNoticePlacement[];
+  readonly buttonTargets: readonly Node[];
+  retired: boolean;
+  mutated: boolean;
+  observer: MutationObserver | null;
+}
+
+interface DocumentListActivation {
+  readonly commit: DocumentChooserCommit;
+  readonly action: DocumentChooserAction;
+  readonly button: HTMLButtonElement;
+  readonly ownerDocument: Document;
+  readonly inputs: Readonly<DocumentListInputs>;
+  readonly callback: BeginDocumentRequest;
+  readonly list: DocumentListApi;
 }
 
 type SecretNoticeRole = "notice" | "code" | "copy" | "hide";
@@ -275,6 +337,8 @@ const SECRET_HIDE_LABEL = "I stored it - hide secret";
 const SECRET_GUIDANCE = "Store it now in a safe place. Only a hash is saved by Markdoc; the secret cannot be recovered or edited.";
 const SecretNoticeMutationObserver =
   typeof MutationObserver === "function" ? MutationObserver : null;
+const DocumentChooserMutationObserver =
+  typeof MutationObserver === "function" ? MutationObserver : null;
 
 function snapshotCreatedSecret(value: CreatedApiTokenDto | CreatedSecretValue): CreatedSecretValue {
   return Object.freeze({
@@ -355,6 +419,31 @@ function secretNoticeNodes(element: HTMLElement): readonly Node[] {
   };
   visit(element);
   return Object.freeze(nodes);
+}
+
+function exactDocumentChooserEventPath(
+  nativeEvent: MouseEvent,
+  target: Node,
+  ownerDocument: Document,
+): boolean {
+  const expected: EventTarget[] = [];
+  let node: Node | null = target;
+  while (node) {
+    expected.push(node);
+    if (node === ownerDocument) break;
+    node = node.parentNode;
+  }
+  const ownerWindow = ownerDocument.defaultView;
+  const actual = nativeEvent.composedPath();
+  const pathWindow = actual.at(-1);
+  return expected.at(-1) === ownerDocument
+    && !!ownerWindow
+    && actual.length === expected.length + 1
+    && expected.every((entry, index) => actual[index] === entry)
+    && typeof pathWindow === "object"
+    && pathWindow !== null
+    && "document" in pathWindow
+    && pathWindow.document === ownerDocument;
 }
 
 function snapshotSecretNoticePlacement(root: HTMLElement): readonly SecretNoticePlacement[] | null {
@@ -1313,6 +1402,14 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
   const documentVisit = useRef<number | null>(null);
   const documentOwner = useRef<DocumentListOperation | null>(null);
   const documentRequest = useRef<DocumentListRequest | null>(null);
+  const activeDocumentCallback = useRef<BeginDocumentRequest | null>(null);
+  const activeDocumentCommit = useRef<DocumentChooserCommit | null>(null);
+  const committedDocumentCandidates = useRef(new WeakSet<DocumentChooserCandidate>());
+  const detachedDocumentCandidates = useRef(new WeakSet<DocumentChooserCandidate>());
+  const repairRequestedDocumentCandidates = useRef(new WeakSet<DocumentChooserCandidate>());
+  const claimedDocumentEvents = useRef(new WeakSet<object>());
+  const consumedDocumentCommits = useRef(new WeakSet<DocumentChooserCommit>());
+  const [, setDocumentPresentationRevision] = useState(0);
   const managerSession = useRef<ManagerSession>({
     authority: Symbol("token-manager-session"),
     origin,
@@ -1382,31 +1479,125 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     tokensButtonControl.element = null;
     if (tokensButtonOwner.current === tokensButtonControl) tokensButtonOwner.current = null;
   }, [tokensButtonControl]);
-  const isDocumentCurrent = useCallback((operation: DocumentListOperation) =>
-    documentMountActive.current
-    && operation.mount === documentMount
-    && documentVisit.current === operation.visit
-    && operation.requestId === operation.request.id
-    && documentOwner.current === operation, [documentMount]);
+  const documentMutationFree = useCallback((commit: DocumentChooserCommit) => {
+    if (commit.mutated) return false;
+    if ((commit.observer?.takeRecords().length ?? 0) > 0) {
+      commit.mutated = true;
+      return false;
+    }
+    return true;
+  }, []);
+  const retireDocumentCommit = useCallback((commit: DocumentChooserCommit) => {
+    commit.retired = true;
+    commit.observer?.disconnect();
+    commit.observer = null;
+    if (activeDocumentCommit.current === commit) activeDocumentCommit.current = null;
+    if (commit.candidate.pending?.pendingCommit === commit) {
+      commit.candidate.pending.pendingCommit = null;
+    }
+  }, []);
+  const documentCommitMatches = useCallback((commit: DocumentChooserCommit) => {
+    const candidate = commit.candidate;
+    const ownerWindow = commit.ownerDocument.defaultView;
+    return !commit.retired
+      && documentMountActive.current
+      && candidate.mount === documentMount
+      && candidate.session === activeManagerSession.current
+      && candidate.session.authority === activeManagerSession.current?.authority
+      && documentVisit.current === candidate.visit
+      && candidate.requestSequence === documentRequestSeq.current
+      && candidate.callback === activeDocumentCallback.current
+      && candidate.list === api.documents.list
+      && Object.isFrozen(candidate.inputs)
+      && !!ownerWindow
+      && commit.root.isConnected
+      && commit.button.isConnected
+      && commit.root.ownerDocument === commit.ownerDocument
+      && commit.button.ownerDocument === commit.ownerDocument
+      && commit.button.parentElement === commit.root.firstElementChild
+      && commit.root.dataset.testid === "token-documents"
+      && commit.root.className === "max-h-48 overflow-y-auto"
+      && commit.button.type === "button"
+      && commit.button.className === "btn btn-sm btn-outline"
+      && commit.button.textContent === candidate.buttonLabel
+      && commit.button.disabled === (candidate.action === null)
+      && commit.button.getAttribute("aria-disabled") !== "true"
+      && secretNoticeDomMatches(commit.dom)
+      && secretNoticePlacementMatches(commit.root, commit.ownerDocument, commit.placement);
+  }, [documentMount]);
+  const documentCommitIsCurrent = useCallback((commit: DocumentChooserCommit) =>
+    activeDocumentCommit.current === commit
+    && documentCommitMatches(commit)
+    && documentMutationFree(commit),
+  [documentCommitMatches, documentMutationFree]);
+  const isDocumentCurrent = useCallback((operation: DocumentListOperation) => {
+    const activationCurrent = !operation.activation || (
+      operation.pendingCommit !== null
+      && operation.pendingCommit.candidate.pending === operation
+      && operation.pendingCommit.button === operation.activation.button
+      && operation.pendingCommit.ownerDocument === operation.activation.ownerDocument
+      && documentCommitIsCurrent(operation.pendingCommit)
+    );
+    return documentMountActive.current
+      && operation.mount === documentMount
+      && operation.session === activeManagerSession.current
+      && operation.session.authority === activeManagerSession.current?.authority
+      && documentVisit.current === operation.visit
+      && operation.requestId === operation.request.id
+      && operation.request.mount === documentMount
+      && (!operation.activation || operation.request.inputs === operation.activation.inputs)
+      && operation.request.list === operation.list
+      && operation.callback === activeDocumentCallback.current
+      && operation.list === api.documents.list
+      && documentOwner.current === operation
+      && activationCurrent;
+  }, [documentCommitIsCurrent, documentMount]);
   const retireDocumentVisit = useCallback((updatePending = true, expectedVisit?: number) => {
     if (expectedVisit !== undefined && documentVisit.current !== expectedVisit) return;
     const owner = documentOwner.current;
     documentVisit.current = null;
     documentOwner.current = null;
+    if (owner?.pendingCommit) retireDocumentCommit(owner.pendingCommit);
+    const commit = activeDocumentCommit.current;
+    if (commit) retireDocumentCommit(commit);
     if (updatePending && owner) {
       setDocumentPending((current) => current === owner ? null : current);
     }
-  }, []);
-  const beginDocumentRequest = useCallback((intent: DocumentListIntent, visit: number) => {
+  }, [retireDocumentCommit]);
+  const beginDocumentRequest = useCallback<BeginDocumentRequest>((intent, visit, activation) => {
     if (!documentMountActive.current || documentVisit.current !== visit || documentOwner.current) return;
-    let request = documentRequest.current;
+    if (intent !== "initial") {
+      if (
+        !activation
+        || activation.commit.candidate.visit !== visit
+        || activation.commit.candidate.inputs !== activation.inputs
+        || activation.commit.candidate.callback !== activation.callback
+        || activation.commit.candidate.list !== activation.list
+        || activation.commit.candidate.action !== activation.action
+        || activation.action.intent !== intent
+        || activation.button !== activation.commit.button
+        || activation.ownerDocument !== activation.commit.ownerDocument
+        || activation.callback !== beginDocumentRequest
+        || activation.callback !== activeDocumentCallback.current
+        || activation.list !== api.documents.list
+        || documentRequest.current
+        || !documentCommitIsCurrent(activation.commit)
+      ) {
+        return;
+      }
+    } else if (activation) {
+      return;
+    }
+    let request = intent === "initial" ? documentRequest.current : null;
     if (!request) {
-      const inputs = Object.freeze<DocumentListInputs>({});
+      const inputs = activation?.inputs ?? Object.freeze<DocumentListInputs>({});
+      const list = activation?.list ?? api.documents.list;
       request = {
         mount: documentMount,
         id: ++documentRequestSeq.current,
         inputs,
-        promise: api.documents.list(inputs),
+        list,
+        promise: list(inputs),
       };
       documentRequest.current = request;
       const clearRequest = () => {
@@ -1416,10 +1607,15 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     }
     const operation: DocumentListOperation = {
       mount: documentMount,
+      session: managerSession,
       visit,
       requestId: request.id,
       intent,
       request,
+      callback: beginDocumentRequest,
+      list: request.list,
+      activation: activation ?? null,
+      pendingCommit: null,
     };
     documentOwner.current = operation;
     setDocumentError(null);
@@ -1440,18 +1636,206 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
         setDocumentPending((current) => current === operation ? null : current);
       }
     })();
-  }, [documentMount, isDocumentCurrent]);
+  }, [documentCommitIsCurrent, documentMount, isDocumentCurrent, managerSession]);
   const beginDocumentVisit = useCallback(() => {
     if (!documentMountActive.current || documentVisit.current !== null) return;
     const visit = ++documentVisitSeq.current;
     documentVisit.current = visit;
     beginDocumentRequest("initial", visit);
   }, [beginDocumentRequest]);
-  const retryDocuments = useCallback(() => {
-    const visit = documentVisit.current;
-    if (visit === null || documentOwner.current) return;
-    beginDocumentRequest("retry", visit);
-  }, [beginDocumentRequest]);
+  const documentButtonLabel: DocumentChooserCandidate["buttonLabel"] | null =
+    documentPending?.intent === "retry" || (documentError !== null && documentPending === null)
+      ? "Retry documents"
+      : documents !== null
+        ? "Refresh documents"
+        : null;
+  const documentActionIntent: DocumentChooserAction["intent"] | null =
+    documentPending !== null || busy || documentButtonLabel === null
+      ? null
+      : documentError !== null
+        ? "retry"
+        : "refresh";
+  const documentChooserCandidate: DocumentChooserCandidate | null =
+    chooserVisible && documentButtonLabel
+      ? Object.freeze({
+        identity: Symbol("token-document-chooser"),
+        mount: documentMount,
+        session: managerSession,
+        visit: documentVisit.current ?? -1,
+        requestSequence: documentRequestSeq.current,
+        inputs: documentPending?.request.inputs ?? Object.freeze<DocumentListInputs>({}),
+        callback: beginDocumentRequest,
+        list: api.documents.list,
+        pending: documentPending,
+        action: documentActionIntent
+          ? {
+            identity: Symbol(`token-document-${documentActionIntent}`),
+            intent: documentActionIntent,
+            claimed: false,
+          }
+          : null,
+        buttonLabel: documentButtonLabel,
+        root: { element: null },
+        button: { element: null },
+      })
+      : null;
+  const retireDocumentCandidate = (candidate: DocumentChooserCandidate) => {
+    const commit = activeDocumentCommit.current;
+    if (commit?.candidate === candidate) retireDocumentCommit(commit);
+  };
+  const bindDocumentChooserElement = <T extends HTMLDivElement | HTMLButtonElement>(
+    candidate: DocumentChooserCandidate,
+    slot: DocumentChooserSlot<T>,
+    element: T | null,
+  ) => {
+    if (slot.element !== element) retireDocumentCandidate(candidate);
+    slot.element = element;
+    if (!element) {
+      if (committedDocumentCandidates.current.has(candidate)) {
+        detachedDocumentCandidates.current.add(candidate);
+      }
+      retireDocumentCandidate(candidate);
+      return;
+    }
+    if (
+      detachedDocumentCandidates.current.has(candidate)
+      && !repairRequestedDocumentCandidates.current.has(candidate)
+      && documentMountActive.current
+      && documentVisit.current === candidate.visit
+      && activeDocumentCommit.current === null
+    ) {
+      repairRequestedDocumentCandidates.current.add(candidate);
+      setDocumentPresentationRevision((current) => current + 1);
+    }
+  };
+  const buildDocumentCommit = (candidate: DocumentChooserCandidate) => {
+    const root = candidate.root.element;
+    const button = candidate.button.element;
+    if (!root || !button || button.parentElement !== root.firstElementChild) return null;
+    const placement = snapshotSecretNoticePlacement(root);
+    if (!placement) return null;
+    const commit: DocumentChooserCommit = {
+      candidate,
+      ownerDocument: root.ownerDocument,
+      root,
+      button,
+      dom: snapshotSecretNoticeDom(root),
+      placement,
+      buttonTargets: secretNoticeNodes(button),
+      retired: false,
+      mutated: false,
+      observer: null,
+    };
+    if (!documentCommitMatches(commit)) return null;
+    activeDocumentCommit.current = commit;
+    if (!documentCommitIsCurrent(commit)) {
+      retireDocumentCommit(commit);
+      return null;
+    }
+    committedDocumentCandidates.current.add(candidate);
+    if (candidate.pending && documentOwner.current === candidate.pending) {
+      candidate.pending.pendingCommit = commit;
+    }
+    if (DocumentChooserMutationObserver) {
+      const observer = new DocumentChooserMutationObserver(() => {
+        commit.mutated = true;
+      });
+      // React restores controlled checkboxes after layout; their structure stays guarded,
+      // while restored attribute mutations are relevant to the refresh/retry control itself.
+      observer.observe(root, {
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      observer.observe(button, {
+        attributes: true,
+        subtree: true,
+      });
+      const observed = new Set<Node>([root]);
+      for (const entry of placement) {
+        if (entry.parent && !observed.has(entry.parent)) {
+          observer.observe(entry.parent, { childList: true });
+          observed.add(entry.parent);
+        }
+      }
+      commit.observer = observer;
+    }
+    return commit;
+  };
+  const activateDocumentChooser = (
+    candidate: DocumentChooserCandidate,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    const commit = activeDocumentCommit.current;
+    const action = candidate.action;
+    const button = candidate.button.element;
+    const ownerWindow = commit?.ownerDocument.defaultView;
+    const nativeEvent = event?.nativeEvent;
+    const target = event?.target;
+    const reactEvent = event as ReactMouseEvent<HTMLButtonElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    if (
+      !commit
+      || commit.candidate !== candidate
+      || !action
+      || action.claimed
+      || !button
+      || commit.button !== button
+      || !ownerWindow
+      || !event
+      || typeof event !== "object"
+      || event.type !== "click"
+      || event.button !== 0
+      || event.currentTarget !== button
+      || event.defaultPrevented
+      || event.bubbles !== true
+      || event.cancelable !== true
+      || !(nativeEvent instanceof ownerWindow.MouseEvent)
+      || nativeEvent.type !== "click"
+      || nativeEvent.button !== 0
+      || nativeEvent.eventPhase === ownerWindow.Event.NONE
+      || !nativeEvent.bubbles
+      || !nativeEvent.cancelable
+      || nativeEvent.defaultPrevented
+      || reactEvent._reactName !== "onClick"
+      || typeof reactEvent.isDefaultPrevented !== "function"
+      || reactEvent.isDefaultPrevented()
+      || typeof reactEvent.isPropagationStopped !== "function"
+      || reactEvent.isPropagationStopped()
+      || typeof reactEvent.persist !== "function"
+      || nativeEvent.target !== target
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== commit.ownerDocument
+      || !button.contains(target)
+      || !commit.buttonTargets.includes(target)
+      || !secretNoticeDomContains(commit.dom, target)
+      || !exactDocumentChooserEventPath(nativeEvent, target, commit.ownerDocument)
+      || claimedDocumentEvents.current.has(event)
+      || claimedDocumentEvents.current.has(nativeEvent)
+      || consumedDocumentCommits.current.has(commit)
+      || !documentCommitIsCurrent(commit)
+    ) {
+      return;
+    }
+    action.claimed = true;
+    claimedDocumentEvents.current.add(event);
+    claimedDocumentEvents.current.add(nativeEvent);
+    consumedDocumentCommits.current.add(commit);
+    const activation = Object.freeze<DocumentListActivation>({
+      commit,
+      action,
+      button,
+      ownerDocument: commit.ownerDocument,
+      inputs: candidate.inputs,
+      callback: candidate.callback,
+      list: candidate.list,
+    });
+    candidate.callback(action.intent, candidate.visit, activation);
+  };
   const selectDestination = useCallback((visit: ManagerControlVisit, value: "tokens" | "connect") => {
     if (!isControlVisitCurrent(visit) || hasSecretWork(visit)) return;
     setDestination((current) =>
@@ -1508,12 +1892,31 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     };
   }, [retireDocumentVisit]);
   useLayoutEffect(() => {
+    activeDocumentCallback.current = beginDocumentRequest;
+    return () => {
+      if (activeDocumentCallback.current === beginDocumentRequest) {
+        activeDocumentCallback.current = null;
+      }
+    };
+  }, [beginDocumentRequest]);
+  useLayoutEffect(() => {
     if (chooserVisible) beginDocumentVisit();
     else retireDocumentVisit();
     return () => {
       if (chooserVisible) retireDocumentVisit();
     };
   }, [beginDocumentVisit, chooserVisible, retireDocumentVisit]);
+  useLayoutEffect(() => {
+    if (!documentChooserCandidate) {
+      const current = activeDocumentCommit.current;
+      if (current) retireDocumentCommit(current);
+      return;
+    }
+    retireDocumentCandidate(documentChooserCandidate);
+    const commit = buildDocumentCommit(documentChooserCandidate);
+    if (!commit) return;
+    return () => retireDocumentCommit(commit);
+  });
 
   const load = useCallback(async (ownerCurrent?: () => boolean) => {
     const session = activeManagerSession.current;
@@ -1825,12 +2228,25 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
             {documentId ? "Only this document" : "Only these documents"}
           </label>
           <p id={`${id}-access`} className="text-xs text-ink-3" data-testid="token-document-access">{restrict ? "Every other document answers 404 to this token." : "This token will access all documents you can access."}</p>
-          {restrict && !documentId && <div className="max-h-48 overflow-y-auto" data-testid="token-documents">
-           {documentPending && <p role="status" aria-live="polite" aria-atomic="true" className="text-xs text-ink-3" data-testid="token-documents-pending">
-             {documentPending.intent === "retry" ? "Refreshing your documents..." : "Loading your documents..."}
-           </p>}
+          {restrict && !documentId && <div
+            ref={documentChooserCandidate
+              ? (element) => bindDocumentChooserElement(documentChooserCandidate, documentChooserCandidate.root, element)
+              : undefined}
+            className="max-h-48 overflow-y-auto" data-testid="token-documents">
+           {(documentPending || documentChooserCandidate) && <div className="flex flex-wrap items-center gap-2">
+             {documentPending && <p role="status" aria-live="polite" aria-atomic="true" className="text-xs text-ink-3" data-testid="token-documents-pending">
+               {documentPending.intent === "initial" ? "Loading your documents..." : "Refreshing your documents..."}
+             </p>}
+             {documentChooserCandidate && <button
+               ref={(element) => bindDocumentChooserElement(documentChooserCandidate, documentChooserCandidate.button, element)}
+               type="button" className="btn btn-sm btn-outline"
+               disabled={documentChooserCandidate.action === null}
+               onClick={(event) => activateDocumentChooser(documentChooserCandidate, event)}>
+               {documentChooserCandidate.buttonLabel}
+             </button>}
+           </div>}
            {documentError && <><p role="alert" aria-atomic="true" className="text-sm text-danger">{documentError}</p>
-             <button type="button" className="btn btn-sm btn-outline" disabled={busy} onClick={retryDocuments}>Retry documents</button></>}
+           </>}
            {documents !== null && (documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
                   : documents.map((d) => <label key={d.id} className="flex items-start gap-2 text-sm text-ink-2">
                    <input type="checkbox" checked={documentIds.includes(d.id)} disabled={busy} onChange={() => setDocumentIds((ids) => ids.includes(d.id) ? ids.filter((value) => value !== d.id) : [...ids, d.id])} data-testid={`token-document-${d.id}`} />
