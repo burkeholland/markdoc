@@ -30,7 +30,7 @@ import { RichPane } from "./rich-pane";
 import { CodePane } from "./code-pane";
 
 const SOURCE = "Before [**nested** *label*](https://example.test/guide) after\n\n## Section\n";
-const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const sessions: CollabSession[] = [];
 const rangeMethods = ["getClientRects", "getBoundingClientRect"] as const;
 const originalRangeMethods = rangeMethods.map((name) => Object.getOwnPropertyDescriptor(Range.prototype, name));
@@ -105,7 +105,7 @@ function nativeDoubleClick(target: EventTarget, init: MouseEventInit) {
 }
 
 function flushHighlightActivation() {
-  act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS));
+  act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS));
 }
 
 function mountEditor(
@@ -400,37 +400,82 @@ describe.each(["rich", "source"] as const)("%s editor link input", (surface) => 
     },
   );
 
-  it("keeps a browser-classified delayed double-click on an overlapping link as selection only", async () => {
-    const editor = mountEditor(surface, SOURCE, "owner", true);
-    const from = SOURCE.indexOf("nested");
-    act(() => {
-      addLiveHighlight(editor.session, "comment", from, from + "nested".length);
-      if (editor.rich) refreshRichHighlights(editor.rich);
-    });
-    await waitFor(() => expect(editor.dom.querySelector(".md-comment")).not.toBeNull());
-    const target = editor.dom.querySelector<HTMLElement>(".md-comment")!;
-    const before = editor.selection();
-    const markdown = editor.session.ytext.toString();
-    vi.useFakeTimers();
+  it.each(["comment", "suggest-insert"] as const)(
+    "keeps a browser-classified %s double-click inside 750 ms on an overlapping link as selection only",
+    async (kind) => {
+      const editor = mountEditor(surface, SOURCE, "owner", true);
+      const from = SOURCE.indexOf("nested");
+      act(() => {
+        addLiveHighlight(editor.session, kind, from, from + "nested".length);
+        if (editor.rich) refreshRichHighlights(editor.rich);
+      });
+      const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+      await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+      const target = editor.dom.querySelector<HTMLElement>(selector)!;
+      const before = editor.selection();
+      const markdown = editor.session.ytext.toString();
+      vi.useFakeTimers();
 
-    gesture(target, { clientX: from + 2, detail: 1 });
-    act(() => vi.advanceTimersByTime(501));
-    gesture(target, { clientX: from + 2, detail: 2 });
-    const doubleClick = mouse(target, "dblclick", { clientX: from + 2, detail: 2 });
-    flushHighlightActivation();
+      gesture(target, { clientX: from + 2, detail: 1 });
+      act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 1));
+      gesture(target, { clientX: from + 2, detail: 2 });
+      const doubleClick = mouse(target, "dblclick", { clientX: from + 2, detail: 2 });
+      flushHighlightActivation();
 
-    expect(editor.onHighlightClick).not.toHaveBeenCalled();
-    expect(editor.highlightOpens()).toBe(0);
-    expect(editor.session.activeCommentId).toBeNull();
-    if (surface === "source") {
-      expect(editor.selection()).not.toEqual(before);
-    } else {
-      expect(editor.selection()).toEqual(before);
-    }
-    expect(editor.session.ytext.toString()).toBe(markdown);
-    expect(window.open).not.toHaveBeenCalled();
-    expect(doubleClick.defaultPrevented).toBe(false);
-  });
+      expect(editor.onHighlightClick).not.toHaveBeenCalled();
+      expect(editor.highlightOpens()).toBe(0);
+      expect(editor.session.activeCommentId).toBeNull();
+      expect(editor.session.activeSuggestionId).toBeNull();
+      if (surface === "source") {
+        expect(editor.selection()).not.toEqual(before);
+      } else {
+        expect(editor.selection()).toEqual(before);
+      }
+      expect(editor.session.ytext.toString()).toBe(markdown);
+      expect(window.open).not.toHaveBeenCalled();
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it.each(["comment", "suggest-insert"] as const)(
+    "does not duplicate a committed %s click when browser detail 2 arrives after 750 ms",
+    async (kind) => {
+      const editor = mountEditor(surface, SOURCE, "owner", true);
+      const from = SOURCE.indexOf("nested");
+      let id = "";
+      act(() => {
+        id = addLiveHighlight(editor.session, kind, from, from + "nested".length);
+        if (editor.rich) refreshRichHighlights(editor.rich);
+      });
+      const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+      await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+      const before = editor.selection();
+      const markdown = editor.session.ytext.toString();
+      vi.useFakeTimers();
+
+      gesture(editor.dom.querySelector(selector)!, { clientX: from + 2, detail: 1 });
+      act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS + 1));
+      expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(kind, id, from + 2);
+      expect(editor.highlightOpens()).toBe(1);
+
+      const currentTarget = editor.dom.querySelector<HTMLElement>(selector)!;
+      gesture(currentTarget, { clientX: from + 2, detail: 2 });
+      const doubleClick = mouse(currentTarget, "dblclick", { clientX: from + 2, detail: 2 });
+      flushHighlightActivation();
+
+      expect(editor.onHighlightClick).toHaveBeenCalledTimes(1);
+      expect(editor.highlightOpens()).toBe(1);
+      expect(kind === "comment" ? editor.session.activeCommentId : editor.session.activeSuggestionId).toBe(id);
+      if (surface === "source") {
+        expect(editor.selection()).not.toEqual(before);
+      } else {
+        expect(editor.selection()).toEqual(before);
+      }
+      expect(editor.session.ytext.toString()).toBe(markdown);
+      expect(window.open).not.toHaveBeenCalled();
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
 
   it("retires stale and unmounted deferred highlights before a later fresh single click", async () => {
     const source = "Before highlighted passage after";

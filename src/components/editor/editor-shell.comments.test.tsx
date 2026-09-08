@@ -154,7 +154,7 @@ function clickRichHighlight() {
       dispatch("pointerup");
       dispatch("mouseup");
       dispatch("click");
-      vi.advanceTimersByTime(5001);
+      vi.advanceTimersByTime(750);
     });
   } finally {
     hitTest.mockRestore();

@@ -166,12 +166,14 @@ export function richHighlightAtPointer(
   return position ? richHighlightAtPosition(view, session, event, position.pos) : null;
 }
 
-// Chromium honors Windows' documented 5000 ms cap; wait past it so the second press retires first.
-const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
+// Product policy: classify clicks for 750 ms from the first press. A later detail-2
+// gesture cannot undo an activation that has already committed.
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const DRAG_TOLERANCE_PX = 4;
 
 interface RichHighlightPress {
   down: MouseEvent;
+  startedAt: number;
   pointerId: number | null;
   target: PositionedHighlightTarget;
   signature: string;
@@ -236,6 +238,7 @@ function installRichHighlightActivation(
   let pending: PendingRichHighlightActivation | null = null;
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
   let nextPointerId: number | null = null;
+  let nextPressStartedAt: number | null = null;
 
   const pointerId = (event: Event) => {
     const value = (event as Partial<PointerEvent>).pointerId;
@@ -261,14 +264,17 @@ function installRichHighlightActivation(
     clearPress();
     clearPending();
     nextPointerId = null;
+    nextPressStartedAt = null;
   };
   const pointerDown = (event: PointerEvent) => {
     retire();
     nextPointerId = pointerId(event);
+    nextPressStartedAt = Date.now();
   };
   const pointerUp = (event: PointerEvent) => {
     if (!press) {
       nextPointerId = null;
+      nextPressStartedAt = null;
     } else if (press.pointerId !== null && pointerId(event) !== press.pointerId) {
       clearPress();
     }
@@ -292,7 +298,7 @@ function installRichHighlightActivation(
           return;
         }
         onClick(activation.target.kind, activation.target.id, activation.target.sourcePosition);
-      }, HIGHLIGHT_ACTIVATION_DELAY_MS),
+      }, Math.max(0, HIGHLIGHT_ACTIVATION_WINDOW_MS - (Date.now() - current.startedAt))),
     };
     pending = activation;
   };
@@ -329,12 +335,14 @@ function installRichHighlightActivation(
   };
   const down = (event: MouseEvent) => {
     const currentPointerId = nextPointerId;
+    const startedAt = nextPressStartedAt ?? Date.now();
     retire();
     if (event.defaultPrevented || !isPlainPrimaryEvent(event) || event.buttons !== 1 || !key.getState(view.state)) return;
     const target = richHighlightAtPointer(view, session, event);
     if (!target) return;
     press = {
       down: event,
+      startedAt,
       pointerId: currentPointerId,
       target,
       signature: currentSignature(),

@@ -155,12 +155,14 @@ function sourceHighlightIsCurrent(view: EditorView, target: PositionedHighlightT
   return !!current && sourceHighlightOwnsRange(current, target);
 }
 
-// Chromium honors Windows' documented 5000 ms cap; wait past it so the second press retires first.
-const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
+// Product policy: classify clicks for 750 ms from the first press. A later detail-2
+// gesture cannot undo an activation that has already committed.
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const DRAG_TOLERANCE_PX = 4;
 
 interface SourceHighlightPress {
   down: MouseEvent;
+  startedAt: number;
   pointerId: number | null;
   target: PositionedHighlightTarget;
   doc: Text;
@@ -210,6 +212,7 @@ function installSourceHighlightActivation(
   let pending: PendingSourceHighlightActivation | null = null;
   let releaseTimer: ReturnType<typeof setTimeout> | undefined;
   let nextPointerId: number | null = null;
+  let nextPressStartedAt: number | null = null;
 
   const currentHighlights = () => view.state.field(highlightsField, false);
   const pointerId = (event: Event) => {
@@ -236,14 +239,17 @@ function installSourceHighlightActivation(
     clearPress();
     clearPending();
     nextPointerId = null;
+    nextPressStartedAt = null;
   };
   const pointerDown = (event: PointerEvent) => {
     retire();
     nextPointerId = pointerId(event);
+    nextPressStartedAt = Date.now();
   };
   const pointerUp = (event: PointerEvent) => {
     if (!press) {
       nextPointerId = null;
+      nextPressStartedAt = null;
     } else if (press.pointerId !== null && pointerId(event) !== press.pointerId) {
       clearPress();
     }
@@ -268,7 +274,7 @@ function installSourceHighlightActivation(
           return;
         }
         onClick(activation.target.kind, activation.target.id, activation.target.sourcePosition);
-      }, HIGHLIGHT_ACTIVATION_DELAY_MS),
+      }, Math.max(0, HIGHLIGHT_ACTIVATION_WINDOW_MS - (Date.now() - current.startedAt))),
     };
     pending = activation;
   };
@@ -306,6 +312,7 @@ function installSourceHighlightActivation(
   };
   const down = (event: MouseEvent) => {
     const currentPointerId = nextPointerId;
+    const startedAt = nextPressStartedAt ?? Date.now();
     retire();
     const highlights = currentHighlights();
     if (event.defaultPrevented || !isPlainPrimaryEvent(event) || event.buttons !== 1 || !highlights) return;
@@ -313,6 +320,7 @@ function installSourceHighlightActivation(
     if (!target) return;
     press = {
       down: event,
+      startedAt,
       pointerId: currentPointerId,
       target,
       doc: view.state.doc,
