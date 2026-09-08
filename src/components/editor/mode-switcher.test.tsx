@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -152,8 +152,65 @@ function radio(name: "Editing" | "Suggesting" | "Viewing") {
 }
 
 function openMenu() {
-  fireEvent.pointerDown(trigger(), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  fireEvent(trigger(), new PointerEvent("pointerdown", {
+    bubbles: true,
+    button: 0,
+    ctrlKey: false,
+    pointerType: "mouse",
+  }));
   return menu();
+}
+
+function pointerDown(element: Element, event = new PointerEvent("pointerdown", {
+  bubbles: true,
+  button: 0,
+  ctrlKey: false,
+  pointerType: "mouse",
+})) {
+  fireEvent(element, event);
+  return event;
+}
+
+function keyDown(element: Element, key: string) {
+  const event = new KeyboardEvent("keydown", { bubbles: true, key });
+  fireEvent(element, event);
+  return event;
+}
+
+async function waitForOutsideListener() {
+  await act(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+function dispatchTrustedEscapeOutsideAct(target: HTMLElement) {
+  const escape = captureEscape();
+  const close = captureOpenChange();
+  const event = new KeyboardEvent("keydown", { bubbles: true, key: "Escape" });
+  document.addEventListener("keydown", (nativeEvent) => {
+    nativeEvent.stopImmediatePropagation();
+    escape(nativeEvent);
+    close(false);
+  }, { capture: true, once: true });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function dispatchTrustedModeSelectionOutsideAct(
+  name: "Editing" | "Suggesting" | "Viewing",
+  value: EditMode,
+) {
+  const row = radio(name);
+  const select = captureRowSelect(name);
+  const change = captureModeChange();
+  const event = new CustomEvent("menu.itemSelect", { cancelable: true });
+  row.addEventListener("menu.itemSelect", (nativeEvent) => {
+    nativeEvent.stopImmediatePropagation();
+    select(nativeEvent);
+    change(value);
+  }, { once: true });
+  row.dispatchEvent(event);
+  return event;
 }
 
 function captureOpenChange(): OpenHandler {
@@ -199,6 +256,23 @@ function sourceEvent(currentTarget: EventTarget | null, key = "") {
   };
 }
 
+function nativeSourceEvent(
+  currentTarget: EventTarget,
+  nativeEvent: PointerEvent | KeyboardEvent,
+  key = "",
+) {
+  return {
+    ...sourceEvent(currentTarget, key),
+    type: nativeEvent.type,
+    target: nativeEvent.target,
+    nativeEvent,
+    altKey: false,
+    metaKey: false,
+    shiftKey: false,
+    repeat: false,
+  };
+}
+
 function selectEvent(currentTarget: EventTarget | null) {
   return {
     currentTarget,
@@ -209,16 +283,8 @@ function selectEvent(currentTarget: EventTarget | null) {
 }
 
 function selectMode(name: "Editing" | "Suggesting" | "Viewing", value: EditMode) {
-  captureRowSelect(name)(selectEvent(radio(name)));
-  captureModeChange()(value);
-}
-
-function invokeOutside(handler: OutsideHandler, outside: HTMLElement) {
-  const originalEvent = { target: outside } as unknown as Event;
-  outside.addEventListener("dismissableLayer.pointerDownOutside", handler as EventListener, { once: true });
-  outside.dispatchEvent(new CustomEvent("dismissableLayer.pointerDownOutside", {
-    detail: { originalEvent },
-  }));
+  void value;
+  fireEvent.click(radio(name));
 }
 
 beforeEach(() => {
@@ -256,21 +322,35 @@ describe("ModeSwitcher presentation authority", () => {
 
       act(() => root.render(<ModeBoundary session={session} revision={1} />));
       expect(trigger()).toBe(reused);
-      const current = reactHandler<SourceHandler>(reused, kind === "pointer" ? "onPointerDown" : "onKeyDown");
-      const exactEvent = sourceEvent(reused, key);
+      const exactEvent = kind === "pointer"
+        ? new PointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+            ctrlKey: false,
+            pointerType: "mouse",
+          })
+        : new KeyboardEvent("keydown", { bubbles: true, key });
+      const invokeCurrent = () => reused.dispatchEvent(exactEvent);
       const invokeStale = () => {
         stale(sourceEvent(reused, key));
         staleOpen(true);
-        current(sourceEvent(wrong, key));
+        if (kind === "pointer") {
+          reactHandler<SourceHandler>(reused, "onPointerDown")(sourceEvent(wrong, key));
+        } else {
+          reactHandler<SourceHandler>(reused, "onKeyDown")(sourceEvent(wrong, key));
+        }
       };
       act(() => {
         if (order === "stale-before-current") {
-          invokeStale();
-          current(exactEvent);
-          current(exactEvent);
+          reused.addEventListener(exactEvent.type, (nativeEvent) => {
+            stale(nativeSourceEvent(reused, nativeEvent as PointerEvent | KeyboardEvent, key));
+            staleOpen(true);
+          }, { capture: true, once: true });
+          invokeCurrent();
+          invokeCurrent();
         } else {
-          current(exactEvent);
-          current(exactEvent);
+          invokeCurrent();
+          invokeCurrent();
           invokeStale();
         }
       });
@@ -312,10 +392,8 @@ describe("ModeSwitcher presentation authority", () => {
     expect(session.setMode).not.toHaveBeenCalled();
     expect(menu()).toBeInTheDocument();
 
-    act(() => {
-      changeMode("editing");
-      changeMode("editing");
-    });
+    fireEvent.click(editing);
+    fireEvent.click(editing);
     expect(session.setMode).toHaveBeenCalledExactlyOnceWith("editing");
     expect(screen.queryByRole("menu")).toBeNull();
   });
@@ -373,7 +451,7 @@ describe("ModeSwitcher presentation authority", () => {
 
       openMenu();
       const reader = screen.getByTestId("mode-reader");
-      act(() => captureReaderSelect()(selectEvent(reader)));
+      fireEvent.click(reader);
       expect(window.open).toHaveBeenCalledExactlyOnceWith("/p/document-b", "_blank", "noopener");
     } finally {
       act(() => root.unmount());
@@ -402,11 +480,10 @@ describe("ModeSwitcher presentation authority", () => {
     expect(screen.queryByRole("menu")).toBeNull();
 
     act(() => root.render(<ModeBoundary session={current} revision={1} />));
-    const currentPointer = reactHandler<SourceHandler>(trigger(), "onPointerDown");
     act(() => {
       oldPointer(sourceEvent(trigger()));
-      currentPointer(sourceEvent(trigger()));
     });
+    pointerDown(trigger());
     expect(menu()).toBeInTheDocument();
 
     const staleReaderElement = screen.getByTestId("mode-reader");
@@ -450,7 +527,7 @@ describe("ModeSwitcher presentation authority", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("requires exact trigger, content, and outside close events before closing or returning focus", () => {
+  it("requires exact trigger, content, and outside close events before closing or returning focus", async () => {
     const session = new ModeSession("close-sources", "owner", "editing");
     render(
       <>
@@ -472,7 +549,7 @@ describe("ModeSwitcher presentation authority", () => {
     expect(menu()).toBeInTheDocument();
     expect(modeTrigger).not.toHaveFocus();
 
-    act(() => triggerPointer(sourceEvent(modeTrigger)));
+    pointerDown(modeTrigger);
     expect(screen.queryByRole("menu")).toBeNull();
 
     openMenu();
@@ -492,16 +569,7 @@ describe("ModeSwitcher presentation authority", () => {
     expect(menu()).toBeInTheDocument();
     expect(modeTrigger).not.toHaveFocus();
 
-    const exactEscape = {
-      key: "Escape",
-      target: radio("Editing"),
-      currentTarget: document,
-      defaultPrevented: false,
-    } as unknown as KeyboardEvent;
-    act(() => {
-      escape(exactEscape);
-      close(false);
-    });
+    keyDown(radio("Editing"), "Escape");
     expect(screen.queryByRole("menu")).toBeNull();
 
     openMenu();
@@ -521,10 +589,8 @@ describe("ModeSwitcher presentation authority", () => {
     expect(menu()).toBeInTheDocument();
     expect(modeTrigger).not.toHaveFocus();
 
-    act(() => {
-      invokeOutside(outsideHandler, outside);
-      close(false);
-    });
+    await waitForOutsideListener();
+    pointerDown(outside);
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
@@ -565,17 +631,14 @@ describe("ModeSwitcher presentation authority", () => {
     expect(window.open).not.toHaveBeenCalled();
     expect(menu()).toBeInTheDocument();
 
-    act(() => {
-      editing(selectEvent(editingElement));
-      changeMode("editing");
-    });
+    fireEvent.click(editingElement);
     expect(originalSetMode).toHaveBeenCalledExactlyOnceWith("editing");
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("retires an exact row on ref detach and reattach while allowing its republished successor", () => {
+  it("retires a partial row handler while a fresh complete render remains usable", () => {
     const session = new ModeSession("row-ref", "owner", "editing");
-    render(<ModeSwitcher session={session.asCollabSession()} />);
+    render(<ModeBoundary session={session} />);
     openMenu();
     const rowElement = radio("Viewing");
     const staleSelect = captureRowSelect("Viewing");
@@ -596,13 +659,132 @@ describe("ModeSwitcher presentation authority", () => {
     expect(session.setMode).not.toHaveBeenCalled();
     expect(menu()).toBeInTheDocument();
 
-    act(() => selectMode("Viewing", "viewing"));
+    fireEvent.click(rowElement);
     expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
     expect(screen.queryByRole("menu")).toBeNull();
   });
+
+  it.each(["attribute", "order", "portal", "portal-ancestor", "placement"] as const)(
+    "permanently retires a presentation after a restored transient %s mutation",
+    (mutation) => {
+      const session = new ModeSession(`mutation-${mutation}`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      openMenu();
+      const content = menu();
+      const group = radio("Editing").parentElement;
+      if (!(group instanceof HTMLDivElement)) throw new Error("Mode group was not rendered");
+      const editing = radio("Editing");
+      const suggesting = radio("Suggesting");
+
+      act(() => {
+        if (mutation === "attribute") {
+          editing.setAttribute("role", "option");
+          editing.setAttribute("role", "menuitemradio");
+        } else if (mutation === "order") {
+          group.insertBefore(suggesting, editing);
+          group.insertBefore(editing, suggesting);
+        } else if (mutation === "portal") {
+          const parent = content.parentNode;
+          if (!parent) throw new Error("Mode portal did not have a parent");
+          parent.removeChild(content);
+          parent.appendChild(content);
+        } else if (mutation === "portal-ancestor") {
+          const portal = content.parentNode;
+          const parent = portal?.parentNode;
+          if (!portal || !parent) throw new Error("Mode portal wrapper did not have a parent");
+          parent.removeChild(portal);
+          parent.appendChild(portal);
+        } else {
+          const parent = content.parentNode;
+          if (!parent) throw new Error("Mode portal did not have a parent");
+          const sibling = document.createElement("div");
+          parent.insertBefore(sibling, content);
+          sibling.remove();
+        }
+      });
+
+      fireEvent.click(radio("Viewing"));
+      expect(session.setMode).not.toHaveBeenCalled();
+      expect(menu()).toBeInTheDocument();
+    },
+  );
 });
 
 describe("ModeSwitcher current behavior", () => {
+  it.each([
+    ["trigger pointer", "pointer"],
+    ["trigger keyboard", "keyboard"],
+    ["Editing choice", "editing"],
+    ["Suggesting choice", "suggesting"],
+    ["Viewing choice", "viewing"],
+    ["reader link", "reader"],
+    ["Escape close", "escape"],
+    ["outside close", "outside"],
+  ] as const)("keeps the %s exact through direct-root Strict Mode replay", async (_name, family) => {
+    const initialMode: EditMode = family === "viewing" ? "editing" : "viewing";
+    const session = new ModeSession(`strict-${family}`, "owner", initialMode);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <ModeSwitcher session={session.asCollabSession()} />
+          <button type="button">Strict outside</button>
+        </StrictMode>,
+      ));
+      const modeTrigger = trigger();
+      const strictOutside = screen.getByRole("button", { name: "Strict outside" });
+      modeTrigger.focus();
+
+      if (family === "pointer") {
+        pointerDown(modeTrigger);
+        expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+      } else if (family === "keyboard") {
+        keyDown(modeTrigger, "Enter");
+        expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+      } else {
+        openMenu();
+        if (family === "editing" || family === "suggesting" || family === "viewing") {
+          const label = family === "editing" ? "Editing" : family === "suggesting" ? "Suggesting" : "Viewing";
+          fireEvent.click(radio(label));
+          expect(session.setMode).toHaveBeenCalledExactlyOnceWith(family);
+          expect(screen.queryByRole("menu")).toBeNull();
+        } else if (family === "reader") {
+          fireEvent.click(screen.getByTestId("mode-reader"));
+          expect(window.open).toHaveBeenCalledExactlyOnceWith(`/p/strict-${family}`, "_blank", "noopener");
+          expect(screen.queryByRole("menu")).toBeNull();
+        } else if (family === "escape") {
+          keyDown(radio("Viewing"), "Escape");
+          expect(screen.queryByRole("menu")).toBeNull();
+        } else {
+          await waitForOutsideListener();
+          pointerDown(strictOutside);
+          expect(screen.queryByRole("menu")).toBeNull();
+        }
+        await waitFor(() => expect(modeTrigger).toHaveFocus());
+      }
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("keeps Radix collision-placement attributes dynamic", () => {
+    const session = new ModeSession("dynamic-placement", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    openMenu();
+
+    act(() => {
+      menu().setAttribute("data-side", "top");
+      menu().setAttribute("data-align", "start");
+    });
+    fireEvent.click(radio("Viewing"));
+
+    expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it.each([
     ["owner", "editing"],
     ["owner", "suggesting"],
@@ -707,6 +889,203 @@ describe("ModeSwitcher current behavior", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it.each([
+    ["Escape", "escape"],
+    ["mode selection", "mode"],
+  ] as const)("returns focus once after a trusted %s commits beyond the event microtask", async (_name, family) => {
+    const session = new ModeSession(`${family}-focus-order`, "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    const viewing = radio("Viewing");
+    viewing.focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    if (family === "escape") {
+      dispatchTrustedEscapeOutsideAct(viewing);
+    } else {
+      dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    }
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    if (family === "mode") {
+      expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    }
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+  });
+
+  it.each([
+    ["Escape", "retained", "escape"],
+    ["Escape", "restored", "escape"],
+    ["mode selection", "retained", "mode"],
+    ["mode selection", "restored", "mode"],
+  ] as const)(
+    "does not focus after a trusted %s with a %s adjacent sibling mutation",
+    async (_name, mutation, family) => {
+      const session = new ModeSession(`${family}-${mutation}-adjacent-focus`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      const parent = modeTrigger.parentNode;
+      if (!parent) throw new Error("Mode trigger did not have a parent");
+      openMenu();
+      const viewing = radio("Viewing");
+      viewing.focus();
+      const focus = vi.spyOn(modeTrigger, "focus");
+
+      if (family === "escape") {
+        dispatchTrustedEscapeOutsideAct(viewing);
+      } else {
+        dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+      }
+      const adjacent = document.createElement("span");
+      parent.insertBefore(adjacent, modeTrigger.nextSibling);
+      if (mutation === "restored") adjacent.remove();
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      if (family === "mode") {
+        expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+      }
+      expect(focus).not.toHaveBeenCalled();
+      adjacent.remove();
+    },
+  );
+
+  it.each([
+    ["Escape", "escape"],
+    ["mode selection", "mode"],
+  ] as const)("keeps one focus after a trusted %s with a nonadjacent sibling mutation", async (_name, family) => {
+    const session = new ModeSession(`${family}-nonadjacent-focus`, "owner", "editing");
+    render(
+      <>
+        <ModeSwitcher session={session.asCollabSession()} />
+        <span data-testid="mode-sibling-buffer" />
+      </>,
+    );
+    const modeTrigger = trigger();
+    const parent = modeTrigger.parentNode;
+    if (!parent) throw new Error("Mode trigger did not have a parent");
+    openMenu();
+    const viewing = radio("Viewing");
+    viewing.focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    if (family === "escape") {
+      dispatchTrustedEscapeOutsideAct(viewing);
+    } else {
+      dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    }
+    const nonadjacent = document.createElement("span");
+    parent.appendChild(nonadjacent);
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    if (family === "mode") {
+      expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    }
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+    nonadjacent.remove();
+  });
+
+  it("returns focus once when the trusted current trigger toggles the menu closed", async () => {
+    const session = new ModeSession("trigger-close-focus", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    menu().focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    pointerDown(modeTrigger);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+  });
+
+  it.each(["replaced", "mutated"] as const)(
+    "does not focus a %s stale trigger after a trusted Escape close",
+    async (change) => {
+      const session = new ModeSession(`stale-focus-${change}`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      openMenu();
+      const viewing = radio("Viewing");
+      viewing.focus();
+      const staleFocus = vi.spyOn(modeTrigger, "focus");
+      const replacement = modeTrigger.cloneNode(true) as HTMLButtonElement;
+      const replacementFocus = vi.spyOn(replacement, "focus");
+      const ref = fiberFor(modeTrigger).ref;
+      if (typeof ref !== "function") throw new Error("Mode trigger callback ref was not attached");
+
+      dispatchTrustedEscapeOutsideAct(viewing);
+      if (change === "replaced") {
+        ref(null);
+        ref(replacement);
+      } else {
+        modeTrigger.setAttribute("aria-label", "stale mode trigger");
+      }
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      expect(staleFocus).not.toHaveBeenCalled();
+      expect(replacementFocus).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not focus a mode-changing trigger with an unrelated pending mutation", async () => {
+    const session = new ModeSession("mode-change-stale-focus", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    radio("Viewing").focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    modeTrigger.setAttribute("aria-label", "mutated while close was pending");
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it.each(["style", "tabindex", "svg", "label"] as const)(
+    "rejects a pending trusted focus after a transient %s mutation",
+    async (mutation) => {
+      const session = new ModeSession(`pending-focus-${mutation}`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      openMenu();
+      radio("Viewing").focus();
+      const focus = vi.spyOn(modeTrigger, "focus");
+
+      if (mutation === "style" || mutation === "tabindex") {
+        dispatchTrustedEscapeOutsideAct(radio("Viewing"));
+        if (mutation === "style") {
+          modeTrigger.style.visibility = "hidden";
+        } else {
+          modeTrigger.tabIndex = -1;
+        }
+      } else {
+        dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+        if (mutation === "svg") {
+          modeTrigger.querySelector("svg")?.setAttribute("stroke", "tomato");
+        } else {
+          const label = modeTrigger.children.item(1);
+          if (!label) throw new Error("Mode trigger label was not rendered");
+          label.textContent = "Corrupted";
+        }
+      }
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
   it("preserves keyboard selection, Escape and outside close, and trigger focus return", async () => {
     const session = new ModeSession("keyboard-current", "editor", "editing");
     render(
@@ -719,7 +1098,7 @@ describe("ModeSwitcher current behavior", () => {
     const outside = screen.getByRole("button", { name: "Outside control" });
     modeTrigger.focus();
 
-    fireEvent.keyDown(modeTrigger, { key: "ArrowDown" });
+    fireEvent.keyDown(modeTrigger, { key: "ArrowDown", shiftKey: true });
     await waitFor(() => expect(radio("Editing")).toHaveFocus());
     await userEvent.keyboard("{ArrowDown}");
     expect(radio("Suggesting")).toHaveFocus();
@@ -731,13 +1110,26 @@ describe("ModeSwitcher current behavior", () => {
 
     await userEvent.click(modeTrigger);
     await waitFor(() => expect(menu()).toBeInTheDocument());
-    fireEvent.keyDown(radio("Suggesting"), { key: "Escape" });
+    fireEvent.keyDown(radio("Suggesting"), { key: "Escape", shiftKey: true });
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     await waitFor(() => expect(modeTrigger).toHaveFocus());
 
     await userEvent.click(modeTrigger);
     await waitFor(() => expect(menu()).toBeInTheDocument());
-    fireEvent.pointerDown(outside);
+    menu().focus();
+    await waitForOutsideListener();
+    pointerDown(outside, new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 2,
+      pointerType: "mouse",
+    }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(modeTrigger).not.toHaveFocus();
+
+    await userEvent.click(modeTrigger);
+    await waitFor(() => expect(menu()).toBeInTheDocument());
+    outside.addEventListener("pointerdown", (event) => event.preventDefault(), { once: true });
+    pointerDown(outside);
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
@@ -745,24 +1137,28 @@ describe("ModeSwitcher current behavior", () => {
     const session = new ModeSession("single-disclosure", "owner", "editing");
     render(<ModeSwitcher session={session.asCollabSession()} />);
     const modeTrigger = trigger();
-    const openPointer = reactHandler<SourceHandler>(modeTrigger, "onPointerDown");
-    const open = captureOpenChange();
-    const openEvent = sourceEvent(modeTrigger);
+    const openEvent = new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
 
     act(() => {
-      openPointer(openEvent);
-      openPointer(openEvent);
-      open(true);
+      modeTrigger.dispatchEvent(openEvent);
+      modeTrigger.dispatchEvent(openEvent);
     });
     expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
-    const closePointer = reactHandler<SourceHandler>(modeTrigger, "onPointerDown");
-    const close = captureOpenChange();
-    const closeEvent = sourceEvent(modeTrigger);
+    const closeEvent = new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
 
     act(() => {
-      closePointer(closeEvent);
-      closePointer(closeEvent);
-      close(false);
+      modeTrigger.dispatchEvent(closeEvent);
+      modeTrigger.dispatchEvent(closeEvent);
     });
     expect(screen.queryByRole("menu")).toBeNull();
   });
