@@ -1,6 +1,18 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent as ReactChangeEvent,
+  type FormEvent as ReactFormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { Dialog as RadixDialog } from "radix-ui";
 import {
   Activity, ArrowDownUp, ArrowLeft, Bold, BookOpen, Bot, Calendar, ChevronLeft, ChevronRight, Code, Columns2, Copy, CornerDownLeft, Download, Eye,
@@ -20,6 +32,14 @@ const ICONS: Record<string, LucideIcon> = {
   ListTree, LogOut, MessageSquare, MessageSquareDashed, MessageSquarePlus, Minus, Pencil, PenLine, Quote, Radio, Redo2, Replace, Search, Share2, SquareCode,
   Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, User, Users,
 };
+
+const RADIX_SETTLING_ATTRIBUTES = new Set([
+  "aria-describedby",
+  "aria-hidden",
+  "aria-labelledby",
+  "data-aria-hidden",
+  "style",
+]);
 
 interface Level {
   title: string | null;
@@ -44,6 +64,7 @@ interface PaletteAuthority {
 interface PaletteVisit {
   authority: PaletteAuthority;
   token: symbol;
+  returnFocus: HTMLElement | null;
 }
 
 interface PaletteState {
@@ -70,6 +91,128 @@ interface RowPublication extends ControlPublication<HTMLDivElement> {
   index: number;
 }
 
+interface CommandFacts {
+  source: Command;
+  keywords: string[];
+  id: string;
+  title: string;
+  group: string;
+  shortcut: string | undefined;
+  icon: string | undefined;
+  when: Command["when"];
+  run: Command["run"];
+  children: Command["children"];
+}
+
+interface LevelFacts {
+  source: Level;
+  items: Command[];
+  title: string | null;
+}
+
+interface PaletteStateFacts {
+  source: PaletteState;
+  visit: PaletteVisit | null;
+  commands: (() => Command[]) | null;
+  query: string;
+  stack: LevelFacts[];
+  highlight: number;
+  recent: string[];
+  childLoad: ChildLoad | null;
+  childError: ChildLoadError | null;
+}
+
+interface DomSnapshot {
+  node: Node;
+  value: string | null;
+  attributes: readonly (readonly [string, string])[] | null;
+  children: readonly DomSnapshot[];
+}
+
+interface AncestorPlacement {
+  node: Node;
+  parent: Node;
+  previous: Node | null;
+  next: Node | null;
+}
+
+interface PalettePlacement {
+  document: Document;
+  parent: Node;
+  overlayPrevious: Node | null;
+  overlayNext: Node | null;
+  contentPrevious: Node | null;
+  contentNext: Node | null;
+  ancestors: readonly AncestorPlacement[];
+}
+
+interface PaletteDomGuard {
+  isClean: () => boolean;
+  release: () => void;
+}
+
+interface CommittedElement {
+  publication: ElementPublication<HTMLElement>;
+  element: HTMLElement;
+}
+
+type NativeDismissal =
+  | { kind: "escape"; event: KeyboardEvent }
+  | { kind: "pointer"; event: PointerEvent | Event; click: MouseEvent }
+  | { kind: "focus"; event: FocusEvent };
+
+type CapturedDismissal =
+  | {
+      kind: "instant";
+      document: Document;
+      event: Event;
+    }
+  | {
+      kind: "pointer";
+      document: Document;
+      event: PointerEvent | Event;
+      target: Node;
+      pointerId: number | null;
+      button: number;
+      pointerUp: PointerEvent | Event | null;
+      click: MouseEvent | null;
+      expiration: number | null;
+    };
+
+interface CommittedPresentation {
+  token: symbol;
+  source: PalettePresentation;
+  elements: readonly CommittedElement[];
+  overlay: HTMLDivElement;
+  content: HTMLDivElement;
+  form: HTMLFormElement;
+  input: HTMLInputElement;
+  list: HTMLDivElement;
+  back: HTMLButtonElement | null;
+  retry: HTMLButtonElement | null;
+  rows: readonly HTMLDivElement[];
+  placement: PalettePlacement;
+  overlayTree: DomSnapshot;
+  contentTree: DomSnapshot;
+  guard: PaletteDomGuard;
+  retired: boolean;
+  claimed: boolean;
+}
+
+interface RefReplay {
+  publication: ElementPublication<HTMLElement>;
+  element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface PresentationReplay {
+  source: CommittedPresentation;
+  layoutRetired: boolean;
+  invalid: boolean;
+  refs: RefReplay[];
+}
+
 interface CommandSection {
   group: string | null;
   items: Command[];
@@ -79,6 +222,7 @@ interface PalettePresentation {
   authority: PaletteAuthority;
   visit: PaletteVisit | null;
   token: symbol;
+  generation: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   commands: () => Command[];
@@ -91,15 +235,17 @@ interface PalettePresentation {
   visible: Command[];
   sections: CommandSection[];
   flat: Command[];
+  stateFacts: PaletteStateFacts;
+  commandFacts: CommandFacts[];
+  groupOrderFacts: readonly string[] | undefined;
   overlay: ElementPublication<HTMLDivElement>;
   content: ElementPublication<HTMLDivElement>;
+  form: ElementPublication<HTMLFormElement>;
   input: ElementPublication<HTMLInputElement>;
   list: ElementPublication<HTMLDivElement>;
   back: ControlPublication<HTMLButtonElement> | null;
   retry: ControlPublication<HTMLButtonElement> | null;
   rows: RowPublication[];
-  active: boolean;
-  retired: boolean;
   layoutAttempted: boolean;
   republishRequested: boolean;
   consumedEvents: WeakSet<object>;
@@ -134,6 +280,7 @@ interface CloseTransition {
   expectedState: PaletteState;
   overlay: HTMLDivElement;
   content: HTMLDivElement;
+  form: HTMLFormElement;
   input: HTMLInputElement;
   list: HTMLDivElement;
   returnFocus: HTMLElement | null;
@@ -146,11 +293,11 @@ interface DismissalProof {
   authority: PaletteAuthority;
   visit: PaletteVisit;
   token: symbol;
-  presentation: PalettePresentation;
+  presentation: CommittedPresentation;
   content: HTMLDivElement;
   overlay: HTMLDivElement;
   event: Event;
-  source: "escape" | "pointer";
+  source: "escape" | "pointer" | "focus";
   consumed: boolean;
 }
 
@@ -190,53 +337,539 @@ function publicationNode<T extends HTMLElement>(value: ElementPublication<T>): T
   return value.element ?? value.lastElement;
 }
 
-function samePublication<T extends HTMLElement>(left: ElementPublication<T> | null, right: ElementPublication<T> | null): boolean {
-  if (!left || !right) return left === right;
-  const leftNode = publicationNode(left);
-  return !!leftNode && leftNode === publicationNode(right);
+function commandFacts(command: Command): CommandFacts {
+  return {
+    source: command,
+    keywords: [...command.keywords],
+    id: command.id,
+    title: command.title,
+    group: command.group,
+    shortcut: command.shortcut,
+    icon: command.icon,
+    when: command.when,
+    run: command.run,
+    children: command.children,
+  };
 }
 
-function samePresentationProps(left: PalettePresentation, right: PalettePresentation): boolean {
+function commandFactsAreCurrent(facts: CommandFacts): boolean {
+  const command = facts.source;
   return (
-    left.onOpenChange === right.onOpenChange &&
-    left.commands === right.commands &&
-    left.groupOrder === right.groupOrder &&
-    left.placeholder === right.placeholder
+    command.id === facts.id &&
+    command.title === facts.title &&
+    command.group === facts.group &&
+    command.shortcut === facts.shortcut &&
+    command.icon === facts.icon &&
+    command.when === facts.when &&
+    command.run === facts.run &&
+    command.children === facts.children &&
+    command.keywords.length === facts.keywords.length &&
+    command.keywords.every((keyword, index) => keyword === facts.keywords[index])
   );
 }
 
-function samePrimaryElements(left: PalettePresentation, right: PalettePresentation): boolean {
-  return (
-    samePublication(left.overlay, right.overlay) &&
-    samePublication(left.content, right.content) &&
-    samePublication(left.input, right.input) &&
-    samePublication(left.list, right.list)
-  );
+function paletteStateFacts(state: PaletteState): PaletteStateFacts {
+  return {
+    source: state,
+    visit: state.visit,
+    commands: state.commands,
+    query: state.query,
+    stack: state.stack.map((level) => ({ source: level, title: level.title, items: [...level.items] })),
+    highlight: state.highlight,
+    recent: [...state.recent],
+    childLoad: state.childLoad,
+    childError: state.childError,
+  };
 }
 
-function sameChildElements(left: PalettePresentation, right: PalettePresentation): boolean {
+function stateFactsAreCurrent(facts: PaletteStateFacts, state: PaletteState): boolean {
   return (
-    samePrimaryElements(left, right) &&
-    samePublication(left.back, right.back) &&
-    samePublication(left.retry, right.retry) &&
-    left.rows.length === right.rows.length &&
-    left.rows.every((row, index) => {
-      const next = right.rows[index];
-      return !!next && row.command === next.command && row.index === next.index && samePublication(row, next);
+    facts.source === state &&
+    facts.visit === state.visit &&
+    facts.commands === state.commands &&
+    facts.query === state.query &&
+    facts.highlight === state.highlight &&
+    facts.childLoad === state.childLoad &&
+    facts.childError === state.childError &&
+    facts.recent.length === state.recent.length &&
+    facts.recent.every((id, index) => id === state.recent[index]) &&
+    facts.stack.length === state.stack.length &&
+    facts.stack.every((level, index) => {
+      const current = state.stack[index];
+      return (
+        current === level.source &&
+        current.title === level.title &&
+        current.items.length === level.items.length &&
+        current.items.every((command, itemIndex) => command === level.items[itemIndex])
+      );
     })
   );
+}
+
+function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  const element = node as Element;
+  return Object.freeze(
+    [...element.attributes]
+      .filter(
+        ({ name }) =>
+          !(
+            (element.getAttribute("role") === "dialog" &&
+              RADIX_SETTLING_ATTRIBUTES.has(name)) ||
+            (element.classList.contains("dialog-overlay") &&
+              (name === "aria-hidden" ||
+                name === "data-aria-hidden" ||
+                name === "style"))
+          ),
+      )
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotDom(node: Node): DomSnapshot {
+  return Object.freeze({
+    node,
+    value: node.nodeValue,
+    attributes: snapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotDom)),
+  });
+}
+
+function domMatches(snapshot: DomSnapshot): boolean {
+  const node = snapshot.node;
+  if (node.nodeValue !== snapshot.value) return false;
+  const attributes = snapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || expected[0] !== name || expected[1] !== value;
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) => node.childNodes.item(index) === child.node && domMatches(child),
+    )
+  );
+}
+
+function isRadixFocusGuard(node: Node | null): boolean {
+  return (
+    node instanceof Element &&
+    node.tagName === "SPAN" &&
+    node.hasAttribute("data-radix-focus-guard")
+  );
+}
+
+function previousCommittedSibling(node: Node): Node | null {
+  let sibling = node.previousSibling;
+  while (isRadixFocusGuard(sibling)) sibling = sibling?.previousSibling ?? null;
+  return sibling;
+}
+
+function nextCommittedSibling(node: Node): Node | null {
+  let sibling = node.nextSibling;
+  while (isRadixFocusGuard(sibling)) sibling = sibling?.nextSibling ?? null;
+  return sibling;
+}
+
+function capturePlacement(
+  overlay: HTMLDivElement,
+  content: HTMLDivElement,
+): PalettePlacement | null {
+  const parent = content.parentNode;
+  const document = content.ownerDocument;
+  if (
+    !parent ||
+    overlay.parentNode !== parent ||
+    overlay.ownerDocument !== document ||
+    !overlay.isConnected ||
+    !content.isConnected
+  ) {
+    return null;
+  }
+  const ancestors: AncestorPlacement[] = [];
+  let node = parent;
+  while (node !== document) {
+    const ancestorParent = node.parentNode;
+    if (!ancestorParent) return null;
+    ancestors.push(
+      Object.freeze({
+        node,
+        parent: ancestorParent,
+        previous: node.previousSibling,
+        next: node.nextSibling,
+      }),
+    );
+    node = ancestorParent;
+  }
+  return Object.freeze({
+    document,
+    parent,
+    overlayPrevious: previousCommittedSibling(overlay),
+    overlayNext: nextCommittedSibling(overlay),
+    contentPrevious: previousCommittedSibling(content),
+    contentNext: nextCommittedSibling(content),
+    ancestors: Object.freeze(ancestors),
+  });
+}
+
+function placementMatches(
+  overlay: HTMLDivElement,
+  content: HTMLDivElement,
+  placement: PalettePlacement,
+): boolean {
+  return (
+    overlay.isConnected &&
+    content.isConnected &&
+    overlay.ownerDocument === placement.document &&
+    content.ownerDocument === placement.document &&
+    overlay.parentNode === placement.parent &&
+    content.parentNode === placement.parent &&
+    previousCommittedSibling(overlay) === placement.overlayPrevious &&
+    nextCommittedSibling(overlay) === placement.overlayNext &&
+    previousCommittedSibling(content) === placement.contentPrevious &&
+    nextCommittedSibling(content) === placement.contentNext &&
+    placement.ancestors.every(
+      (ancestor) =>
+        ancestor.node.isConnected &&
+        ancestor.node.parentNode === ancestor.parent &&
+        ancestor.node.previousSibling === ancestor.previous &&
+        ancestor.node.nextSibling === ancestor.next,
+    )
+  );
+}
+
+function createDomGuard(
+  overlay: HTMLDivElement,
+  content: HTMLDivElement,
+  placement: PalettePlacement,
+): PaletteDomGuard | null {
+  const ownerWindow = placement.document.defaultView;
+  const Observer = ownerWindow?.MutationObserver;
+  if (!ownerWindow || !Observer) return null;
+  let changed = false;
+  const settling = new Set(
+    [...RADIX_SETTLING_ATTRIBUTES].filter(
+      (attribute) => !content.hasAttribute(attribute),
+    ),
+  );
+  const record = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((mutation) => {
+      if (
+        mutation.type === "attributes" &&
+        mutation.target === content &&
+        mutation.attributeName &&
+        settling.delete(mutation.attributeName)
+      ) {
+        return false;
+      }
+      if (
+        mutation.type === "attributes" &&
+        mutation.target === overlay &&
+        (mutation.attributeName === "aria-hidden" ||
+          mutation.attributeName === "data-aria-hidden")
+      ) {
+        return false;
+      }
+      if (
+        mutation.type === "attributes" &&
+        mutation.attributeName === "name" &&
+        mutation.target instanceof ownerWindow.HTMLInputElement &&
+        mutation.target.getAttribute("role") === "combobox" &&
+        !mutation.target.hasAttribute("name")
+      ) {
+        return false;
+      }
+      if (
+        mutation.type === "childList" &&
+        mutation.target === placement.parent &&
+        [...mutation.addedNodes, ...mutation.removedNodes].length > 0 &&
+        [...mutation.addedNodes, ...mutation.removedNodes].every(isRadixFocusGuard)
+      ) {
+        return false;
+      }
+      if (
+        mutation.target === overlay ||
+        mutation.target === content ||
+        content.contains(mutation.target)
+      ) {
+        return true;
+      }
+      if (mutation.type !== "childList") {
+        return false;
+      }
+      if (mutation.target === placement.parent) {
+        if (
+          mutation.previousSibling === overlay ||
+          mutation.nextSibling === overlay ||
+          mutation.previousSibling === content ||
+          mutation.nextSibling === content
+        ) {
+          return true;
+        }
+        if (
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (node) =>
+              node === overlay ||
+              node === content ||
+              (node instanceof Element &&
+                (node.contains(overlay) || node.contains(content))),
+          )
+        ) {
+          return true;
+        }
+      }
+      return placement.ancestors.some(
+        (ancestor) =>
+          mutation.target === ancestor.parent &&
+          (mutation.previousSibling === ancestor.node ||
+            mutation.nextSibling === ancestor.node ||
+            [...mutation.addedNodes, ...mutation.removedNodes].includes(
+              ancestor.node,
+            )),
+      );
+    });
+  };
+  const observer = new Observer(record);
+  observer.observe(overlay, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(content, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(placement.parent, { childList: true });
+  for (const ancestor of placement.ancestors) {
+    observer.observe(ancestor.parent, { childList: true });
+  }
+  return Object.freeze({
+    isClean: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
 }
 
 function presentationElementsReady(presentation: PalettePresentation): boolean {
   const overlay = presentation.overlay.element;
   const content = presentation.content.element;
+  const form = presentation.form.element;
   const input = presentation.input.element;
   const list = presentation.list.element;
-  if (!overlay?.isConnected || !content?.isConnected || !input?.isConnected || !list?.isConnected) return false;
-  if (!content.contains(input) || !content.contains(list)) return false;
-  if (presentation.back && (!presentation.back.element?.isConnected || !content.contains(presentation.back.element))) return false;
-  if (presentation.retry && (!presentation.retry.element?.isConnected || !content.contains(presentation.retry.element))) return false;
-  return presentation.rows.every((row) => !!row.element?.isConnected && list.contains(row.element));
+  const ownerWindow = content?.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(overlay instanceof ownerWindow.HTMLDivElement) ||
+    !(content instanceof ownerWindow.HTMLDivElement) ||
+    !(form instanceof ownerWindow.HTMLFormElement) ||
+    !(input instanceof ownerWindow.HTMLInputElement) ||
+    !(list instanceof ownerWindow.HTMLDivElement) ||
+    !overlay.isConnected ||
+    !content.isConnected ||
+    !form.isConnected ||
+    !input.isConnected ||
+    !list.isConnected ||
+    overlay.ownerDocument !== content.ownerDocument ||
+    overlay.parentNode !== content.parentNode ||
+    overlay.nextElementSibling !== content ||
+    content.getAttribute("role") !== "dialog" ||
+    content.dataset.testid !== "command-palette" ||
+    form.parentElement !== content ||
+    form !== content.children.item(2) &&
+      form !== content.firstElementChild?.nextElementSibling ||
+    !form.contains(input) ||
+    list.parentElement !== content ||
+    list.getAttribute("role") !== "listbox" ||
+    list.id !== "command-palette-list" ||
+    input.getAttribute("role") !== "combobox" ||
+    input.getAttribute("aria-controls") !== list.id ||
+    input.disabled
+  ) {
+    return false;
+  }
+  const back = presentation.back?.element ?? null;
+  if (
+    (presentation.back
+      ? !(back instanceof ownerWindow.HTMLButtonElement) ||
+        !back.isConnected ||
+        back.disabled ||
+        back.type !== "button" ||
+        back.parentElement !== form ||
+        form.firstElementChild !== back
+      : form.querySelector('[data-testid="palette-back"]') !== null)
+  ) {
+    return false;
+  }
+  const retry = presentation.retry?.element ?? null;
+  if (
+    (presentation.retry
+      ? !(retry instanceof ownerWindow.HTMLButtonElement) ||
+        !retry.isConnected ||
+        retry.parentElement?.getAttribute("role") !== "alert"
+      : content.querySelector('[role="alert"] button') !== null)
+  ) {
+    return false;
+  }
+  const domRows = [...list.querySelectorAll<HTMLDivElement>('[role="option"]')];
+  return (
+    domRows.length === presentation.rows.length &&
+    presentation.rows.every((row, index) => {
+      const element = row.element;
+      const unavailable =
+        presentation.state.childLoad?.command.id === row.command.id ||
+        presentation.state.childError?.command.id === row.command.id;
+      return (
+        element instanceof ownerWindow.HTMLDivElement &&
+        element.isConnected &&
+        element.parentElement?.getAttribute("role") === "group" &&
+        domRows[index] === element &&
+        element.dataset.index === String(index) &&
+        element.dataset.testid === `palette-item-${row.command.id}` &&
+        element.getAttribute("aria-disabled") ===
+          (unavailable ? "true" : null)
+      );
+    })
+  );
+}
+
+function exactNativeClick(
+  event: ReactMouseEvent<HTMLElement>,
+  control: HTMLElement,
+): MouseEvent | null {
+  const ownerWindow = control.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  return event.type === "click" &&
+    !event.defaultPrevented &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.MouseEvent &&
+    nativeEvent.type === "click" &&
+    !nativeEvent.defaultPrevented &&
+    event.currentTarget === control &&
+    target instanceof ownerWindow.Node &&
+    target === nativeEvent.target &&
+    target.isConnected &&
+    target.ownerDocument === control.ownerDocument &&
+    control.contains(target)
+    ? nativeEvent
+    : null;
+}
+
+function exactNativeMouse(
+  event: ReactMouseEvent<HTMLElement>,
+  control: HTMLElement,
+  reactType: "mouseenter" | "mousedown",
+  nativeType: "mouseover" | "mousedown",
+): MouseEvent | null {
+  const ownerWindow = control.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  return event.type === reactType &&
+    !event.defaultPrevented &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.MouseEvent &&
+    nativeEvent.type === nativeType &&
+    !nativeEvent.defaultPrevented &&
+    event.currentTarget === control &&
+    target instanceof ownerWindow.Node &&
+    target === nativeEvent.target &&
+    target.isConnected &&
+    target.ownerDocument === control.ownerDocument &&
+    control.contains(target)
+    ? nativeEvent
+    : null;
+}
+
+function exactNativeInput(
+  event: ReactChangeEvent<HTMLInputElement>,
+  input: HTMLInputElement,
+): Event | null {
+  const ownerWindow = input.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  return (event.type === "change" || event.type === "input") &&
+    !event.defaultPrevented &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.Event &&
+    (nativeEvent.type === "change" || nativeEvent.type === "input") &&
+    !nativeEvent.defaultPrevented &&
+    event.currentTarget === input &&
+    event.target === input &&
+    nativeEvent.target === input &&
+    input.isConnected
+    ? nativeEvent
+    : null;
+}
+
+function exactNativeKey(
+  event: ReactKeyboardEvent<HTMLInputElement>,
+  input: HTMLInputElement,
+): KeyboardEvent | null {
+  const ownerWindow = input.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  return event.type === "keydown" &&
+    !event.defaultPrevented &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.KeyboardEvent &&
+    nativeEvent.type === "keydown" &&
+    !nativeEvent.defaultPrevented &&
+    event.currentTarget === input &&
+    event.target === input &&
+    nativeEvent.target === input &&
+    input.isConnected
+    ? nativeEvent
+    : null;
+}
+
+function exactNativeSubmit(
+  event: ReactFormEvent<HTMLFormElement>,
+  form: HTMLFormElement,
+  input: HTMLInputElement,
+): Event | null {
+  const ownerWindow = form.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  if (
+    event.type !== "submit" ||
+    event.defaultPrevented ||
+    !ownerWindow ||
+    !(nativeEvent instanceof ownerWindow.Event) ||
+    nativeEvent.type !== "submit" ||
+    nativeEvent.defaultPrevented ||
+    event.currentTarget !== form ||
+    event.target !== form ||
+    nativeEvent.target !== form ||
+    !form.isConnected ||
+    input.form !== form ||
+    input.disabled
+  ) {
+    return null;
+  }
+  if (
+    typeof ownerWindow.SubmitEvent === "function" &&
+    nativeEvent instanceof ownerWindow.SubmitEvent &&
+    nativeEvent.submitter !== null
+  ) {
+    return null;
+  }
+  return nativeEvent;
 }
 
 export interface CommandPaletteProps {
@@ -266,20 +899,33 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     childLoad: null,
     childError: null,
   });
-  const [, setDomRevision] = useState(0);
   const authority = useMemo<PaletteAuthority>(() => ({ token: Symbol("command-palette") }), []);
   const authorityRef = useRef<PaletteAuthority | null>(null);
   const visitRef = useRef<PaletteVisit | null>(null);
   const visitFocusRef = useRef<VisitFocus | null>(null);
   const presentationRef = useRef<PalettePresentation | null>(null);
   const committedPresentationRef = useRef<PalettePresentation | null>(null);
+  const activeCommitRef = useRef<CommittedPresentation | null>(null);
+  const replayRef = useRef<PresentationReplay | null>(null);
+  const layoutActiveRef = useRef(new WeakSet<PalettePresentation>());
+  const renderGenerationRef = useRef(0);
+  const claimedEventsRef = useRef(new WeakSet<object>());
   const childRequestRef = useRef<ChildRequest | null>(null);
   const successorRef = useRef<PresentationSuccessor | null>(null);
   const dismissalRef = useRef<DismissalProof | null>(null);
   const closeRef = useRef<CloseTransition | null>(null);
   const commandTimersRef = useRef(new Set<CommandExecution>());
   const claimedControlsRef = useRef(new WeakSet<object>());
+  const capturedDismissalRef = useRef<CapturedDismissal | null>(null);
+  const dismissalCaptureRef = useRef<{
+    document: Document;
+    remove: () => void;
+  } | null>(null);
   const portalElementsRef = useRef<{ overlay: HTMLDivElement | null; content: HTMLDivElement | null }>({
+    overlay: null,
+    content: null,
+  });
+  const portalTokensRef = useRef<{ overlay: symbol | null; content: symbol | null }>({
     overlay: null,
     content: null,
   });
@@ -287,56 +933,215 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     overlay: null,
     content: null,
   });
-  const retirePortalElement = useCallback((element: HTMLDivElement) => {
-    const current = presentationRef.current;
-    if (!current || (publicationNode(current.overlay) !== element && publicationNode(current.content) !== element)) return;
-    current.active = false;
-    current.retired = true;
-    presentationRef.current = null;
-    const request = childRequestRef.current;
-    if (request?.owner === current) {
-      request.active = false;
-      childRequestRef.current = null;
-      if (successorRef.current?.request === request) successorRef.current = null;
+  const clearCapturedDismissal = useCallback((expected?: CapturedDismissal) => {
+    const captured = capturedDismissalRef.current;
+    if (!captured || (expected && captured !== expected)) return;
+    if (captured.kind === "pointer" && captured.expiration !== null) {
+      captured.document.defaultView?.clearTimeout(captured.expiration);
+      captured.expiration = null;
     }
+    capturedDismissalRef.current = null;
+  }, []);
+  const ensureDismissalCapture = useCallback((ownerDocument: Document) => {
+    const existing = dismissalCaptureRef.current;
+    if (existing?.document === ownerDocument) return;
+    existing?.remove();
+    clearCapturedDismissal();
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow) return;
+    const exactPointer = (
+      captured: Extract<CapturedDismissal, { kind: "pointer" }>,
+      event: Event,
+    ) => {
+      const pointerId = Reflect.get(event, "pointerId");
+      const button = Reflect.get(event, "button");
+      return (
+        event.target === captured.target &&
+        (captured.pointerId === null
+          ? typeof pointerId !== "number"
+          : pointerId === captured.pointerId) &&
+        (event.type === "pointercancel" ||
+          typeof button !== "number" ||
+          button === captured.button)
+      );
+    };
+    const remember = (event: Event) => {
+      const current = capturedDismissalRef.current;
+      if (event.type === "pointercancel") {
+        if (current?.kind === "pointer" && exactPointer(current, event)) {
+          clearCapturedDismissal(current);
+        }
+        return;
+      }
+      if (event.type === "pointerup") {
+        if (current?.kind !== "pointer") return;
+        if (!exactPointer(current, event)) {
+          clearCapturedDismissal(current);
+          return;
+        }
+        current.pointerUp = event;
+        current.expiration = ownerWindow.setTimeout(
+          () => clearCapturedDismissal(current),
+          0,
+        );
+        return;
+      }
+      if (event.type === "click") {
+        if (current?.kind !== "pointer") return;
+        if (
+          !current.pointerUp ||
+          !(event instanceof ownerWindow.MouseEvent) ||
+          event.button !== current.button ||
+          event.target !== current.target
+        ) {
+          clearCapturedDismissal(current);
+          return;
+        }
+        current.click = event;
+        queueMicrotask(() => clearCapturedDismissal(current));
+        return;
+      }
+      if (event.type === "focusin" && current?.kind === "pointer") return;
+      if (
+        event.type !== "keydown" &&
+        event.type !== "pointerdown" &&
+        event.type !== "focusin"
+      ) {
+        return;
+      }
+      clearCapturedDismissal();
+      if (event.type === "pointerdown") {
+        const target = event.target;
+        const pointerId = Reflect.get(event, "pointerId");
+        const button = Reflect.get(event, "button");
+        const isPrimary = Reflect.get(event, "isPrimary");
+        if (
+          !(target instanceof ownerWindow.Node) ||
+          target.ownerDocument !== ownerDocument ||
+          (typeof button === "number" && button !== 0) ||
+          isPrimary === false
+        ) {
+          return;
+        }
+        capturedDismissalRef.current = {
+          kind: "pointer",
+          document: ownerDocument,
+          event,
+          target,
+          pointerId: typeof pointerId === "number" ? pointerId : null,
+          button: typeof button === "number" ? button : 0,
+          pointerUp: null,
+          click: null,
+          expiration: null,
+        };
+        return;
+      }
+      const captured: CapturedDismissal = {
+        kind: "instant",
+        document: ownerDocument,
+        event,
+      };
+      capturedDismissalRef.current = captured;
+      queueMicrotask(() => clearCapturedDismissal(captured));
+    };
+    ownerDocument.addEventListener("keydown", remember, true);
+    ownerDocument.addEventListener("pointerdown", remember, true);
+    ownerDocument.addEventListener("pointerup", remember, true);
+    ownerDocument.addEventListener("pointercancel", remember, true);
+    ownerDocument.addEventListener("click", remember, true);
+    ownerDocument.addEventListener("focusin", remember, true);
+    dismissalCaptureRef.current = {
+      document: ownerDocument,
+      remove: () => {
+        ownerDocument.removeEventListener("keydown", remember, true);
+        ownerDocument.removeEventListener("pointerdown", remember, true);
+        ownerDocument.removeEventListener("pointerup", remember, true);
+        ownerDocument.removeEventListener("pointercancel", remember, true);
+        ownerDocument.removeEventListener("click", remember, true);
+        ownerDocument.removeEventListener("focusin", remember, true);
+      },
+    };
+  }, [clearCapturedDismissal]);
+  const retirePortalElement = useCallback((element: HTMLDivElement) => {
+    const commit = activeCommitRef.current;
+    if (!commit) return;
+    const publication =
+      commit.overlay === element
+        ? commit.source.overlay
+        : commit.content === element
+          ? commit.source.content
+          : null;
+    if (!publication) return;
+    retireCommittedPresentation(commit, "ref", publication);
+    // This callback is mount-stable; retirement reads current authority through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const bindOverlay = useCallback(
     (element: HTMLDivElement | null) => {
       if (!element) return;
+      const token = Symbol("command-palette-overlay-ref");
+      portalTokensRef.current.overlay = token;
       const cleanup = () => {
-        if (portalElementsRef.current.overlay !== element) return;
+        if (
+          portalElementsRef.current.overlay !== element ||
+          portalTokensRef.current.overlay !== token
+        ) {
+          return;
+        }
         retirePortalElement(element);
         portalElementsRef.current.overlay = null;
+        portalTokensRef.current.overlay = null;
       };
       const previous = portalElementsRef.current.overlay;
-      if (previous === element) return cleanup;
+      if (previous === element) {
+        noteRefReplay(element, portalElementsRef.current.overlay, "overlay");
+        return cleanup;
+      }
       if (previous) retirePortalElement(previous);
       portalElementsRef.current.overlay = element;
+      noteRefReplay(element, previous, "overlay");
       if (portalElementsRef.current.content) {
         setPortalElements({ overlay: element, content: portalElementsRef.current.content });
       }
       return cleanup;
     },
+    // Ref publication is mount-stable and resolves replay state through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [retirePortalElement],
   );
   const bindContent = useCallback(
     (element: HTMLDivElement | null) => {
       if (!element) return;
+      const token = Symbol("command-palette-content-ref");
+      portalTokensRef.current.content = token;
       const cleanup = () => {
-        if (portalElementsRef.current.content !== element) return;
+        if (
+          portalElementsRef.current.content !== element ||
+          portalTokensRef.current.content !== token
+        ) {
+          return;
+        }
         retirePortalElement(element);
         portalElementsRef.current.content = null;
+        portalTokensRef.current.content = null;
       };
       const previous = portalElementsRef.current.content;
-      if (previous === element) return cleanup;
+      ensureDismissalCapture(element.ownerDocument);
+      if (previous === element) {
+        noteRefReplay(element, portalElementsRef.current.content, "content");
+        return cleanup;
+      }
       if (previous) retirePortalElement(previous);
       portalElementsRef.current.content = element;
+      noteRefReplay(element, previous, "content");
       if (portalElementsRef.current.overlay) {
         setPortalElements({ overlay: portalElementsRef.current.overlay, content: element });
       }
       return cleanup;
     },
-    [retirePortalElement],
+    // Ref publication is mount-stable and resolves replay state through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ensureDismissalCapture, retirePortalElement],
   );
   const visit = useMemo<PaletteVisit | null>(
     () =>
@@ -344,6 +1149,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         ? {
             authority,
             token: Symbol("command-palette-visit"),
+            returnFocus: focusedElement(),
           }
         : null,
     [authority, open],
@@ -351,6 +1157,8 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
 
   useLayoutEffect(() => {
     authorityRef.current = authority;
+    const content = portalElementsRef.current.content;
+    if (content) ensureDismissalCapture(content.ownerDocument);
     const commandTimers = commandTimersRef.current;
 
     return () => {
@@ -370,20 +1178,31 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         if (execution.timer !== null) clearTimeout(execution.timer);
         commandTimers.delete(execution);
       }
-      if (presentationRef.current?.authority === authority) {
-        presentationRef.current.active = false;
-        presentationRef.current.retired = true;
-        presentationRef.current = null;
-      }
+      const active = activeCommitRef.current;
+      if (active?.source.authority === authority) retireCommittedPresentation(active, "layout");
       if (committedPresentationRef.current?.authority === authority) committedPresentationRef.current = null;
+      const capture = dismissalCaptureRef.current;
+      queueMicrotask(() => {
+        if (
+          authorityRef.current !== authority &&
+          capture &&
+          dismissalCaptureRef.current === capture
+        ) {
+          capture.remove();
+          dismissalCaptureRef.current = null;
+          clearCapturedDismissal();
+        }
+      });
     };
-  }, [authority]);
+    // Authority teardown must not restart for each render-local retirement closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authority, clearCapturedDismissal, ensureDismissalCapture]);
 
   useLayoutEffect(() => {
     if (!visit || authorityRef.current !== authority) return;
     const claimedControls = claimedControlsRef.current;
     visitRef.current = visit;
-    visitFocusRef.current = { visit, claimed: false, returnFocus: null };
+    visitFocusRef.current = { visit, claimed: false, returnFocus: visit.returnFocus };
     if (closeRef.current?.authority === authority) closeRef.current = null;
     for (const execution of commandTimersRef.current) {
       if (execution.authority !== authority) continue;
@@ -394,14 +1213,15 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     return () => {
       if (visitRef.current === visit) visitRef.current = null;
 
-      const current = presentationRef.current;
+      const current = activeCommitRef.current?.source ?? null;
       if (
         authorityRef.current === authority &&
         !closeRef.current &&
         current?.visit === visit &&
-        current.active &&
+        ownsPresentation(current) &&
         current.overlay.element &&
         current.content.element &&
+        current.form.element &&
         current.input.element &&
         current.list.element
       ) {
@@ -420,6 +1240,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           expectedState: current.state,
           overlay: current.overlay.element,
           content: current.content.element,
+          form: current.form.element,
           input: current.input.element,
           list: current.list.element,
           returnFocus: visitFocus?.visit === visit ? visitFocus.returnFocus : null,
@@ -437,6 +1258,8 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       }
       if (visitFocusRef.current?.visit === visit) visitFocusRef.current = null;
     };
+    // Visit teardown validates the current presentation through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authority, visit]);
 
   const { query, stack, highlight, recent, childLoad, childError } = state;
@@ -459,10 +1282,15 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     command,
     index,
   }));
+  const publishedCommands = [
+    ...new Set([...stack.flatMap((entry) => entry.items), ...flat]),
+  ];
+  const generation = ++renderGenerationRef.current;
   const presentation: PalettePresentation = {
     authority,
     visit,
     token: Symbol("command-palette-presentation"),
+    generation,
     open,
     onOpenChange,
     commands,
@@ -475,15 +1303,17 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     visible,
     sections,
     flat,
+    stateFacts: paletteStateFacts(state),
+    commandFacts: publishedCommands.map(commandFacts),
+    groupOrderFacts: groupOrder ? Object.freeze([...groupOrder]) : undefined,
     overlay: publishedElement(portalElements.overlay),
     content: publishedElement(portalElements.content),
+    form: publication<HTMLFormElement>(),
     input: publication<HTMLInputElement>(),
     list: publication<HTMLDivElement>(),
     back: atRoot ? null : controlPublication<HTMLButtonElement>(),
     retry: childError ? controlPublication<HTMLButtonElement>() : null,
     rows,
-    active: false,
-    retired: false,
     layoutAttempted: false,
     republishRequested: false,
     consumedEvents: new WeakSet<object>(),
@@ -496,118 +1326,352 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     if (successorRef.current?.request === request) successorRef.current = null;
   }
 
-  function retirePresentation(value: PalettePresentation): void {
-    if (value.retired) return;
-    value.retired = true;
-    value.active = false;
-    if (presentationRef.current === value) presentationRef.current = null;
-    if (dismissalRef.current?.presentation === value) dismissalRef.current = null;
-    const request = childRequestRef.current;
-    if (request?.owner === value && successorRef.current?.from !== value) invalidateChildRequest(request);
+  function releaseReplay(replay: PresentationReplay): void {
+    if (replayRef.current === replay) replayRef.current = null;
+    replay.source.guard.release();
   }
 
-  function bindElement<T extends HTMLElement>(value: PalettePresentation, target: ElementPublication<T>, element: T | null): void {
+  function retireCommittedPresentation(
+    commit: CommittedPresentation,
+    reason: "layout" | "ref" | "ordinary",
+    detached?: ElementPublication<HTMLElement>,
+  ): void {
+    clearCapturedDismissal();
+    let replay = replayRef.current?.source === commit ? replayRef.current : null;
+    if (!commit.retired) {
+      commit.retired = true;
+      if (activeCommitRef.current === commit) activeCommitRef.current = null;
+      if (presentationRef.current === commit.source) presentationRef.current = null;
+      if (dismissalRef.current?.presentation === commit) dismissalRef.current = null;
+      replay = {
+        source: commit,
+        layoutRetired: false,
+        invalid: reason === "ordinary",
+        refs: commit.elements.map(({ publication, element }) => ({
+          publication,
+          element,
+          detached: false,
+          reattached: false,
+        })),
+      };
+      replayRef.current = replay;
+    }
+    if (!replay) return;
+    if (reason === "layout") replay.layoutRetired = true;
+    if (reason === "ordinary") {
+      replay.invalid = true;
+      releaseReplay(replay);
+      return;
+    }
+    if (detached) {
+      const ref = replay.refs.find((entry) => entry.publication === detached);
+      if (!ref || detached.element !== null && detached.element !== ref.element) {
+        replay.invalid = true;
+      } else {
+        ref.detached = true;
+        ref.reattached = false;
+      }
+    }
+    queueMicrotask(() => {
+      if (
+        replayRef.current === replay &&
+        !layoutActiveRef.current.has(commit.source) &&
+        activeCommitRef.current !== commit
+      ) {
+        releaseReplay(replay);
+      }
+    });
+  }
+
+  function noteRefReplay(
+    element: HTMLElement,
+    _previous: HTMLElement | null,
+    kind: "overlay" | "content",
+  ): void {
+    const replay = replayRef.current;
+    if (!replay) return;
+    const publication =
+      kind === "overlay" ? replay.source.source.overlay : replay.source.source.content;
+    const ref = replay.refs.find((entry) => entry.publication === publication);
+    if (!ref || !ref.detached || ref.element !== element) {
+      replay.invalid = true;
+      return;
+    }
+    ref.reattached = true;
+    if (layoutActiveRef.current.has(replay.source.source)) {
+      commitPresentation(replay.source.source);
+    }
+  }
+
+  function bindElement<T extends HTMLElement>(
+    value: PalettePresentation,
+    target: ElementPublication<T>,
+    element: T | null,
+  ): void {
     if (target.element === element) return;
-    const replacing = !!element && !!target.lastElement && target.lastElement !== element;
+    const previous = target.element;
     if (element) {
+      const replay = replayRef.current;
+      const ref =
+        replay?.source.source === value
+          ? replay.refs.find((entry) => entry.publication === target)
+          : null;
+      if (target.lastElement && target.lastElement !== element) {
+        if (replay) replay.invalid = true;
+        const active = activeCommitRef.current;
+        if (active?.source === value) {
+          retireCommittedPresentation(
+            active,
+            "ordinary",
+          );
+        }
+      }
       target.element = element;
       target.lastElement = element;
-      if (
-        value.layoutAttempted &&
-        (!value.active || replacing) &&
-        !value.republishRequested &&
-        value.open &&
-        presentationElementsReady(value)
-      ) {
-        value.republishRequested = true;
-        setDomRevision((revision) => revision + 1);
+      if (ref) {
+        if (!ref.detached || ref.element !== element || previous !== null) {
+          replay!.invalid = true;
+        } else {
+          ref.reattached = true;
+        }
+      }
+      if (value.layoutAttempted && layoutActiveRef.current.has(value)) {
+        commitPresentation(value);
       }
       return;
     }
-    if (target.element) {
-      target.lastElement = target.element;
-      target.element = null;
-      retirePresentation(value);
+    if (!previous) return;
+    target.lastElement = previous;
+    target.element = null;
+    const active = activeCommitRef.current;
+    if (active?.source === value) {
+      retireCommittedPresentation(
+        active,
+        "ref",
+        target as ElementPublication<HTMLElement>,
+      );
+      return;
+    }
+    const replay = replayRef.current;
+    if (replay?.source.source !== value) return;
+    const ref = replay.refs.find((entry) => entry.publication === target);
+    if (!ref || ref.element !== previous) replay.invalid = true;
+    else {
+      ref.detached = true;
+      ref.reattached = false;
     }
   }
 
-  function ownsPresentation(value: PalettePresentation): boolean {
+  function presentationFactsAreCurrent(value: PalettePresentation): boolean {
+    const request = value.state.childLoad?.request;
+    const commandSet = new Set(value.commandFacts.map((facts) => facts.source));
     return (
-      value.active &&
-      !value.retired &&
-      value.open &&
+      committedPresentationRef.current === value &&
       authorityRef.current === value.authority &&
       visitRef.current === value.visit &&
       !!value.visit &&
-      presentationRef.current === value &&
-      presentationElementsReady(value)
+      value.open &&
+      stateFactsAreCurrent(value.stateFacts, value.state) &&
+      value.root === value.state.stack[0] &&
+      value.level === value.state.stack[value.state.stack.length - 1] &&
+      value.atRoot === (value.state.stack.length <= 1) &&
+      value.rows.length === value.flat.length &&
+      value.rows.every(
+        (row, index) =>
+          row.index === index &&
+          row.command === value.flat[index] &&
+          commandSet.has(row.command),
+      ) &&
+      value.commandFacts.every(commandFactsAreCurrent) &&
+      value.groupOrderFacts?.length === value.groupOrder?.length &&
+      (value.groupOrderFacts?.every((group, index) => group === value.groupOrder?.[index]) ??
+        value.groupOrder === undefined) &&
+      (!request ||
+        (request.authority === value.authority &&
+          request.visit === value.visit &&
+          request.command === value.state.childLoad?.command &&
+          request.provider === request.command.children &&
+          request.expectedState === value.state &&
+          request.active &&
+          childRequestRef.current === request))
     );
   }
 
-  function ownsElement<T extends HTMLElement>(value: PalettePresentation, target: ElementPublication<T>, currentTarget: EventTarget | null): currentTarget is T {
+  function committedDomIsCurrent(commit: CommittedPresentation): boolean {
+    return (
+      !commit.retired &&
+      commit.guard.isClean() &&
+      presentationElementsReady(commit.source) &&
+      commit.source.overlay.element === commit.overlay &&
+      commit.source.content.element === commit.content &&
+      commit.source.form.element === commit.form &&
+      commit.source.input.element === commit.input &&
+      commit.source.list.element === commit.list &&
+      (commit.source.back?.element ?? null) === commit.back &&
+      (commit.source.retry?.element ?? null) === commit.retry &&
+      commit.source.rows.every((row, index) => row.element === commit.rows[index]) &&
+      placementMatches(commit.overlay, commit.content, commit.placement) &&
+      domMatches(commit.overlayTree) &&
+      domMatches(commit.contentTree)
+    );
+  }
+
+  function ownsPresentation(value: PalettePresentation): boolean {
+    const commit = activeCommitRef.current;
+    if (
+      !commit ||
+      commit.source !== value ||
+      commit.retired ||
+      presentationRef.current !== value
+    ) {
+      return false;
+    }
+    if (
+      !presentationFactsAreCurrent(value) ||
+      !committedDomIsCurrent(commit)
+    ) {
+      retireCommittedPresentation(commit, "ordinary");
+      return false;
+    }
+    return true;
+  }
+
+  function ownsElement<T extends HTMLElement>(
+    value: PalettePresentation,
+    target: ElementPublication<T>,
+    currentTarget: EventTarget | null,
+  ): currentTarget is T {
+    const commit = activeCommitRef.current;
     return (
       ownsPresentation(value) &&
+      !!commit &&
+      commit.elements.some(
+        (entry) =>
+          entry.publication === target &&
+          entry.element === currentTarget,
+      ) &&
       target.element === currentTarget &&
       !!target.element?.isConnected &&
       !!value.content.element?.contains(target.element)
     );
   }
 
-  function claimEvent(value: PalettePresentation, event: object): boolean {
-    if (value.consumedEvents.has(event)) return false;
+  function claimEvent(
+    value: PalettePresentation,
+    event: object,
+    nativeEvent: object,
+    relatedEvent?: object,
+  ): boolean {
+    const commit = activeCommitRef.current;
+    if (
+      !commit ||
+      !ownsPresentation(value) ||
+      commit.source !== value ||
+      claimedEventsRef.current.has(event) ||
+      claimedEventsRef.current.has(nativeEvent) ||
+      (relatedEvent !== undefined && claimedEventsRef.current.has(relatedEvent))
+    ) {
+      return false;
+    }
+    commit.claimed = true;
+    claimedEventsRef.current.add(event);
+    claimedEventsRef.current.add(nativeEvent);
+    if (relatedEvent !== undefined) claimedEventsRef.current.add(relatedEvent);
     value.consumedEvents.add(event);
+    value.consumedEvents.add(nativeEvent);
+    if (relatedEvent !== undefined) value.consumedEvents.add(relatedEvent);
     return true;
   }
 
   function publishDismissal(
     value: PalettePresentation,
-    event: KeyboardEvent | CustomEvent<{ originalEvent: PointerEvent }>,
+    event:
+      | KeyboardEvent
+      | CustomEvent<{ originalEvent: PointerEvent | FocusEvent }>,
     source: DismissalProof["source"],
   ): void {
-    const content = value.content.element;
-    const overlay = value.overlay.element;
+    const commit = activeCommitRef.current;
+    const content = commit?.content ?? null;
+    const overlay = commit?.overlay ?? null;
     const visit = value.visit;
+    const nativeEvent =
+      source === "escape"
+        ? event
+        : (event as CustomEvent<{
+            originalEvent: PointerEvent | FocusEvent;
+          }>).detail?.originalEvent;
+    const captured = capturedDismissalRef.current;
+    const ownerWindow = content?.ownerDocument.defaultView;
+    const target = nativeEvent?.target;
+    let proof: NativeDismissal | null = null;
     if (
+      !proof &&
+      content &&
+      ownerWindow &&
+      captured?.document === content.ownerDocument &&
+      captured.event === nativeEvent &&
+      target instanceof ownerWindow.Node &&
+      target.isConnected &&
+      target.ownerDocument === content.ownerDocument
+    ) {
+      if (
+        source === "escape" &&
+        nativeEvent instanceof ownerWindow.KeyboardEvent &&
+        nativeEvent.type === "keydown" &&
+        nativeEvent.key === "Escape" &&
+        content.contains(target)
+      ) {
+        proof = { kind: "escape", event: nativeEvent };
+      } else if (
+        source === "pointer" &&
+        captured.kind === "pointer" &&
+        nativeEvent.type === "pointerdown" &&
+        captured.pointerUp !== null &&
+        captured.click !== null &&
+        !content.contains(target)
+      ) {
+        proof = { kind: "pointer", event: nativeEvent, click: captured.click };
+      } else if (
+        source === "focus" &&
+        captured.kind === "instant" &&
+        nativeEvent instanceof ownerWindow.FocusEvent &&
+        nativeEvent.type === "focusin" &&
+        !content.contains(target)
+      ) {
+        proof = { kind: "focus", event: nativeEvent };
+      }
+    }
+    if (
+      !commit ||
       !content ||
       !overlay ||
       !visit ||
+      !captured ||
       !ownsPresentation(value) ||
       !content.isConnected ||
       !overlay.isConnected ||
-      value.consumedEvents.has(event)
+      !proof ||
+      proof.kind !== source
     ) {
       return;
     }
-    if (source === "escape") {
-      const target = event.target;
-      if (
-        event.currentTarget !== content.ownerDocument ||
-        !(target instanceof Node) ||
-        !target.isConnected ||
-        target.ownerDocument !== content.ownerDocument ||
-        !content.contains(target)
-      ) {
-        return;
-      }
-    } else {
-      const target = (event as CustomEvent<{ originalEvent: PointerEvent }>).detail?.originalEvent?.target;
-      if (
-        event.currentTarget !== target ||
-        !(target instanceof Node) ||
-        !target.isConnected ||
-        target.ownerDocument !== content.ownerDocument ||
-        content.contains(target)
-      ) {
-        return;
-      }
+    if (
+      nativeEvent !== proof.event ||
+      !claimEvent(
+        value,
+        event,
+        nativeEvent,
+        proof.kind === "pointer" ? proof.click : undefined,
+      )
+    ) {
+      return;
     }
-
-    value.consumedEvents.add(event);
+    clearCapturedDismissal(captured);
     dismissalRef.current = {
       authority: value.authority,
       visit,
       token: Symbol("command-palette-dismissal"),
-      presentation: value,
+      presentation: commit,
       content,
       overlay,
       event,
@@ -619,18 +1683,35 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   function ownsChildRequest(request: ChildRequest): boolean {
     const owner = request.owner;
     const transferring = successorRef.current?.request === request && successorRef.current.from === owner;
+    const current = activeCommitRef.current?.source ?? null;
+    const transferCommit = activeCommitRef.current;
+    const ownsTransfer =
+      transferring &&
+      !!transferCommit &&
+      transferCommit.source === owner &&
+      !transferCommit.retired &&
+      presentationRef.current === owner &&
+      committedDomIsCurrent(transferCommit);
+    const committedOwner =
+      current?.state.childLoad?.request === request &&
+      current.state === request.expectedState &&
+      ownsPresentation(current)
+        ? current
+        : null;
+    if (committedOwner) request.owner = committedOwner;
     return (
       request.active &&
       authorityRef.current === request.authority &&
       visitRef.current === request.visit &&
       childRequestRef.current === request &&
-      presentationRef.current === owner &&
-      owner.active &&
-      !owner.retired &&
-      owner.authority === request.authority &&
-      owner.visit === request.visit &&
+      ((!!committedOwner &&
+        committedOwner.authority === request.authority &&
+        committedOwner.visit === request.visit) ||
+        (ownsTransfer &&
+          owner.authority === request.authority &&
+          owner.visit === request.visit)) &&
       request.command.children === request.provider &&
-      (owner.state.childLoad?.request === request || transferring)
+      (committedOwner?.state.childLoad?.request === request || transferring)
     );
   }
 
@@ -667,26 +1748,29 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     successorRef.current = { from: value, request };
     setState(nextState);
 
-    void Promise.resolve()
-      .then(() => {
-        if (!ownsChildRequest(request)) return null;
-        return Promise.resolve(provider()).then((items) => ({ items }));
-      })
-      .then((result) => {
-        if (!result || !ownsChildRequest(request)) return;
+    let pending: Promise<Command[]>;
+    try {
+      if (!ownsChildRequest(request)) return;
+      pending = Promise.resolve(provider());
+    } catch (error: unknown) {
+      pending = Promise.reject(error);
+    }
+    void pending.then(
+      (items) => {
+        if (!ownsChildRequest(request)) return;
         const owner = request.owner;
         focusInput(owner);
         invalidateChildRequest(request);
         setState({
           ...owner.state,
           query: "",
-          stack: [...owner.state.stack, { title: command.title.replace(/…$/, ""), items: result.items }],
+          stack: [...owner.state.stack, { title: command.title.replace(/…$/, ""), items }],
           highlight: 0,
           childLoad: null,
           childError: null,
         });
-      })
-      .catch((error: unknown) => {
+      },
+      (error: unknown) => {
         if (!ownsChildRequest(request)) return;
         const owner = request.owner;
         const title = command.title.replace(/…$/, "").trim();
@@ -697,22 +1781,26 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           childLoad: null,
           childError: { command, message: apiErrorText(error, `Could not load ${title || "commands"}`) },
         });
-      });
+      },
+    );
   }
 
   function beginClose(value: PalettePresentation, command: Command | null, nextState: PaletteState): void {
     const currentVisit = value.visit;
     const overlay = value.overlay.element;
     const content = value.content.element;
+    const form = value.form.element;
     const input = value.input.element;
     const list = value.list.element;
+    const closeOwns = ownsPresentation(value);
     if (
-      !ownsPresentation(value) ||
+      !closeOwns ||
       !currentVisit ||
       claimedControlsRef.current.has(value) ||
       closeRef.current ||
       !overlay ||
       !content ||
+      !form ||
       !input ||
       !list
     ) {
@@ -734,6 +1822,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       expectedState: nextState,
       overlay,
       content,
+      form,
       input,
       list,
       returnFocus: visitFocus?.visit === currentVisit ? visitFocus.returnFocus : null,
@@ -795,9 +1884,150 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     );
   }
 
+  function presentationElements(
+    value: PalettePresentation,
+  ): CommittedElement[] | null {
+    const elements: CommittedElement[] = [];
+    const append = <T extends HTMLElement>(
+      publication: ElementPublication<T> | null,
+    ) => {
+      const element = publication?.element;
+      if (!publication || !element) return false;
+      elements.push({
+        publication: publication as ElementPublication<HTMLElement>,
+        element,
+      });
+      return true;
+    };
+    if (
+      !append(value.overlay) ||
+      !append(value.content) ||
+      !append(value.form) ||
+      !append(value.input) ||
+      !append(value.list) ||
+      (value.back !== null && !append(value.back)) ||
+      (value.retry !== null && !append(value.retry)) ||
+      value.rows.some((row) => !append(row))
+    ) {
+      return null;
+    }
+    return elements;
+  }
+
+  function createCommittedPresentation(
+    value: PalettePresentation,
+  ): CommittedPresentation | null {
+    if (!presentationElementsReady(value)) return null;
+    const elements = presentationElements(value);
+    const overlay = value.overlay.element;
+    const content = value.content.element;
+    const form = value.form.element;
+    const input = value.input.element;
+    const list = value.list.element;
+    const placement =
+      overlay && content ? capturePlacement(overlay, content) : null;
+    if (
+      !elements ||
+      !overlay ||
+      !content ||
+      !form ||
+      !input ||
+      !list ||
+      !placement
+    ) {
+      return null;
+    }
+    const guard = createDomGuard(overlay, content, placement);
+    if (!guard) return null;
+    return {
+      token: Symbol("command-palette-commit"),
+      source: value,
+      elements,
+      overlay,
+      content,
+      form,
+      input,
+      list,
+      back: value.back?.element ?? null,
+      retry: value.retry?.element ?? null,
+      rows: value.rows.map((row) => row.element!),
+      placement,
+      overlayTree: snapshotDom(overlay),
+      contentTree: snapshotDom(content),
+      guard,
+      retired: false,
+      claimed: false,
+    };
+  }
+
+  function exactReplayAllows(
+    value: PalettePresentation,
+    next: CommittedPresentation,
+  ): boolean {
+    const replay = replayRef.current;
+    if (!replay) return true;
+    if (replay.source.source !== value) {
+      releaseReplay(replay);
+      return true;
+    }
+    const noRefReplay = replay.refs.every(
+      (entry) => !entry.detached && !entry.reattached,
+    );
+    const noPartialRefReplay = replay.refs.every(
+      (entry) => entry.detached === entry.reattached,
+    );
+    const refWasReplayed = (publication: ElementPublication<HTMLElement>) =>
+      replay.refs.some(
+        (entry) => entry.publication === publication && entry.detached && entry.reattached,
+      );
+    const completeGroupReplay = (
+      publications: readonly ElementPublication<HTMLElement>[],
+    ) => {
+      const replayed = publications.filter(refWasReplayed).length;
+      return replayed === 0 || replayed === publications.length;
+    };
+    const primaryGroups = [
+      [value.overlay, value.content],
+      [value.form, value.input, value.list],
+    ] as readonly (readonly ElementPublication<HTMLElement>[])[];
+    const rowPublications = value.rows as readonly ElementPublication<HTMLElement>[];
+    const completeRefReplay =
+      noPartialRefReplay &&
+      replay.refs.some((entry) => entry.detached) &&
+      primaryGroups.every(completeGroupReplay) &&
+      completeGroupReplay(rowPublications);
+    const exact =
+      !replay.invalid &&
+      !replay.source.claimed &&
+      (completeRefReplay || (replay.layoutRetired && noRefReplay)) &&
+      replay.refs.length === next.elements.length &&
+      replay.refs.every((entry, index) => {
+        const current = next.elements[index];
+        return (
+          current?.publication === entry.publication &&
+          current.element === entry.element
+        );
+      }) &&
+      replay.source.guard.isClean() &&
+      placementMatches(
+        replay.source.overlay,
+        replay.source.content,
+        replay.source.placement,
+      ) &&
+      domMatches(replay.source.overlayTree) &&
+      domMatches(replay.source.contentTree);
+    releaseReplay(replay);
+    return exact;
+  }
+
   function commitPresentation(value: PalettePresentation): void {
     value.layoutAttempted = true;
-    if (authorityRef.current !== authority) return;
+    if (
+      authorityRef.current !== authority ||
+      value.generation !== renderGenerationRef.current
+    ) {
+      return;
+    }
     committedPresentationRef.current = value;
 
     if (value.open) {
@@ -842,32 +2072,47 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         commandTimersRef.current.delete(execution);
       }
 
-      value.active = true;
+      if (!presentationFactsAreCurrent(value)) return;
+      const active = activeCommitRef.current;
+      if (active?.source === value && !active.retired) return;
+      const commit = createCommittedPresentation(value);
+      if (!commit || !exactReplayAllows(value, commit)) {
+        commit?.guard.release();
+        return;
+      }
+      if (active && active !== commit) {
+        retireCommittedPresentation(active, "ordinary");
+        const staged = replayRef.current;
+        if (staged?.source === active) releaseReplay(staged);
+      }
+      activeCommitRef.current = commit;
       presentationRef.current = value;
-      if (dismissalRef.current?.presentation !== value) dismissalRef.current = null;
+      if (
+        !commit.content.ownerDocument.defaultView ||
+        !presentationFactsAreCurrent(value) ||
+        !committedDomIsCurrent(commit)
+      ) {
+        retireCommittedPresentation(commit, "ordinary");
+        const staged = replayRef.current;
+        if (staged?.source === commit) releaseReplay(staged);
+        return;
+      }
+      if (dismissalRef.current?.presentation !== commit) dismissalRef.current = null;
       const request = value.state.childLoad?.request;
-      const successor = successorRef.current;
+      const requestOwner = request?.owner;
       const adoptsRequest =
         !!request &&
-        successor?.request === request &&
-        successor.from === request.owner &&
         request.active &&
         childRequestRef.current === request &&
         request.expectedState === value.state &&
-        successor.from.visit === value.visit &&
-        samePresentationProps(successor.from, value) &&
-        successor.from.visible === value.visible &&
-        successor.from.sections === value.sections &&
-        successor.from.flat === value.flat &&
-        sameChildElements(successor.from, value);
+        !!requestOwner &&
+        request.authority === value.authority &&
+        request.visit === value.visit &&
+        request.command === value.state.childLoad?.command &&
+        request.provider === request.command.children;
       if (request && adoptsRequest) {
         request.owner = value;
         successorRef.current = null;
-      }
-
-      if (request && !adoptsRequest && request.owner !== value) {
-        invalidateChildRequest(request);
-        setState({ ...value.state, childLoad: null });
       }
       return;
     }
@@ -879,13 +2124,17 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       close.onOpenChange === value.onOpenChange &&
       close.commands === value.commands &&
       close.groupOrder === value.groupOrder &&
-      close.placeholder === value.placeholder &&
-      publicationNode(value.overlay) === close.overlay &&
-      publicationNode(value.content) === close.content &&
-      publicationNode(value.input) === close.input &&
-      publicationNode(value.list) === close.list
+      close.placeholder === value.placeholder
     ) {
-      close.presentation = value;
+      if (
+        publicationNode(value.overlay) === close.overlay &&
+        publicationNode(value.content) === close.content &&
+        publicationNode(value.form) === close.form &&
+        publicationNode(value.input) === close.input &&
+        publicationNode(value.list) === close.list
+      ) {
+        close.presentation = value;
+      }
     } else if (close?.authority === authority) {
       closeRef.current = null;
     }
@@ -905,8 +2154,19 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   }
 
   useLayoutEffect(() => {
+    const layoutActive = layoutActiveRef.current;
+    layoutActive.add(presentation);
     commitPresentation(presentation);
-    return () => retirePresentation(presentation);
+    return () => {
+      layoutActive.delete(presentation);
+      const active = activeCommitRef.current;
+      if (active?.source === presentation) {
+        retireCommittedPresentation(active, "layout");
+      } else {
+        const replay = replayRef.current;
+        if (replay?.source.source === presentation) replay.layoutRetired = true;
+      }
+    };
   });
 
   useEffect(() => {
@@ -930,7 +2190,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           dismissal.consumed ||
           dismissal.authority !== presentation.authority ||
           dismissal.visit !== presentation.visit ||
-          dismissal.presentation !== presentation ||
+          dismissal.presentation !== activeCommitRef.current ||
           dismissal.content !== presentation.content.element ||
           dismissal.overlay !== presentation.overlay.element ||
           !ownsPresentation(presentation)
@@ -959,6 +2219,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           data-testid="command-palette"
           onEscapeKeyDown={(event) => publishDismissal(presentation, event, "escape")}
           onPointerDownOutside={(event) => publishDismissal(presentation, event, "pointer")}
+          onFocusOutside={(event) => publishDismissal(presentation, event, "focus")}
           onOpenAutoFocus={(event) => {
             const input = presentation.input.element;
             const currentVisit = presentation.visit;
@@ -978,28 +2239,37 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
               !currentVisit ||
               visitFocusRef.current?.visit !== currentVisit ||
               visitFocusRef.current.claimed ||
-              !claimEvent(presentation, event)
+              !(event instanceof (presentation.content.element?.ownerDocument.defaultView?.Event ?? Event)) ||
+              !claimEvent(presentation, event, event)
             ) {
               return;
             }
             event.preventDefault();
-            visitFocusRef.current = { visit: currentVisit, claimed: true, returnFocus: focusedElement() };
+            visitFocusRef.current = {
+              visit: currentVisit,
+              claimed: true,
+              returnFocus: visitFocusRef.current.returnFocus ?? focusedElement(),
+            };
             input.focus();
           }}
           onCloseAutoFocus={(event) => {
             const close = closeRef.current;
             const exactHandler = close?.presentation ? close.presentation === presentation : close?.origin === presentation;
+            const ownerWindow = close?.content.ownerDocument.defaultView;
             if (
               !close ||
               !exactHandler ||
+              !ownerWindow ||
               close.authority !== authority ||
               authorityRef.current !== authority ||
               close.content !== event.currentTarget ||
               close.autoFocusClaimed ||
-              presentation.consumedEvents.has(event)
+              !(event instanceof ownerWindow.Event) ||
+              claimedEventsRef.current.has(event)
             ) {
               return;
             }
+            claimedEventsRef.current.add(event);
             presentation.consumedEvents.add(event);
             close.autoFocusClaimed = true;
             event.preventDefault();
@@ -1043,7 +2313,26 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         >
           <RadixDialog.Title className="sr-only">Command palette</RadixDialog.Title>
           <RadixDialog.Description className="sr-only">Search every action, heading and recent document.</RadixDialog.Description>
-          <div className="flex items-center gap-2 border-b border-line px-3">
+          <form
+            ref={(element) => bindElement(presentation, presentation.form, element)}
+            className="flex items-center gap-2 border-b border-line px-3"
+            onSubmit={(event) => {
+              const form = presentation.form.element;
+              const input = presentation.input.element;
+              if (!form || !input) return;
+              const nativeEvent = exactNativeSubmit(event, form, input);
+              if (!nativeEvent) return;
+              event.preventDefault();
+              if (
+                !ownsElement(presentation, presentation.form, event.currentTarget) ||
+                !claimEvent(presentation, event, nativeEvent)
+              ) {
+                return;
+              }
+              const row = presentation.rows[presentation.state.highlight];
+              if (row) pickRow(presentation, row);
+            }}
+          >
             {atRoot ? (
               <Search size={16} className="shrink-0 text-ink-3" aria-hidden />
             ) : (
@@ -1055,7 +2344,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 className="icon-btn -ml-1 h-7 w-7"
                 onClick={(event) => {
                   const control = presentation.back;
-                  if (!control || !ownsElement(presentation, control, event.currentTarget) || !claimEvent(presentation, event)) return;
+                  if (!control || !ownsElement(presentation, control, event.currentTarget)) return;
+                  const nativeEvent = exactNativeClick(event, control.element!);
+                  if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                   back(presentation);
                 }}
                 aria-label="Back"
@@ -1071,7 +2362,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
               placeholder={atRoot ? placeholder : "Filter…"}
               value={query}
               onChange={(event) => {
-                if (!ownsElement(presentation, presentation.input, event.currentTarget) || !claimEvent(presentation, event)) return;
+                if (!ownsElement(presentation, presentation.input, event.currentTarget)) return;
+                const nativeEvent = exactNativeInput(event, event.currentTarget);
+                if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                 const value = event.currentTarget.value;
                 invalidateChildRequest(presentation.state.childLoad?.request ?? null);
                 setState({
@@ -1086,7 +2379,8 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 const key = event.key;
                 const isBack = key === "Backspace" && !presentation.state.query && !presentation.atRoot;
                 if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(key) && !isBack) return;
-                if (!claimEvent(presentation, event)) return;
+                const nativeEvent = exactNativeKey(event, event.currentTarget);
+                if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                 event.preventDefault();
 
                 if (key === "Enter") {
@@ -1127,7 +2421,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
               data-testid="palette-input"
             />
             <Kbd>Esc</Kbd>
-          </div>
+          </form>
           {childError && (
             <div className="mx-1.5 mt-1.5 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
               <span className="min-w-0 flex-1">{childError.message}</span>
@@ -1143,13 +2437,14 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                     !control ||
                     claimedControlsRef.current.has(control) ||
                     !ownsElement(presentation, control, event.currentTarget) ||
-                    !claimEvent(presentation, event) ||
                     presentation.state.childError !== childError ||
                     !childError.command.children ||
                     retrying
                   ) {
                     return;
                   }
+                  const nativeEvent = exactNativeClick(event, control.element!);
+                  if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                   claimedControlsRef.current.add(control);
                   startChildren(presentation, childError.command, true);
                 }}
@@ -1203,9 +2498,11 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                           unavailable && "cursor-default opacity-60",
                         )}
                         onMouseEnter={(event) => {
+                          const nativeEvent = exactNativeMouse(event, row.element!, "mouseenter", "mouseover");
                           if (
                             !ownsElement(presentation, row, event.currentTarget) ||
-                            !claimEvent(presentation, event) ||
+                            !nativeEvent ||
+                            !claimEvent(presentation, event, nativeEvent) ||
                             itemIndex === presentation.state.highlight
                           ) {
                             return;
@@ -1218,11 +2515,15 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                           });
                         }}
                         onMouseDown={(event) => {
-                          if (!ownsElement(presentation, row, event.currentTarget) || !claimEvent(presentation, event)) return;
+                          if (!ownsElement(presentation, row, event.currentTarget)) return;
+                          const nativeEvent = exactNativeMouse(event, row.element!, "mousedown", "mousedown");
+                          if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                           event.preventDefault();
                         }}
                         onClick={(event) => {
-                          if (!ownsElement(presentation, row, event.currentTarget) || !claimEvent(presentation, event)) return;
+                          if (!ownsElement(presentation, row, event.currentTarget)) return;
+                          const nativeEvent = exactNativeClick(event, row.element!);
+                          if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                           pickRow(presentation, row);
                         }}
                       >

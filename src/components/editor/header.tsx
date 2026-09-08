@@ -1395,7 +1395,7 @@ interface ModeSwitcherState {
   readonly open: boolean;
 }
 
-interface ModeSwitcherRowAuthority {
+interface ModeSwitcherRowFacts {
   readonly index: number;
   readonly value: EditMode;
   readonly label: string;
@@ -1403,15 +1403,8 @@ interface ModeSwitcherRowAuthority {
   readonly eligible: boolean;
 }
 
-interface ModeSwitcherDom {
-  readonly trigger: HTMLButtonElement | null;
-  readonly content: HTMLDivElement | null;
-  readonly group: HTMLDivElement | null;
-  readonly rows: readonly (HTMLDivElement | null)[];
-  readonly reader: HTMLDivElement | null;
-}
-
-interface ModeSwitcherAuthority {
+interface ModeSwitcherRender {
+  readonly identity: object;
   readonly visit: ModeSwitcherVisit;
   readonly session: CollabSession;
   readonly docId: string;
@@ -1420,54 +1413,114 @@ interface ModeSwitcherAuthority {
   readonly mode: EditMode;
   readonly open: boolean;
   readonly setMode: CollabSession["setMode"];
-  readonly dom: ModeSwitcherDom;
+  readonly triggerClassName: string;
   readonly reader: Readonly<{
     url: string;
     target: "_blank";
     features: "noopener";
   }>;
-  readonly rows: readonly ModeSwitcherRowAuthority[];
+  readonly rows: readonly ModeSwitcherRowFacts[];
 }
 
-interface ModeSwitcherRowPublication extends ModeSwitcherRowAuthority {
-  readonly capture: (element: HTMLDivElement | null) => void;
-  readonly onSelect: (event: Event) => void;
+interface ModeSwitcherDom {
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLDivElement | null;
+  readonly group: HTMLDivElement | null;
+  readonly rows: readonly HTMLDivElement[];
+  readonly separator: HTMLDivElement | null;
+  readonly reader: HTMLDivElement | null;
+}
+
+interface ModeSwitcherDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly ModeSwitcherDomSnapshot[];
+}
+
+interface ModeSwitcherPlacementSnapshot {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface ModeSwitcherPublication {
+  readonly render: ModeSwitcherRender;
+  readonly document: Document;
+  readonly dom: ModeSwitcherDom;
+  readonly triggerParent: Node;
+  readonly contentParent: Node | null;
+  readonly triggerSnapshot: ModeSwitcherDomSnapshot;
+  readonly contentSnapshot: ModeSwitcherDomSnapshot | null;
+  readonly isExact: () => boolean;
+  readonly recordElementChange: (
+    owner: ModeSwitcherElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly retire: () => boolean;
+  readonly dispose: () => void;
+}
+
+interface ModeSwitcherPublicationRuntime {
+  readonly publication: ModeSwitcherPublication;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly isRetired: () => boolean;
+  readonly recordElementChange: (
+    owner: ModeSwitcherElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
 }
 
 interface ModeSwitcherDisclosureIntent {
-  readonly publication: ModeSwitcherPresentation;
+  readonly publication: ModeSwitcherPublication;
   readonly open: boolean;
-  readonly claim: () => boolean;
+  readonly returnFocus: boolean;
+  readonly events: readonly Event[];
 }
 
 interface ModeSwitcherSelectionIntent {
-  readonly publication: ModeSwitcherPresentation;
-  readonly row: ModeSwitcherRowPublication;
-  readonly claim: () => boolean;
+  readonly publication: ModeSwitcherPublication;
+  readonly row: ModeSwitcherRowFacts;
+  readonly event: Event;
 }
 
 interface ModeSwitcherFocusIntent {
-  readonly publication: ModeSwitcherPresentation;
+  readonly source: ModeSwitcherPublication;
+  readonly visit: ModeSwitcherVisit;
   readonly target: HTMLButtonElement;
+  readonly modes: readonly EditMode[];
+  readonly guard: ModeSwitcherFocusGuard;
 }
 
-interface ModeSwitcherCells {
-  active: ModeSwitcherPresentation | null;
-  disclosureIntent: ModeSwitcherDisclosureIntent | null;
-  selectionIntent: ModeSwitcherSelectionIntent | null;
-  focusIntent: ModeSwitcherFocusIntent | null;
-  readonly issuedEvents: WeakSet<object>;
+interface ModeSwitcherFocusGuard {
+  readonly isExact: (publication: ModeSwitcherPublication) => boolean;
+  readonly dispose: () => void;
+}
+
+interface ModeSwitcherFocusPlacement {
+  readonly snapshots: readonly ModeSwitcherPlacementSnapshot[];
+  readonly expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>;
+}
+
+interface ModeSwitcherRowPublication extends ModeSwitcherRowFacts {
+  readonly capture: React.RefCallback<HTMLDivElement>;
+  readonly onSelect: (event: Event) => void;
 }
 
 interface ModeSwitcherPresentation {
-  readonly authority: ModeSwitcherAuthority;
   readonly rows: readonly ModeSwitcherRowPublication[];
   readonly captureTrigger: (element: HTMLButtonElement | null) => void;
   readonly captureContent: (element: HTMLDivElement | null) => void;
   readonly captureGroup: (element: HTMLDivElement | null) => void;
   readonly captureReader: (element: HTMLDivElement | null) => void;
-  readonly establish: () => void;
-  readonly retire: () => boolean;
+  readonly establish: () => (() => void) | undefined;
   readonly onTriggerPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
   readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
@@ -1475,321 +1528,1392 @@ interface ModeSwitcherPresentation {
   readonly onReaderSelect: (event: Event) => void;
   readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
   readonly onOutside: (event: CustomEvent<{ originalEvent: Event }>) => void;
+  readonly onCloseAutoFocus: (event: Event) => void;
 }
 
-function createModeSwitcherPresentation({
-  authority,
-  cells,
-  commitOpen,
-  captureTrigger,
-  captureContent,
-  captureGroup,
-  captureRows,
-  captureReader,
-}: {
-  authority: ModeSwitcherAuthority;
-  cells: ModeSwitcherCells;
-  commitOpen: (state: ModeSwitcherState) => void;
-  captureTrigger: (element: HTMLButtonElement | null) => void;
-  captureContent: (element: HTMLDivElement | null) => void;
-  captureGroup: (element: HTMLDivElement | null) => void;
-  captureRows: readonly ((element: HTMLDivElement | null) => void)[];
-  captureReader: (element: HTMLDivElement | null) => void;
-}): ModeSwitcherPresentation {
-  const factsAreCurrent = () => {
-    const currentEditable = authority.session.role === "owner" || authority.session.role === "editor";
-    return (
-      authority.visit.session === authority.session
-      && authority.session.docId === authority.docId
-      && authority.session.role === authority.role
-      && currentEditable === authority.editable
-      && authority.session.mode === authority.mode
-      && authority.session.setMode === authority.setMode
-    );
-  };
-  const exactDomIsCurrent = () => {
-    const { trigger, content, group, reader } = authority.dom;
-    if (
-      !trigger
-      || !trigger.isConnected
-      || trigger.ownerDocument !== document
-      || trigger.getAttribute("data-testid") !== "mode-switcher"
-      || trigger.getAttribute("aria-expanded") !== String(authority.open)
-      || trigger.getAttribute("data-state") !== (authority.open ? "open" : "closed")
-    ) return false;
+class ModeSwitcherPublicationCoordinator {
+  #active: ModeSwitcherPublication | null = null;
+  #successorOf: ModeSwitcherPublication | null = null;
+  #claimedEvents = new WeakSet<Event>();
+  #disclosureIntent: ModeSwitcherDisclosureIntent | null = null;
+  #selectionIntent: ModeSwitcherSelectionIntent | null = null;
+  #focusIntent: ModeSwitcherFocusIntent | null = null;
+  #requestedSuccessors = new WeakSet<ModeSwitcherPublication>();
+  #unpublishedChangeRequested = false;
 
-    if (!authority.open) {
-      return content === null
-        && group === null
-        && reader === null
-        && authority.dom.rows.every((element) => element === null);
+  constructor(private readonly requestSuccessor: () => void) {}
+
+  active() {
+    return this.#active;
+  }
+
+  allowsElementReplacement() {
+    return this.#active === null;
+  }
+
+  publish(publication: ModeSwitcherPublication) {
+    const previous = this.#active ?? this.#successorOf;
+    this.#active = publication;
+    this.#successorOf = null;
+    this.#unpublishedChangeRequested = false;
+    const focus = this.#focusIntent;
+    const returnFocus = Boolean(
+      focus && modeSwitcherFocusSuccessorIsExact(focus, publication),
+    );
+    const focusTarget = returnFocus ? focus?.target : null;
+    if (focus) this.#clearFocus(focus);
+    if (previous && previous !== publication) previous.dispose();
+    focusTarget?.focus();
+  }
+
+  retire(publication: ModeSwitcherPublication) {
+    if (this.#active !== publication) return false;
+    this.#active = null;
+    this.#successorOf = publication;
+    if (this.#disclosureIntent?.publication === publication) {
+      this.#disclosureIntent = null;
     }
-    if (
-      !content
-      || !group
-      || !reader
-      || !content.isConnected
-      || !group.isConnected
-      || !reader.isConnected
-      || content.ownerDocument !== trigger.ownerDocument
-      || content.getAttribute("role") !== "menu"
-      || content.getAttribute("data-state") !== "open"
-      || group.parentElement !== content
-      || reader.parentElement !== content
-      || reader.getAttribute("role") !== "menuitem"
-      || content.children.length !== 3
-      || content.firstElementChild !== group
-      || content.lastElementChild !== reader
-      || group.nextElementSibling?.nextElementSibling !== reader
-      || group.children.length !== authority.rows.length
-    ) return false;
-
-    return rows.every((row) => {
-      const source = authority.rows[row.index];
-      const element = authority.dom.rows[row.index];
-      return (
-        source?.index === row.index
-        && source.value === row.value
-        && source.label === row.label
-        && source.description === row.description
-        && source.eligible === row.eligible
-        && !!element
-        && element.isConnected
-        && element.parentElement === group
-        && group.children.item(row.index) === element
-        && element.getAttribute("role") === "menuitemradio"
-        && element.getAttribute("aria-checked") === String(row.value === authority.mode)
-        && (element.getAttribute("aria-disabled") === "true") === !row.eligible
-      );
-    });
-  };
-  const ownsPresentation = () => cells.active === publication && factsAreCurrent() && exactDomIsCurrent();
-  const eventCapability = (event: object, prove: () => boolean) => {
-    if (cells.issuedEvents.has(event) || !prove()) return null;
-    cells.issuedEvents.add(event);
-    let claimed = false;
-    return () => {
-      if (claimed || !prove()) return false;
-      claimed = true;
-      return true;
-    };
-  };
-  const connectedControl = (element: HTMLElement | null, expected: HTMLElement | null) => {
-    const content = authority.dom.content;
-    return (
-      ownsPresentation()
-      && !!content
-      && !!element
-      && element === expected
-      && element.isConnected
-      && content.isConnected
-      && content.contains(element)
-    );
-  };
-  const preparedClose = (): ModeSwitcherDisclosureIntent | null => {
-    if (!ownsPresentation() || !authority.open) return null;
-    const { trigger, content } = authority.dom;
-    if (!trigger || !content) return null;
-    let used = false;
-    return Object.freeze({
-      publication,
-      open: false,
-      claim: () => {
-        if (
-          used
-          || cells.active !== publication
-          || authority.dom.trigger !== trigger
-          || authority.dom.content !== content
-          || !trigger.isConnected
-          || !content.isConnected
-        ) return false;
-        used = true;
-        return true;
-      },
-    });
-  };
-  const publishDisclosure = (event: object, open: boolean, prove: () => boolean) => {
-    const claim = eventCapability(event, prove);
-    if (!claim) return;
-    cells.disclosureIntent = Object.freeze({ publication, open, claim });
-  };
-  const scheduleFocusReturn = (target: HTMLButtonElement) => {
-    const intent: ModeSwitcherFocusIntent = Object.freeze({ publication, target });
-    cells.focusIntent = intent;
+    if (this.#selectionIntent?.publication === publication) {
+      this.#selectionIntent = null;
+    }
     queueMicrotask(() => {
-      if (
-        cells.focusIntent !== intent
-        || !target.isConnected
-        || target.ownerDocument !== document
-      ) return;
-      cells.focusIntent = null;
-      target.focus();
+      if (this.#active !== null || this.#successorOf !== publication) return;
+      this.#successorOf = null;
+      publication.dispose();
     });
-  };
-  const onTriggerPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
-    const source = event.currentTarget;
-    if (event.defaultPrevented || event.button !== 0 || event.ctrlKey) return;
-    publishDisclosure(event, !authority.open, () => (
-      source === authority.dom.trigger
-      && source.isConnected
-      && ownsPresentation()
-    ));
-  };
-  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (event.defaultPrevented || !["Enter", " ", "ArrowDown"].includes(event.key)) return;
-    const source = event.currentTarget;
-    const open = event.key === "ArrowDown" ? true : !authority.open;
-    publishDisclosure(event, open, () => (
-      source === authority.dom.trigger
-      && source.isConnected
-      && ownsPresentation()
-    ));
-  };
-  const onOpenChange = (open: boolean) => {
-    const intent = cells.disclosureIntent;
+    return true;
+  }
+
+  acceptsSuccessorOf(publication: ModeSwitcherPublication) {
+    return this.#active === null && this.#successorOf === publication;
+  }
+
+  elementChanged(
+    owner: ModeSwitcherElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) {
+    const focus = this.#focusIntent;
+    if (focus && previous === focus.target && element !== focus.target) {
+      this.#clearFocus(focus);
+    }
+    const publication = this.#active;
+    if (!publication) {
+      if (!this.#unpublishedChangeRequested) {
+        this.#unpublishedChangeRequested = true;
+        this.requestSuccessor();
+      }
+      return;
+    }
+    const exactBeforeChange = publication.isExact();
+    publication.recordElementChange(owner, element, previous);
+    if (
+      !this.#requestedSuccessors.has(publication)
+      && this.acceptsSuccessorOf(publication)
+      && (exactBeforeChange || publication.isExactElementReplay())
+    ) {
+      this.#requestedSuccessors.add(publication);
+      this.requestSuccessor();
+    }
+  }
+
+  claim(events: readonly Event[]) {
+    const unique = new Set(events);
+    if (unique.size !== events.length || events.some((event) => this.#claimedEvents.has(event))) {
+      return false;
+    }
+    for (const event of events) this.#claimedEvents.add(event);
+    return true;
+  }
+
+  publishDisclosure(
+    publication: ModeSwitcherPublication,
+    open: boolean,
+    events: readonly Event[],
+    returnFocus = true,
+  ) {
+    const intent = Object.freeze({
+      publication,
+      open,
+      returnFocus,
+      events: Object.freeze([...events]),
+    });
+    this.#disclosureIntent = intent;
+    queueMicrotask(() => {
+      if (this.#disclosureIntent === intent) this.#disclosureIntent = null;
+    });
+  }
+
+  consumeDisclosure(publication: ModeSwitcherPublication, open: boolean) {
+    const intent = this.#disclosureIntent;
     if (
       intent?.publication !== publication
       || intent.open !== open
-      || !intent.claim()
-    ) return;
-    cells.disclosureIntent = null;
-    if (authority.open === open) return;
-    publication.retire();
-    commitOpen(Object.freeze({ visit: authority.visit, open }));
-  };
-  const onModeChange = (value: string) => {
-    const intent = cells.selectionIntent;
+      || this.#active !== publication
+      || !publication.isExact()
+      || !intent.events.some((event) => isLiveNativeEvent(event, publication.document))
+    ) {
+      return null;
+    }
+    this.#disclosureIntent = null;
+    return intent;
+  }
+
+  publishSelection(
+    publication: ModeSwitcherPublication,
+    row: ModeSwitcherRowFacts,
+    event: Event,
+  ) {
+    const intent = Object.freeze({ publication, row, event });
+    this.#selectionIntent = intent;
+    queueMicrotask(() => {
+      if (this.#selectionIntent === intent) this.#selectionIntent = null;
+    });
+  }
+
+  consumeSelection(publication: ModeSwitcherPublication, value: string) {
+    const intent = this.#selectionIntent;
     if (
       intent?.publication !== publication
       || intent.row.value !== value
       || !intent.row.eligible
-      || !intent.claim()
-    ) return;
-    const close = preparedClose();
-    if (!close) return;
-    const returnTarget = authority.dom.trigger;
-    if (!returnTarget) return;
-    cells.selectionIntent = null;
-    cells.disclosureIntent = close;
-    scheduleFocusReturn(returnTarget);
-    onOpenChange(false);
-    authority.setMode.call(authority.session, intent.row.value);
+      || this.#active !== publication
+      || !publication.isExact()
+      || !isLiveNativeEvent(intent.event, publication.document)
+    ) {
+      return null;
+    }
+    this.#selectionIntent = null;
+    return intent.row;
+  }
+
+  scheduleFocus(
+    source: ModeSwitcherPublication,
+    target: HTMLButtonElement,
+    mode: EditMode = source.render.mode,
+  ) {
+    const previous = this.#focusIntent;
+    if (previous) this.#clearFocus(previous);
+    let pendingIntent: ModeSwitcherFocusIntent | null = null;
+    const guard = createModeSwitcherFocusGuard(
+      source,
+      target,
+      mode,
+      () => {
+        if (pendingIntent) this.#clearFocus(pendingIntent);
+      },
+    );
+    const modes = mode === source.render.mode
+      ? Object.freeze([mode])
+      : Object.freeze([source.render.mode, mode]);
+    const intent: ModeSwitcherFocusIntent = Object.freeze({
+      source,
+      visit: source.render.visit,
+      target,
+      modes,
+      guard,
+    });
+    pendingIntent = intent;
+    this.#focusIntent = intent;
+  }
+
+  #clearFocus(intent: ModeSwitcherFocusIntent) {
+    if (this.#focusIntent !== intent) return;
+    this.#focusIntent = null;
+    intent.guard.dispose();
+  }
+}
+
+class ModeSwitcherElementOwner<T extends HTMLElement> {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly accepts: (element: T) => boolean,
+    private readonly allowsReplacement: () => boolean,
+    private readonly onChange: (
+      owner: ModeSwitcherElementOwner<T>,
+      element: T | null,
+      previous: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+
+  readonly capture: React.RefCallback<T> = (element) => {
+    if (this.#current === element) return;
+    if (element) {
+      if (
+        !this.accepts(element)
+        || (this.#current !== null && this.#current !== element)
+        || (
+          this.#current === null
+          && this.#last !== null
+          && this.#last !== element
+          && !this.allowsReplacement()
+        )
+      ) {
+        return;
+      }
+    }
+    const previous = this.#current;
+    if (element === null) {
+      this.onChange(this, element, previous);
+      this.#current = null;
+      return;
+    }
+    this.#current = element;
+    this.#last = element;
+    this.onChange(this, element, previous);
   };
-  const onReaderSelect = (event: Event) => {
-    const source = event.currentTarget;
-    const claim = eventCapability(event, () => connectedControl(
-      source instanceof HTMLDivElement ? source : null,
-      authority.dom.reader,
-    ));
-    if (!claim || !claim()) return;
-    const close = preparedClose();
-    if (!close) return;
-    const returnTarget = authority.dom.trigger;
-    if (!returnTarget) return;
-    cells.selectionIntent = null;
-    cells.disclosureIntent = close;
-    scheduleFocusReturn(returnTarget);
-    onOpenChange(false);
-    window.open(authority.reader.url, authority.reader.target, authority.reader.features);
+}
+
+interface ModeSwitcherElementOwnerHandle {
+  readonly element: () => HTMLElement | null;
+}
+
+interface ModeSwitcherOwners {
+  readonly trigger: ModeSwitcherElementOwner<HTMLButtonElement>;
+  readonly content: ModeSwitcherElementOwner<HTMLDivElement>;
+  readonly group: ModeSwitcherElementOwner<HTMLDivElement>;
+  readonly rows: readonly ModeSwitcherElementOwner<HTMLDivElement>[];
+  readonly reader: ModeSwitcherElementOwner<HTMLDivElement>;
+}
+
+function createModeSwitcherOwners(coordinator: ModeSwitcherPublicationCoordinator): ModeSwitcherOwners {
+  const changed = <T extends HTMLElement>(
+    owner: ModeSwitcherElementOwner<T>,
+    element: T | null,
+    previous: T | null,
+  ) => coordinator.elementChanged(owner, element, previous);
+  const accepts = <T extends HTMLElement>(tagName: string) => (element: T) =>
+    element.tagName === tagName;
+  const allowsReplacement = () => coordinator.allowsElementReplacement();
+  return Object.freeze({
+    trigger: new ModeSwitcherElementOwner<HTMLButtonElement>(accepts("BUTTON"), allowsReplacement, changed),
+    content: new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+    group: new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+    rows: Object.freeze([
+      new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+      new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+      new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+    ]),
+    reader: new ModeSwitcherElementOwner<HTMLDivElement>(accepts("DIV"), allowsReplacement, changed),
+  });
+}
+
+const MODE_SWITCHER_DYNAMIC_ATTRIBUTES = new Set([
+  "data-align",
+  "data-highlighted",
+  "data-radix-popper-align",
+  "data-radix-popper-side",
+  "data-side",
+  "style",
+  "tabindex",
+]);
+
+function createModeSwitcherFocusGuard(
+  source: ModeSwitcherPublication,
+  target: HTMLButtonElement,
+  mode: EditMode,
+  onInvalidated: () => void,
+): ModeSwitcherFocusGuard {
+  const focusPlacement = snapshotModeSwitcherFocusPlacement(source, target);
+  const placementSnapshots = focusPlacement.snapshots;
+  const placements = new Map(
+    placementSnapshots.map((snapshot) => [snapshot.node, snapshot]),
+  );
+  const MutationObserverConstructor = target.ownerDocument.defaultView?.MutationObserver;
+  const initialDynamicAttributes = new Map(
+    [...MODE_SWITCHER_DYNAMIC_ATTRIBUTES].map((name) => [name, target.getAttribute(name)]),
+  );
+  const originalIcon = target.firstElementChild;
+  const originalLabel = target.children.item(1);
+  const records: MutationRecord[] = [];
+  let observer: MutationObserver | null = null;
+  let invalid = false;
+  const inspect = (pending: readonly MutationRecord[]) => {
+    if (invalid) return;
+    records.push(...pending);
   };
-  const onEscapeKeyDown = (event: KeyboardEvent) => {
-    const target = event.target;
-    const content = authority.dom.content;
-    if (
-      event.defaultPrevented
-      || event.key !== "Escape"
-      || !content
-      || !(target instanceof Node)
-      || event.currentTarget instanceof Element
-    ) return;
-    publishDisclosure(event, false, () => (
-      ownsPresentation()
-      && authority.dom.content === content
-      && content.isConnected
-      && target.isConnected
-      && content.contains(target)
-    ));
-  };
-  const onOutside = (event: CustomEvent<{ originalEvent: Event }>) => {
-    const originalTarget = event.detail?.originalEvent?.target;
-    const { content, trigger } = authority.dom;
-    if (
-      event.defaultPrevented
-      || !content
-      || !trigger
-      || !(originalTarget instanceof Node)
-      || event.target !== originalTarget
-      || event.currentTarget !== originalTarget
-      || content.contains(originalTarget)
-      || trigger.contains(originalTarget)
-    ) return;
-    publishDisclosure(event, false, () => (
-      ownsPresentation()
-      && authority.dom.content === content
-      && authority.dom.trigger === trigger
-      && content.isConnected
-      && trigger.isConnected
-      && originalTarget.isConnected
-      && !content.contains(originalTarget)
-      && !trigger.contains(originalTarget)
-    ));
-  };
-  const retire = () => {
-    const wasActive = cells.active === publication;
-    if (wasActive) cells.active = null;
-    if (cells.disclosureIntent?.publication === publication) cells.disclosureIntent = null;
-    if (cells.selectionIntent?.publication === publication) cells.selectionIntent = null;
-    return wasActive;
-  };
-  const establish = () => {
-    const previous = cells.active;
-    if (previous && previous !== publication) previous.retire();
-    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
-    const focus = cells.focusIntent;
-    if (
-      focus
+  if (MutationObserverConstructor) {
+    observer = new MutationObserverConstructor(inspect);
+    observer.observe(target, {
+      attributeOldValue: true,
+      attributes: true,
+      characterDataOldValue: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    for (let ancestor = target.parentNode; ancestor; ancestor = ancestor.parentNode) {
+      observer.observe(ancestor, { childList: true });
+    }
+  }
+  return Object.freeze({
+    isExact: (publication: ModeSwitcherPublication) => {
+      if (observer) inspect(observer.takeRecords());
+      if (!records.every((record) =>
+        modeSwitcherFocusMutationIsExpected(
+          record,
+          source,
+          publication,
+          target,
+          originalIcon,
+          originalLabel,
+          placements,
+          focusPlacement.expectedRemovals,
+          mode,
+        )
+      )) {
+        invalid = true;
+        onInvalidated();
+      }
+      return Boolean(
+        !invalid
+        && target.isConnected
+        && placementSnapshots.every(modeSwitcherPlacementMatches)
+        && modeSwitcherFocusTriggerIsExact(publication, initialDynamicAttributes)
+      );
+    },
+    dispose: () => {
+      observer?.disconnect();
+      observer = null;
+    },
+  });
+}
+
+function modeSwitcherFocusMutationIsExpected(
+  record: MutationRecord,
+  source: ModeSwitcherPublication,
+  successor: ModeSwitcherPublication,
+  trigger: HTMLButtonElement,
+  originalIcon: Element | null,
+  originalLabel: Element | null,
+  placements: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
+  expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
+  mode: EditMode,
+) {
+  if (record.target !== trigger && !trigger.contains(record.target)) {
+    if (modeSwitcherFocusRemovalIsExpected(record, expectedRemovals)) return true;
+    return record.type === "childList"
+      && (record.previousSibling === null || !placements.has(record.previousSibling))
+      && (record.nextSibling === null || !placements.has(record.nextSibling))
+      && [...record.addedNodes, ...record.removedNodes].every(
+        (node) => !placements.has(node) && !node.contains(trigger),
+      );
+  }
+  if (record.type === "attributes" && record.target === trigger) {
+    if (record.attributeName === "aria-expanded") {
+      return record.oldValue === "true" && trigger.getAttribute("aria-expanded") === "false";
+    }
+    if (record.attributeName === "aria-controls") {
+      return Boolean(
+        source.dom.content?.id
+        && record.oldValue === source.dom.content.id
+        && trigger.getAttribute("aria-controls") === null
+      );
+    }
+    if (record.attributeName === "data-state") {
+      return record.oldValue === "open" && trigger.getAttribute("data-state") === "closed";
+    }
+    if (record.attributeName === "class" && mode !== source.render.mode) {
+      return (
+        record.oldValue === source.render.triggerClassName
+        && trigger.className === successor.render.triggerClassName
+      );
+    }
+    return false;
+  }
+  if (mode === source.render.mode) return false;
+  const currentIcon = trigger.firstElementChild;
+  if (record.type === "childList" && record.target === trigger) {
+    return Boolean(
+      originalIcon
+      && currentIcon
+      && record.previousSibling === null
+      && record.nextSibling === originalLabel
       && (
-        focus.publication.authority.visit !== authority.visit
-        || authority.open
-        || focus.target !== authority.dom.trigger
+        (
+          record.removedNodes.length === 1
+          && record.removedNodes.item(0) === originalIcon
+          && record.addedNodes.length === 0
+        )
+        || (
+          record.removedNodes.length === 0
+          && record.addedNodes.length === 1
+          && record.addedNodes.item(0) === currentIcon
+        )
       )
-    ) cells.focusIntent = null;
-    cells.active = publication;
+    );
+  }
+  const currentLabel = trigger.children.item(1);
+  return Boolean(
+    record.type === "characterData"
+    && originalLabel
+    && currentLabel === originalLabel
+    && originalLabel.contains(record.target)
+    && record.oldValue === source.render.rows.find(
+      (row) => row.value === source.render.mode,
+    )?.label
+    && record.target.nodeValue === successor.render.rows.find(
+      (row) => row.value === mode,
+    )?.label
+  );
+}
+
+function snapshotModeSwitcherFocusPlacement(
+  source: ModeSwitcherPublication,
+  target: HTMLButtonElement,
+): ModeSwitcherFocusPlacement {
+  const expectedRemovals = new Map<Node, ModeSwitcherPlacementSnapshot>();
+  const snapshots = snapshotModeSwitcherPlacement([target]).map((snapshot) => {
+    let { previousSibling, nextSibling } = snapshot;
+    const content = source.dom.content;
+    if (content && previousSibling?.contains(content)) {
+      expectedRemovals.set(previousSibling, Object.freeze({
+        node: previousSibling,
+        parent: previousSibling.parentNode,
+        previousSibling: previousSibling.previousSibling,
+        nextSibling: previousSibling.nextSibling,
+      }));
+      previousSibling = previousSibling.previousSibling;
+    }
+    if (content && nextSibling?.contains(content)) {
+      expectedRemovals.set(nextSibling, Object.freeze({
+        node: nextSibling,
+        parent: nextSibling.parentNode,
+        previousSibling: nextSibling.previousSibling,
+        nextSibling: nextSibling.nextSibling,
+      }));
+      nextSibling = nextSibling.nextSibling;
+    }
+    return Object.freeze({
+      node: snapshot.node,
+      parent: snapshot.parent,
+      previousSibling,
+      nextSibling,
+    });
+  });
+  return Object.freeze({
+    snapshots: Object.freeze(snapshots),
+    expectedRemovals,
+  });
+}
+
+function modeSwitcherFocusRemovalIsExpected(
+  record: MutationRecord,
+  expectedRemovals: ReadonlyMap<Node, ModeSwitcherPlacementSnapshot>,
+) {
+  if (
+    record.type !== "childList"
+    || record.addedNodes.length !== 0
+    || record.removedNodes.length !== 1
+  ) {
+    return false;
+  }
+  const removed = record.removedNodes.item(0);
+  const snapshot = removed && expectedRemovals.get(removed);
+  return Boolean(
+    snapshot
+    && record.target === snapshot.parent
+    && record.previousSibling === snapshot.previousSibling
+    && record.nextSibling === snapshot.nextSibling
+  );
+}
+
+const MODE_SWITCHER_ICON_NODES: Readonly<Record<
+  EditMode,
+  readonly Readonly<{ tag: string; attributes: Readonly<Record<string, string>> }>[]
+>> = Object.freeze({
+  editing: Object.freeze([
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M13 21h8" }) }),
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+      }),
+    }),
+  ]),
+  suggesting: Object.freeze([
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z",
+      }),
+    }),
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M12 8v6" }) }),
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M9 11h6" }) }),
+  ]),
+  viewing: Object.freeze([
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
+      }),
+    }),
+    Object.freeze({
+      tag: "circle",
+      attributes: Object.freeze({ cx: "12", cy: "12", r: "3" }),
+    }),
+  ]),
+});
+
+function modeSwitcherElementAttributesAreExact(
+  element: Element,
+  expected: Readonly<Record<string, string>>,
+) {
+  const entries = Object.entries(expected);
+  return (
+    element.attributes.length === entries.length
+    && entries.every(([name, value]) => element.getAttribute(name) === value)
+  );
+}
+
+function modeSwitcherIconIsExact(
+  element: Element | null,
+  mode: EditMode,
+  size: number,
+  className: string,
+) {
+  if (
+    !element
+    || element.tagName.toLowerCase() !== "svg"
+    || !modeSwitcherElementAttributesAreExact(element, {
+      "aria-hidden": "true",
+      class: className,
+      fill: "none",
+      height: String(size),
+      stroke: "currentColor",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "stroke-width": "2",
+      viewBox: "0 0 24 24",
+      width: String(size),
+      xmlns: "http://www.w3.org/2000/svg",
+    })
+  ) {
+    return false;
+  }
+  const expectedNodes = MODE_SWITCHER_ICON_NODES[mode];
+  return (
+    element.children.length === expectedNodes.length
+    && expectedNodes.every((expected, index) => {
+      const child = element.children.item(index);
+      return Boolean(
+        child
+        && child.tagName.toLowerCase() === expected.tag
+        && child.children.length === 0
+        && child.textContent === ""
+        && modeSwitcherElementAttributesAreExact(child, expected.attributes)
+      );
+    })
+  );
+}
+
+function modeSwitcherChevronIsExact(element: Element | null) {
+  const path = element?.children.item(0);
+  return Boolean(
+    element
+    && element.tagName.toLowerCase() === "svg"
+    && modeSwitcherElementAttributesAreExact(element, {
+      "aria-hidden": "true",
+      class: "lucide lucide-chevron-down text-ink-4",
+      fill: "none",
+      height: "14",
+      stroke: "currentColor",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "stroke-width": "2",
+      viewBox: "0 0 24 24",
+      width: "14",
+      xmlns: "http://www.w3.org/2000/svg",
+    })
+    && element.children.length === 1
+    && path?.tagName.toLowerCase() === "path"
+    && path.children.length === 0
+    && path.textContent === ""
+    && modeSwitcherElementAttributesAreExact(path, { d: "m6 9 6 6 6-6" })
+  );
+}
+
+function modeSwitcherFocusTriggerIsExact(
+  publication: ModeSwitcherPublication,
+  initialDynamicAttributes: ReadonlyMap<string, string | null>,
+) {
+  const { trigger } = publication.dom;
+  const label = publication.render.rows.find((row) => row.value === publication.render.mode)?.label;
+  const allowedAttributes = new Set([
+    "aria-expanded",
+    "aria-haspopup",
+    "class",
+    "data-state",
+    "data-testid",
+    "id",
+    "type",
+  ]);
+  const initialDynamicCount = [...initialDynamicAttributes.values()].filter(
+    (value) => value !== null,
+  ).length;
+  const icon = trigger.children.item(0);
+  const labelElement = trigger.children.item(1);
+  const chevron = trigger.children.item(2);
+  return Boolean(
+    label
+    && trigger.attributes.length === allowedAttributes.size + initialDynamicCount
+    && Array.from(trigger.attributes).every((attribute) => (
+      allowedAttributes.has(attribute.name)
+      || initialDynamicAttributes.get(attribute.name) === attribute.value
+    ))
+    && [...initialDynamicAttributes].every(
+      ([name, value]) => trigger.getAttribute(name) === value,
+    )
+    && Boolean(trigger.id)
+    && trigger.getAttribute("aria-haspopup") === "menu"
+    && trigger.getAttribute("aria-expanded") === "false"
+    && trigger.getAttribute("data-state") === "closed"
+    && trigger.getAttribute("aria-controls") === null
+    && trigger.className === publication.render.triggerClassName
+    && trigger.children.length === 3
+    && modeSwitcherIconIsExact(
+      icon,
+      publication.render.mode,
+      15,
+      `lucide lucide-${publication.render.mode === "editing" ? "pen-line" : publication.render.mode === "suggesting" ? "message-square-plus" : "eye"}`,
+    )
+    && labelElement?.tagName === "SPAN"
+    && labelElement.attributes.length === 0
+    && labelElement.children.length === 0
+    && labelElement.textContent === label
+    && modeSwitcherChevronIsExact(chevron)
+  );
+}
+
+function modeSwitcherFocusSuccessorIsExact(
+  intent: ModeSwitcherFocusIntent,
+  publication: ModeSwitcherPublication,
+) {
+  const before = intent.source.render;
+  const after = publication.render;
+  return (
+    before.open
+    && !after.open
+    && after.visit === intent.visit
+    && after.session === before.session
+    && after.docId === before.docId
+    && after.role === before.role
+    && after.editable === before.editable
+    && intent.modes.includes(after.mode)
+    && after.setMode === before.setMode
+    && after.reader.url === before.reader.url
+    && after.reader.target === before.reader.target
+    && after.reader.features === before.reader.features
+    && after.rows.length === before.rows.length
+    && after.rows.every((row, index) => {
+      const previous = before.rows[index];
+      return Boolean(
+        previous
+        && row.index === previous.index
+        && row.value === previous.value
+        && row.label === previous.label
+        && row.description === previous.description
+        && row.eligible === previous.eligible
+      );
+    })
+    && publication.document === intent.source.document
+    && publication.dom.trigger === intent.target
+    && intent.target.ownerDocument === publication.document
+    && intent.guard.isExact(publication)
+    && publication.isExact()
+  );
+}
+
+function snapshotModeSwitcherDom(node: Node): ModeSwitcherDomSnapshot {
+  const ElementConstructor = node.ownerDocument?.defaultView?.Element;
+  const attributes = ElementConstructor && node instanceof ElementConstructor
+    ? Object.freeze(
+        Array.from(node.attributes)
+          .filter((attribute) => !MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(attribute.name))
+          .map((attribute) => Object.freeze([attribute.name, attribute.value] as const)),
+      )
+    : null;
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes,
+    children: Object.freeze(Array.from(node.childNodes, snapshotModeSwitcherDom)),
+  });
+}
+
+function modeSwitcherDomSnapshotMatches(snapshot: ModeSwitcherDomSnapshot): boolean {
+  const { node, attributes, children } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue || node.childNodes.length !== children.length) return false;
+  if (attributes) {
+    const ElementConstructor = node.ownerDocument?.defaultView?.Element;
+    if (!ElementConstructor || !(node instanceof ElementConstructor)) return false;
+    const current = Array.from(node.attributes).filter(
+      (attribute) => !MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(attribute.name),
+    );
+    if (current.length !== attributes.length) return false;
+    for (let index = 0; index < attributes.length; index++) {
+      const expected = attributes[index]!;
+      const actual = current[index];
+      if (!actual || actual.name !== expected[0] || actual.value !== expected[1]) return false;
+    }
+  }
+  for (let index = 0; index < children.length; index++) {
+    if (
+      node.childNodes.item(index) !== children[index]!.node
+      || !modeSwitcherDomSnapshotMatches(children[index]!)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function snapshotModeSwitcherPlacement(
+  roots: readonly Node[],
+): readonly ModeSwitcherPlacementSnapshot[] {
+  const visited = new Set<Node>();
+  const placements: ModeSwitcherPlacementSnapshot[] = [];
+  for (const root of roots) {
+    for (let node: Node | null = root; node && !visited.has(node); node = node.parentNode) {
+      visited.add(node);
+      placements.push(Object.freeze({
+        node,
+        parent: node.parentNode,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+      }));
+    }
+  }
+  return Object.freeze(placements);
+}
+
+function modeSwitcherPlacementMatches(snapshot: ModeSwitcherPlacementSnapshot) {
+  return (
+    snapshot.node.parentNode === snapshot.parent
+    && snapshot.node.previousSibling === snapshot.previousSibling
+    && snapshot.node.nextSibling === snapshot.nextSibling
+  );
+}
+
+function modeSwitcherFactsAreCurrent(render: ModeSwitcherRender) {
+  const { session } = render;
+  const editable = session.role === "owner" || session.role === "editor";
+  return (
+    render.visit.session === session
+    && session.docId === render.docId
+    && session.role === render.role
+    && editable === render.editable
+    && session.mode === render.mode
+    && session.setMode === render.setMode
+    && render.reader.url === `/p/${render.docId}`
+    && render.reader.target === "_blank"
+    && render.reader.features === "noopener"
+    && render.rows.length === 3
+    && render.rows[0]?.index === 0
+    && render.rows[0]?.value === "editing"
+    && render.rows[0]?.label === "Editing"
+    && render.rows[0]?.description === "Edit the document directly"
+    && render.rows[0]?.eligible === render.editable
+    && render.rows[1]?.index === 1
+    && render.rows[1]?.value === "suggesting"
+    && render.rows[1]?.label === "Suggesting"
+    && render.rows[1]?.description === "Edits become suggestions others can accept"
+    && render.rows[1]?.eligible === render.editable
+    && render.rows[2]?.index === 2
+    && render.rows[2]?.value === "viewing"
+    && render.rows[2]?.label === "Viewing"
+    && render.rows[2]?.description === "Read or print the final document"
+    && render.rows[2]?.eligible
+  );
+}
+
+function currentModeSwitcherDom(
+  render: ModeSwitcherRender,
+  owners: ModeSwitcherOwners,
+): ModeSwitcherDom | null {
+  const trigger = owners.trigger.element();
+  const ownerDocument = trigger?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    !trigger
+    || !ownerDocument
+    || !ownerWindow
+    || !(trigger instanceof ownerWindow.HTMLButtonElement)
+    || !trigger.isConnected
+    || trigger.type !== "button"
+    || trigger.disabled
+    || trigger.dataset.testid !== "mode-switcher"
+    || trigger.className !== render.triggerClassName
+    || trigger.textContent !== render.rows.find((row) => row.value === render.mode)?.label
+    || trigger.getAttribute("aria-haspopup") !== "menu"
+    || trigger.getAttribute("aria-expanded") !== String(render.open)
+    || trigger.getAttribute("data-state") !== (render.open ? "open" : "closed")
+  ) {
+    return null;
+  }
+
+  const content = owners.content.element();
+  const group = owners.group.element();
+  const rows = owners.rows.map((owner) => owner.element());
+  const reader = owners.reader.element();
+  if (!render.open) {
+    if (content || group || reader || rows.some(Boolean)) return null;
+    return Object.freeze({
+      trigger,
+      content: null,
+      group: null,
+      rows: Object.freeze([]),
+      separator: null,
+      reader: null,
+    });
+  }
+
+  const DivElement = ownerWindow.HTMLDivElement;
+  if (
+    !content
+    || !group
+    || !reader
+    || rows.some((row) => !row)
+    || !(content instanceof DivElement)
+    || !(group instanceof DivElement)
+    || !(reader instanceof DivElement)
+    || !content.isConnected
+    || content.ownerDocument !== ownerDocument
+    || group.ownerDocument !== ownerDocument
+    || reader.ownerDocument !== ownerDocument
+    || content.getAttribute("role") !== "menu"
+    || content.getAttribute("data-state") !== "open"
+    || !["start", "center", "end"].includes(content.getAttribute("data-align") ?? "")
+    || group.parentElement !== content
+    || group.getAttribute("role") !== "group"
+    || reader.parentElement !== content
+    || reader.getAttribute("role") !== "menuitem"
+    || reader.dataset.testid !== "mode-reader"
+    || reader.textContent !== "Open reader view"
+    || content.children.length !== 3
+    || content.firstElementChild !== group
+    || content.lastElementChild !== reader
+    || group.children.length !== render.rows.length
+  ) {
+    return null;
+  }
+  const separator = content.children.item(1);
+  if (
+    !(separator instanceof DivElement)
+    || separator.ownerDocument !== ownerDocument
+    || separator.getAttribute("role") !== "separator"
+    || group.nextElementSibling !== separator
+    || separator.nextElementSibling !== reader
+  ) {
+    return null;
+  }
+  const exactRows: HTMLDivElement[] = [];
+  for (const facts of render.rows) {
+    const row = rows[facts.index];
+    if (
+      !row
+      || !(row instanceof DivElement)
+      || !row.isConnected
+      || row.ownerDocument !== ownerDocument
+      || row.parentElement !== group
+      || group.children.item(facts.index) !== row
+      || row.getAttribute("role") !== "menuitemradio"
+      || row.getAttribute("aria-checked") !== String(facts.value === render.mode)
+      || (row.getAttribute("aria-disabled") === "true") !== !facts.eligible
+      || row.textContent !== `${facts.value === render.mode ? "✓" : ""}${facts.label}${facts.description}`
+    ) {
+      return null;
+    }
+    exactRows.push(row);
+  }
+  return Object.freeze({
+    trigger,
+    content,
+    group,
+    rows: Object.freeze(exactRows),
+    separator,
+    reader,
+  });
+}
+
+function modeSwitcherDomIsSame(current: ModeSwitcherDom, published: ModeSwitcherDom) {
+  return (
+    current.trigger === published.trigger
+    && current.content === published.content
+    && current.group === published.group
+    && current.separator === published.separator
+    && current.reader === published.reader
+    && current.rows.length === published.rows.length
+    && current.rows.every((row, index) => row === published.rows[index])
+  );
+}
+
+function isLiveNativeEvent(event: Event, document: Document) {
+  const EventConstructor = document.defaultView?.Event;
+  return Boolean(
+    EventConstructor
+    && event instanceof EventConstructor
+    && event.eventPhase !== EventConstructor.NONE
+    && event.target
+  );
+}
+
+function createModeSwitcherPresentation({
+  render,
+  coordinator,
+  owners,
+  commitOpen,
+}: {
+  render: ModeSwitcherRender;
+  coordinator: ModeSwitcherPublicationCoordinator;
+  owners: ModeSwitcherOwners;
+  commitOpen: (state: ModeSwitcherState) => void;
+}): ModeSwitcherPresentation {
+  const runtimeState: {
+    layoutPassed: boolean;
+    current: ModeSwitcherPublicationRuntime | null;
+    last: ModeSwitcherPublicationRuntime | null;
+  } = {
+    layoutPassed: false,
+    current: null,
+    last: null,
   };
-  const rows: readonly ModeSwitcherRowPublication[] = authority.rows.map((row, index) => {
+
+  const createRuntime = (dom: ModeSwitcherDom): ModeSwitcherPublicationRuntime => {
+    type Retirement = "element" | "layout" | "mutation" | "other";
+    const triggerParent = dom.trigger.parentNode;
+    const contentParent = dom.content?.parentNode ?? null;
+    if (!triggerParent || (dom.content && !contentParent)) {
+      throw new Error("Mode switcher controls must have connected parents");
+    }
+    const triggerSnapshot = snapshotModeSwitcherDom(dom.trigger);
+    const contentSnapshot = dom.content ? snapshotModeSwitcherDom(dom.content) : null;
+    const placements = snapshotModeSwitcherPlacement(
+      dom.content ? [dom.trigger, dom.content] : [dom.trigger],
+    );
+    const placementNodes = new Set(placements.map(({ node }) => node));
+    const expectedOwners = new Map<ModeSwitcherElementOwnerHandle, HTMLElement>([
+      [owners.trigger, dom.trigger],
+    ]);
+    if (render.open && dom.content && dom.group && dom.reader) {
+      expectedOwners.set(owners.content, dom.content);
+      expectedOwners.set(owners.group, dom.group);
+      for (const [index, row] of dom.rows.entries()) expectedOwners.set(owners.rows[index]!, row);
+      expectedOwners.set(owners.reader, dom.reader);
+    }
+    const detached = new Set<ModeSwitcherElementOwnerHandle>();
+    const reattached = new Set<ModeSwitcherElementOwnerHandle>();
+    let replayInvalid = false;
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let mutationSeen = false;
+    const MutationObserverConstructor = dom.trigger.ownerDocument.defaultView?.MutationObserver;
+    let observer: MutationObserver | null = null;
+
+    const relevantMutation = (record: MutationRecord) => {
+      if (
+        record.type === "attributes"
+        && record.attributeName
+        && MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(record.attributeName)
+      ) {
+        return false;
+      }
+      const roots = dom.content ? [dom.trigger, dom.content] : [dom.trigger];
+      if (roots.some((root) => record.target === root || root.contains(record.target))) return true;
+      if (record.type !== "childList") return false;
+      return (
+        (record.previousSibling !== null && placementNodes.has(record.previousSibling))
+        || (record.nextSibling !== null && placementNodes.has(record.nextSibling))
+        || [...record.addedNodes, ...record.removedNodes].some((node) =>
+          roots.some((root) => node === root || node.contains?.(root)))
+      );
+    };
+    function inspectMutations(records: readonly MutationRecord[]) {
+      if (records.some(relevantMutation)) {
+        mutationSeen = true;
+        retire("mutation");
+      }
+    }
+    const mutationHistoryIsClean = () => {
+      if (observer) inspectMutations(observer.takeRecords());
+      return !mutationSeen;
+    };
+    const recordElementChange = (
+      owner: ModeSwitcherElementOwnerHandle,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+    ) => {
+      const expected = expectedOwners.get(owner);
+      if (!expected || replayInvalid) return;
+      if (!retired) retire("element");
+      if (retirement !== "element") return;
+      if (element === null) {
+        if (
+          previous !== expected
+          || detached.has(owner)
+          || reattached.size > 0
+        ) {
+          replayInvalid = true;
+          return;
+        }
+        detached.add(owner);
+        return;
+      }
+      if (
+        previous !== null
+        || element !== expected
+        || detached.size !== expectedOwners.size
+        || !detached.has(owner)
+        || reattached.has(owner)
+      ) {
+        replayInvalid = true;
+        return;
+      }
+      reattached.add(owner);
+    };
+    const isExactElementReplay = () => (
+      retired
+      && retirement === "element"
+      && !replayInvalid
+      && detached.size === expectedOwners.size
+      && reattached.size === expectedOwners.size
+      && publication.isExact()
+    );
+    const publication: ModeSwitcherPublication = Object.freeze({
+      render,
+      document: dom.trigger.ownerDocument,
+      dom,
+      triggerParent,
+      contentParent,
+      triggerSnapshot,
+      contentSnapshot,
+      isExact: () => {
+        if (!mutationHistoryIsClean() || !modeSwitcherFactsAreCurrent(render)) return false;
+        const current = currentModeSwitcherDom(render, owners);
+        return Boolean(
+          current
+          && modeSwitcherDomIsSame(current, dom)
+          && dom.trigger.parentNode === triggerParent
+          && (dom.content ? dom.content.parentNode === contentParent : contentParent === null)
+          && placements.every(modeSwitcherPlacementMatches)
+          && modeSwitcherDomSnapshotMatches(triggerSnapshot)
+          && (!contentSnapshot || modeSwitcherDomSnapshotMatches(contentSnapshot))
+        );
+      },
+      recordElementChange,
+      isExactElementReplay,
+      retire: () => retire("other"),
+      dispose: () => {
+        observer?.disconnect();
+        observer = null;
+      },
+    });
+    function retire(reason: Retirement) {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      coordinator.retire(publication);
+      if (runtimeState.current?.publication === publication) runtimeState.current = null;
+      return true;
+    }
+    const runtime: ModeSwitcherPublicationRuntime = Object.freeze({
+      publication,
+      retireForElement: () => {
+        retire(mutationSeen ? "mutation" : "element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      isRetired: () => retired,
+      recordElementChange,
+      isExactElementReplay,
+      isExactLayoutReplay: () => (
+        retired
+        && retirement === "layout"
+        && publication.isExact()
+      ),
+    });
+    if (MutationObserverConstructor) {
+      observer = new MutationObserverConstructor(inspectMutations);
+      observer.observe(dom.trigger, { attributes: true, characterData: true, childList: true, subtree: true });
+      for (let ancestor: Node | null = dom.trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+        observer.observe(ancestor, { childList: true });
+      }
+      if (dom.content && contentParent) {
+        observer.observe(dom.content, { attributes: true, characterData: true, childList: true, subtree: true });
+        for (let ancestor: Node | null = dom.content.parentNode; ancestor; ancestor = ancestor.parentNode) {
+          observer.observe(ancestor, { childList: true });
+        }
+      }
+    }
+    return runtime;
+  };
+
+  const currentPublication = () => {
+    const runtime = runtimeState.current;
+    const publication = runtime?.publication;
+    return runtime
+      && publication
+      && !runtime.isRetired()
+      && coordinator.active() === publication
+      && publication.render === render
+      && publication.isExact()
+      ? publication
+      : null;
+  };
+  const close = (
+    publication: ModeSwitcherPublication,
+    returnFocus = true,
+    mode: EditMode = publication.render.mode,
+  ) => {
+    if (
+      !render.open
+      || coordinator.active() !== publication
+      || !publication.isExact()
+      || !publication.retire()
+    ) {
+      return false;
+    }
+    if (returnFocus) coordinator.scheduleFocus(publication, publication.dom.trigger, mode);
+    commitOpen(Object.freeze({ visit: render.visit, open: false }));
+    return true;
+  };
+  const onTriggerPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    const trigger = publication?.dom.trigger;
+    const ownerWindow = publication?.document.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !publication
+      || !trigger
+      || !ownerWindow
+      || event.type !== "pointerdown"
+      || event.currentTarget !== trigger
+      || event.defaultPrevented
+      || event.button !== 0
+      || event.ctrlKey
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== publication.document
+      || !trigger.contains(target)
+      || !(nativeEvent instanceof ownerWindow.PointerEvent)
+      || nativeEvent.type !== "pointerdown"
+      || nativeEvent.target !== target
+      || nativeEvent.defaultPrevented
+      || nativeEvent.button !== 0
+      || nativeEvent.ctrlKey
+      || !isLiveNativeEvent(nativeEvent, publication.document)
+      || !nativeEvent.composedPath().includes(trigger)
+      || !coordinator.claim([nativeEvent])
+    ) {
+      return;
+    }
+    coordinator.publishDisclosure(publication, !render.open, [nativeEvent]);
+  };
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!["Enter", " ", "ArrowDown"].includes(event.key)) return;
+    const publication = currentPublication();
+    const trigger = publication?.dom.trigger;
+    const ownerWindow = publication?.document.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !publication
+      || !trigger
+      || !ownerWindow
+      || event.type !== "keydown"
+      || event.currentTarget !== trigger
+      || event.defaultPrevented
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== publication.document
+      || !trigger.contains(target)
+      || !(nativeEvent instanceof ownerWindow.KeyboardEvent)
+      || nativeEvent.type !== "keydown"
+      || nativeEvent.target !== target
+      || nativeEvent.key !== event.key
+      || nativeEvent.defaultPrevented
+      || !isLiveNativeEvent(nativeEvent, publication.document)
+      || !nativeEvent.composedPath().includes(trigger)
+      || !coordinator.claim([nativeEvent])
+    ) {
+      return;
+    }
+    coordinator.publishDisclosure(
+      publication,
+      event.key === "ArrowDown" ? true : !render.open,
+      [nativeEvent],
+    );
+  };
+  const onOpenChange = (open: boolean) => {
+    const publication = currentPublication();
+    const intent = publication && coordinator.consumeDisclosure(publication, open);
+    if (!publication || !intent) return;
+    if (render.open === open) return;
+    if (open) {
+      if (!publication.retire()) return;
+      commitOpen(Object.freeze({ visit: render.visit, open: true }));
+    } else {
+      close(publication, intent.returnFocus);
+    }
+  };
+  const rows: readonly ModeSwitcherRowPublication[] = render.rows.map((row) => {
     const rowPublication: ModeSwitcherRowPublication = Object.freeze({
       ...row,
-      capture: captureRows[index]!,
+      capture: owners.rows[row.index]!.capture,
       onSelect: (event: Event) => {
         if (!row.eligible) return;
-        const source = event.currentTarget;
-        const claim = eventCapability(event, () => (
-          rowPublication === rows[row.index]
-          && connectedControl(
-            source instanceof HTMLDivElement ? source : null,
-            authority.dom.rows[row.index],
-          )
-        ));
-        if (claim) {
-          cells.selectionIntent = Object.freeze({
-            publication,
-            row: rowPublication,
-            claim,
-          });
+        const publication = currentPublication();
+        const element = publication?.dom.rows[row.index];
+        const ownerWindow = publication?.document.defaultView;
+        if (
+          !publication
+          || !element
+          || !ownerWindow
+          || rowPublication !== rows[row.index]
+          || !(event instanceof ownerWindow.CustomEvent)
+          || event.type !== "menu.itemSelect"
+          || event.currentTarget !== element
+          || event.target !== element
+          || event.defaultPrevented
+          || !isLiveNativeEvent(event, publication.document)
+          || !event.composedPath().includes(element)
+          || !coordinator.claim([event])
+        ) {
+          return;
         }
+        coordinator.publishSelection(publication, row, event);
       },
     });
     return rowPublication;
   });
-  const publication: ModeSwitcherPresentation = Object.freeze({
-    authority,
+  const onModeChange = (value: string) => {
+    const publication = currentPublication();
+    if (!publication) return;
+    const row = coordinator.consumeSelection(publication, value);
+    if (!row || !close(publication, true, row.value)) return;
+    render.setMode.call(render.session, row.value);
+  };
+  const onReaderSelect = (event: Event) => {
+    const publication = currentPublication();
+    const reader = publication?.dom.reader;
+    const ownerWindow = publication?.document.defaultView;
+    if (
+      !publication
+      || !reader
+      || !ownerWindow
+      || !(event instanceof ownerWindow.CustomEvent)
+      || event.type !== "menu.itemSelect"
+      || event.currentTarget !== reader
+      || event.target !== reader
+      || event.defaultPrevented
+      || !isLiveNativeEvent(event, publication.document)
+      || !event.composedPath().includes(reader)
+      || !coordinator.claim([event])
+      || !close(publication)
+    ) {
+      return;
+    }
+    const { url, target, features } = render.reader;
+    window.open(url, target, features);
+  };
+  const onEscapeKeyDown = (event: KeyboardEvent) => {
+    const publication = currentPublication();
+    const content = publication?.dom.content;
+    const ownerWindow = publication?.document.defaultView;
+    const target = event.target;
+    if (
+      !publication
+      || !content
+      || !ownerWindow
+      || !(event instanceof ownerWindow.KeyboardEvent)
+      || event.type !== "keydown"
+      || event.key !== "Escape"
+      || event.currentTarget !== publication.document
+      || event.defaultPrevented
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== publication.document
+      || !content.contains(target)
+      || !isLiveNativeEvent(event, publication.document)
+      || !event.composedPath().includes(content)
+      || !coordinator.claim([event])
+    ) {
+      return;
+    }
+    coordinator.publishDisclosure(publication, false, [event]);
+  };
+  const onOutside = (event: CustomEvent<{ originalEvent: Event }>) => {
+    const publication = currentPublication();
+    const content = publication?.dom.content;
+    const trigger = publication?.dom.trigger;
+    const ownerWindow = publication?.document.defaultView;
+    const originalEvent = event.detail?.originalEvent;
+    const target = originalEvent?.target;
+    const pointerOutside = ownerWindow
+      && originalEvent instanceof ownerWindow.PointerEvent
+      && event.type === "dismissableLayer.pointerDownOutside"
+      && originalEvent.type === "pointerdown";
+    const focusOutside = ownerWindow
+      && originalEvent instanceof ownerWindow.FocusEvent
+      && event.type === "dismissableLayer.focusOutside"
+      && originalEvent.type === "focusin";
+    if (
+      !publication
+      || !content
+      || !trigger
+      || !ownerWindow
+      || !(event instanceof ownerWindow.CustomEvent)
+      || event.defaultPrevented
+      || (!pointerOutside && !focusOutside)
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== publication.document
+      || event.target !== target
+      || event.currentTarget !== target
+      || !target.isConnected
+      || content.contains(target)
+      || trigger.contains(target)
+      || !isLiveNativeEvent(event, publication.document)
+      || !isLiveNativeEvent(originalEvent, publication.document)
+      || !event.composedPath().includes(target)
+      || !originalEvent.composedPath().includes(target)
+      || !coordinator.claim([event, originalEvent])
+    ) {
+      return;
+    }
+    const rightClick = originalEvent instanceof ownerWindow.PointerEvent
+      && (
+        originalEvent.button === 2
+        || (originalEvent.button === 0 && originalEvent.ctrlKey)
+      );
+    coordinator.publishDisclosure(publication, false, [event, originalEvent], !rightClick);
+  };
+
+  function establish() {
+    runtimeState.layoutPassed = true;
+    if (
+      (runtimeState.last && !runtimeState.last.isExactLayoutReplay())
+      || !modeSwitcherFactsAreCurrent(render)
+    ) {
+      return undefined;
+    }
+    const dom = currentModeSwitcherDom(render, owners);
+    if (!dom) return undefined;
+    const runtime = createRuntime(dom);
+    runtimeState.current = runtime;
+    runtimeState.last = runtime;
+    coordinator.publish(runtime.publication);
+    return runtime.retireForLayout;
+  }
+  const result: ModeSwitcherPresentation = Object.freeze({
     rows: Object.freeze(rows),
-    captureTrigger,
-    captureContent,
-    captureGroup,
-    captureReader,
+    captureTrigger: owners.trigger.capture,
+    captureContent: owners.content.capture,
+    captureGroup: owners.group.capture,
+    captureReader: owners.reader.capture,
     establish,
-    retire,
     onTriggerPointerDown,
     onTriggerKeyDown,
     onOpenChange,
@@ -1797,33 +2921,15 @@ function createModeSwitcherPresentation({
     onReaderSelect,
     onEscapeKeyDown,
     onOutside,
+    onCloseAutoFocus: (event: Event) => {
+      event.preventDefault();
+    },
   });
-  return publication;
-}
-
-function useModeSwitcherElement<T extends HTMLElement>(
-  cells: ModeSwitcherCells,
-  republish: () => void,
-) {
-  const [element, setElement] = useState<T | null>(null);
-  const attached = useRef<T | null>(null);
-  const capture = useCallback<React.RefCallback<T>>((next) => {
-    if (attached.current === next) return;
-    attached.current = next;
-    cells.active?.retire();
-    setElement(next);
-    republish();
-  }, [cells, republish]);
-  return [element, capture] as const;
+  return result;
 }
 
 function ModeSwitcherOpenCommit({ presentation }: { presentation: ModeSwitcherPresentation }) {
-  useLayoutEffect(() => {
-    presentation.establish();
-    return () => {
-      presentation.retire();
-    };
-  }, [presentation]);
+  useLayoutEffect(() => presentation.establish(), [presentation]);
   return null;
 }
 
@@ -1831,6 +2937,13 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
   const mode = useSessionValue(session, (s) => s.mode);
   const editable = session.role === "owner" || session.role === "editor";
   const [mount] = useState(() => Symbol("mode switcher"));
+  const [, setPublicationRevision] = useState(0);
+  const [coordinator] = useState(
+    () => new ModeSwitcherPublicationCoordinator(
+      () => setPublicationRevision((current) => current + 1),
+    ),
+  );
+  const [owners] = useState(() => createModeSwitcherOwners(coordinator));
   const visit = useMemo<ModeSwitcherVisit>(
     () => Object.freeze({ mount, session }),
     [mount, session],
@@ -1840,29 +2953,18 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     [visit],
   );
   const [storedState, setStoredState] = useState<ModeSwitcherState>(initialState);
-  const [cells] = useState<ModeSwitcherCells>(() => ({
-    active: null,
-    disclosureIntent: null,
-    selectionIntent: null,
-    focusIntent: null,
-    issuedEvents: new WeakSet(),
-  }));
-  const [, setDomRevision] = useState(0);
-  const republishDom = useCallback(() => setDomRevision((current) => current + 1), []);
-  const [triggerElement, captureTriggerElement] = useModeSwitcherElement<HTMLButtonElement>(cells, republishDom);
-  const [contentElement, captureContentElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
-  const [groupElement, captureGroupElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
-  const [editingElement, captureEditing] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
-  const [suggestingElement, captureSuggesting] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
-  const [viewingElement, captureViewing] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
-  const [readerElement, captureReaderElement] = useModeSwitcherElement<HTMLDivElement>(cells, republishDom);
   const state = storedState.visit === visit ? storedState : initialState;
-  const rows: readonly ModeSwitcherRowAuthority[] = Object.freeze([
+  const rows: readonly ModeSwitcherRowFacts[] = Object.freeze([
     Object.freeze({ index: 0, value: "editing", label: "Editing", description: "Edit the document directly", eligible: editable }),
     Object.freeze({ index: 1, value: "suggesting", label: "Suggesting", description: "Edits become suggestions others can accept", eligible: editable }),
     Object.freeze({ index: 2, value: "viewing", label: "Viewing", description: "Read or print the final document", eligible: true }),
   ]);
-  const authority: ModeSwitcherAuthority = Object.freeze({
+  const triggerClassName = cn(
+    "btn btn-sm gap-1.5 border",
+    mode === "suggesting" ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300" : "border-line-2 bg-surface text-ink-2 hover:bg-surface-2",
+  );
+  const render: ModeSwitcherRender = Object.freeze({
+    identity: Object.freeze({}),
     visit,
     session,
     docId: session.docId,
@@ -1871,13 +2973,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     mode,
     open: state.open,
     setMode: session.setMode,
-    dom: Object.freeze({
-      trigger: triggerElement,
-      content: contentElement,
-      group: groupElement,
-      rows: Object.freeze([editingElement, suggestingElement, viewingElement]),
-      reader: readerElement,
-    }),
+    triggerClassName,
     reader: Object.freeze({
       url: `/p/${session.docId}`,
       target: "_blank",
@@ -1886,22 +2982,13 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     rows,
   });
   const presentation = createModeSwitcherPresentation({
-    authority,
-    cells,
+    render,
+    coordinator,
+    owners,
     commitOpen: setStoredState,
-    captureTrigger: captureTriggerElement,
-    captureContent: captureContentElement,
-    captureGroup: captureGroupElement,
-    captureRows: Object.freeze([captureEditing, captureSuggesting, captureViewing]),
-    captureReader: captureReaderElement,
   });
 
-  useLayoutEffect(() => {
-    presentation.establish();
-    return () => {
-      presentation.retire();
-    };
-  }, [presentation]);
+  useLayoutEffect(() => presentation.establish(), [presentation]);
   const {
     captureTrigger,
     captureContent,
@@ -1914,6 +3001,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     onReaderSelect,
     onEscapeKeyDown,
     onOutside,
+    onCloseAutoFocus,
     rows: publishedRows,
   } = presentation;
 
@@ -1929,10 +3017,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
         <button
           ref={captureTrigger}
           type="button"
-          className={cn(
-            "btn btn-sm gap-1.5 border",
-            mode === "suggesting" ? "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300" : "border-line-2 bg-surface text-ink-2 hover:bg-surface-2",
-          )}
+          className={triggerClassName}
           onPointerDown={onTriggerPointerDown}
           onKeyDown={onTriggerKeyDown}
           data-testid="mode-switcher"
@@ -1950,6 +3035,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
           onEscapeKeyDown={onEscapeKeyDown}
           onPointerDownOutside={onOutside}
           onFocusOutside={onOutside}
+          onCloseAutoFocus={onCloseAutoFocus}
         >
           <MenuRadioGroup ref={captureGroup} value={mode} onValueChange={onModeChange}>
             {publishedRows.map((row) => (
