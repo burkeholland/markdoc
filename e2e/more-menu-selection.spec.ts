@@ -52,6 +52,16 @@ interface MoreMenuSelectionEvidence {
   };
 }
 
+interface MoreMenuInternalSelectionTraceRecord {
+  sequence: number;
+  boundary: string;
+  result: boolean;
+  firstFailed: string | null;
+  predicates: Record<string, boolean | null>;
+  identities: Record<string, number | null>;
+  state: Record<string, unknown>;
+}
+
 test("a trusted More-menu selection closes the menu and opens Version history", async ({ browser }) => {
   const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block" });
   await blockNonLoopbackTraffic(context);
@@ -73,9 +83,19 @@ test("a trusted More-menu selection closes the menu and opens Version history", 
 
       type DiagnosticWindow = typeof window & {
         __moreMenuSelectionEvidence?: MoreMenuSelectionEvidence;
+        __moreMenuInternalSelectionTrace?: {
+          records: MoreMenuInternalSelectionTraceRecord[];
+          identities: WeakMap<object, number>;
+          nextIdentity: number;
+        };
         __removeMoreMenuSelectionDiagnostic?: () => void;
       };
       const diagnosticWindow = window as DiagnosticWindow;
+      diagnosticWindow.__moreMenuInternalSelectionTrace = {
+        records: [],
+        identities: new WeakMap<object, number>(),
+        nextIdentity: 1,
+      };
       let click: MouseEvent | null = null;
       let selection: Event | null = null;
       let count = 0;
@@ -156,6 +176,7 @@ test("a trusted More-menu selection closes the menu and opens Version history", 
         window.removeEventListener("menu.itemSelect", onWindowSelect, { capture: true });
         item.removeEventListener("menu.itemSelect", onItemSelect, { capture: true });
         delete diagnosticWindow.__moreMenuSelectionEvidence;
+        delete diagnosticWindow.__moreMenuInternalSelectionTrace;
         delete diagnosticWindow.__removeMoreMenuSelectionDiagnostic;
       };
     });
@@ -198,6 +219,36 @@ test("a trusted More-menu selection closes the menu and opens Version history", 
         itemDefaultPrevented: false,
       },
     }));
+
+    const internalTrace = await page.evaluate(() =>
+      (window as typeof window & {
+        __moreMenuInternalSelectionTrace?: {
+          records: MoreMenuInternalSelectionTraceRecord[];
+        };
+      }).__moreMenuInternalSelectionTrace?.records);
+    console.log(`[More-menu internal selection trace] ${JSON.stringify(internalTrace)}`);
+    expect(internalTrace).toBeDefined();
+    expect(internalTrace!.length).toBeGreaterThan(0);
+    expect(internalTrace!.map(({ sequence }) => sequence)).toEqual(
+      internalTrace!.map((_, index) => index),
+    );
+    for (const record of internalTrace!) {
+      expect(record).toEqual(expect.objectContaining({
+        sequence: expect.any(Number),
+        boundary: expect.any(String),
+        result: expect.any(Boolean),
+        firstFailed: record.firstFailed,
+        predicates: expect.any(Object),
+        identities: expect.any(Object),
+        state: expect.any(Object),
+      }));
+      if (record.firstFailed !== null) {
+        expect(record.predicates[record.firstFailed]).toBe(false);
+      }
+      for (const identity of Object.values(record.identities)) {
+        expect(identity === null || (Number.isInteger(identity) && identity > 0)).toBe(true);
+      }
+    }
 
     await expect(menu).toHaveCount(0);
     await expect(page.getByTestId("versions-panel")).toBeVisible();
