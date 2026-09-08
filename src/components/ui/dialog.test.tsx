@@ -2,6 +2,7 @@
 import {
   StrictMode,
   useLayoutEffect,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -142,6 +143,19 @@ function ControlledDialog({
 function LayoutCapture({ capture }: { capture: () => void }) {
   useLayoutEffect(capture, [capture]);
   return null;
+}
+
+function RemoveLeadingGuardOnRefReplay() {
+  const removed = useRef(false);
+  return (
+    <span
+      ref={() => () => {
+        if (removed.current) return;
+        removed.current = true;
+        document.querySelector<HTMLElement>("[data-radix-focus-guard]")?.remove();
+      }}
+    />
+  );
 }
 
 beforeEach(() => {
@@ -829,6 +843,88 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(cleanClosed).toHaveBeenCalledOnce();
   });
+
+  it("rejects a focus guard removed by child ref cleanup after replay preparation", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
+      <StrictMode>
+        <ControlledDialog key={rootKey} title="Child cleanup" onClosed={onClosed}>
+          {tainted && <RemoveLeadingGuardOnRefReplay />}
+          <input data-testid="child-cleanup-input" autoFocus />
+        </ControlledDialog>
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", true, taintedClosed));
+
+    fireEvent.click(closeButton());
+    fireEvent.keyDown(screen.getByTestId("child-cleanup-input"), {
+      key: "Escape",
+      code: "Escape",
+    });
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Child cleanup");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", false, cleanClosed)));
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
+  });
+
+  it.each(["leading", "trailing"] as const)(
+    "rejects moving the %s focus guard to the opposite body edge",
+    async (edge) => {
+      const onClosed = vi.fn();
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog title={`${edge} guard swap`} onClosed={onClosed} />
+        </StrictMode>,
+      );
+      const guards = document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]");
+      const guard = edge === "leading" ? guards[0] : guards[guards.length - 1];
+
+      act(() => {
+        guard.remove();
+        if (edge === "leading") document.body.append(guard);
+        else document.body.prepend(guard);
+      });
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(`${edge} guard swap`);
+      expect(onClosed).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["leading", "trailing"] as const)(
+    "preserves %s focus-guard repositioning at its original body edge",
+    async (edge) => {
+      const onClosed = vi.fn();
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog title={`${edge} guard reposition`} onClosed={onClosed} />
+        </StrictMode>,
+      );
+      const guards = document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]");
+      const guard = edge === "leading" ? guards[0] : guards[guards.length - 1];
+
+      act(() => {
+        guard.remove();
+        if (edge === "leading") document.body.prepend(guard);
+        else document.body.append(guard);
+      });
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onClosed).toHaveBeenCalledOnce();
+    },
+  );
 
   it("finishes an authenticated close through fresh controlled callback identities", async () => {
     const onClosed = vi.fn();

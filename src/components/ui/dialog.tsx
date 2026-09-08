@@ -356,10 +356,12 @@ class MutationJournal {
   readonly #onInvalid: () => void;
   readonly #records: MutationRecord[] = [];
   readonly #attributeValues = new WeakMap<Element, Map<string, string | null>>();
-  readonly #focusGuards = new Set<Node>();
+  readonly #focusGuards = new Map<Node, "leading" | "trailing">();
+  readonly #expectedReplayGuardTeardown = new Set<Node>();
   readonly #nestedRoots = new Set<Node>();
   #processed = 0;
   #replayPreparation: object | null = null;
+  #validatingReplayTeardown = false;
   #closing = false;
   #replaying = false;
   #invalid = false;
@@ -374,9 +376,14 @@ class MutationJournal {
     this.#description = elements.description;
     this.#onInvalid = onInvalid;
     this.#initialBodyPointerEvents = this.#ownerDocument.body.style.pointerEvents;
+    const leadingGuard = this.#ownerDocument.body.firstElementChild;
+    const trailingGuard = this.#ownerDocument.body.lastElementChild;
     this.#ownerDocument
       .querySelectorAll("[data-radix-focus-guard]")
-      .forEach((guard) => this.#focusGuards.add(guard));
+      .forEach((guard) => {
+        if (guard === leadingGuard) this.#focusGuards.set(guard, "leading");
+        else if (guard === trailingGuard) this.#focusGuards.set(guard, "trailing");
+      });
     const portalParent = elements.content.parentNode;
     if (!portalParent || (elements.overlay && elements.overlay.parentNode !== portalParent)) {
       throw new Error("Cannot publish dialog roots without their shared portal parent");
@@ -439,6 +446,10 @@ class MutationJournal {
     );
   }
 
+  #allowsReplayTeardown() {
+    return this.#replaying || this.#validatingReplayTeardown;
+  }
+
   #isAllowedAttribute(record: MutationRecord, index: number) {
     const target = record.target;
     const name = record.attributeName;
@@ -485,7 +496,7 @@ class MutationJournal {
       && (((name === "aria-labelledby" && next === this.#title.id)
           || (name === "aria-describedby" && next === this.#description.id))
         && record.oldValue === null
-        || (this.#replaying
+        || (this.#allowsReplayTeardown()
           && ((name === "aria-labelledby" && record.oldValue === this.#title.id)
             || (name === "aria-describedby" && record.oldValue === this.#description.id))
           && next === null))
@@ -511,7 +522,9 @@ class MutationJournal {
       && (target === this.#overlay
         || (!this.#isOwned(target) && !target.contains(this.#content)))
       && ((record.oldValue === null && next === "true")
-        || ((this.#closing || this.#replaying) && record.oldValue === "true" && next === null))
+        || ((this.#closing || this.#allowsReplayTeardown())
+          && record.oldValue === "true"
+          && next === null))
     ) {
       allowed = true;
     } else if (target === this.#ownerDocument.body && name === "data-scroll-locked") {
@@ -522,7 +535,7 @@ class MutationJournal {
         && Number.isInteger(after)
         && before >= 0
         && ((!this.#closing && after === before + 1)
-          || ((this.#closing || this.#replaying) && after === before - 1))
+          || ((this.#closing || this.#allowsReplayTeardown()) && after === before - 1))
       );
     } else if ((target === this.#overlay || target === this.#content) && name === "style") {
       const before = styleParts(this.#ownerDocument, record.oldValue);
@@ -531,7 +544,7 @@ class MutationJournal {
         before.rest === after.rest
         && (((before.pointerEvents === "" || before.pointerEvents === "none")
             && after.pointerEvents === "auto")
-          || ((this.#closing || this.#replaying)
+          || ((this.#closing || this.#allowsReplayTeardown())
             && before.pointerEvents === "auto"
             && (after.pointerEvents === "" || after.pointerEvents === "none")))
       );
@@ -541,7 +554,7 @@ class MutationJournal {
       allowed = (
         before.rest === after.rest
         && ((before.pointerEvents === this.#initialBodyPointerEvents && after.pointerEvents === "none")
-          || ((this.#closing || this.#replaying)
+          || ((this.#closing || this.#allowsReplayTeardown())
             && before.pointerEvents === "none"
             && after.pointerEvents === this.#initialBodyPointerEvents))
       );
@@ -550,7 +563,91 @@ class MutationJournal {
     return allowed;
   }
 
-  #isReaddedLater(index: number, target: Node, node: Node) {
+  #isGuardMutationAtRole(record: MutationRecord, role: "leading" | "trailing") {
+    return role === "leading"
+      ? record.previousSibling === null
+      : record.nextSibling === null;
+  }
+
+  #hasFocusGuardsAtBothEdges() {
+    let leading: Node | null = null;
+    let trailing: Node | null = null;
+    for (const [guard, role] of this.#focusGuards) {
+      if (role === "leading") {
+        if (leading !== null) return false;
+        leading = guard;
+      } else {
+        if (trailing !== null) return false;
+        trailing = guard;
+      }
+    }
+    return (
+      leading !== null
+      && trailing !== null
+      && this.#ownerDocument.body.firstElementChild === leading
+      && this.#ownerDocument.body.lastElementChild === trailing
+    );
+  }
+
+  #trackFocusGuardAdditions(record: MutationRecord, added: readonly Node[]) {
+    for (const node of added) {
+      const existingRole = this.#focusGuards.get(node);
+      const role = record.previousSibling === null
+        ? "leading"
+        : record.nextSibling === null
+          ? "trailing"
+          : null;
+      if (
+        role === null
+        || (existingRole !== undefined && existingRole !== role)
+        || [...this.#focusGuards].some(([guard, guardRole]) =>
+          guard !== node && guardRole === role)
+      ) {
+        return false;
+      }
+      this.#focusGuards.set(node, role);
+    }
+    return true;
+  }
+
+  #prepareExpectedReplayGuardTeardown() {
+    this.#expectedReplayGuardTeardown.clear();
+    const candidates = this.#records.slice(-2);
+    if (
+      candidates.length !== 2
+      || this.#focusGuards.size !== 2
+      || !candidates.every((record) => (
+        record.type === "childList"
+        && record.target === this.#ownerDocument.body
+        && record.addedNodes.length === 0
+        && record.removedNodes.length === 1
+      ))
+    ) {
+      return;
+    }
+    const roles = new Set<"leading" | "trailing">();
+    for (const record of candidates) {
+      const node = record.removedNodes[0];
+      const role = this.#focusGuards.get(node);
+      if (
+        role === undefined
+        || roles.has(role)
+        || !this.#isGuardMutationAtRole(record, role)
+      ) {
+        this.#expectedReplayGuardTeardown.clear();
+        return;
+      }
+      roles.add(role);
+      this.#expectedReplayGuardTeardown.add(node);
+    }
+  }
+
+  #isReaddedLater(
+    index: number,
+    target: Node,
+    node: Node,
+    role: "leading" | "trailing",
+  ) {
     for (let cursor = index + 1; cursor < this.#records.length; cursor++) {
       const candidate = this.#records[cursor];
       if (
@@ -559,6 +656,7 @@ class MutationJournal {
         && candidate.removedNodes.length === 0
         && [...candidate.addedNodes].every(isFocusGuard)
         && [...candidate.addedNodes].includes(node)
+        && this.#isGuardMutationAtRole(candidate, role)
       ) {
         return true;
       }
@@ -576,8 +674,7 @@ class MutationJournal {
       && removed.length === 0
       && added.every(isFocusGuard)
     ) {
-      added.forEach((node) => this.#focusGuards.add(node));
-      return true;
+      return this.#trackFocusGuardAdditions(record, added);
     }
     if (
       record.target === this.#portalParent
@@ -610,11 +707,22 @@ class MutationJournal {
       && added.length === 0
       && removed.every((node) => this.#focusGuards.has(node))
     ) {
-      if (removed.every((node) => (
-        (node === this.#ownerDocument.body.firstElementChild
-          || node === this.#ownerDocument.body.lastElementChild)
-        && this.#isReaddedLater(index, record.target, node)
-      ))) {
+      if (
+        this.#validatingReplayTeardown
+        && removed.every((node) => this.#expectedReplayGuardTeardown.delete(node))
+      ) {
+        removed.forEach((node) => this.#focusGuards.delete(node));
+        return true;
+      }
+      if (removed.every((node) => {
+        const role = this.#focusGuards.get(node);
+        return role !== undefined && this.#isReaddedLater(
+          index,
+          record.target,
+          node,
+          role,
+        );
+      }) && this.#hasFocusGuardsAtBothEdges()) {
         return true;
       }
       if (!this.#closing && !this.#replaying && this.#nestedRoots.size === 0) return false;
@@ -706,6 +814,7 @@ class MutationJournal {
         this.#processed = 0;
         this.#replayPreparation = null;
         this.#focusGuards.clear();
+        this.#expectedReplayGuardTeardown.clear();
         this.#nestedRoots.clear();
         this.#onInvalid();
         return;
@@ -733,12 +842,17 @@ class MutationJournal {
     if (this.#released || this.#invalid) return false;
     const prepared = this.#replayPreparation !== null;
     this.#replayPreparation = null;
-    if (!prepared) {
-      this.#collectRecords();
-      if (this.#hasPendingCloseTransition()) return false;
+    this.#collectRecords();
+    if (this.#hasPendingCloseTransition()) return false;
+    this.#validatingReplayTeardown = prepared;
+    if (prepared) this.#prepareExpectedReplayGuardTeardown();
+    try {
       this.#process();
-      if (this.#released || this.#invalid) return false;
+    } finally {
+      this.#validatingReplayTeardown = false;
+      this.#expectedReplayGuardTeardown.clear();
     }
+    if (this.#released || this.#invalid) return false;
     this.#replaying = true;
     return true;
   }
@@ -769,6 +883,7 @@ class MutationJournal {
     this.#records.length = 0;
     this.#replayPreparation = null;
     this.#focusGuards.clear();
+    this.#expectedReplayGuardTeardown.clear();
     this.#nestedRoots.clear();
     this.#released = true;
   }
