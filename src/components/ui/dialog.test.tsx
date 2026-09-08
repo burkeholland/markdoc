@@ -11,7 +11,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Dialog, DialogClose, DialogContent } from "./dialog";
+import { Dialog, DialogClose, DialogContent, DialogTrigger } from "./dialog";
 import { lazyOnFirstUse } from "@/components/editor/lazy-on-first-use";
 
 vi.mock("next/dynamic", async () => {
@@ -242,6 +242,77 @@ describe("DialogContent exact Strict Mode publication", () => {
     },
   );
 
+  it("bridges only the current Radix Close chain to its parent authority", () => {
+    const staleParent = vi.fn();
+    const currentParent = vi.fn();
+    const acceptedCurrent = vi.fn();
+    let authorizedClose: HTMLButtonElement | null = null;
+    const tree = (visit: "A" | "B") => (
+      <StrictMode>
+        <Dialog
+          key={visit}
+          open
+          onOpenChange={visit === "A"
+            ? staleParent
+            : (open) => {
+                currentParent(open);
+                if (authorizedClose === closeButton()) acceptedCurrent(open);
+              }}
+        >
+          <DialogContent title={`Close ${visit}`}>
+            <input autoFocus />
+          </DialogContent>
+        </Dialog>
+      </StrictMode>
+    );
+    const view = renderDirect(tree("A"));
+    const staleElement = closeButton();
+    const staleClose = captureClick(staleElement);
+
+    act(() => view.root.render(tree("B")));
+    const currentElement = closeButton();
+    const currentClose = captureClick(currentElement);
+    const capturedEvent = (currentTarget: HTMLButtonElement) => ({
+      currentTarget,
+      defaultPrevented: false,
+    }) as unknown as ReactMouseEvent<HTMLButtonElement>;
+
+    act(() => {
+      staleClose(capturedEvent(currentElement));
+      currentClose(capturedEvent(staleElement));
+    });
+    expect(staleParent).not.toHaveBeenCalled();
+    expect(acceptedCurrent).not.toHaveBeenCalled();
+
+    authorizedClose = currentElement;
+    act(() => currentClose(capturedEvent(currentElement)));
+    expect(currentParent).toHaveBeenCalledOnce();
+    expect(acceptedCurrent).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("completes an uncontrolled current Radix Close bridge", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <Dialog defaultOpen>
+          <DialogContent title="Uncontrolled bridge" onClosed={onClosed}>
+            <input autoFocus />
+          </DialogContent>
+        </Dialog>
+      </StrictMode>,
+    );
+    const currentClose = closeButton();
+
+    act(() => captureClick(currentClose)({
+      currentTarget: currentClose,
+      defaultPrevented: false,
+    } as unknown as ReactMouseEvent<HTMLButtonElement>));
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
   it("lets an expanded combobox consume the first Escape before the exact second Escape closes", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
@@ -388,6 +459,41 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(opener).toHaveFocus();
     expect(closedA).not.toHaveBeenCalled();
     expect(closedB).toHaveBeenCalledOnce();
+  });
+
+  it("clears the exact opening-recovery timer at the synchronous replacement boundary", () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(window, "setTimeout");
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
+    const onOpenChange = vi.fn();
+    const tree = (visit: "A" | "B") => (
+      <StrictMode>
+        <Dialog open onOpenChange={onOpenChange}>
+          <DialogContent key={visit} title={`Recovery ${visit}`}>
+            <input data-testid={`recovery-${visit}`} autoFocus />
+          </DialogContent>
+        </Dialog>
+      </StrictMode>
+    );
+    const view = renderDirect(tree("A"));
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const callsBeforeFocusOut = timeout.mock.calls.length;
+
+    fireEvent.focusOut(screen.getByTestId("recovery-A"), { relatedTarget: outside });
+    const timerIndex = timeout.mock.calls.findIndex(
+      (call, index) => index >= callsBeforeFocusOut && call[1] === 0,
+    );
+    expect(timerIndex).toBeGreaterThanOrEqual(callsBeforeFocusOut);
+    const timer = timeout.mock.results[timerIndex]!.value;
+    const staleCallback = timeout.mock.calls[timerIndex]![0] as () => void;
+
+    act(() => view.root.render(tree("B")));
+    expect(clearTimeout).toHaveBeenCalledWith(timer);
+    expect(screen.getByTestId("recovery-B")).toHaveFocus();
+
+    act(staleCallback);
+    expect(screen.getByTestId("recovery-B")).toHaveFocus();
   });
 
   it.each(["subtree", "immediate placement", "higher ancestor"] as const)(
@@ -629,6 +735,26 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(screen.getByTestId("non-modal-input")).toHaveFocus();
 
     fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("authenticates a current uncontrolled non-modal DialogTrigger close", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <Dialog defaultOpen modal={false}>
+          <DialogTrigger type="reset">Toggle dialog</DialogTrigger>
+          <DialogContent title="Uncontrolled non-modal" onClosed={onClosed}>
+            <input autoFocus />
+          </DialogContent>
+        </Dialog>
+      </StrictMode>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle dialog" }));
     await flushTasks();
 
     expect(screen.queryByRole("dialog")).toBeNull();

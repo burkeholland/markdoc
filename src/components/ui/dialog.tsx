@@ -148,6 +148,7 @@ interface DialogReplay {
 interface PublicationRuntime {
   readonly publication: DialogPublication;
   readonly publish: () => boolean;
+  readonly scheduleOpeningRecovery: () => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly noteRef: (
@@ -162,6 +163,12 @@ interface PublicationRuntime {
 }
 
 interface PendingDismiss {
+  readonly publication: DialogPublication;
+  readonly root: DialogRootAuthority;
+  readonly action: object;
+}
+
+interface ParentDismissBridge {
   readonly publication: DialogPublication;
   readonly root: DialogRootAuthority;
   readonly action: object;
@@ -745,12 +752,12 @@ function rootAuthoritiesMatch(previous: DialogRootAuthority, current: DialogRoot
 function rootAuthoritiesMatchExceptOpen(previous: DialogRootAuthority, current: DialogRootAuthority) {
   return (
     previous.mount === current.mount
-    && previous.controlled
-    && current.controlled
+    && previous.controlled === current.controlled
     && previous.actualOpen
     && !current.actualOpen
-    && previous.open === true
-    && current.open === false
+    && (previous.controlled
+      ? previous.open === true && current.open === false
+      : previous.open === undefined && current.open === undefined)
     && previous.defaultOpen === current.defaultOpen
     && previous.modal === current.modal
     && previous.setUncontrolledOpen === current.setUncontrolledOpen
@@ -1015,6 +1022,44 @@ function exactNativeOwnedCloseClick(
     : null;
 }
 
+function exactNativeTriggerCloseClick(
+  event: React.MouseEvent<HTMLElement>,
+  publication: DialogPublication,
+) {
+  const ownerDocument = publication.ownerDocument;
+  const view = ownerDocument.defaultView;
+  const trigger = event?.currentTarget;
+  if (!view || !(trigger instanceof view.HTMLElement)) return null;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  const path = nativeEvent?.composedPath?.() ?? [];
+  return (
+    nativeEvent instanceof view.MouseEvent
+    && nativeEvent.type === "click"
+    && nativeEvent.button === 0
+    && nativeEvent.eventPhase !== view.Event.NONE
+    && nativeEvent.bubbles
+    && nativeEvent.cancelable
+    && !nativeEvent.defaultPrevented
+    && event.type === "click"
+    && event.button === 0
+    && event.bubbles
+    && !event.defaultPrevented
+    && (!(trigger instanceof view.HTMLButtonElement) || !trigger.disabled)
+    && trigger.ownerDocument === ownerDocument
+    && trigger.isConnected
+    && !publication.elements.content.contains(trigger)
+    && nativeEvent.target === target
+    && isNodeFromDocument(target, ownerDocument)
+    && trigger.contains(target)
+    && path[0] === target
+    && path.includes(trigger)
+    && path.includes(ownerDocument)
+  )
+    ? nativeEvent
+    : null;
+}
+
 function exactEscape(event: EscapeKeyEvent, publication: DialogPublication) {
   const ownerDocument = publication.ownerDocument;
   const view = ownerDocument.defaultView;
@@ -1044,6 +1089,28 @@ function exactEscape(event: EscapeKeyEvent, publication: DialogPublication) {
   )
     ? event
     : null;
+}
+
+function bridgeableEscape(event: EscapeKeyEvent, publication: DialogPublication) {
+  const ownerDocument = publication.ownerDocument;
+  const view = ownerDocument.defaultView;
+  const target = event?.target;
+  return Boolean(
+    view
+    && event instanceof view.KeyboardEvent
+    && event.type === "keydown"
+    && event.key === "Escape"
+    && event.bubbles
+    && event.cancelable
+    && !event.defaultPrevented
+    && isNodeFromDocument(target, ownerDocument)
+    && publication.elements.content.contains(target)
+    && contentSnapshotContains(
+      publication.contentDom,
+      publication.elements.header,
+      target,
+    )
+  );
 }
 
 function exactOutsideFocus(event: FocusOutsideEvent, publication: DialogPublication) {
@@ -1160,6 +1227,7 @@ class DialogCoordinator {
   #successorOf: DialogPublication | null = null;
   #replay: DialogReplay | null = null;
   #pendingDismiss: PendingDismiss | null = null;
+  #parentDismissBridge: ParentDismissBridge | null = null;
   #transition: CloseTransition | null = null;
   #retired = new WeakSet<DialogPublication>();
   #claimedReactEvents = new WeakSet<object>();
@@ -1205,11 +1273,16 @@ class DialogCoordinator {
       this.#replay = null;
       this.#transition = null;
       this.#pendingDismiss = null;
+      this.#parentDismissBridge = null;
     });
   }
 
   active() {
     return this.#active;
+  }
+
+  ownsRoot(authority: DialogRootAuthority) {
+    return this.#root === authority && authority.mount === this.#mount;
   }
 
   replay() {
@@ -1275,6 +1348,7 @@ class DialogCoordinator {
     this.#active = publication;
     this.#successorOf = null;
     this.#pendingDismiss = null;
+    this.#parentDismissBridge = null;
     this.#knownCloseActions.set(publication.actions.closeAutoFocus, publication);
     this.#knownAutoFocusActions.set(publication.actions.openAutoFocus, publication);
     return true;
@@ -1290,6 +1364,9 @@ class DialogCoordinator {
     }
     if (this.#pendingDismiss?.publication === publication && !this.#transition) {
       this.#pendingDismiss = null;
+    }
+    if (this.#parentDismissBridge?.publication === publication) {
+      this.#parentDismissBridge = null;
     }
     return true;
   }
@@ -1407,20 +1484,66 @@ class DialogCoordinator {
       root: publication.authority.root,
       action,
     };
+    this.#parentDismissBridge = null;
     return true;
   }
 
-  dismissFromManagedAction(
+  stageCloseBridge(
     publication: DialogPublication,
     action: object,
-    reactEvent: object,
-    nativeEvent: Event,
+    event: React.MouseEvent<HTMLButtonElement>,
   ) {
-    if (!this.beginDismiss(publication, action, reactEvent, nativeEvent)) return false;
-    const root = publication.authority.root;
-    if (!root.controlled) root.setUncontrolledOpen(false);
-    root.onOpenChange?.(false);
+    if (
+      !this.isCurrent(publication)
+      || publication.authority.root !== this.#root
+      || action !== publication.actions.closeClick
+      || event?.currentTarget !== publication.elements.close
+      || event.defaultPrevented
+      || !publication.exactOpenDomMatches()
+    ) {
+      return false;
+    }
+    this.#parentDismissBridge = {
+      publication,
+      root: publication.authority.root,
+      action,
+    };
     return true;
+  }
+
+  stageEscapeBridge(
+    publication: DialogPublication,
+    action: object,
+    event: EscapeKeyEvent,
+  ) {
+    if (
+      !this.isCurrent(publication)
+      || publication.authority.root !== this.#root
+      || action !== publication.actions.escape
+      || !bridgeableEscape(event, publication)
+      || !publication.exactOpenDomMatches()
+    ) {
+      return false;
+    }
+    this.#parentDismissBridge = {
+      publication,
+      root: publication.authority.root,
+      action,
+    };
+    return true;
+  }
+
+  consumeParentDismissBridge(authority: DialogRootAuthority) {
+    const bridge = this.#parentDismissBridge;
+    this.#parentDismissBridge = null;
+    return Boolean(
+      bridge
+      && bridge.root === authority
+      && (bridge.action === bridge.publication.actions.closeClick
+        || bridge.action === bridge.publication.actions.escape)
+      && this.isCurrent(bridge.publication)
+      && bridge.publication.exactOpenDomMatches()
+    );
   }
 
   claimInteraction(
@@ -1451,6 +1574,7 @@ class DialogCoordinator {
       return false;
     }
     this.#pendingDismiss = null;
+    this.#parentDismissBridge = null;
     const transition: CloseTransition = {
       source: pending.publication,
       authority: pending.publication.authority,
@@ -1613,10 +1737,14 @@ function createRootPresentation(
 ): DialogRootPresentation {
   const onOpenChange = (open: boolean) => {
     if (typeof open !== "boolean" || open === authority.actualOpen) return;
-    if (!coordinator.requestOpenChange(authority, open)) {
-      if (!open && authority.controlled) authority.onOpenChange?.(false);
-      return;
-    }
+    const accepted = coordinator.requestOpenChange(authority, open);
+    const bridged = (
+      !accepted
+      && !open
+      && coordinator.ownsRoot(authority)
+      && coordinator.consumeParentDismissBridge(authority)
+    );
+    if (!accepted && !bridged) return;
     if (!authority.controlled) authority.setUncontrolledOpen(open);
     authority.onOpenChange?.(open);
   };
@@ -1684,12 +1812,33 @@ export function Dialog({
   );
 }
 
-export const DialogTrigger = RadixDialog.Trigger;
 export const DialogPortal = RadixDialog.Portal;
 export const DialogOverlay = RadixDialog.Overlay;
 export const DialogTitle = RadixDialog.Title;
 /** Unstyled Radix content for drawers and sheets; `DialogContent` below is the centred card. */
 export const DialogPrimitiveContent = RadixDialog.Content;
+
+export const DialogTrigger = React.forwardRef<
+  React.ElementRef<typeof RadixDialog.Trigger>,
+  React.ComponentPropsWithoutRef<typeof RadixDialog.Trigger>
+>(function DialogTrigger({ onClick, ...props }, forwardedRef) {
+  const inherited = React.useContext(DialogContext);
+  const [action] = React.useState(() => Object.freeze({
+    identity: Symbol("dialog-owned-trigger"),
+  }));
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    onClick?.(event);
+    if (event.defaultPrevented) return;
+    const coordinator = inherited?.coordinator;
+    const publication = coordinator?.active();
+    if (!coordinator || !publication || !publication.authority.root.actualOpen) return;
+    const nativeEvent = exactNativeTriggerCloseClick(event, publication);
+    if (nativeEvent) {
+      coordinator.beginDismiss(publication, action, event, nativeEvent);
+    }
+  };
+  return <RadixDialog.Trigger {...props} ref={forwardedRef} onClick={handleClick} />;
+});
 
 export const DialogClose = React.forwardRef<
   React.ElementRef<typeof RadixDialog.Close>,
@@ -1779,8 +1928,10 @@ function createPublicationRuntime(
     && contentDomMatches(contentDom, elements.header)
   );
   const detachOpening = () => {
-    if (publication.openingTimer !== null) {
+    const timer = publication.openingTimer;
+    if (timer !== null) {
       publication.openingTimer = null;
+      publication.ownerDocument.defaultView?.clearTimeout(timer);
     }
     if (publication.listenerAttached) {
       publication.listenerAttached = false;
@@ -1845,6 +1996,12 @@ function createPublicationRuntime(
       }
       publication.listenerAttached = true;
       elements.content.addEventListener("focusout", onFocusOut);
+      return true;
+    },
+    scheduleOpeningRecovery: () => {
+      if (!publication.opening || publication.openingTimer !== null) return;
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow) return;
       const recoverOpeningFocus = () => {
         const timer = publication.openingTimer;
         if (timer === null || !coordinator.claimOpeningTimer(publication, timer)) return;
@@ -1862,9 +2019,7 @@ function createPublicationRuntime(
         }
         (firstTabbable(elements.body) ?? elements.content).focus({ preventScroll: true });
       };
-      const timer = publication.ownerDocument.defaultView?.setTimeout(recoverOpeningFocus, 0) ?? null;
-      publication.openingTimer = timer;
-      return true;
+      publication.openingTimer = ownerWindow.setTimeout(recoverOpeningFocus, 0);
     },
     retireForElement: () => {
       retire("element");
@@ -2068,17 +2223,20 @@ function createDialogPresentation(
   };
   const onFocusOut = (event: FocusEvent) => {
     const publication = currentRuntime?.publication;
+    const relatedTarget = publication ? exactFocusOut(event, publication) : null;
     if (
       !publication
       || publication.actions.focusOut !== actions.focusOut
+      || !relatedTarget
       || !coordinator.claimFocusOut(publication, event)
     ) {
       return;
     }
-    const relatedTarget = exactFocusOut(event, publication);
-    if (!relatedTarget || publication.custody.returnTargetClaimed) return;
-    publication.custody.returnTarget = relatedTarget;
-    publication.custody.returnTargetClaimed = true;
+    if (!publication.custody.returnTargetClaimed) {
+      publication.custody.returnTarget = relatedTarget;
+      publication.custody.returnTargetClaimed = true;
+    }
+    currentRuntime?.scheduleOpeningRecovery();
   };
   const tryEstablish = () => {
     adoptPortalRoots();
@@ -2208,7 +2366,10 @@ function createDialogPresentation(
       return;
     }
     const nativeEvent = exactEscape(event, publication);
-    if (!nativeEvent) return;
+    if (!nativeEvent) {
+      coordinator.stageEscapeBridge(publication, actions.escape, event);
+      return;
+    }
     const target = nativeEvent.target;
     const expandedCombobox = target instanceof Element
       ? target.closest<HTMLElement>('[role="combobox"][aria-expanded="true"]')
@@ -2256,12 +2417,9 @@ function createDialogPresentation(
     }
     const nativeEvent = exactNativeCloseClick(event, publication);
     if (nativeEvent) {
-      coordinator.dismissFromManagedAction(
-        publication,
-        actions.closeClick,
-        event,
-        nativeEvent,
-      );
+      coordinator.beginDismiss(publication, actions.closeClick, event, nativeEvent);
+    } else {
+      coordinator.stageCloseBridge(publication, actions.closeClick, event);
     }
   };
 
@@ -2423,7 +2581,7 @@ export function DialogContent({
               </RadixDialog.Description>
             )}
           </div>
-          <button
+          <RadixDialog.Close
             ref={captureClose}
             type="button"
             className={CLOSE_CLASS_NAME}
@@ -2431,7 +2589,7 @@ export function DialogContent({
             onClick={onCloseClick}
           >
             <X ref={captureIcon} size={16} />
-          </button>
+          </RadixDialog.Close>
         </div>
         {children}
         <DialogPublicationBoundary establish={establish} />
