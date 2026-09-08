@@ -290,6 +290,13 @@ async function settleSearch() {
   });
 }
 
+async function dispatchSearchAction(action: () => void) {
+  await act(async () => {
+    action();
+    await Promise.resolve();
+  });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -2999,11 +3006,13 @@ describe("TemplateGrid publication ownership", () => {
 });
 
 describe("dashboard search shortcut", () => {
-  it("has an explicit name and compact hint, then focuses and selects the query once for /", () => {
+  it("has an explicit name and compact hint, then focuses and selects the query once for /", async () => {
     renderDashboard(<button type="button">Outside search</button>);
     const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
     expect(screen.getByText("/", { selector: "kbd" })).toBeInTheDocument();
-    fireEvent.change(search, { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
     screen.getByRole("button", { name: "Outside search" }).focus();
     const focus = vi.spyOn(search, "focus");
     const select = vi.spyOn(search, "select");
@@ -3071,21 +3080,29 @@ describe("dashboard search controls", () => {
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
       search.focus();
 
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       expect(search).toHaveValue("alpha");
       expect(search).toHaveFocus();
 
-      expect(fireEvent.keyDown(search, { key: "Escape" })).toBe(false);
+      await dispatchSearchAction(() => {
+        fireEvent.keyDown(search, { key: "Escape" });
+      });
       expect(search).toHaveValue("");
       expect(search).toHaveFocus();
 
-      expect(fireEvent.keyDown(search, { key: "Escape" })).toBe(false);
+      await dispatchSearchAction(() => {
+        fireEvent.keyDown(search, { key: "Escape" });
+      });
       expect(search).toHaveValue("");
       expect(search).not.toHaveFocus();
 
       fireEvent.keyDown(document, { key: "/" });
       expect(search).toHaveFocus();
-      fireEvent.change(search, { target: { value: "fresh" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "fresh" } });
+      });
       expect(search).toHaveValue("fresh");
       expect(searchDocuments).not.toHaveBeenCalled();
     } finally {
@@ -3108,11 +3125,15 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       const clear = screen.getByTestId("search-clear");
       clear.focus();
 
-      fireEvent.click(clear);
+      await dispatchSearchAction(() => {
+        fireEvent.click(clear);
+      });
 
       expect(search).toHaveValue("");
       expect(search).toHaveFocus();
@@ -3138,13 +3159,17 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      fireEvent.change(search, { target: { value: "missing" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "missing" } });
+      });
       await settleSearch();
       await act(async () => {});
       const clear = screen.getByTestId("empty-state-clear-search");
       clear.focus();
 
-      fireEvent.click(clear);
+      await dispatchSearchAction(() => {
+        fireEvent.click(clear);
+      });
 
       expect(search).toHaveValue("");
       expect(search).toHaveFocus();
@@ -3174,11 +3199,15 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" });
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       await settleSearch();
       const retryButton = within(screen.getByRole("alert")).getByRole("button", { name: "Retry" });
 
-      fireEvent.click(retryButton);
+      await dispatchSearchAction(() => {
+        fireEvent.click(retryButton);
+      });
       retryButton.click();
 
       expect(searchDocuments).toHaveBeenCalledTimes(2);
@@ -3210,7 +3239,9 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       const oldClear = screen.getByTestId("search-clear");
       const staleHandler = captureReactHandler(oldClear, "onClick");
 
@@ -3228,7 +3259,9 @@ describe("dashboard search controls", () => {
         original(event);
       });
       try {
-        fireEvent.click(currentClear);
+        await dispatchSearchAction(() => {
+          fireEvent.click(currentClear);
+        });
       } finally {
         restore();
       }
@@ -3262,7 +3295,9 @@ describe("dashboard search controls", () => {
         for (const binding of full) binding.ref(binding.element);
       });
 
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       expect(search).toHaveValue("alpha");
       const partial = searchRefBindings(search, true).slice(-2);
       await act(async () => {
@@ -3270,7 +3305,9 @@ describe("dashboard search controls", () => {
         for (const binding of partial.toReversed()) binding.ref(binding.element);
       });
 
-      fireEvent.click(screen.getByTestId("search-clear"));
+      await dispatchSearchAction(() => {
+        fireEvent.click(screen.getByTestId("search-clear"));
+      });
       expect(search).toHaveValue("");
       expect(search).toHaveFocus();
     } finally {
@@ -3298,7 +3335,9 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       const clear = screen.getByTestId("search-clear") as HTMLButtonElement;
       const clearIcon = clear.firstElementChild!;
       const searchRoot = search.parentElement!;
@@ -3320,7 +3359,9 @@ describe("dashboard search controls", () => {
         parent.insertBefore(searchRoot, next);
       }
 
-      fireEvent.click(clear);
+      await dispatchSearchAction(() => {
+        fireEvent.click(clear);
+      });
       expect(search).toHaveValue("alpha");
 
       await act(async () => {
@@ -3330,7 +3371,9 @@ describe("dashboard search controls", () => {
           </StrictMode>,
         );
       });
-      fireEvent.click(screen.getByTestId("search-clear"));
+      await dispatchSearchAction(() => {
+        fireEvent.click(screen.getByTestId("search-clear"));
+      });
       expect(search).toHaveValue("");
       expect(search).toHaveFocus();
     } finally {
@@ -3376,9 +3419,11 @@ describe("dashboard search controls", () => {
           document.addEventListener("change", cancel);
         }
 
-        fireEvent.change(search, {
-          target: { value: "blocked" },
-          cancelable: true,
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, {
+            target: { value: "blocked" },
+            cancelable: true,
+          });
         });
 
         if (scenario === "stopped") {
@@ -3392,11 +3437,10 @@ describe("dashboard search controls", () => {
         }
         expect(searchDocuments).not.toHaveBeenCalled();
 
-        await act(async () => {
-          await Promise.resolve();
-        });
         expect(search).toHaveValue("");
-        fireEvent.change(search, { target: { value: "fresh" } });
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "fresh" } });
+        });
         expect(search).toHaveValue("fresh");
       } finally {
         await act(async () => root.unmount());
@@ -3430,7 +3474,9 @@ describe("dashboard search controls", () => {
         original(event);
       });
       try {
-        fireEvent.change(search, { target: { value: "alpha" } });
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "alpha" } });
+        });
       } finally {
         restore();
       }
@@ -3445,7 +3491,9 @@ describe("dashboard search controls", () => {
 
       await settleSearch();
       expect(searchDocuments).toHaveBeenCalledTimes(1);
-      fireEvent.change(search, { target: { value: "beta" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "beta" } });
+      });
       expect(search).toHaveValue("beta");
     } finally {
       await act(async () => root.unmount());
@@ -3467,7 +3515,9 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       const clear = screen.getByTestId("search-clear");
       const event = new MouseEvent("click", {
         bubbles: true,
@@ -3493,6 +3543,113 @@ describe("dashboard search controls", () => {
     }
   });
 
+  it("uses the exact iframe owner window for one change and Clear delivery", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerDocument = frame.contentDocument;
+    const ownerWindow = frame.contentWindow;
+    if (!ownerDocument || !ownerWindow) {
+      throw new Error("The search-control test frame has no document");
+    }
+    ownerDocument.open();
+    ownerDocument.write(
+      "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>",
+    );
+    ownerDocument.close();
+    const host = ownerDocument.getElementById("root");
+    if (!host) throw new Error("The search-control test frame has no root");
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = ownerDocument.querySelector<HTMLInputElement>(
+        'input[aria-label="Search documents"]',
+      );
+      if (!search) throw new Error("The iframe search input was not rendered");
+
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
+      expect(search).toHaveValue("alpha");
+      const clear = ownerDocument.querySelector<HTMLButtonElement>(
+        '[data-testid="search-clear"]',
+      );
+      if (!clear) throw new Error("The iframe Clear control was not rendered");
+
+      await dispatchSearchAction(() => {
+        fireEvent.click(clear);
+      });
+
+      expect(search).toHaveValue("");
+      expect(ownerDocument.activeElement).toBe(search);
+      expect(searchDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      frame.remove();
+    }
+  });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "stopImmediatePropagation",
+  ] as const)(
+    "rejects a window %s listener added from later document capture and recovers",
+    async (method) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        const attack = (event: Event) => {
+          event[method]();
+        };
+        const installAttack = (event: Event) => {
+          if (event.target === search) {
+            window.addEventListener("change", attack, { once: true });
+          }
+        };
+        document.addEventListener("change", installAttack, true);
+
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, {
+            target: { value: "blocked" },
+            cancelable: true,
+          });
+        });
+
+        document.removeEventListener("change", installAttack, true);
+        window.removeEventListener("change", attack);
+        expect(search).toHaveValue("");
+        expect(searchDocuments).not.toHaveBeenCalled();
+
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "fresh" } });
+        });
+        expect(search).toHaveValue("fresh");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it("rejects a stale-user Retry and callback reentry while one current request starts", async () => {
     const finalRetry = deferred<SearchResponse>();
     let currentRetry: HTMLButtonElement | null = null;
@@ -3517,7 +3674,9 @@ describe("dashboard search controls", () => {
         );
       });
       const search = screen.getByRole("textbox", { name: "Search documents" });
-      fireEvent.change(search, { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
       await settleSearch();
       const staleRetry = within(screen.getByRole("alert")).getByRole("button", { name: "Retry" });
       const staleHandler = captureReactHandler(staleRetry, "onClick");
@@ -3539,7 +3698,9 @@ describe("dashboard search controls", () => {
         original(event);
       });
       try {
-        fireEvent.click(retry);
+        await dispatchSearchAction(() => {
+          fireEvent.click(retry);
+        });
       } finally {
         restore();
       }
@@ -3814,7 +3975,9 @@ describe("dashboard content-search recovery", () => {
     searchDocuments.mockRejectedValueOnce(new ApiError(503, "Search service unavailable"));
     renderDashboard();
     const search = screen.getByRole("textbox", { name: "Search documents" });
-    fireEvent.change(search, { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
     await settleSearch();
 
     const alert = screen.getByRole("alert");
@@ -3824,7 +3987,9 @@ describe("dashboard content-search recovery", () => {
     expect(screen.getByRole("link", { name: /Alpha planning/ })).toBeInTheDocument();
     expect(screen.queryByText('No matches for "alpha"')).toBeNull();
 
-    fireEvent.change(search, { target: { value: "notes" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "notes" } });
+    });
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -3835,12 +4000,14 @@ describe("dashboard content-search recovery", () => {
       .mockReturnValueOnce(retry.promise);
     renderDashboard();
     const search = screen.getByRole("textbox", { name: "Search documents" });
-    fireEvent.change(search, { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
     await settleSearch();
     const alert = screen.getByRole("alert");
 
     const retryButton = within(alert).getByRole("button", { name: "Retry" });
-    act(() => {
+    await dispatchSearchAction(() => {
       retryButton.click();
       retryButton.click();
     });
@@ -3869,12 +4036,18 @@ describe("dashboard content-search recovery", () => {
     renderDashboard();
     const search = screen.getByRole("textbox", { name: "Search documents" });
 
-    fireEvent.change(search, { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
     await settleSearch();
-    fireEvent.change(search, { target: { value: "beta" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "beta" } });
+    });
     expect(searchDocuments.mock.calls[0][1]?.signal?.aborted).toBe(true);
     await settleSearch();
-    fireEvent.change(search, { target: { value: "gamma" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "gamma" } });
+    });
     expect(searchDocuments.mock.calls[1][1]?.signal?.aborted).toBe(true);
     await settleSearch();
 
@@ -3903,7 +4076,9 @@ describe("dashboard content-search recovery", () => {
       const replacementUser = { ...USER, id: "replacement-owner", name: "Replacement owner", login: "replacement-owner" };
       searchDocuments.mockReturnValueOnce(oldSearch.promise).mockReturnValueOnce(currentSearch.promise);
       const view = render(<DashboardBoundary onPassiveCleanup={passiveCleanup} />);
-      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      });
       await settleSearch();
       const oldSignal = searchDocuments.mock.calls[0][1]?.signal;
 
@@ -3959,7 +4134,9 @@ describe("dashboard content-search recovery", () => {
       const passiveCleanup = vi.fn();
       searchDocuments.mockReturnValueOnce(oldSearch.promise);
       const view = render(<DashboardBoundary onPassiveCleanup={passiveCleanup} />);
-      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      await dispatchSearchAction(() => {
+        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      });
       await settleSearch();
       const oldSignal = searchDocuments.mock.calls[0][1]?.signal;
 
@@ -3999,7 +4176,9 @@ describe("dashboard content-search recovery", () => {
     const replacementUser = { ...USER, id: "replacement-finalizer", name: "Replacement owner", login: "replacement-finalizer" };
     searchDocuments.mockReturnValueOnce(oldSearch.promise).mockReturnValueOnce(currentSearch.promise);
     const view = render(<DashboardBoundary />);
-    fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+    });
     await settleSearch();
 
     view.rerender(
@@ -4541,7 +4720,9 @@ describe("dashboard star recovery", () => {
     renderDashboard();
     const input = screen.getByRole("textbox", { name: "Search documents" });
 
-    fireEvent.change(input, { target: { value: "alpha" } });
+    await dispatchSearchAction(() => {
+      fireEvent.change(input, { target: { value: "alpha" } });
+    });
     fireEvent.click(documentStar("Alpha planning"));
     await settleSearch();
 

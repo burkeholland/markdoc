@@ -83,27 +83,6 @@ const TRUSTED_REMOVE_EVENT_LISTENER = Function.prototype.call.bind(
   listener: (event: E) => void,
   options?: boolean | EventListenerOptions,
 ) => void;
-const MODULE_WINDOW = typeof window === "undefined" ? null : window;
-const TRUSTED_WINDOW_ADD_EVENT_LISTENER = MODULE_WINDOW
-  ? (Function.prototype.call.bind(
-      MODULE_WINDOW.addEventListener,
-      MODULE_WINDOW,
-    ) as (
-      type: string,
-      listener: (event: Event) => void,
-      options?: boolean | AddEventListenerOptions,
-    ) => void)
-  : null;
-const TRUSTED_WINDOW_REMOVE_EVENT_LISTENER = MODULE_WINDOW
-  ? (Function.prototype.call.bind(
-      MODULE_WINDOW.removeEventListener,
-      MODULE_WINDOW,
-    ) as (
-      type: string,
-      listener: (event: Event) => void,
-      options?: boolean | EventListenerOptions,
-    ) => void)
-  : null;
 const TRUSTED_PREVENT_DEFAULT = Function.prototype.call.bind(
   Event.prototype.preventDefault,
 ) as (event: Event) => void;
@@ -113,6 +92,7 @@ const TRUSTED_STOP_IMMEDIATE_PROPAGATION = Function.prototype.call.bind(
 const TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
   Object.getOwnPropertyDescriptor.bind(Object);
 const TRUSTED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf.bind(Object);
+const TRUSTED_REFLECT_DEFINE_PROPERTY = Reflect.defineProperty.bind(Reflect);
 const TRUSTED_IS_PROTOTYPE_OF = Function.prototype.call.bind(
   Object.prototype.isPrototypeOf,
 ) as (prototype: object, value: object) => boolean;
@@ -2494,6 +2474,7 @@ interface SearchNativeEventProof {
   readonly button: number | null;
   readonly buttons: number | null;
   readonly detail: number | null;
+  readonly propagationStopped: () => boolean;
 }
 
 interface SearchReactEventProof {
@@ -2507,8 +2488,6 @@ interface SearchTerminalEventProof {
   readonly native: SearchNativeEventProof;
   readonly capture: SearchReactEventProof;
   readonly bubble: SearchReactEventProof;
-  readonly preventedByPublication: boolean;
-  readonly expectedDefaultPrevented: boolean;
 }
 
 interface SearchControlPublicationRuntime {
@@ -3389,10 +3368,51 @@ function createSearchControlPublication(
     if (!searchRoot || !input) return null;
     const ownerDocument = searchRoot.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
+    const addOwnerWindowListener = ownerWindow
+      ? capturePrototypeMethod<
+          (
+            target: EventTarget,
+            type: string,
+            listener: (event: Event) => void,
+            options?: boolean | AddEventListenerOptions,
+          ) => void
+        >(ownerWindow.EventTarget.prototype, "addEventListener")
+      : null;
+    const removeOwnerWindowListener = ownerWindow
+      ? capturePrototypeMethod<
+          (
+            target: EventTarget,
+            type: string,
+            listener: (event: Event) => void,
+            options?: boolean | EventListenerOptions,
+          ) => void
+        >(ownerWindow.EventTarget.prototype, "removeEventListener")
+      : null;
+    const preventOwnerDefault = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "preventDefault",
+        )
+      : null;
+    const stopOwnerPropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopPropagation",
+        )
+      : null;
+    const stopOwnerImmediatePropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopImmediatePropagation",
+        )
+      : null;
     if (
       !ownerWindow ||
-      !TRUSTED_WINDOW_ADD_EVENT_LISTENER ||
-      !TRUSTED_WINDOW_REMOVE_EVENT_LISTENER ||
+      !addOwnerWindowListener ||
+      !removeOwnerWindowListener ||
+      !preventOwnerDefault ||
+      !stopOwnerPropagation ||
+      !stopOwnerImmediatePropagation ||
       !(searchRoot instanceof ownerWindow.HTMLDivElement) ||
       !(input instanceof ownerWindow.HTMLInputElement)
     ) {
@@ -3511,6 +3531,11 @@ function createSearchControlPublication(
     let reactBubbleProof: SearchReactEventProof | null = null;
     let nativeBoundaryProof: SearchNativeEventProof | null = null;
     let terminal: SearchTerminalEventProof | null = null;
+    let windowTerminal: SearchTerminalEventProof | null = null;
+    let terminalWindowListener: Readonly<{
+      target: EventTarget;
+      type: string;
+    }> | null = null;
     const publication: SearchControlPublication = Object.freeze({
       identity,
       render,
@@ -3523,14 +3548,25 @@ function createSearchControlPublication(
       isRetired: () => retired,
     });
 
+    const removeTerminalWindowListener = () => {
+      if (!terminalWindowListener) return;
+      removeOwnerWindowListener(
+        terminalWindowListener.target,
+        terminalWindowListener.type,
+        onNativeWindowBubble,
+      );
+      terminalWindowListener = null;
+    };
     const clearEventProof = (proof?: SearchNativeEventProof) => {
       if (proof && nativeProof !== proof) return;
+      removeTerminalWindowListener();
       nativeProof = null;
       reactRootProof = null;
       reactCaptureProof = null;
       reactBubbleProof = null;
       nativeBoundaryProof = null;
       terminal = null;
+      windowTerminal = null;
     };
     const releaseGuard = () => {
       guard?.release();
@@ -3702,6 +3738,43 @@ function createSearchControlPublication(
         detail = TRUSTED_UI_DETAIL(event);
         if (button !== 0 || buttons !== 0 || detail < 0) return null;
       }
+      if (
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopPropagation",
+        ) ||
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopImmediatePropagation",
+        )
+      ) {
+        return null;
+      }
+      let propagationStopped = false;
+      const stopPropagation = () => {
+        propagationStopped = true;
+        stopOwnerPropagation(event);
+      };
+      const stopImmediatePropagation = () => {
+        propagationStopped = true;
+        stopOwnerImmediatePropagation(event);
+      };
+      if (
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopPropagation,
+        }) ||
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopImmediatePropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopImmediatePropagation,
+        })
+      ) {
+        return null;
+      }
       return Object.freeze({
         identity: Symbol("dashboard-search-native-event"),
         origin,
@@ -3725,12 +3798,13 @@ function createSearchControlPublication(
         button,
         buttons,
         detail,
+        propagationStopped: () => propagationStopped,
       });
     };
 
     const blockCrossedEvent = (event: Event) => {
-      TRUSTED_PREVENT_DEFAULT(event);
-      TRUSTED_STOP_IMMEDIATE_PROPAGATION(event);
+      preventOwnerDefault(event);
+      stopOwnerImmediatePropagation(event);
     };
     const beginNativeEvent = (
       event: Event,
@@ -4000,12 +4074,12 @@ function createSearchControlPublication(
       }
     };
 
-    const releaseReservation = (proof: SearchNativeEventProof) => {
+    const releaseClaim = (proof: SearchNativeEventProof) => {
       cells.claimedPublications.delete(publication);
       cells.claimedControls.delete(proof.control);
       cells.claimedActions.delete(proof.action);
     };
-    const reserveTerminal = (proof: SearchNativeEventProof) => {
+    const authenticateTerminal = (proof: SearchNativeEventProof) => {
       const capture = reactCaptureProof;
       const bubble = reactBubbleProof;
       if (
@@ -4021,31 +4095,38 @@ function createSearchControlPublication(
       ) {
         return null;
       }
-      cells.claimedPublications.add(publication);
-      cells.claimedControls.add(proof.control);
-      cells.claimedActions.add(proof.action);
-      cells.claimedNativeEvents.add(proof.event);
-      cells.claimedReactEvents.add(capture.event);
-      cells.claimedReactEvents.add(bubble.event);
       if (
         !publicationOwnsCurrentDom(proof.action.kind === "change") ||
         !nativeEventStillMatches(proof) ||
         !searchControlIsEnabled(proof.control.element, proof.control.root)
       ) {
-        releaseReservation(proof);
         return null;
       }
-      const preventedByPublication = proof.action.kind === "escape";
-      if (preventedByPublication) TRUSTED_PREVENT_DEFAULT(proof.event);
-      const expectedDefaultPrevented =
-        preventedByPublication && proof.cancelable;
       return Object.freeze({
         native: proof,
         capture,
         bubble,
-        preventedByPublication,
-        expectedDefaultPrevented,
       });
+    };
+    const claimTerminal = (proof: SearchTerminalEventProof) => {
+      const native = proof.native;
+      if (
+        cells.claimedPublications.has(publication) ||
+        cells.claimedControls.has(native.control) ||
+        cells.claimedActions.has(native.action) ||
+        cells.claimedNativeEvents.has(native.event) ||
+        cells.claimedReactEvents.has(proof.capture.event) ||
+        cells.claimedReactEvents.has(proof.bubble.event)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedControls.add(native.control);
+      cells.claimedActions.add(native.action);
+      cells.claimedNativeEvents.add(native.event);
+      cells.claimedReactEvents.add(proof.capture.event);
+      cells.claimedReactEvents.add(proof.bubble.event);
+      return true;
     };
     const deliver = (proof: SearchTerminalEventProof) => {
       const native = proof.native;
@@ -4060,16 +4141,11 @@ function createSearchControlPublication(
         !cells.claimedNativeEvents.has(native.event) ||
         !cells.claimedReactEvents.has(proof.capture.event) ||
         !cells.claimedReactEvents.has(proof.bubble.event) ||
-        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
-        !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(native.event) !==
-          proof.expectedDefaultPrevented ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(native.event) ||
         !nativeEventStillMatches(native) ||
         !publicationOwnsCurrentDom(native.action.kind === "change") ||
         !searchControlIsEnabled(native.control.element, native.control.root)
       ) {
-        releaseReservation(native);
+        releaseClaim(native);
         clearEventProof(native);
         return false;
       }
@@ -4100,24 +4176,48 @@ function createSearchControlPublication(
       }
       return true;
     };
+    const rejectTerminal = (proof: SearchTerminalEventProof) => {
+      releaseClaim(proof.native);
+      clearEventProof(proof.native);
+      publication.retire();
+      requestSuccessor();
+    };
+    const settleTerminal = (proof: SearchTerminalEventProof) => {
+      const native = proof.native;
+      if (
+        terminal !== proof ||
+        windowTerminal !== proof ||
+        nativeProof !== native ||
+        cells.delivery !== null ||
+        cells.active !== publication ||
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        TRUSTED_EVENT_CURRENT_TARGET(native.event) !== null ||
+        TRUSTED_EVENT_PHASE(native.event) !== ownerWindow.Event.NONE ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(native.event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(native.event) ||
+        native.propagationStopped() ||
+        !nativeEventStillMatches(native) ||
+        !publicationOwnsCurrentDom(native.action.kind === "change") ||
+        !searchControlIsEnabled(native.control.element, native.control.root) ||
+        !claimTerminal(proof)
+      ) {
+        rejectTerminal(proof);
+        return;
+      }
+      if (native.action.kind === "escape") {
+        preventOwnerDefault(native.event);
+      }
+      if (!deliver(proof)) {
+        publication.retire();
+        requestSuccessor();
+      }
+    };
 
     const onNativeCapture = (event: Event) => {
-      const proof = beginNativeEvent(event, "document-capture");
-      if (!proof) return;
-      TRUSTED_REMOVE_EVENT_LISTENER(
-        ownerDocument,
-        proof.type,
-        onNativeBubble,
-      );
-      TRUSTED_ADD_EVENT_LISTENER(ownerDocument, proof.type, onNativeBubble);
-      TRUSTED_WINDOW_REMOVE_EVENT_LISTENER(
-        proof.type,
-        onNativeWindowBubble,
-      );
-      TRUSTED_WINDOW_ADD_EVENT_LISTENER(
-        proof.type,
-        onNativeWindowBubble,
-      );
+      beginNativeEvent(event, "document-capture");
     };
     const onNativeBubble = (event: Event) => {
       if (
@@ -4134,30 +4234,57 @@ function createSearchControlPublication(
       ) {
         return;
       }
-      const reserved = reserveTerminal(nativeProof);
-      if (!reserved) return;
-      terminal = reserved;
-      queueMicrotask(() => {
-        if (terminal !== reserved) return;
-        releaseReservation(reserved.native);
-        clearEventProof(reserved.native);
-        publication.retire();
-        requestSuccessor();
-      });
-    };
-    const onNativeWindowBubble = (event: Event) => {
+      const authenticated = authenticateTerminal(nativeProof);
+      if (!authenticated) return;
+      const windowTarget =
+        authenticated.native.path[authenticated.native.path.length - 1];
       if (
-        !terminal ||
-        terminal.native.event !== event ||
-        !TRUSTED_EVENT_CURRENT_TARGET ||
-        !TRUSTED_EVENT_PHASE ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !==
-          terminal.native.path[terminal.native.path.length - 1] ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE
+        !windowTarget ||
+        !TRUSTED_IS_PROTOTYPE_OF(
+          ownerWindow.EventTarget.prototype,
+          windowTarget,
+        )
       ) {
         return;
       }
-      deliver(terminal);
+      terminal = authenticated;
+      removeTerminalWindowListener();
+      addOwnerWindowListener(
+        windowTarget,
+        authenticated.native.type,
+        onNativeWindowBubble,
+      );
+      terminalWindowListener = Object.freeze({
+        target: windowTarget,
+        type: authenticated.native.type,
+      });
+      queueMicrotask(() => {
+        if (terminal === authenticated) settleTerminal(authenticated);
+      });
+    };
+    const onNativeWindowBubble = (event: Event) => {
+      const authenticated = terminal;
+      if (
+        !authenticated ||
+        authenticated.native.event !== event ||
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        TRUSTED_EVENT_CURRENT_TARGET(event) !== terminalWindowListener?.target ||
+        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        authenticated.native.propagationStopped() ||
+        !searchControlPathMatches(
+          authenticated.native.path,
+          TRUSTED_EVENT_COMPOSED_PATH(event),
+          ownerDocument,
+        )
+      ) {
+        return;
+      }
+      windowTerminal = authenticated;
     };
     const boundaryListeners = [...controls.values()].map((control) => {
       const type =
@@ -4191,7 +4318,6 @@ function createSearchControlPublication(
           true,
         );
         TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
-        TRUSTED_WINDOW_ADD_EVENT_LISTENER(type, onNativeWindowBubble);
       }
       for (const { control, type, listener } of boundaryListeners) {
         for (const eventType of type) {
@@ -4213,11 +4339,8 @@ function createSearchControlPublication(
           true,
         );
         TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
-        TRUSTED_WINDOW_REMOVE_EVENT_LISTENER(
-          type,
-          onNativeWindowBubble,
-        );
       }
+      removeTerminalWindowListener();
       for (const { control, type, listener } of boundaryListeners) {
         for (const eventType of type) {
           TRUSTED_REMOVE_EVENT_LISTENER(
