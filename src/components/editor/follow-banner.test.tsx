@@ -8,7 +8,15 @@ import {
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
+import {
+  afterEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+  type MockInstance,
+} from "vitest";
 import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import { FollowBanner } from "./follow-banner";
 
@@ -189,6 +197,128 @@ function nativeClick(target: Element, event?: MouseEvent) {
     });
   target.dispatchEvent(nativeEvent);
   return nativeEvent;
+}
+
+interface KeyListenerRecord {
+  readonly target: Document;
+  readonly listener: EventListenerOrEventListenerObject;
+  readonly capture: boolean;
+  active: boolean;
+}
+
+function captureOption(
+  options: boolean | AddEventListenerOptions | EventListenerOptions | undefined,
+) {
+  return typeof options === "boolean" ? options : options?.capture ?? false;
+}
+
+function trackDocumentKeys(ownerDocument: Document) {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The key listener document has no owner window");
+  const prototype = ownerWindow.EventTarget.prototype;
+  const nativeAdd = prototype.addEventListener;
+  const nativeRemove = prototype.removeEventListener;
+  const added: KeyListenerRecord[] = [];
+  const removed: KeyListenerRecord[] = [];
+  vi.spyOn(prototype, "addEventListener").mockImplementation(function (
+    this: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ) {
+    if (this === ownerDocument && type === "keydown" && listener) {
+      added.push({
+        target: ownerDocument,
+        listener,
+        capture: captureOption(options),
+        active: true,
+      });
+    }
+    return Reflect.apply(nativeAdd, this, [type, listener, options]);
+  });
+  vi.spyOn(prototype, "removeEventListener").mockImplementation(function (
+    this: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | EventListenerOptions,
+  ) {
+    if (this === ownerDocument && type === "keydown" && listener) {
+      const capture = captureOption(options);
+      const current = added.find(
+        (record) =>
+          record.active &&
+          record.listener === listener &&
+          record.capture === capture,
+      );
+      if (current) current.active = false;
+      removed.push({
+        target: ownerDocument,
+        listener,
+        capture,
+        active: false,
+      });
+    }
+    return Reflect.apply(nativeRemove, this, [type, listener, options]);
+  });
+  return {
+    added,
+    removed,
+    active: () => added.filter((record) => record.active),
+  };
+}
+
+function invokeKey(record: KeyListenerRecord, event: Event) {
+  if (typeof record.listener === "function") {
+    record.listener.call(record.target, event);
+  } else {
+    record.listener.handleEvent(event);
+  }
+}
+
+function ownerDocumentOf(target: Node): Document {
+  if (target.nodeType === target.DOCUMENT_NODE) return target as Document;
+  if (!target.ownerDocument) throw new Error("The key target has no owner document");
+  return target.ownerDocument;
+}
+
+function escapeEvent(
+  target: Node,
+  init: KeyboardEventInit & { type?: string } = {},
+) {
+  const ownerDocument = ownerDocumentOf(target);
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The key target has no owner window");
+  const { type = "keydown", ...eventInit } = init;
+  return new ownerWindow.KeyboardEvent(type, {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    ...eventInit,
+  });
+}
+
+function dispatchKey(target: Node, event = escapeEvent(target)) {
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function preventionsFor(
+  spy: MockInstance<Event["preventDefault"]>,
+  event: Event,
+) {
+  return spy.mock.contexts.filter((context) => context === event).length;
+}
+
+function directRootIn(ownerDocument: Document, node: React.ReactNode) {
+  const host = ownerDocument.createElement("div");
+  ownerDocument.body.append(host);
+  const view: DirectView = { root: createRoot(host), host, active: true };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
 }
 
 interface WorkProbe {
@@ -490,6 +620,402 @@ describe("FollowBanner", () => {
         }
       },
     );
+  });
+
+  describe("owner-document Escape", () => {
+    it("claims, prevents, and stops exactly once while preserving native Stop activation", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      const view = directRoot(
+        <StrictMode>
+          <Boundary session={session} />
+        </StrictMode>,
+      );
+      expect(keys.active()).toHaveLength(1);
+      const stale = keys.added.find((record) => !record.active);
+      if (!stale) throw new Error("Strict Mode did not retire its first key listener");
+
+      const replayed = escapeEvent(document.body);
+      invokeKey(stale, replayed);
+      expect(preventionsFor(preventDefault, replayed)).toBe(0);
+      expect(action).not.toHaveBeenCalled();
+
+      const accepted = dispatchKey(document.body);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+      expect(action.mock.contexts[0]).toBe(session);
+      expect(keys.active()).toHaveLength(0);
+
+      const duplicate = dispatchKey(document.body);
+      expect(duplicate.defaultPrevented).toBe(false);
+      expect(preventionsFor(preventDefault, duplicate)).toBe(0);
+      nativeClick(stopButton(view.host));
+      expect(action).toHaveBeenCalledTimes(1);
+
+      session.publish(BASE_USER.id, [user({ name: "Grace" })]);
+      act(() => {
+        view.root.render(<Boundary session={session} bannerKey="fresh" />);
+      });
+      nativeClick(stopButton(view.host));
+      expect(action).toHaveBeenCalledTimes(2);
+      expect(action.mock.contexts[1]).toBe(session);
+    });
+
+    it("rejects modified, repeated, composing, canceled, stopped, and incomplete events", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      directRoot(
+        <StrictMode>
+          <FollowBanner session={session.asCollabSession()} />
+        </StrictMode>,
+      );
+      expect(keys.active()).toHaveLength(1);
+
+      const rejected = [
+        escapeEvent(document.body, { key: "Enter" }),
+        escapeEvent(document.body, { ctrlKey: true }),
+        escapeEvent(document.body, { altKey: true }),
+        escapeEvent(document.body, { metaKey: true }),
+        escapeEvent(document.body, { shiftKey: true }),
+        escapeEvent(document.body, { repeat: true }),
+        escapeEvent(document.body, { isComposing: true }),
+        escapeEvent(document, { bubbles: false }),
+        escapeEvent(document, { cancelable: false }),
+      ];
+      const canceled = escapeEvent(document.body);
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      rejected.push(canceled);
+      for (const event of rejected) {
+        const target = event.bubbles ? document.body : document;
+        dispatchKey(target, event);
+        expect(preventionsFor(preventDefault, event)).toBe(0);
+      }
+
+      const stopped = escapeEvent(document.body);
+      document.body.addEventListener(
+        "keydown",
+        (event) => event.stopPropagation(),
+        { once: true },
+      );
+      dispatchKey(document.body, stopped);
+      expect(stopped.defaultPrevented).toBe(false);
+      expect(preventionsFor(preventDefault, stopped)).toBe(0);
+      expect(action).not.toHaveBeenCalled();
+      expect(keys.active()).toHaveLength(1);
+
+      const accepted = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+    });
+
+    it("rejects fabricated, foreign-realm, stale, replayed, and crossed deliveries", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      directRoot(
+        <StrictMode>
+          <Boundary session={session} />
+        </StrictMode>,
+      );
+      const current = keys.active()[0];
+      const stale = keys.added.find((record) => !record.active);
+      if (!current || !stale) throw new Error("Expected current and retired key listeners");
+
+      const outsideDispatch = escapeEvent(document.body);
+      invokeKey(current, outsideDispatch);
+      invokeKey(stale, outsideDispatch);
+      invokeKey(
+        current,
+        {
+          type: "keydown",
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        } as unknown as Event,
+      );
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const foreignWindow = frame.contentWindow;
+      if (!foreignWindow) throw new Error("The foreign frame has no window");
+      const foreign = new (foreignWindow as Window & typeof globalThis).KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      });
+      invokeKey(current, foreign);
+      expect(preventionsFor(preventDefault, outsideDispatch)).toBe(0);
+      expect(action).not.toHaveBeenCalled();
+
+      document.body.addEventListener(
+        "keydown",
+        (event) => invokeKey(stale, event),
+        { once: true },
+      );
+      const accepted = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+      invokeKey(current, accepted);
+      invokeKey(stale, accepted);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(action).toHaveBeenCalledTimes(1);
+      frame.remove();
+    });
+
+    it("retires stale listeners across session, user, and callback replacements", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const firstAction = vi.fn<(userId: string | null) => void>();
+      const replacementAction = vi.fn<(userId: string | null) => void>();
+      const finalAction = vi.fn<(userId: string | null) => void>();
+      const first = new ControlledSession(BASE_USER.id, [user()], firstAction);
+      const final = new ControlledSession(
+        "collaborator-b",
+        [user({ id: "collaborator-b", name: "Grace", clientId: 202 })],
+        finalAction,
+      );
+      const view = directRoot(
+        <StrictMode>
+          <Boundary session={first} />
+        </StrictMode>,
+      );
+      const firstListener = keys.active()[0];
+      if (!firstListener) throw new Error("The first publication has no key listener");
+
+      first.publish(BASE_USER.id, [user({ name: "Grace" })]);
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={first} passiveKey={1} />
+          </StrictMode>,
+        );
+      });
+      const userListener = keys.active()[0];
+      if (!userListener) throw new Error("The user publication has no key listener");
+      first.follow = replacementAction;
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={first} passiveKey={2} />
+          </StrictMode>,
+        );
+      });
+      const callbackListener = keys.active()[0];
+      if (!callbackListener) throw new Error("The callback publication has no key listener");
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={final} passiveKey={3} />
+          </StrictMode>,
+        );
+      });
+      expect(keys.active()).toHaveLength(1);
+
+      for (const stale of [firstListener, userListener, callbackListener]) {
+        const event = escapeEvent(document.body);
+        invokeKey(stale, event);
+        expect(preventionsFor(preventDefault, event)).toBe(0);
+      }
+      const accepted = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(firstAction).not.toHaveBeenCalled();
+      expect(replacementAction).not.toHaveBeenCalled();
+      expect(finalAction).toHaveBeenCalledExactlyOnceWith(null);
+      expect(finalAction.mock.contexts[0]).toBe(final);
+    });
+
+    it("fails closed after restored subtree and placement mutations, then recovers fresh", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      const view = directRoot(
+        <StrictMode>
+          <Boundary session={session} />
+        </StrictMode>,
+      );
+      const banner = view.host.querySelector<HTMLDivElement>(
+        '[data-testid="follow-banner"]',
+      );
+      if (!banner) throw new Error("The publication has no Follow banner");
+      const separator = banner.children.item(1);
+      if (!separator) throw new Error("The publication has no separator");
+
+      separator.textContent = "changed";
+      separator.textContent = "·";
+      const restoredMutation = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, restoredMutation)).toBe(0);
+      expect(action).not.toHaveBeenCalled();
+      expect(keys.active()).toHaveLength(0);
+
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={session} bannerKey="banner-b" domKey="dom-b" />
+          </StrictMode>,
+        );
+      });
+      const currentBanner = view.host.querySelector<HTMLDivElement>(
+        '[data-testid="follow-banner"]',
+      );
+      if (!currentBanner?.parentNode) throw new Error("The successor has no placement");
+      const parent = currentBanner.parentNode;
+      const next = currentBanner.nextSibling;
+      parent.removeChild(currentBanner);
+      parent.insertBefore(currentBanner, next);
+      const restoredPlacement = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, restoredPlacement)).toBe(0);
+      expect(action).not.toHaveBeenCalled();
+      expect(keys.active()).toHaveLength(0);
+
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary session={session} bannerKey="banner-c" domKey="dom-c" />
+          </StrictMode>,
+        );
+      });
+      const accepted = dispatchKey(document.body);
+      expect(preventionsFor(preventDefault, accepted)).toBe(1);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+    });
+
+    it("releases partial Strict Mode replay and cleanup synchronously, then accepts a clean successor", () => {
+      const keys = trackDocumentKeys(document);
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user()], action);
+      let stopRef: ((element: HTMLButtonElement | null) => void) | null = null;
+      const view = directRoot(
+        <StrictMode>
+          <Boundary
+            session={session}
+            boundary={1}
+            onBoundary={() => {
+              if (stopRef) return;
+              stopRef = reactHandler<(element: HTMLButtonElement | null) => void>(
+                stopButton(document.body),
+                "ref",
+              );
+            }}
+            onBoundaryCleanup={() => stopRef?.(null)}
+          />
+        </StrictMode>,
+      );
+      expect(keys.active()).toHaveLength(0);
+      for (const stale of keys.added) {
+        const event = escapeEvent(document.body);
+        invokeKey(stale, event);
+        expect(preventionsFor(preventDefault, event)).toBe(0);
+      }
+
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary
+              session={session}
+              bannerKey="fresh"
+              domKey="fresh"
+            />
+          </StrictMode>,
+        );
+      });
+      expect(keys.active()).toHaveLength(1);
+      const active = keys.active()[0]!;
+      let boundaryReached = false;
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary
+              session={session}
+              present={false}
+              boundary={1}
+              onBoundary={() => {
+                boundaryReached = true;
+                expect(keys.active()).toHaveLength(0);
+                const event = escapeEvent(document.body);
+                invokeKey(active, event);
+                expect(preventionsFor(preventDefault, event)).toBe(0);
+              }}
+            />
+          </StrictMode>,
+        );
+      });
+      expect(boundaryReached).toBe(true);
+      expect(action).not.toHaveBeenCalled();
+
+      session.publish(BASE_USER.id, [user({ name: "Grace" })]);
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <Boundary
+              session={session}
+              bannerKey="recovered"
+              domKey="recovered"
+            />
+          </StrictMode>,
+        );
+      });
+      dispatchKey(document.body);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+    });
+
+    it("keeps owner-realm listeners and actions isolated across two documents when supported", () => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const foreignDocument = frame.contentDocument;
+      if (!foreignDocument?.defaultView) {
+        frame.remove();
+        return;
+      }
+      const mainKeys = trackDocumentKeys(document);
+      const foreignKeys = trackDocumentKeys(foreignDocument);
+      const mainAction = vi.fn<(userId: string | null) => void>();
+      const foreignAction = vi.fn<(userId: string | null) => void>();
+      const main = new ControlledSession(BASE_USER.id, [user()], mainAction);
+      const foreign = new ControlledSession(
+        "collaborator-b",
+        [user({ id: "collaborator-b", name: "Grace", clientId: 202 })],
+        foreignAction,
+      );
+      const mainView = directRoot(
+        <StrictMode>
+          <FollowBanner session={main.asCollabSession()} />
+        </StrictMode>,
+      );
+      const foreignView = directRootIn(
+        foreignDocument,
+        <StrictMode>
+          <FollowBanner session={foreign.asCollabSession()} />
+        </StrictMode>,
+      );
+      expect(mainKeys.active()).toHaveLength(1);
+      expect(foreignKeys.active()).toHaveLength(1);
+
+      const foreignEvent = dispatchKey(foreignDocument.body);
+      expect(foreignEvent.defaultPrevented).toBe(true);
+      expect(mainAction).not.toHaveBeenCalled();
+      expect(foreignAction).toHaveBeenCalledExactlyOnceWith(null);
+      expect(mainKeys.active()).toHaveLength(1);
+      expect(foreignKeys.active()).toHaveLength(0);
+
+      const mainEvent = dispatchKey(document.body);
+      expect(mainEvent.defaultPrevented).toBe(true);
+      expect(mainAction).toHaveBeenCalledExactlyOnceWith(null);
+      act(() => {
+        mainView.root.unmount();
+        foreignView.root.unmount();
+      });
+      mainView.active = false;
+      foreignView.active = false;
+      frame.remove();
+    });
   });
 
   const replacements = [
