@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ReactNode, type RefObject } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type ReactNode, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 import type { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
@@ -10,6 +10,7 @@ import type { EditorActions, FormatState, TableCommand } from "./actions";
 
 const setup = vi.hoisted(() => ({
   hidden: vi.fn(() => false),
+  tipChildren: [] as ReactNode[],
 }));
 
 vi.mock("@/editor/prosemirror/setup", () => ({
@@ -18,7 +19,10 @@ vi.mock("@/editor/prosemirror/setup", () => ({
 }));
 
 vi.mock("@/components/ui/primitives", () => ({
-  Tip: ({ children }: { children: ReactNode }) => children,
+  Tip: ({ children }: { children: ReactNode }) => {
+    setup.tipChildren.push(children);
+    return children;
+  },
 }));
 
 import { TableMenu } from "./table-menu";
@@ -272,6 +276,24 @@ function captureControl(testId: string): CapturedControl {
   };
 }
 
+function captureRenderedControl(testId: string, occurrence: number): Omit<CapturedControl, "element"> {
+  const renders = setup.tipChildren.filter((child) => (
+    (child as { props?: Record<string, unknown> }).props?.["data-testid"] === testId
+  ));
+  const props = (renders[occurrence] as { props?: Record<string, unknown> } | undefined)?.props;
+  const click = props?.onClick;
+  const mouseDown = props?.onMouseDown;
+  const buttonRef = props?.ref;
+  if (typeof click !== "function" || typeof mouseDown !== "function" || typeof buttonRef !== "function") {
+    throw new Error(`${testId} render ${occurrence} did not expose complete control callbacks`);
+  }
+  return {
+    click: click as CapturedControl["click"],
+    mouseDown: mouseDown as CapturedControl["mouseDown"],
+    buttonRef: buttonRef as CapturedControl["buttonRef"],
+  };
+}
+
 function controlEvent(control: CapturedControl, preventDefault: () => void = vi.fn(), currentTarget = control.element): DirectMouseEvent {
   return { currentTarget, preventDefault };
 }
@@ -369,10 +391,68 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   setup.hidden.mockClear();
+  setup.tipChildren.length = 0;
   document.body.replaceChildren();
 });
 
 describe("TableMenu geometry ownership", () => {
+  it("keeps table, alignment, and delete controls usable through Strict Mode replay", () => {
+    setup.tipChildren.length = 0;
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+      align: "center",
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+
+      const retired = {
+        table: captureRenderedControl("table-row-before", 1),
+        alignment: captureRenderedControl("table-align-center", 1),
+        deletion: captureRenderedControl("table-delete", 1),
+      };
+      const currentControls = captureRepresentativeControls();
+      const pairs = [
+        [retired.table, currentControls.table],
+        [retired.alignment, currentControls.alignment],
+        [retired.deletion, currentControls.deletion],
+      ] as const;
+      const stalePreventions = pairs.map(() => vi.fn());
+      pairs.forEach(([control, currentControl], index) => {
+        control.mouseDown(controlEvent(currentControl, stalePreventions[index]));
+        control.click(controlEvent(currentControl));
+      });
+      expect(stalePreventions.every((preventDefault) => preventDefault.mock.calls.length === 0)).toBe(true);
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+
+      for (const [retiredControl, currentControl] of pairs) {
+        retiredControl.buttonRef(null);
+        retiredControl.buttonRef(currentControl.element);
+      }
+      const currentPreventions = pairs.map(() => vi.fn());
+      pairs.forEach(([, control], index) => {
+        mouseDown(control, currentPreventions[index]);
+        click(control);
+      });
+      expect(currentPreventions.every((preventDefault) => preventDefault.mock.calls.length === 1)).toBe(true);
+      expect(current.tableAction.mock.calls).toEqual([["rowBefore"], ["deleteTable"]]);
+      expect(current.alignAction.mock.calls).toEqual([[null]]);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it("retires exact listeners and frames before parent layout boundaries while current events coalesce", () => {
     const browser = controlledBrowser();
     const first = fixture({
