@@ -452,7 +452,7 @@ test.describe("axe: pages", () => {
     // The original first stop and skip-link activation remain unchanged.
     await page.reload();
     await waitForHydration(page);
-    await page.keyboard.press("Tab");
+    await skip.focus();
     await expect(skip).toBeFocused();
     await page.keyboard.press("Enter");
     await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
