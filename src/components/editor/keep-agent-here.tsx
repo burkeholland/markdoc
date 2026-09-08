@@ -12,7 +12,8 @@ import {
 import { ArrowLeft, Check, Copy, ExternalLink, Radio } from "lucide-react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { api, apiErrorText } from "@/lib/api";
-import { useCopy } from "@/lib/hooks";
+import { COPY_FALLBACK_HINT } from "@/lib/clipboard";
+import { useCopy, type CopyStatus } from "@/lib/hooks";
 import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { AgentConnectCard, useOrigin } from "@/components/settings/agent-connect-card";
 
@@ -171,7 +172,12 @@ const PANEL_BODY = "Your agent sits in this document and reacts to what people w
 const CLIENTS = "Works with any MCP client: Copilot CLI, VS Code, Claude, Cursor.";
 const COPY_LABEL = "Copy instruction";
 
-type CopySetup = ReturnType<typeof useCopy>;
+type CopySetup = Readonly<{
+  copy: () => void;
+  status: CopyStatus;
+  label: string;
+  copied: boolean;
+}>;
 type PanelActionKind = "back" | "retry" | "copy";
 
 interface KeepAgentPanelRender {
@@ -202,6 +208,9 @@ interface KeepAgentPanelRender {
   readonly tokensHref: string;
   readonly connectHref: string;
   readonly docsHref: string;
+  readonly promptTestId: string;
+  readonly copyTestId: string;
+  readonly copyAriaLabel: string;
 }
 
 interface KeepAgentPanelElements {
@@ -272,11 +281,28 @@ function emptyPanelElements(): KeepAgentPanelElements {
 }
 
 interface KeepAgentPanelDraft {
+  readonly identity: symbol;
   readonly render: KeepAgentPanelRender;
-  readonly elements: KeepAgentPanelElements;
-  readonly lastElements: KeepAgentPanelElements;
+  readonly generation: KeepAgentPanelGeneration;
   committed: boolean;
   retired: boolean;
+}
+
+interface KeepAgentPanelGeneration {
+  readonly identity: symbol;
+  readonly render: KeepAgentPanelRender;
+  readonly elements: KeepAgentPanelElements;
+  readonly bindings: Record<PanelElementRole, KeepAgentPanelBinding | null>;
+  authority: KeepAgentPanelDraft | null;
+  target: RefObject<HTMLPreElement | null> | null;
+}
+
+interface KeepAgentPanelBinding {
+  readonly identity: symbol;
+  readonly generation: KeepAgentPanelGeneration;
+  readonly role: PanelElementRole;
+  readonly element: HTMLElement;
+  active: boolean;
 }
 
 interface KeepAgentPanelAction {
@@ -285,28 +311,59 @@ interface KeepAgentPanelAction {
   readonly targets: readonly Node[];
 }
 
+interface KeepAgentPanelDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly KeepAgentPanelDomSnapshot[];
+  readonly opaque: boolean;
+}
+
+interface KeepAgentPanelPlacement {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
 interface KeepAgentPanelPublication {
+  readonly identity: symbol;
   readonly render: KeepAgentPanelRender;
   readonly draft: KeepAgentPanelDraft;
+  readonly generation: KeepAgentPanelGeneration;
   readonly target: RefObject<HTMLPreElement | null>;
   readonly elements: Readonly<KeepAgentPanelElements>;
+  readonly bindings: Readonly<Record<PanelElementRole, KeepAgentPanelBinding | null>>;
+  readonly roles: readonly PanelElementRole[];
   readonly setup: Element | null;
   readonly topLevelChildren: readonly Element[];
+  readonly placement: readonly KeepAgentPanelPlacement[];
+  readonly dom: KeepAgentPanelDomSnapshot;
   readonly back: KeepAgentPanelAction | null;
   readonly retry: KeepAgentPanelAction | null;
   readonly copy: KeepAgentPanelAction;
+  retired: boolean;
+  mutated: boolean;
+  observer: MutationObserver | null;
 }
 
 interface PanelElementOwner {
-  readonly draft: KeepAgentPanelDraft;
-  readonly role: PanelElementRole;
-  readonly element: HTMLElement;
+  readonly binding: KeepAgentPanelBinding;
 }
 
 interface PromptOwner {
-  readonly draft: KeepAgentPanelDraft;
+  readonly binding: KeepAgentPanelBinding;
   readonly target: RefObject<HTMLPreElement | null>;
-  readonly element: HTMLPreElement;
+}
+
+interface KeepAgentPanelReplay {
+  readonly publication: KeepAgentPanelPublication;
+  readonly generation: KeepAgentPanelGeneration;
+  readonly expected: Readonly<Record<PanelElementRole, KeepAgentPanelBinding | null>>;
+  readonly released: Set<PanelElementRole>;
+  readonly rebound: Map<PanelElementRole, KeepAgentPanelBinding>;
+  layoutRetired: boolean;
+  invalid: boolean;
 }
 
 function descendantsOf(element: HTMLElement): readonly Node[] {
@@ -333,48 +390,179 @@ function normalizedText(element: Element): string {
   return element.textContent?.replace(/\s+/g, " ").trim() ?? "";
 }
 
+function iconMatches(element: Element | null, iconClass: string, size: string): boolean {
+  return Boolean(
+    element &&
+    element.tagName.toLowerCase() === "svg" &&
+    element.classList.contains(iconClass) &&
+    element.getAttribute("width") === size &&
+    element.getAttribute("height") === size &&
+    element.getAttribute("aria-hidden") === "true",
+  );
+}
+
+function panelAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotPanelDom(node: Node, opaque: Node | null): KeepAgentPanelDomSnapshot {
+  const isOpaque = node === opaque;
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: panelAttributes(node),
+    children: isOpaque
+      ? Object.freeze([])
+      : Object.freeze([...node.childNodes].map((child) => snapshotPanelDom(child, opaque))),
+    opaque: isOpaque,
+  });
+}
+
+function panelDomMatches(snapshot: KeepAgentPanelDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = panelAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  if (snapshot.opaque) return true;
+  return node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && panelDomMatches(child));
+}
+
+function connectedPlacement(panel: HTMLElement): readonly KeepAgentPanelPlacement[] | null {
+  const placement: KeepAgentPanelPlacement[] = [];
+  const ownerDocument = panel.ownerDocument;
+  let current: Node | null = panel;
+  while (current) {
+    placement.push(Object.freeze({
+      node: current,
+      parent: current.parentNode,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+    }));
+    if (current === ownerDocument) return Object.freeze(placement);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function placementMatches(
+  panel: HTMLElement,
+  placement: readonly KeepAgentPanelPlacement[],
+): boolean {
+  const ownerDocument = panel.ownerDocument;
+  if (!panel.isConnected || placement.length === 0 || placement[0]?.node !== panel) {
+    return false;
+  }
+  for (let index = 0; index < placement.length; index++) {
+    const current = placement[index]!;
+    const next = placement[index + 1];
+    if (
+      current.node.parentNode !== current.parent ||
+      current.node.previousSibling !== current.previousSibling ||
+      current.node.nextSibling !== current.nextSibling ||
+      (next && current.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placement.at(-1)!;
+  return last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null;
+}
+
+function mutationTouchesPlacement(
+  placement: readonly KeepAgentPanelPlacement[],
+  mutation: MutationRecord,
+): boolean {
+  if (mutation.type !== "childList") return false;
+  return placement.some(({ node, parent }) =>
+    parent === mutation.target &&
+    (
+      mutation.previousSibling === node ||
+      mutation.nextSibling === node ||
+      [...mutation.addedNodes].includes(node) ||
+      [...mutation.removedNodes].includes(node)
+    ));
+}
+
+function nativePathMatches(
+  nativeEvent: MouseEvent,
+  target: Node,
+  ownerDocument: Document,
+): boolean {
+  const path = nativeEvent.composedPath();
+  if (path[0] !== target) return false;
+  const expected: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    typeof terminal === "object" &&
+    terminal !== null &&
+    "document" in terminal &&
+    terminal.document === ownerDocument;
+}
+
 class KeepAgentPanelCoordinator {
   readonly #mount: symbol;
   #current: KeepAgentPanelPublication | null = null;
+  #replay: KeepAgentPanelReplay | null = null;
   #elementOwners = new WeakMap<HTMLElement, PanelElementOwner>();
   #promptOwner: PromptOwner | null = null;
+  #publishedGenerations = new WeakSet<KeepAgentPanelGeneration>();
+  #replayedGenerations = new WeakSet<KeepAgentPanelGeneration>();
   #claimedActions = new WeakSet<KeepAgentPanelAction>();
-  #claimedEvents = new WeakSet<Event>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedNativeEvents = new WeakSet<Event>();
 
   constructor(mount: symbol) {
     this.#mount = mount;
   }
 
   createDraft(render: KeepAgentPanelRender): KeepAgentPanelDraft {
-    return {
+    const generation: KeepAgentPanelGeneration = {
+      identity: Symbol("keep-agent-panel-generation"),
       render,
       elements: emptyPanelElements(),
-      lastElements: emptyPanelElements(),
+      bindings: Object.fromEntries(
+        PANEL_ELEMENT_ROLES.map((role) => [role, null]),
+      ) as Record<PanelElementRole, KeepAgentPanelBinding | null>,
+      authority: null,
+      target: null,
+    };
+    const draft: KeepAgentPanelDraft = {
+      identity: Symbol("keep-agent-panel-draft"),
+      render,
+      generation,
       committed: false,
       retired: false,
     };
-  }
-
-  deactivate(draft: KeepAgentPanelDraft) {
-    if (this.#current?.draft === draft) this.#current = null;
-  }
-
-  retire(draft: KeepAgentPanelDraft) {
-    draft.retired = true;
-    this.deactivate(draft);
-    for (const role of PANEL_ELEMENT_ROLES) {
-      const element = draft.elements[role];
-      if (!element) continue;
-      const owner = this.#elementOwners.get(element);
-      if (owner?.draft === draft && owner.role === role && owner.element === element) {
-        this.#elementOwners.delete(element);
-      }
-    }
-    const promptOwner = this.#promptOwner;
-    if (promptOwner?.draft === draft) {
-      this.#promptOwner = null;
-      if (promptOwner.target.current === promptOwner.element) promptOwner.target.current = null;
-    }
+    generation.authority = draft;
+    return draft;
   }
 
   bindElement<Role extends PanelElementRole>(
@@ -382,44 +570,7 @@ class KeepAgentPanelCoordinator {
     role: Role,
     element: KeepAgentPanelElements[Role],
   ) {
-    const previous = draft.elements[role];
-    if (element === null) {
-      if (previous) {
-        const owner = this.#elementOwners.get(previous);
-        if (owner?.draft === draft && owner.role === role && owner.element === previous) {
-          this.#elementOwners.delete(previous);
-        }
-      }
-      draft.elements[role] = null;
-      if (previous) this.retire(draft);
-      return;
-    }
-
-    if (draft.retired) {
-      const current = this.#current;
-      const last = draft.lastElements[role];
-      const owner = this.#elementOwners.get(element);
-      if (
-        !draft.committed ||
-        last !== element ||
-        (current && current.draft !== draft) ||
-        (owner && owner.draft !== draft)
-      ) {
-        return;
-      }
-    }
-    if (previous && previous !== element) {
-      this.retire(draft);
-      return;
-    }
-
-    const displaced = this.#elementOwners.get(element);
-    if (displaced && (displaced.draft !== draft || displaced.role !== role)) {
-      this.retire(displaced.draft);
-    }
-    draft.elements[role] = element;
-    draft.lastElements[role] = element;
-    this.#elementOwners.set(element, { draft, role, element });
+    return this.#bind(draft.generation, role, element);
   }
 
   bindPrompt(
@@ -427,55 +578,25 @@ class KeepAgentPanelCoordinator {
     target: RefObject<HTMLPreElement | null>,
     element: HTMLPreElement | null,
   ) {
-    const previous = draft.elements.prompt;
-    if (element === null) {
-      if (previous) {
-        const owner = this.#elementOwners.get(previous);
-        if (owner?.draft === draft && owner.role === "prompt" && owner.element === previous) {
-          this.#elementOwners.delete(previous);
-        }
-      }
-      draft.elements.prompt = null;
-      const promptOwner = this.#promptOwner;
-      if (previous && promptOwner?.draft === draft && promptOwner.element === previous) {
-        this.#promptOwner = null;
-        if (target.current === previous) target.current = null;
-      }
-      if (previous) this.retire(draft);
+    const generation = draft.generation;
+    if (generation.target && generation.target !== target) {
+      this.#retireAuthority(generation);
       return;
     }
-
-    if (draft.retired) {
-      const current = this.#current;
-      const owner = this.#elementOwners.get(element);
-      if (
-        !draft.committed ||
-        draft.lastElements.prompt !== element ||
-        (current && current.draft !== draft) ||
-        (owner && owner.draft !== draft)
-      ) {
-        return;
-      }
-    }
-    if (previous && previous !== element) {
-      this.retire(draft);
-      return;
-    }
-
-    const displaced = this.#elementOwners.get(element);
-    if (displaced && (displaced.draft !== draft || displaced.role !== "prompt")) {
-      this.retire(displaced.draft);
-    }
-    draft.elements.prompt = element;
-    draft.lastElements.prompt = element;
-    this.#elementOwners.set(element, { draft, role: "prompt", element });
-    this.#promptOwner = { draft, target, element };
-    target.current = element;
+    generation.target = target;
+    return this.#bind(generation, "prompt", element, target);
   }
 
   #ownsElement(publication: KeepAgentPanelPublication, role: PanelElementRole, element: HTMLElement) {
+    const binding = publication.bindings[role];
     const owner = this.#elementOwners.get(element);
-    return owner?.draft === publication.draft && owner.role === role && owner.element === element;
+    return Boolean(binding &&
+      binding.element === element &&
+      binding.generation === publication.generation &&
+      binding.role === role &&
+      binding.active &&
+      publication.generation.bindings[role] === binding &&
+      owner?.binding === binding);
   }
 
   #renderIsCurrent(render: KeepAgentPanelRender): boolean {
@@ -507,15 +628,26 @@ class KeepAgentPanelCoordinator {
       copyStatus === render.copyStatus &&
       copyLabel === render.copyLabel &&
       copied === render.copied &&
+      copied === (copyStatus === "copied") &&
+      copyLabel === (
+        copyStatus === "copied"
+          ? "Copied"
+          : copyStatus === "fallback"
+            ? COPY_FALLBACK_HINT
+            : "Copy"
+      ) &&
       render.showSetup === (hasTokens === false && !render.dismissed) &&
       render.tokensHref === tokensHref &&
       render.connectHref === connectHref &&
-      render.docsHref === `${AGENT_DOCS_URL}#sit-in-a-document`
+      render.docsHref === `${AGENT_DOCS_URL}#sit-in-a-document` &&
+      render.promptTestId === "keep-agent-prompt" &&
+      render.copyTestId === "keep-agent-copy" &&
+      render.copyAriaLabel === COPY_LABEL
     );
   }
 
   #hierarchyIsCurrent(publication: KeepAgentPanelPublication): boolean {
-    const { render, elements, setup, topLevelChildren } = publication;
+    const { render, generation, elements, bindings, setup, topLevelChildren } = publication;
     const {
       panel,
       headingRow,
@@ -536,7 +668,11 @@ class KeepAgentPanelCoordinator {
       clients,
       docsLink,
     } = elements;
+    const copyIcon = copy?.firstElementChild ?? null;
     if (
+      generation.render !== render ||
+      generation.authority !== publication.draft ||
+      generation.target !== publication.target ||
       !panel ||
       !nav ||
       !tokensLink ||
@@ -583,7 +719,13 @@ class KeepAgentPanelCoordinator {
     }
     for (const role of PANEL_ELEMENT_ROLES) {
       const element = elements[role];
-      if (element && !this.#ownsElement(publication, role, element)) return false;
+      if (
+        generation.elements[role] !== element ||
+        generation.bindings[role] !== bindings[role] ||
+        (element && !this.#ownsElement(publication, role, element))
+      ) {
+        return false;
+      }
     }
 
     const shouldShowHeading = !render.hideHeading;
@@ -622,6 +764,7 @@ class KeepAgentPanelCoordinator {
 
     if (headingRow && heading) {
       const expectedHeadingChildren = back ? [back, heading] : [heading];
+      const headingIcon = heading.firstElementChild;
       if (
         headingRow.className !== HEADING_ROW_CLASS ||
         headingRow.parentElement !== panel ||
@@ -629,6 +772,8 @@ class KeepAgentPanelCoordinator {
         expectedHeadingChildren.some((element, index) => headingRow.children.item(index) !== element) ||
         heading.className !== HEADING_CLASS ||
         heading.tagName !== "H3" ||
+        heading.children.length !== 1 ||
+        !iconMatches(headingIcon, "lucide-radio", "15") ||
         normalizedText(heading) !== "Keep an agent here"
       ) {
         return false;
@@ -638,10 +783,14 @@ class KeepAgentPanelCoordinator {
       back &&
       (back.parentElement !== headingRow ||
         back.className !== BACK_CLASS ||
+        back.getAttribute("type") !== "button" ||
         back.type !== "button" ||
         back.disabled ||
+        back.matches(":disabled") ||
         back.getAttribute("aria-label") !== "Back" ||
-        back.dataset.testid !== "keep-agent-back")
+        back.dataset.testid !== "keep-agent-back" ||
+        back.children.length !== 1 ||
+        !iconMatches(back.firstElementChild, "lucide-arrow-left", "15"))
     ) {
       return false;
     }
@@ -722,23 +871,27 @@ class KeepAgentPanelCoordinator {
       promptWrapper.firstElementChild !== prompt ||
       promptWrapper.lastElementChild !== copy ||
       prompt.className !== PROMPT_CLASS ||
-      prompt.dataset.testid !== "keep-agent-prompt" ||
+      prompt.dataset.testid !== render.promptTestId ||
       prompt.children.length !== 0 ||
-      prompt.textContent?.trim() !== render.prompt ||
+      prompt.textContent !== render.prompt ||
       publication.target.current !== prompt ||
-      this.#promptOwner?.draft !== publication.draft ||
-      this.#promptOwner.element !== prompt
+      this.#promptOwner?.binding !== bindings.prompt ||
+      this.#promptOwner.target !== publication.target
     ) {
       return false;
     }
     if (
       copy.parentElement !== promptWrapper ||
       copy.className !== COPY_CLASS ||
+      copy.getAttribute("type") !== "button" ||
       copy.type !== "button" ||
       copy.disabled ||
-      copy.getAttribute("aria-label") !== COPY_LABEL ||
-      copy.dataset.testid !== "keep-agent-copy" ||
-      normalizedText(copy) !== render.copyLabel
+      copy.matches(":disabled") ||
+      copy.getAttribute("aria-label") !== render.copyAriaLabel ||
+      copy.dataset.testid !== render.copyTestId ||
+      normalizedText(copy) !== render.copyLabel ||
+      copy.children.length !== 1 ||
+      !iconMatches(copyIcon, render.copied ? "lucide-check" : "lucide-copy", "14")
     ) {
       return false;
     }
@@ -757,21 +910,305 @@ class KeepAgentPanelCoordinator {
       docsLink.getAttribute("href") !== render.docsHref ||
       docsLink.getAttribute("target") !== "_blank" ||
       docsLink.getAttribute("rel") !== "noreferrer" ||
-      normalizedText(docsLink) !== "Agent docs · Sit in a document"
+      normalizedText(docsLink) !== "Agent docs · Sit in a document" ||
+      docsLink.children.length !== 2 ||
+      docsLink.firstElementChild?.tagName !== "SPAN" ||
+      docsLink.firstElementChild?.getAttribute("aria-hidden") !== "true" ||
+      !iconMatches(docsLink.lastElementChild, "lucide-external-link", "13")
     ) {
       return false;
     }
     return (
+      publication.elements.panel === publication.dom.node &&
+      placementMatches(publication.elements.panel, publication.placement) &&
+      panelDomMatches(publication.dom) &&
       (!publication.back || sameNodes(publication.back.targets, publication.back.element)) &&
       (!publication.retry || sameNodes(publication.retry.targets, publication.retry.element)) &&
       sameNodes(publication.copy.targets, publication.copy.element)
     );
   }
 
-  establish(draft: KeepAgentPanelDraft, target: RefObject<HTMLPreElement | null>) {
-    const previous = this.#current;
-    if (previous && previous.draft !== draft) this.retire(previous.draft);
-    const { render, elements } = draft;
+  #bind<Role extends PanelElementRole>(
+    generation: KeepAgentPanelGeneration,
+    role: Role,
+    element: KeepAgentPanelElements[Role],
+    target?: RefObject<HTMLPreElement | null>,
+  ): (() => void) | undefined {
+    const previous = generation.bindings[role];
+    if (element === null) {
+      if (previous) this.#release(previous, "null");
+      return;
+    }
+    if (previous?.active && previous.element === element) return;
+    if (
+      previous?.active &&
+      (!element.isConnected || element.ownerDocument !== previous.element.ownerDocument)
+    ) {
+      return;
+    }
+    if (previous) this.#release(previous, "replace");
+    if (this.#replay && this.#replay.generation !== generation) {
+      this.#invalidateReplay(this.#replay);
+    }
+    if (!this.#canBind(generation)) return;
+
+    const replay = this.#replay;
+    if (replay?.generation === generation) {
+      const expected = replay.expected[role];
+      if (
+        replay.invalid ||
+        !expected ||
+        !replay.released.has(role) ||
+        replay.rebound.has(role) ||
+        expected.element !== element
+      ) {
+        this.#invalidateReplay(replay);
+        return;
+      }
+    }
+
+    const displaced = this.#elementOwners.get(element);
+    if (displaced) {
+      const displacedBinding = displaced.binding;
+      if (
+        displacedBinding.generation !== generation &&
+        this.#current?.generation === displacedBinding.generation &&
+        generation.authority?.retired
+      ) {
+        return;
+      }
+      this.#release(displacedBinding, "replace");
+      if (!this.#canBind(generation)) return;
+    }
+
+    const binding: KeepAgentPanelBinding = {
+      identity: Symbol(`keep-agent-panel-${role}-binding`),
+      generation,
+      role,
+      element,
+      active: true,
+    };
+    generation.bindings[role] = binding;
+    generation.elements[role] = element;
+    this.#elementOwners.set(element, { binding });
+    if (role === "prompt" && target) {
+      this.#promptOwner = { binding, target };
+      target.current = element as HTMLPreElement;
+    }
+    if (replay?.generation === generation) replay.rebound.set(role, binding);
+    return () => this.#release(binding, "cleanup");
+  }
+
+  #release(
+    binding: KeepAgentPanelBinding,
+    source: "cleanup" | "null" | "replace",
+  ) {
+    if (!binding.active) return;
+    const publication = this.#current;
+    const startsReplay =
+      publication?.generation === binding.generation &&
+      publication.bindings[binding.role] === binding
+        ? this.#beginReplay(publication)
+        : null;
+    const replay = this.#replay;
+
+    binding.active = false;
+    const { generation, role, element } = binding;
+    if (generation.bindings[role] === binding) {
+      generation.bindings[role] = null;
+      generation.elements[role] = null;
+    }
+    if (this.#elementOwners.get(element)?.binding === binding) {
+      this.#elementOwners.delete(element);
+    }
+    if (role === "prompt" && this.#promptOwner?.binding === binding) {
+      const { target } = this.#promptOwner;
+      this.#promptOwner = null;
+      if (target.current === element) target.current = null;
+    }
+
+    if (replay?.generation === generation) {
+      if (
+        source !== "cleanup" ||
+        replay.expected[role] !== binding ||
+        replay.released.has(role) ||
+        replay.rebound.has(role)
+      ) {
+        replay.invalid = true;
+      } else {
+        replay.released.add(role);
+      }
+    }
+
+    if (publication?.generation === generation) {
+      this.#retirePublication(publication, Boolean(startsReplay && !startsReplay.invalid));
+    } else if (!replay && generation.authority && !generation.authority.retired) {
+      this.#retireDraft(generation.authority);
+    }
+    if (replay?.invalid) this.#invalidateReplay(replay);
+  }
+
+  #canBind(generation: KeepAgentPanelGeneration): boolean {
+    const authority = generation.authority;
+    return Boolean(
+      authority &&
+      (
+        !authority.retired ||
+        this.#current?.generation === generation ||
+        (this.#replay?.generation === generation && !this.#replay.invalid)
+      ),
+    );
+  }
+
+  #beginReplay(publication: KeepAgentPanelPublication): KeepAgentPanelReplay | null {
+    if (this.#replay?.publication === publication) return this.#replay;
+    if (
+      this.#replay ||
+      publication.retired ||
+      this.#current !== publication ||
+      this.#replayedGenerations.has(publication.generation) ||
+      this.#claimedActions.has(publication.copy) ||
+      Boolean(publication.back && this.#claimedActions.has(publication.back)) ||
+      Boolean(publication.retry && this.#claimedActions.has(publication.retry)) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      return null;
+    }
+    const replay: KeepAgentPanelReplay = {
+      publication,
+      generation: publication.generation,
+      expected: publication.bindings,
+      released: new Set(),
+      rebound: new Map(),
+      layoutRetired: false,
+      invalid: false,
+    };
+    this.#replay = replay;
+    queueMicrotask(() => {
+      if (this.#replay === replay) this.#invalidateReplay(replay);
+    });
+    return replay;
+  }
+
+  establish(initialDraft: KeepAgentPanelDraft, target: RefObject<HTMLPreElement | null>) {
+    if (initialDraft.retired) {
+      const successor = this.#replaySuccessor(initialDraft, target);
+      return successor ? () => this.retire(successor) : undefined;
+    }
+    const { generation } = initialDraft;
+    if (
+      generation.authority !== initialDraft ||
+      generation.target !== target ||
+      this.#publishedGenerations.has(generation)
+    ) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    this.#publishedGenerations.add(generation);
+    if (this.#current && this.#current.generation !== generation) {
+      this.#retirePublication(this.#current, false);
+    }
+    const publication = this.#createPublication(initialDraft, target);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(initialDraft);
+      return;
+    }
+    return () => this.retire(publication);
+  }
+
+  retire(publication: KeepAgentPanelPublication) {
+    const existingReplay = this.#replay;
+    if (existingReplay?.publication === publication) {
+      existingReplay.layoutRetired = true;
+      return;
+    }
+    if (publication.retired) return;
+    const replay = this.#beginReplay(publication);
+    if (replay) replay.layoutRetired = true;
+    this.#retirePublication(publication, Boolean(replay));
+  }
+
+  #replaySuccessor(
+    initialDraft: KeepAgentPanelDraft,
+    target: RefObject<HTMLPreElement | null>,
+  ): KeepAgentPanelPublication | null {
+    const replay = this.#replay;
+    const { generation } = initialDraft;
+    if (
+      !replay ||
+      replay.publication.draft !== initialDraft ||
+      replay.generation !== generation ||
+      generation.authority !== initialDraft ||
+      generation.target !== target ||
+      !initialDraft.committed ||
+      !initialDraft.retired ||
+      !replay.publication.retired ||
+      replay.invalid ||
+      !replay.layoutRetired ||
+      this.#current ||
+      this.#replayedGenerations.has(generation) ||
+      replay.released.size !== replay.publication.roles.length ||
+      replay.rebound.size !== replay.publication.roles.length ||
+      replay.publication.roles.some((role) => {
+        const expected = replay.expected[role];
+        const rebound = replay.rebound.get(role);
+        return (
+          !expected ||
+          !rebound ||
+          rebound.element !== expected.element ||
+          generation.bindings[role] !== rebound ||
+          !this.#ownsBinding(rebound)
+        );
+      }) ||
+      !this.#renderIsCurrent(initialDraft.render) ||
+      !this.#mutationFree(replay.publication)
+    ) {
+      if (replay) this.#invalidateReplay(replay);
+      return null;
+    }
+
+    const successor: KeepAgentPanelDraft = {
+      identity: Symbol("keep-agent-panel-successor-draft"),
+      render: initialDraft.render,
+      generation,
+      committed: false,
+      retired: false,
+    };
+    this.#replayedGenerations.add(generation);
+    generation.authority = successor;
+    const publication = this.#createPublication(
+      successor,
+      target,
+      replay.publication.dom,
+      replay.publication.placement,
+    );
+    this.#replay = null;
+    this.#disconnect(replay.publication);
+    if (!publication || !this.#publish(publication)) {
+      this.#retireDraft(successor);
+      return null;
+    }
+    return publication;
+  }
+
+  #completeBindings(
+    generation: KeepAgentPanelGeneration,
+  ): Readonly<Record<PanelElementRole, KeepAgentPanelBinding | null>> | null {
+    if (PANEL_ELEMENT_ROLES.some((role) =>
+      Boolean(generation.elements[role]) !== Boolean(generation.bindings[role]))) {
+      return null;
+    }
+    return Object.freeze({ ...generation.bindings });
+  }
+
+  #createPublication(
+    draft: KeepAgentPanelDraft,
+    target: RefObject<HTMLPreElement | null>,
+    expectedDom?: KeepAgentPanelDomSnapshot,
+    expectedPlacement?: readonly KeepAgentPanelPlacement[],
+  ): KeepAgentPanelPublication | null {
+    const { generation, render } = draft;
+    const { elements } = generation;
     const {
       panel,
       headingRow,
@@ -792,6 +1229,7 @@ class KeepAgentPanelCoordinator {
       clients,
       docsLink,
     } = elements;
+    const bindings = this.#completeBindings(generation);
     if (
       !panel ||
       !nav ||
@@ -805,46 +1243,177 @@ class KeepAgentPanelCoordinator {
       !after ||
       !clients ||
       !docsLink ||
+      !bindings ||
       (render.hideHeading ? headingRow || heading || back : !headingRow || !heading) ||
       (!render.hideHeading && render.onBack ? !back : Boolean(back)) ||
       (render.tokenCheckPending && !render.tokenCheckError ? !checking : Boolean(checking)) ||
       (render.tokenCheckError ? !error || !retry : Boolean(error || retry))
     ) {
-      this.retire(draft);
-      return;
+      return null;
     }
 
     const prefixLength = Number(Boolean(headingRow)) + Number(Boolean(checking)) + Number(Boolean(error));
     const setup = render.showSetup ? panel.children.item(prefixLength) : null;
     if (render.showSetup && !setup) {
-      this.retire(draft);
-      return;
+      return null;
     }
     const action = (kind: PanelActionKind, element: HTMLButtonElement): KeepAgentPanelAction =>
       Object.freeze({ kind, element, targets: descendantsOf(element) });
-    const frozenElements = Object.freeze({ ...elements });
-    const publication: KeepAgentPanelPublication = Object.freeze({
+    const dom = expectedDom ?? snapshotPanelDom(panel, setup);
+    const placement = expectedPlacement ?? connectedPlacement(panel);
+    if (!placement) return null;
+    const publication: KeepAgentPanelPublication = {
+      identity: Symbol("keep-agent-panel-publication"),
       render,
       draft,
+      generation,
       target,
-      elements: frozenElements,
+      elements: Object.freeze({ ...elements }),
+      bindings,
+      roles: Object.freeze(
+        PANEL_ELEMENT_ROLES.filter((role) => Boolean(elements[role])),
+      ),
       setup,
       topLevelChildren: Object.freeze(Array.from(panel.children)),
+      placement,
+      dom,
       back: back ? action("back", back) : null,
       retry: retry ? action("retry", retry) : null,
       copy: action("copy", copy),
-    });
+      retired: false,
+      mutated: false,
+      observer: null,
+    };
     if (!this.#renderIsCurrent(render) || !this.#hierarchyIsCurrent(publication)) {
-      this.retire(draft);
-      return;
+      return null;
     }
-    draft.committed = true;
-    draft.retired = false;
+    return publication;
+  }
+
+  #publish(publication: KeepAgentPanelPublication): boolean {
+    if (
+      this.#current ||
+      publication.retired ||
+      publication.draft.retired ||
+      publication.generation.authority !== publication.draft
+    ) {
+      return false;
+    }
+    publication.draft.committed = true;
     this.#current = publication;
+    const Observer = publication.elements.panel?.ownerDocument.defaultView?.MutationObserver;
+    if (Observer) {
+      const observer = new Observer((records) => {
+        if (this.#hasRelevantMutation(publication, records)) {
+          this.#markMutated(publication);
+        }
+      });
+      const { panel, promptWrapper } = publication.elements;
+      observer.observe(panel!, { attributes: true, childList: true });
+      observer.observe(promptWrapper!, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      for (const action of [publication.back, publication.retry, publication.copy]) {
+        if (action) {
+          observer.observe(action.element, {
+            attributes: true,
+            characterData: true,
+            childList: true,
+            subtree: true,
+          });
+        }
+      }
+      const observedParents = new Set<Node>();
+      for (const { parent } of publication.placement) {
+        if (parent && !observedParents.has(parent)) {
+          observedParents.add(parent);
+          observer.observe(parent, { childList: true });
+        }
+      }
+      publication.observer = observer;
+    }
+    return true;
+  }
+
+  #retirePublication(publication: KeepAgentPanelPublication, preserveObserver: boolean) {
+    if (!publication.retired) {
+      publication.retired = true;
+      publication.draft.retired = true;
+    }
+    if (this.#current === publication) this.#current = null;
+    if (!preserveObserver) this.#disconnect(publication);
+  }
+
+  #retireDraft(draft: KeepAgentPanelDraft) {
+    draft.retired = true;
+    if (this.#current?.draft === draft) this.#retirePublication(this.#current, false);
+  }
+
+  #retireAuthority(generation: KeepAgentPanelGeneration) {
+    const authority = generation.authority;
+    if (authority) this.#retireDraft(authority);
+    if (this.#replay?.generation === generation) this.#invalidateReplay(this.#replay);
+  }
+
+  #invalidateReplay(replay: KeepAgentPanelReplay) {
+    if (this.#replay === replay) this.#replay = null;
+    replay.invalid = true;
+    this.#disconnect(replay.publication);
+  }
+
+  #disconnect(publication: KeepAgentPanelPublication) {
+    publication.observer?.disconnect();
+    publication.observer = null;
+  }
+
+  #markMutated(publication: KeepAgentPanelPublication) {
+    publication.mutated = true;
+    const replay = this.#replay;
+    if (replay?.publication === publication) this.#invalidateReplay(replay);
+    this.#retirePublication(publication, false);
+  }
+
+  #hasRelevantMutation(
+    publication: KeepAgentPanelPublication,
+    records: readonly MutationRecord[],
+  ): boolean {
+    const panel = publication.elements.panel;
+    return records.some((record) =>
+      Boolean(panel?.contains(record.target)) ||
+      mutationTouchesPlacement(publication.placement, record));
+  }
+
+  #mutationFree(publication: KeepAgentPanelPublication): boolean {
+    if (publication.mutated) return false;
+    const records = publication.observer?.takeRecords() ?? [];
+    if (!this.#hasRelevantMutation(publication, records)) return true;
+    this.#markMutated(publication);
+    return false;
+  }
+
+  #ownsBinding(binding: KeepAgentPanelBinding): boolean {
+    return binding.active &&
+      binding.generation.bindings[binding.role] === binding &&
+      this.#elementOwners.get(binding.element)?.binding === binding;
+  }
+
+  #publicationIsCurrent(publication: KeepAgentPanelPublication): boolean {
+    return (
+      this.#current === publication &&
+      !publication.retired &&
+      !publication.draft.retired &&
+      publication.generation.authority === publication.draft &&
+      this.#mutationFree(publication) &&
+      this.#renderIsCurrent(publication.render) &&
+      this.#hierarchyIsCurrent(publication)
+    );
   }
 
   activate(
-    render: KeepAgentPanelRender,
+    generation: KeepAgentPanelGeneration,
     kind: PanelActionKind,
     event: ReactMouseEvent<HTMLButtonElement>,
   ) {
@@ -858,35 +1427,48 @@ class KeepAgentPanelCoordinator {
     if (
       !publication ||
       !action ||
-      publication.render !== render ||
+      publication.generation !== generation ||
+      publication.draft !== generation.authority ||
+      publication.retired ||
+      publication.draft.retired ||
       !element ||
       !document ||
       !MouseEventConstructor ||
+      !event ||
       event.type !== "click" ||
+      event.button !== 0 ||
+      event.defaultPrevented ||
       !(nativeEvent instanceof MouseEventConstructor) ||
       nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      nativeEvent.defaultPrevented ||
+      !nativeEvent.bubbles ||
       event.currentTarget !== element ||
       nativeEvent.target !== target ||
       !isNodeFromDocument(target, document) ||
+      !target.isConnected ||
       !element.contains(target) ||
       !action.targets.includes(target) ||
+      !nativePathMatches(nativeEvent, target, document) ||
       !element.isConnected ||
       element.disabled ||
+      element.matches(":disabled") ||
       this.#claimedActions.has(action) ||
-      this.#claimedEvents.has(nativeEvent) ||
-      !this.#hierarchyIsCurrent(publication) ||
-      !this.#renderIsCurrent(render) ||
-      (kind === "back" && !render.onBack) ||
-      (kind === "retry" && (!render.tokenCheckError || render.tokenCheckPending))
+      this.#claimedReactEvents.has(event) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      !this.#publicationIsCurrent(publication) ||
+      (kind === "back" && !publication.render.onBack) ||
+      (kind === "retry" && (!publication.render.tokenCheckError || publication.render.tokenCheckPending))
     ) {
       return;
     }
 
     this.#claimedActions.add(action);
-    this.#claimedEvents.add(nativeEvent);
-    if (kind === "back") render.onBack?.();
-    else if (kind === "retry") render.retryTokenCheck();
-    else render.copy();
+    this.#claimedReactEvents.add(event);
+    this.#claimedNativeEvents.add(nativeEvent);
+    if (kind === "back") publication.render.onBack?.();
+    else if (kind === "retry") publication.render.retryTokenCheck();
+    else publication.render.copy();
   }
 }
 
@@ -903,7 +1485,13 @@ function KeepAgentHerePanelContent({
   const docTitle = doc.title;
   const prompt = keepAgentPrompt({ id: docId, title: docTitle });
   const pre = useRef<HTMLPreElement>(null);
-  const copySetup = useCopy(prompt, pre);
+  const copyResult = useCopy(prompt, pre);
+  const copySetup: CopySetup = Object.freeze({
+    copy: copyResult.copy,
+    status: copyResult.status,
+    label: copyResult.label,
+    copied: copyResult.copied,
+  });
   const origin = useOrigin();
   const { hasTokens, pending: tokenCheckPending, error: tokenCheckError, retry: retryTokenCheck } = tokenSetup;
   const [mount] = useState(() => Symbol("keep-agent-panel"));
@@ -949,13 +1537,13 @@ function KeepAgentHerePanelContent({
     tokensHref: `/settings?next=${encodeURIComponent(`/d/${docId}`)}#tokens`,
     connectHref: `/settings?next=${encodeURIComponent(`/d/${docId}`)}#connect`,
     docsHref: `${AGENT_DOCS_URL}#sit-in-a-document`,
+    promptTestId: "keep-agent-prompt",
+    copyTestId: "keep-agent-copy",
+    copyAriaLabel: COPY_LABEL,
   });
   const draft = coordinator.createDraft(render);
 
-  useLayoutEffect(() => {
-    coordinator.establish(draft, pre);
-    return () => coordinator.deactivate(draft);
-  }, [coordinator, draft, pre]);
+  useLayoutEffect(() => coordinator.establish(draft, pre), [coordinator, draft, pre]);
 
   return (
     <div ref={(element) => coordinator.bindElement(draft, "panel", element)} className={PANEL_CLASS} data-testid="keep-agent-panel">
@@ -966,7 +1554,7 @@ function KeepAgentHerePanelContent({
               ref={(element) => coordinator.bindElement(draft, "back", element)}
               type="button"
               className={BACK_CLASS}
-              onClick={(event) => coordinator.activate(render, "back", event)}
+              onClick={(event) => coordinator.activate(draft.generation, "back", event)}
               aria-label="Back"
               data-testid="keep-agent-back"
             >
@@ -1001,7 +1589,7 @@ function KeepAgentHerePanelContent({
             ref={(element) => coordinator.bindElement(draft, "retry", element)}
             type="button"
             className={RETRY_CLASS}
-            onClick={(event) => coordinator.activate(render, "retry", event)}
+            onClick={(event) => coordinator.activate(draft.generation, "retry", event)}
             disabled={render.tokenCheckPending}
             aria-busy={render.tokenCheckPending || undefined}
           >
@@ -1022,7 +1610,7 @@ function KeepAgentHerePanelContent({
         <pre
           ref={(element) => coordinator.bindPrompt(draft, pre, element)}
           className={PROMPT_CLASS}
-          data-testid="keep-agent-prompt"
+          data-testid={render.promptTestId}
         >
           {render.prompt}
         </pre>
@@ -1030,9 +1618,9 @@ function KeepAgentHerePanelContent({
           ref={(element) => coordinator.bindElement(draft, "copy", element)}
           type="button"
           className={COPY_CLASS}
-          onClick={(event) => coordinator.activate(render, "copy", event)}
-          aria-label={COPY_LABEL}
-          data-testid="keep-agent-copy"
+          onClick={(event) => coordinator.activate(draft.generation, "copy", event)}
+          aria-label={render.copyAriaLabel}
+          data-testid={render.copyTestId}
         >
           {render.copied ? <Check size={14} /> : <Copy size={14} />}
           {render.copyLabel}
