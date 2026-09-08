@@ -52,6 +52,43 @@ function checklistWithBoundary(boundary: string, hasAgentRequests: boolean, poll
   );
 }
 
+function reactHandler<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return handler as T;
+}
+
+interface RetryEvent {
+  type: string;
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: Event;
+  defaultPrevented: boolean;
+}
+
+type RetryHandler = (event: RetryEvent) => void;
+
+async function renderStrict(root: ReturnType<typeof createRoot>, checklist: React.ReactNode) {
+  await act(async () => {
+    root.render(<StrictMode>{checklist}</StrictMode>);
+  });
+}
+
+function replayHandlerOnNextClick(handler: RetryHandler, button: HTMLButtonElement) {
+  button.addEventListener("click", (nativeEvent) => {
+    handler({
+      type: "click",
+      currentTarget: button,
+      target: nativeEvent.target,
+      nativeEvent,
+      defaultPrevented: nativeEvent.defaultPrevented,
+    });
+  }, { capture: true, once: true });
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   fetchMock.mockReset();
@@ -496,5 +533,377 @@ describe("Copilot setup checklist polling", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("copilot-checklist")).toBeNull();
+  });
+
+  it("shows one current alert after the initial Strict Mode failure and retains completed milestones", async () => {
+    const replayed = deferred();
+    const current = deferred();
+    fetchMock.mockReturnValueOnce(replayed.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(
+        root,
+        <CopilotChecklist hasAgentRequests={false} initialTokens={[seenToken]} pollMs={1_000} />,
+      );
+      await settle(() => replayed.reject(new Error("replayed offline")));
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      await settle(() => current.reject(new Error("current offline")));
+
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("Couldn't check setup progress.");
+      expect(screen.getByRole("button", { name: "Retry now" })).toBeEnabled();
+      expectProgress(2);
+      expect(screen.getByTestId("checklist-token")).toHaveAttribute("data-done", "true");
+      expect(screen.getByTestId("checklist-config")).toHaveAttribute("data-done", "true");
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts one exact retry, disables it while pending, and rejects a repeated native click", async () => {
+    const replayed = deferred();
+    const failed = deferred();
+    const retry = deferred();
+    fetchMock
+      .mockReturnValueOnce(replayed.promise)
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(root, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+      await settle(() => replayed.reject(new Error("replayed offline")));
+      await settle(() => failed.reject(new Error("offline")));
+      const button = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+
+      await act(async () => {
+        button.click();
+        button.click();
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-busy", "true");
+      await advance(5_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+
+      await settle(() => retry.resolve(response([calledToken])));
+      expectProgress(4);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves the alert after a failed retry and gives recovery one fresh exact callback", async () => {
+    const replayed = deferred();
+    const failed = deferred();
+    const retryFailed = deferred();
+    const recovered = deferred();
+    fetchMock
+      .mockReturnValueOnce(replayed.promise)
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retryFailed.promise)
+      .mockReturnValueOnce(recovered.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(root, <CopilotChecklist hasAgentRequests={false} pollMs={10_000} />);
+      await settle(() => replayed.reject(new Error("replayed offline")));
+      await settle(() => failed.reject(new Error("offline")));
+      const button = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+      const stale = reactHandler<RetryHandler>(button, "onClick");
+
+      await act(async () => button.click());
+      expect(button).toBeDisabled();
+      await settle(() => retryFailed.reject(new Error("still offline")));
+
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(button).toBeEnabled();
+      replayHandlerOnNextClick(stale, button);
+      await act(async () => button.click());
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(button).toBeDisabled();
+
+      await settle(() => recovered.resolve(response([seenToken])));
+      expectProgress(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("clears the current alert when the existing automatic cadence recovers", async () => {
+    const replayed = deferred();
+    const failed = deferred();
+    const recovered = deferred();
+    fetchMock
+      .mockReturnValueOnce(replayed.promise)
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(recovered.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(root, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+      await settle(() => replayed.reject(new Error("replayed offline")));
+      await settle(() => failed.reject(new Error("offline")));
+      expect(screen.getByRole("button", { name: "Retry now" })).toBeEnabled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      await advance(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(1);
+      await settle(() => recovered.resolve(response([seenToken])));
+
+      expectProgress(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a late retry settlement after a Strict Mode replacement and keeps the successor current", async () => {
+    const firstReplay = deferred();
+    const firstFailure = deferred();
+    const lateRetry = deferred();
+    const nextReplay = deferred();
+    const nextFailure = deferred();
+    const nextRetry = deferred();
+    fetchMock
+      .mockReturnValueOnce(firstReplay.promise)
+      .mockReturnValueOnce(firstFailure.promise)
+      .mockReturnValueOnce(lateRetry.promise)
+      .mockReturnValueOnce(nextReplay.promise)
+      .mockReturnValueOnce(nextFailure.promise)
+      .mockReturnValueOnce(nextRetry.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(root, <CopilotChecklist key="first" hasAgentRequests={false} pollMs={10_000} />);
+      await settle(() => firstReplay.reject(new Error("first replay")));
+      await settle(() => firstFailure.reject(new Error("first failure")));
+      const retiredButton = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+      await act(async () => retiredButton.click());
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+
+      await renderStrict(root, <CopilotChecklist key="next" hasAgentRequests={false} pollMs={10_000} />);
+      expect(retiredButton.isConnected).toBe(false);
+      await settle(() => nextReplay.reject(new Error("next replay")));
+      await settle(() => nextFailure.reject(new Error("next failure")));
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+      expectProgress(0);
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+
+      await settle(() => lateRetry.resolve(response([calledToken])));
+      expectProgress(0);
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      const currentButton = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+      expect(currentButton).toBeEnabled();
+      await act(async () => currentButton.click());
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      await settle(() => nextRetry.resolve(response([seenToken])));
+      expectProgress(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["content", "placement"] as const)(
+    "rejects a retry after its committed %s is mutated and restored",
+    async (mutation) => {
+      const replayed = deferred();
+      const failed = deferred();
+      fetchMock.mockReturnValueOnce(replayed.promise).mockReturnValueOnce(failed.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await renderStrict(root, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+        await settle(() => replayed.reject(new Error("replayed offline")));
+        await settle(() => failed.reject(new Error("offline")));
+        const alert = screen.getByRole("alert");
+        const button = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+
+        if (mutation === "content") {
+          const message = alert.firstElementChild!;
+          const original = message.textContent;
+          message.textContent = "restoring";
+          message.textContent = original;
+        } else {
+          const section = screen.getByTestId("copilot-checklist");
+          alert.remove();
+          section.append(alert);
+        }
+        await act(async () => {});
+        await act(async () => button.click());
+
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(button).toBeEnabled();
+        expectProgress(0);
+        expect(screen.getAllByRole("alert")).toHaveLength(1);
+        expect(vi.getTimerCount()).toBe(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects settlement after pending controls are mutation-restored without changing current state", async () => {
+    const replayed = deferred();
+    const failed = deferred();
+    const retry = deferred();
+    fetchMock
+      .mockReturnValueOnce(replayed.promise)
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrict(root, <CopilotChecklist hasAgentRequests={false} initialTokens={[seenToken]} pollMs={10_000} />);
+      await settle(() => replayed.reject(new Error("replayed offline")));
+      await settle(() => failed.reject(new Error("offline")));
+      const button = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+      await act(async () => button.click());
+      expect(button).toBeDisabled();
+
+      const original = button.className;
+      button.className = "mutated";
+      button.className = original;
+      await act(async () => {});
+      await settle(() => retry.resolve(response([calledToken])));
+
+      expectProgress(2);
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(button).toBeDisabled();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["completion", "disable"] as const)(
+    "retires a failure alert and its retry authority on %s",
+    async (stop) => {
+      const replayed = deferred();
+      const failed = deferred();
+      fetchMock.mockReturnValueOnce(replayed.promise).mockReturnValueOnce(failed.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await renderStrict(root, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+        await settle(() => replayed.reject(new Error("replayed offline")));
+        await settle(() => failed.reject(new Error("offline")));
+        const retiredButton = screen.getByRole("button", { name: "Retry now" }) as HTMLButtonElement;
+        const retiredHandler = reactHandler<RetryHandler>(retiredButton, "onClick");
+
+        await renderStrict(
+          root,
+          <CopilotChecklist
+            hasAgentRequests={false}
+            initialTokens={stop === "completion" ? [calledToken] : []}
+            pollMs={stop === "disable" ? 0 : 1_000}
+          />,
+        );
+
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(retiredButton.isConnected).toBe(false);
+        expect(vi.getTimerCount()).toBe(0);
+        const fabricated = new MouseEvent("click", { bubbles: true, cancelable: true });
+        retiredHandler({
+          type: "click",
+          currentTarget: retiredButton,
+          target: retiredButton,
+          nativeEvent: fabricated,
+          defaultPrevented: false,
+        });
+        await advance(10_000);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("drops pending retry work on cleanup and gives a clean Strict Mode successor fresh authority", async () => {
+    const firstReplay = deferred();
+    const firstFailure = deferred();
+    const retiredRetry = deferred();
+    const nextReplay = deferred();
+    const nextFailure = deferred();
+    const nextRetry = deferred();
+    fetchMock
+      .mockReturnValueOnce(firstReplay.promise)
+      .mockReturnValueOnce(firstFailure.promise)
+      .mockReturnValueOnce(retiredRetry.promise)
+      .mockReturnValueOnce(nextReplay.promise)
+      .mockReturnValueOnce(nextFailure.promise)
+      .mockReturnValueOnce(nextRetry.promise);
+    const firstHost = document.createElement("div");
+    const nextHost = document.createElement("div");
+    document.body.append(firstHost, nextHost);
+    const firstRoot = createRoot(firstHost);
+    const nextRoot = createRoot(nextHost);
+    let firstMounted = true;
+
+    try {
+      await renderStrict(firstRoot, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+      await settle(() => firstReplay.reject(new Error("first replay")));
+      await settle(() => firstFailure.reject(new Error("first failure")));
+      await act(async () => screen.getByRole("button", { name: "Retry now" }).click());
+      await act(async () => firstRoot.unmount());
+      firstMounted = false;
+      expect(vi.getTimerCount()).toBe(0);
+
+      await renderStrict(nextRoot, <CopilotChecklist hasAgentRequests={false} pollMs={1_000} />);
+      await settle(() => nextReplay.reject(new Error("next replay")));
+      await settle(() => nextFailure.reject(new Error("next failure")));
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await settle(() => retiredRetry.resolve(response([calledToken])));
+      expectProgress(0);
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+      await act(async () => screen.getByRole("button", { name: "Retry now" }).click());
+      expect(fetchMock).toHaveBeenCalledTimes(6);
+      await settle(() => nextRetry.resolve(response([seenToken])));
+      expectProgress(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      if (firstMounted) await act(async () => firstRoot.unmount());
+      await act(async () => nextRoot.unmount());
+      firstHost.remove();
+      nextHost.remove();
+    }
   });
 });
