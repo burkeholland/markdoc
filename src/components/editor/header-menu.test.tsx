@@ -421,6 +421,36 @@ describe("editor header More menu authority", () => {
     expect(Object.getOwnPropertyDescriptor(history, "dispatchEvent")).toEqual(originalDescriptor);
   });
 
+  it("does not overwrite a same-value foreign dispatch descriptor", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const props = headerProps(session, actions);
+    const view = await renderStrict(header(props));
+    openMenu();
+    const history = item("history");
+    const foreignDescriptor: PropertyDescriptor = {
+      configurable: true,
+      enumerable: true,
+      value: history.dispatchEvent,
+      writable: false,
+    };
+    Object.defineProperty(history, "dispatchEvent", foreignDescriptor);
+
+    await view.render(header({ ...props, commentsOpen: true }));
+
+    expect(Object.getOwnPropertyDescriptor(history, "dispatchEvent")).toEqual(foreignDescriptor);
+    fireEvent.click(history);
+    fireEvent.click(item("history"));
+    expect(actions.onHistory).not.toHaveBeenCalled();
+
+    await view.render(<div key="fresh">{header(props)}</div>);
+    openMenu();
+    const freshHistory = item("history");
+    expect(freshHistory).not.toBe(history);
+    fireEvent.click(freshHistory);
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+  });
+
   it("rejects unadmitted and repeated custom selection without consuming a fresh action", async () => {
     const session = createSession();
     const actions = createActions();

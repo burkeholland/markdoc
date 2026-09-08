@@ -6935,7 +6935,7 @@ function installMoreMenuDispatchObserver(
   const restoreObserved = () => {
     const current = moreMenuOwnDescriptor(target, "dispatchEvent");
     if (current === MORE_MENU_DESCRIPTOR_FAILURE) return false;
-    if (!current || !("value" in current) || current.value !== observedDispatch) {
+    if (!moreMenuDescriptorMatches(current, installedDescriptor)) {
       return moreMenuDescriptorMatches(current, descriptor);
     }
     try {
