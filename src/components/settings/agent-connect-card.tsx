@@ -1194,6 +1194,7 @@ interface AgentTabEventIntrinsics {
   readonly keyboardPrototype: object;
   readonly bubblingPhase: number;
   readonly isPrototypeOf: Object["isPrototypeOf"];
+  readonly trusted: AgentTabTrustedAuthority;
   readonly event: Readonly<{
     type: (this: Event) => string;
     target: (this: Event) => EventTarget | null;
@@ -1222,6 +1223,12 @@ interface AgentTabEventIntrinsics {
   readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
   readonly setTimeout: Window["setTimeout"];
   readonly clearTimeout: Window["clearTimeout"];
+}
+
+interface AgentTabTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
 }
 
 interface AgentTabAction {
@@ -1298,6 +1305,7 @@ interface AgentTabNativeSnapshot {
   readonly shiftKey: boolean;
   readonly repeat: boolean;
   readonly isComposing: boolean;
+  readonly isTrusted: boolean;
   readonly view: Window | null;
 }
 
@@ -1441,6 +1449,58 @@ function agentTabGetter<This extends object, Value>(
   return typeof getter === "function" ? getter as (this: This) => Value : null;
 }
 
+function agentTabDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+    current.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.get === expected.get &&
+    current.set === expected.set &&
+    current.value === expected.value &&
+    current.writable === expected.writable
+  );
+}
+
+function captureAgentTabTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): AgentTabTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("agent-tab-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    agentTabDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
 function captureAgentTabIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): AgentTabEventIntrinsics | null {
@@ -1449,6 +1509,7 @@ function captureAgentTabIntrinsics(
   const uiEventPrototype = ownerWindow.UIEvent.prototype;
   const documentPrototype = ownerWindow.Document.prototype;
   const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const trusted = captureAgentTabTrustedAuthority(ownerWindow);
   const type = agentTabGetter<Event, string>(eventPrototype, "type");
   const target = agentTabGetter<Event, EventTarget | null>(eventPrototype, "target");
   const currentTarget = agentTabGetter<Event, EventTarget | null>(eventPrototype, "currentTarget");
@@ -1475,6 +1536,7 @@ function captureAgentTabIntrinsics(
   const clearTimeout = ownerWindow.clearTimeout;
   const isPrototypeOf = Object.prototype.isPrototypeOf;
   if (
+    !trusted ||
     !type ||
     !target ||
     !currentTarget ||
@@ -1507,6 +1569,7 @@ function captureAgentTabIntrinsics(
     keyboardPrototype,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
     isPrototypeOf,
+    trusted,
     event: Object.freeze({
       type,
       target,
@@ -1542,10 +1605,18 @@ function readAgentTabNativeEvent(
   event: Event,
   intrinsics: AgentTabEventIntrinsics,
 ): AgentTabNativeSnapshot | null {
-  if (!Reflect.apply(intrinsics.isPrototypeOf, intrinsics.keyboardPrototype, [event])) {
-    return null;
-  }
   try {
+    if (
+      !Reflect.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.trusted.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
     return Object.freeze({
       type: Reflect.apply(intrinsics.event.type, event, []),
       target: Reflect.apply(intrinsics.event.target, event, []),
@@ -1565,6 +1636,7 @@ function readAgentTabNativeEvent(
       shiftKey: Reflect.apply(intrinsics.keyboard.shiftKey, event, []),
       repeat: Reflect.apply(intrinsics.keyboard.repeat, event, []),
       isComposing: Reflect.apply(intrinsics.keyboard.isComposing, event, []),
+      isTrusted: intrinsics.trusted.read(event),
       view: Reflect.apply(intrinsics.view, event, []),
     });
   } catch {
@@ -1796,6 +1868,7 @@ class AgentTabCoordinator {
       event.bubbles !== snapshot.bubbles ||
       event.cancelable !== snapshot.cancelable ||
       event.defaultPrevented ||
+      event.isTrusted !== snapshot.isTrusted ||
       event.key !== snapshot.key ||
       event.code !== snapshot.code ||
       event.location !== snapshot.location ||
@@ -1822,6 +1895,7 @@ class AgentTabCoordinator {
       !snapshot.cancelable ||
       snapshot.defaultPrevented ||
       snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
       snapshot.altKey ||
       snapshot.ctrlKey ||
       snapshot.metaKey ||

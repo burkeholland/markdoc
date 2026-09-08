@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -67,6 +74,29 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
   return handler as T;
+}
+
+interface ReactHostFiber {
+  alternate?: ReactHostFiber | null;
+  memoizedProps?: Record<string, unknown>;
+  refCleanup?: unknown;
+}
+
+function reactRefCleanup(element: HTMLElement): () => void {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!fiberKey || !propsKey) throw new Error(`React internals were not attached to ${element.tagName}`);
+  const record = element as unknown as Record<string, ReactHostFiber | Record<string, unknown>>;
+  const fiber = record[fiberKey] as ReactHostFiber;
+  const props = record[propsKey] as Record<string, unknown>;
+  const alternate = fiber.alternate;
+  const current = alternate?.memoizedProps?.onKeyDown === props.onKeyDown
+    ? alternate
+    : fiber;
+  if (typeof current.refCleanup !== "function") {
+    throw new Error(`React ref cleanup was not attached to ${element.tagName}`);
+  }
+  return current.refCleanup as () => void;
 }
 
 type ClickHandler = (event: { currentTarget: HTMLButtonElement }) => void;
@@ -296,15 +326,63 @@ function tabKeyEvent(
   element: HTMLButtonElement,
   key: string,
   init: KeyboardEventInit = {},
+  trusted = true,
 ): KeyboardEvent {
   const KeyboardEventConstructor = element.ownerDocument.defaultView?.KeyboardEvent;
   if (!KeyboardEventConstructor) throw new Error("The tab has no owner-realm KeyboardEvent");
-  return new KeyboardEventConstructor("keydown", {
+  const event = new KeyboardEventConstructor("keydown", {
     key,
     bubbles: true,
     cancelable: true,
     ...init,
   });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function dispatchTabKeyWithHandler(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the Agent tab");
+  const properties = element as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
 }
 
 function dispatchTabKey(
@@ -2201,6 +2279,63 @@ describe("AgentConnectCard exact keyboard publication", () => {
     expectSelected("Copilot CLI");
   });
 
+  it("rejects untrusted input and replaced React trust predicates before trusted recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    const handler = reactHandler<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(source, "onKeyDown");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const untrusted = tabKeyEvent(source, "ArrowDown", {}, false);
+    dispatchTabKey(source, untrusted);
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+
+    const replacedTrust = tabKeyEvent(source, "ArrowDown");
+    dispatchTabKeyWithHandler(source, replacedTrust, (event) => {
+      handler(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isTrusted") return false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+    });
+    expect(replacedTrust.defaultPrevented).toBe(false);
+
+    const replacedPredicate = tabKeyEvent(source, "ArrowDown");
+    dispatchTabKeyWithHandler(source, replacedPredicate, (event) => {
+      handler(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isDefaultPrevented") return () => true;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+    });
+    expect(replacedPredicate.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+    expect(source).toHaveFocus();
+    expect(copyText).not.toHaveBeenCalled();
+
+    const trusted = dispatchTabKey(source, "ArrowDown");
+    expect(trusted.isTrusted).toBe(true);
+    expect(trusted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expectSelected("VS Code");
+    expect(tab("VS Code")).toHaveFocus();
+  });
+
   it("rejects an unfocused selected tab and a focused unselected tab", () => {
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -2310,7 +2445,6 @@ describe("AgentConnectCard exact keyboard publication", () => {
 
   it("rejects partial ref replay and leaves no keyboard work after cleanup", async () => {
     const realQueueMicrotask = globalThis.queueMicrotask.bind(globalThis);
-    const clearTimeout = vi.spyOn(window, "clearTimeout");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const view = renderDirect(
@@ -2319,59 +2453,68 @@ describe("AgentConnectCard exact keyboard publication", () => {
       </StrictMode>,
     );
     await act(async () => {});
+    const initialSource = tab("Copilot CLI");
+    initialSource.focus();
     vi.useFakeTimers();
     const setTimeout = vi.spyOn(window, "setTimeout");
-    expect(vi.getTimerCount()).toBe(0);
-    setTimeout.mockClear();
-    const source = tab("Copilot CLI");
-    const sourceRef = reactHandler<ElementRef<HTMLButtonElement>>(source, "ref");
-    act(() => {
-      sourceRef(null);
-      sourceRef(source);
-    });
-    source.focus();
-    focus.mockClear();
-    preventDefault.mockClear();
-
-    const partial = dispatchTabKey(source, "ArrowDown");
-    expect(partial.defaultPrevented).toBe(false);
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-    expectSelected("Copilot CLI");
-    expect(vi.getTimerCount()).toBe(1);
-    expect(setTimeout).toHaveBeenCalledOnce();
-    expect(setTimeout.mock.calls[0]?.[1]).toBe(0);
-    const expiry = setTimeout.mock.calls[0]?.[0];
-    const handle = setTimeout.mock.results[0]?.value;
-    expect(expiry).toBeTypeOf("function");
-
-    const staleHandler = reactHandler<KeyHandler>(source, "onKeyDown");
-    await act(() => {
-      view.root.render(<StrictMode><div /></StrictMode>);
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
+    try {
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <AgentConnectCard origin="https://current.markdoc.test" hideTokenStep />
+          </StrictMode>,
+        );
+      });
+      const source = tab("Copilot CLI");
+      expect(source).toBe(initialSource);
+      expect(source).toHaveFocus();
+      expect(vi.getTimerCount()).toBe(0);
+      const staleHandler = reactHandler<KeyHandler>(source, "onKeyDown");
+      const sourceCleanup = reactRefCleanup(source);
+      focus.mockClear();
+      preventDefault.mockClear();
+      setTimeout.mockClear();
+      clearTimeout.mockClear();
+      let handle: unknown;
+      act(() => {
+        sourceCleanup();
+        expect(setTimeout).toHaveBeenCalledOnce();
+        expect(setTimeout.mock.calls[0]?.[1]).toBe(0);
+        handle = setTimeout.mock.results[0]?.value;
+      });
+      expect(handle).not.toBeUndefined();
+      expect(handle).not.toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
       staleHandler({
         key: "ArrowDown",
         currentTarget: source,
         preventDefault,
       });
-    });
-    await new Promise<void>((resolve) => realQueueMicrotask(resolve));
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-    expect(copyText).not.toHaveBeenCalled();
-    expect(clearTimeout).toHaveBeenCalledExactlyOnceWith(handle);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelected("Copilot CLI");
+      expect(copyText).not.toHaveBeenCalled();
+      expect(clearTimeout).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
 
-    act(() => {
-      if (typeof expiry === "function") expiry();
-    });
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-    expect(copyText).not.toHaveBeenCalled();
-    expectSelected("Copilot CLI");
-    expect(preventDefault).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-    expect(copyText).not.toHaveBeenCalled();
-    expectSelected("Copilot CLI");
-    expect(vi.getTimerCount()).toBe(0);
+      clearTimeout.mockClear();
+      expect(vi.getTimerCount()).toBe(1);
+      await act(() => {
+        view.root.render(<StrictMode><div /></StrictMode>);
+      });
+      await new Promise<void>((resolve) => realQueueMicrotask(resolve));
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(source).toHaveAttribute("aria-selected", "true");
+      expect(clearTimeout).toHaveBeenCalledExactlyOnceWith(handle);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      setTimeout.mockRestore();
+      clearTimeout.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
