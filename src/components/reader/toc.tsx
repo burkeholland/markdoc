@@ -99,7 +99,34 @@ type NodeFact = Readonly<{
   children: readonly Node[];
 }>;
 
-type PublicationAction = "toggle" | "link" | "escape" | "reject-link";
+type PublicationAction = "toggle" | "link" | "escape" | "navigate" | "reject-link";
+
+type NavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
+
+type KeyboardNavigation = Readonly<{
+  publication: TocPublication;
+  document: Document;
+  view: Window;
+  nativeEvent: KeyboardEvent;
+  control: HTMLButtonElement | HTMLAnchorElement;
+  destination: HTMLAnchorElement;
+  focus: HTMLAnchorElement["focus"];
+  activeElement: Element;
+  target: EventTarget;
+  path: readonly EventTarget[];
+  type: "keydown";
+  bubbles: true;
+  cancelable: true;
+  key: NavigationKey;
+  repeat: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  isComposing: boolean;
+  defaultPrevented: boolean;
+  cancelBubble: boolean;
+}>;
 
 type ActionClaim = Readonly<{
   visitOwner: VisitOwner;
@@ -107,6 +134,7 @@ type ActionClaim = Readonly<{
   action: PublicationAction;
   reactEvent: object;
   nativeEvent: Event;
+  navigation: KeyboardNavigation | null;
 }>;
 
 type EventClaims = Readonly<{
@@ -134,6 +162,7 @@ type TocPublication = PermanentOwner & Readonly<{
     reactEvent: object,
     nativeEvent: Event,
     claims: EventClaims,
+    navigation?: KeyboardNavigation,
   ) => ActionClaim | null;
 }>;
 
@@ -751,7 +780,7 @@ function createPublication(
   );
   const headingIds = new Set(render.visit.headings.map((heading) => heading.id));
   let retired = false;
-  let actionClaimed = false;
+  let stateActionClaimed = false;
   const mutationObserver = new MutationObserverConstructor((records) => {
     if (
       records.some((record) =>
@@ -768,10 +797,16 @@ function createPublication(
     unregisterPublication(publication);
     if (publicationRef.current === publication) publicationRef.current = null;
   };
-  const claim: TocPublication["claim"] = (action, reactEvent, nativeEvent, claims) => {
+  const claim: TocPublication["claim"] = (action, reactEvent, nativeEvent, claims, navigation) => {
     if (
       retired ||
-      actionClaimed ||
+      (action !== "navigate" && stateActionClaimed) ||
+      (action === "navigate") !== Boolean(navigation) ||
+      (navigation && (
+        navigation.publication !== publication ||
+        navigation.nativeEvent !== nativeEvent ||
+        navigation.document !== ownerDocument
+      )) ||
       claims.react.has(reactEvent) ||
       claims.native.has(nativeEvent)
     ) {
@@ -783,8 +818,9 @@ function createPublication(
       action,
       reactEvent,
       nativeEvent,
+      navigation: navigation ?? null,
     });
-    actionClaimed = true;
+    if (action !== "navigate") stateActionClaimed = true;
     claims.react.set(reactEvent, next);
     claims.native.set(nativeEvent, next);
     return next;
@@ -913,7 +949,7 @@ function isPrimaryClick(
 function isEscapeKeyDown(
   event: ReactKeyboardEvent<HTMLElement>,
   publication: TocPublication,
-): event is ReactKeyboardEvent<HTMLElement> & { nativeEvent: KeyboardEvent } {
+): boolean {
   const view = publication.document.defaultView;
   if (
     !view ||
@@ -940,6 +976,164 @@ function isEscapeKeyDown(
     native.target !== null &&
     nativePathIsExact(native.path, native.target, publication.nav, publication.document)
   );
+}
+
+function isNavigationKey(key: string): key is NavigationKey {
+  return key === "ArrowDown" || key === "ArrowUp" || key === "Home" || key === "End";
+}
+
+function readKeyboardNavigation(
+  event: ReactKeyboardEvent<HTMLElement>,
+  publication: TocPublication,
+): KeyboardNavigation | null {
+  const ownerDocument = publication.document;
+  const view = ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !view ||
+    !publication.render.open ||
+    event.currentTarget !== publication.nav ||
+    publication.nav.ownerDocument !== ownerDocument ||
+    !view.KeyboardEvent.prototype.isPrototypeOf(nativeEvent)
+  ) {
+    return null;
+  }
+
+  const native = readNativeEvent(nativeEvent, ownerDocument);
+  if (!native || native.target === null || native.target !== event.target) return null;
+
+  const eventPrototype = view.Event.prototype;
+  const keyboardPrototype = view.KeyboardEvent.prototype;
+  const type = Object.getOwnPropertyDescriptor(eventPrototype, "type")!.get!.call(nativeEvent) as string;
+  const bubbles = Object.getOwnPropertyDescriptor(eventPrototype, "bubbles")!.get!.call(nativeEvent) as boolean;
+  const cancelable = Object.getOwnPropertyDescriptor(eventPrototype, "cancelable")!.get!.call(nativeEvent) as boolean;
+  const defaultPrevented = Object.getOwnPropertyDescriptor(eventPrototype, "defaultPrevented")!.get!
+    .call(nativeEvent) as boolean;
+  const cancelBubble = Object.getOwnPropertyDescriptor(eventPrototype, "cancelBubble")!.get!
+    .call(nativeEvent) as boolean;
+  const key = Object.getOwnPropertyDescriptor(keyboardPrototype, "key")!.get!.call(nativeEvent) as string;
+  const repeat = Object.getOwnPropertyDescriptor(keyboardPrototype, "repeat")!.get!.call(nativeEvent) as boolean;
+  const altKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "altKey")!.get!.call(nativeEvent) as boolean;
+  const ctrlKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "ctrlKey")!.get!.call(nativeEvent) as boolean;
+  const metaKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "metaKey")!.get!.call(nativeEvent) as boolean;
+  const shiftKey = Object.getOwnPropertyDescriptor(keyboardPrototype, "shiftKey")!.get!.call(nativeEvent) as boolean;
+  const isComposing = Object.getOwnPropertyDescriptor(keyboardPrototype, "isComposing")!.get!
+    .call(nativeEvent) as boolean;
+  const isDefaultPrevented = event.isDefaultPrevented;
+  const isPropagationStopped = event.isPropagationStopped;
+  if (
+    type !== "keydown" ||
+    event.type !== type ||
+    !isNavigationKey(key) ||
+    event.key !== key ||
+    event.repeat !== repeat ||
+    event.altKey !== altKey ||
+    event.ctrlKey !== ctrlKey ||
+    event.metaKey !== metaKey ||
+    event.shiftKey !== shiftKey ||
+    event.defaultPrevented !== defaultPrevented ||
+    typeof isDefaultPrevented !== "function" ||
+    typeof isPropagationStopped !== "function" ||
+    isDefaultPrevented.call(event) ||
+    isPropagationStopped.call(event) ||
+    repeat ||
+    altKey ||
+    ctrlKey ||
+    metaKey ||
+    isComposing ||
+    defaultPrevented ||
+    cancelBubble ||
+    bubbles !== true ||
+    cancelable !== true ||
+    (native.view !== null && native.view !== view) ||
+    !nativePathIsExact(native.path, native.target, publication.nav, ownerDocument)
+  ) {
+    return null;
+  }
+
+  const target = native.target;
+  const activeElement = ownerDocument.activeElement;
+  const anchorIndex = publication.anchors.findIndex((anchor) => anchor === target);
+  const control = target === publication.toggle
+    ? publication.toggle
+    : anchorIndex >= 0 ? publication.anchors[anchorIndex] : null;
+  if (
+    !control ||
+    control !== target ||
+    activeElement !== control ||
+    control.ownerDocument !== ownerDocument ||
+    (control === publication.toggle && control.disabled)
+  ) {
+    return null;
+  }
+  if (anchorIndex >= 0) {
+    const heading = publication.render.visit.headings[anchorIndex];
+    const anchor = publication.anchors[anchorIndex];
+    if (
+      !heading ||
+      anchor !== control ||
+      anchor.getAttribute("aria-disabled") !== null ||
+      anchor.getAttribute("href") !== heading.href ||
+      anchor.textContent !== heading.text
+    ) {
+      return null;
+    }
+  }
+
+  const lastIndex = publication.anchors.length - 1;
+  if (lastIndex < 0) return null;
+  let destinationIndex: number;
+  if (key === "Home") {
+    destinationIndex = 0;
+  } else if (key === "End") {
+    destinationIndex = lastIndex;
+  } else if (control === publication.toggle) {
+    const activeIndex = publication.render.visit.headings.findIndex(
+      (heading) => heading.id === publication.render.active,
+    );
+    destinationIndex = activeIndex >= 0
+      ? activeIndex
+      : key === "ArrowDown" ? 0 : lastIndex;
+  } else {
+    destinationIndex = key === "ArrowDown"
+      ? (anchorIndex + 1) % publication.anchors.length
+      : (anchorIndex - 1 + publication.anchors.length) % publication.anchors.length;
+  }
+
+  const destination = publication.anchors[destinationIndex];
+  const focus = view.HTMLElement.prototype.focus;
+  if (
+    !destination ||
+    destination.ownerDocument !== ownerDocument ||
+    !destination.isConnected ||
+    destination.focus !== focus
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    publication,
+    document: ownerDocument,
+    view,
+    nativeEvent,
+    control,
+    destination,
+    focus,
+    activeElement,
+    target: native.target,
+    path: native.path,
+    type: "keydown",
+    bubbles: true,
+    cancelable: true,
+    key,
+    repeat,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    isComposing,
+    defaultPrevented,
+    cancelBubble,
+  });
 }
 
 function anchorHasSafeFragmentNavigation(anchor: HTMLAnchorElement, owner: VisitOwner): boolean {
@@ -989,6 +1183,7 @@ function claimRejectedAnchor(
     action: "reject-link",
     reactEvent: event,
     nativeEvent: event.nativeEvent,
+    navigation: null,
   });
   claims.react.set(event, claim);
   claims.native.set(event.nativeEvent, claim);
@@ -1113,30 +1308,46 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     const publication = exactPublication();
+    if (!publication || !publication.render.open) return;
+
+    if (isEscapeKeyDown(event, publication)) {
+      if (event.target !== publication.toggle && !publication.anchors.includes(event.target as HTMLAnchorElement)) {
+        return;
+      }
+      const control = event.target;
+      if (
+        (control === publication.toggle && publication.toggle.disabled) ||
+        (control instanceof HTMLAnchorElement &&
+          (control.getAttribute("aria-disabled") !== null ||
+            control.getAttribute("href") !== publication.render.visit.headings[
+              publication.anchors.indexOf(control)
+            ]?.href))
+      ) {
+        return;
+      }
+      if (!publication.claim("escape", event, event.nativeEvent, claimsRef.current)) return;
+      publication.retire();
+      event.preventDefault();
+      setDisclosure({ visit, open: false });
+      publication.toggle.focus();
+      return;
+    }
+
+    const navigation = readKeyboardNavigation(event, publication);
+    if (!navigation || exactPublication() !== publication) return;
     if (
-      !publication ||
-      !publication.render.open ||
-      !isEscapeKeyDown(event, publication) ||
-      (event.target !== publication.toggle && !publication.anchors.includes(event.target as HTMLAnchorElement))
+      !publication.claim(
+        "navigate",
+        event,
+        event.nativeEvent,
+        claimsRef.current,
+        navigation,
+      )
     ) {
       return;
     }
-    const control = event.target;
-    if (
-      (control === publication.toggle && publication.toggle.disabled) ||
-      (control instanceof HTMLAnchorElement &&
-        (control.getAttribute("aria-disabled") !== null ||
-          control.getAttribute("href") !== publication.render.visit.headings[
-            publication.anchors.indexOf(control)
-          ]?.href))
-    ) {
-      return;
-    }
-    if (!publication.claim("escape", event, event.nativeEvent, claimsRef.current)) return;
-    publication.retire();
     event.preventDefault();
-    setDisclosure({ visit, open: false });
-    publication.toggle.focus();
+    navigation.focus.call(navigation.destination, { preventScroll: true });
   };
 
   return (

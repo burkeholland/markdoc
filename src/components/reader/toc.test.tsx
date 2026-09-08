@@ -19,6 +19,7 @@ const headings = [
 
 type TestHeading = RenderedHeading & { top: number };
 type ObserverEvent = { target: Element; isIntersecting: boolean };
+type NavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
 const documentA: TestHeading[] = [
   { id: "alpha", level: 2, text: "Alpha", top: 120 },
@@ -31,6 +32,11 @@ const documentB: TestHeading[] = [
 const documentWithMissing: TestHeading[] = [
   ...documentA,
   { id: "missing", level: 3, text: "Missing", top: 360 },
+];
+const navigationHeadings: TestHeading[] = [
+  { id: "first", level: 2, text: "First", top: 120 },
+  { id: "middle", level: 3, text: "Middle", top: 240 },
+  { id: "last", level: 2, text: "Last", top: 360 },
 ];
 
 class InstrumentedIntersectionObserver {
@@ -188,6 +194,68 @@ function escapeEvent(
   };
 }
 
+function navigationEvent(
+  currentTarget: HTMLElement,
+  target: Element,
+  key: NavigationKey,
+  options: {
+    nativeEvent?: KeyboardEvent;
+    repeat?: boolean;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    isComposing?: boolean;
+    canceled?: boolean;
+    stopped?: boolean;
+  } = {},
+) {
+  const view = target.ownerDocument.defaultView ?? window;
+  const nativeEvent = options.nativeEvent ?? new view.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    repeat: options.repeat,
+    altKey: options.altKey,
+    ctrlKey: options.ctrlKey,
+    metaKey: options.metaKey,
+    shiftKey: options.shiftKey,
+    isComposing: options.isComposing,
+  });
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    nativeEvent,
+    preventDefault,
+    dispatch: (...handlers: KeyHandler[]) => {
+      target.addEventListener("keydown", (dispatched) => {
+        if (options.canceled) dispatched.preventDefault();
+        if (options.stopped) dispatched.stopPropagation();
+        const keyboard = dispatched as KeyboardEvent;
+        const event = {
+          type: "keydown",
+          key: keyboard.key,
+          repeat: keyboard.repeat,
+          altKey: keyboard.altKey,
+          ctrlKey: keyboard.ctrlKey,
+          metaKey: keyboard.metaKey,
+          shiftKey: keyboard.shiftKey,
+          isComposing: keyboard.isComposing,
+          defaultPrevented: keyboard.defaultPrevented,
+          currentTarget,
+          target: dispatched.target,
+          nativeEvent: keyboard,
+          preventDefault,
+          isDefaultPrevented: () => keyboard.defaultPrevented,
+          isPropagationStopped: () => keyboard.cancelBubble,
+        } as unknown as ReactKeyboardEvent<HTMLElement>;
+        handlers.forEach((handler) => handler(event));
+        dispatched.stopImmediatePropagation();
+      }, { capture: true, once: true });
+      target.dispatchEvent(nativeEvent);
+    },
+  };
+}
+
 function directControls(host: HTMLElement) {
   const nav = host.querySelector<HTMLElement>('[data-testid="reader-toc"]');
   const toggle = host.querySelector<HTMLButtonElement>('[data-testid="reader-toc-toggle"]');
@@ -330,6 +398,346 @@ describe("ReaderToc mobile disclosure", () => {
     fireEvent.click(links[1]);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("list")).toHaveClass("hidden");
+  });
+});
+
+describe("ReaderToc keyboard navigation", () => {
+  it.each([
+    ["ArrowDown", 0],
+    ["ArrowUp", 2],
+    ["Home", 0],
+    ["End", 2],
+  ] as const)("starts %s from the toggle at the expected no-active heading", (key, expectedIndex) => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.toggle.focus();
+
+    fireEvent.keyDown(controls.toggle, { key });
+
+    expect(controls.links[expectedIndex]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+  });
+
+  it.each(["ArrowDown", "ArrowUp"] as const)(
+    "starts %s from the toggle at the active heading",
+    (key) => {
+      const view = directRoot(
+        <StrictMode>
+          <DirectReaderBoundary currentHeadings={navigationHeadings} />
+        </StrictMode>,
+      );
+      const controls = directControls(view.host);
+      const observer = InstrumentedIntersectionObserver.instances.at(-1)!;
+      observer.publish([{ target: document.getElementById("middle")!, isIntersecting: true }]);
+      expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+      fireEvent.click(controls.toggle);
+      controls.toggle.focus();
+
+      fireEvent.keyDown(controls.toggle, { key });
+
+      expect(controls.links[1]).toHaveFocus();
+      expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+      expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    },
+  );
+
+  it("visits every current anchor, wraps both ways, and handles Home and End without navigation", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const initialHash = window.location.hash;
+    const destinations: Element[] = [];
+    const move = (from: HTMLButtonElement | HTMLAnchorElement, key: NavigationKey) => {
+      from.focus();
+      focus.mockClear();
+      const probe = navigationEvent(controls.nav, from, key);
+      act(() => probe.dispatch(handler));
+      expect(probe.preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+      destinations.push(document.activeElement!);
+    };
+
+    move(controls.toggle, "ArrowDown");
+    move(controls.links[0], "ArrowDown");
+    move(controls.links[1], "ArrowDown");
+    expect(destinations).toEqual(controls.links);
+    move(controls.links[2], "ArrowDown");
+    expect(controls.links[0]).toHaveFocus();
+    move(controls.links[0], "ArrowUp");
+    expect(controls.links[2]).toHaveFocus();
+    move(controls.links[2], "Home");
+    expect(controls.links[0]).toHaveFocus();
+    move(controls.links[0], "End");
+    expect(controls.links[2]).toHaveFocus();
+
+    expect(window.location.hash).toBe(initialHash);
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    expect(controls.list).toHaveClass("flex");
+    expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+  });
+
+  it("leaves Enter to the native anchor and keeps Escape close and focus return", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+
+    fireEvent.keyDown(controls.links[0], { key: "Enter" });
+    expect(controls.links[0]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+    const activate = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+    const activation = clickEvent(controls.links[0]);
+    act(() => activation.dispatch(activate));
+    expect(activation.preventDefault).not.toHaveBeenCalled();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(controls.toggle);
+    controls = directControls(view.host);
+    controls.links[1].focus();
+    fireEvent.keyDown(controls.links[1], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.toggle).toHaveFocus();
+  });
+
+  it.each([
+    ["repeat", { repeat: true }],
+    ["Alt", { altKey: true }],
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["composition", { isComposing: true }],
+    ["canceled", { canceled: true }],
+    ["stopped", { stopped: true }],
+  ] as const)("rejects a %s key before prevention or focus", (_label, options) => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown", options);
+
+    act(() => rejected.dispatch(handler));
+
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(controls.links[0]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+    const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => current.dispatch(handler));
+    expect(current.preventDefault).toHaveBeenCalledOnce();
+    expect(controls.links[1]).toHaveFocus();
+  });
+
+  it.each(["fabricated", "foreign", "outside"] as const)(
+    "rejects a %s keyboard event without consuming the current publication",
+    (kind) => {
+      const view = directRoot(
+        <StrictMode>
+          <ReaderToc headings={navigationHeadings} />
+        </StrictMode>,
+      );
+      const controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.links[0].focus();
+      const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      focus.mockClear();
+      let prevented: ReturnType<typeof vi.fn>;
+      let cleanupProbe = () => {};
+
+      if (kind === "fabricated") {
+        prevented = vi.fn();
+        const fabricated = {
+          type: "keydown",
+          key: "ArrowDown",
+          repeat: false,
+          altKey: false,
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: false,
+          isComposing: false,
+          defaultPrevented: false,
+          currentTarget: controls.nav,
+          target: controls.links[0],
+          nativeEvent: { constructor: { name: "KeyboardEvent" } },
+          preventDefault: prevented,
+          isDefaultPrevented: () => false,
+          isPropagationStopped: () => false,
+        } as unknown as ReactKeyboardEvent<HTMLElement>;
+        act(() => handler(fabricated));
+      } else {
+        let target: HTMLAnchorElement;
+        if (kind === "foreign") {
+          const frame = document.createElement("iframe");
+          document.body.append(frame);
+          target = frame.contentDocument!.createElement("a");
+          target.href = "#first";
+          frame.contentDocument!.body.append(target);
+          cleanupProbe = () => frame.remove();
+        } else {
+          target = document.createElement("a");
+          target.href = "#first";
+          document.body.append(target);
+          cleanupProbe = () => target.remove();
+        }
+        target.focus();
+        focus.mockClear();
+        const probe = navigationEvent(controls.nav, target, "ArrowDown");
+        prevented = probe.preventDefault;
+        act(() => probe.dispatch(handler));
+      }
+
+      expect(prevented).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+      cleanupProbe();
+
+      controls.links[0].focus();
+      focus.mockClear();
+      const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+      act(() => current.dispatch(handler));
+      expect(current.preventDefault).toHaveBeenCalledOnce();
+      expect(controls.links[1]).toHaveFocus();
+    },
+  );
+
+  it("rejects stale and replayed events, then accepts a complete clean successor", () => {
+    const renderBoundary = (headings: TestHeading[], domKey: string) => (
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={headings} domKey={domKey} />
+      </StrictMode>
+    );
+    const view = directRoot(renderBoundary(documentA, "a"));
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    const staleHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+
+    act(() => view.root.render(renderBoundary(documentB, "b")));
+    controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const stale = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => stale.dispatch(staleHandler));
+    expect(stale.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const currentHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => current.dispatch(currentHandler, currentHandler));
+    expect(current.preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(controls.links[1]).toHaveFocus();
+  });
+
+  it.each(["attribute-restore", "detach-restore", "reorder-restore"] as const)(
+    "retires %s history and lets a distinct complete successor recover",
+    (kind) => {
+      const renderBoundary = (domKey: string) => (
+        <StrictMode>
+          <DirectReaderBoundary currentHeadings={navigationHeadings} domKey={domKey} />
+        </StrictMode>
+      );
+      const view = directRoot(renderBoundary("a"));
+      let controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.links[0].focus();
+      const staleHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+      const firstItem = controls.links[0].parentElement as HTMLLIElement;
+      const secondItem = controls.links[1].parentElement as HTMLLIElement;
+      if (kind === "attribute-restore") {
+        controls.links[0].setAttribute("href", "#changed");
+        controls.links[0].setAttribute("href", "#first");
+      } else if (kind === "detach-restore") {
+        firstItem.remove();
+        controls.list.insertBefore(firstItem, secondItem);
+      } else {
+        controls.list.insertBefore(secondItem, firstItem);
+        controls.list.insertBefore(firstItem, secondItem);
+      }
+      const focusBefore = document.activeElement;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      focus.mockClear();
+      const stale = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+
+      act(() => stale.dispatch(staleHandler));
+
+      expect(stale.preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focusBefore);
+
+      act(() => view.root.render(renderBoundary("b")));
+      controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.links[0].focus();
+      focus.mockClear();
+      const currentHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+      const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+      act(() => current.dispatch(currentHandler));
+      expect(current.preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls.links[1]).toHaveFocus();
+    },
+  );
+
+  it("rejects a partial Strict replay and accepts the exact current key handler", () => {
+    const captures: CapturedControls[] = [];
+    const view = directRoot(
+      <StrictMode>
+        <StrictReaderBoundary
+          currentHeadings={documentA}
+          onLayout={(capture) => captures.push(capture)}
+        />
+      </StrictMode>,
+    );
+    expect(captures).toHaveLength(2);
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const stale = captures[0];
+    act(() => {
+      stale.refs[0](controls.nav);
+      stale.refs[1](controls.toggle);
+      stale.refs[0](null);
+      stale.refs[1](null);
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => rejected.dispatch(stale.escapeHandler));
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    const currentHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    act(() => current.dispatch(currentHandler));
+    expect(current.preventDefault).toHaveBeenCalledOnce();
+    expect(controls.links[1]).toHaveFocus();
   });
 });
 
