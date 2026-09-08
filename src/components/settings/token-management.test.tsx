@@ -1,5 +1,15 @@
 // @vitest-environment jsdom
-import { startTransition, useLayoutEffect, useState, type ReactNode } from "react";
+import {
+  StrictMode,
+  startTransition,
+  useLayoutEffect,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -91,6 +101,98 @@ function captureReactCallback<T>(element: Element, name: string): T {
   const callback = props?.[name];
   if (typeof callback !== "function") throw new Error(`The token control has no ${name} callback`);
   return callback as T;
+}
+
+type TokenClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type TokenInputHandler = (event: ChangeEvent<HTMLInputElement>) => void;
+type TokenSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
+
+function tokenClickEvent(
+  currentTarget: HTMLElement,
+  options: {
+    target?: EventTarget;
+    nativeTarget?: EventTarget;
+    MouseEventType?: typeof window.MouseEvent;
+    wrapperType?: string;
+    nativeType?: string;
+    button?: number;
+  } = {},
+) {
+  const target = options.target ?? currentTarget;
+  const nativeTarget = options.nativeTarget ?? target;
+  const MouseEventType = options.MouseEventType ?? currentTarget.ownerDocument.defaultView!.MouseEvent;
+  const nativeEvent = new MouseEventType(options.nativeType ?? "click", {
+    bubbles: true,
+    cancelable: true,
+    button: options.button ?? 0,
+  });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return {
+    type: options.wrapperType ?? "click",
+    button: options.button ?? 0,
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+  } as unknown as ReactMouseEvent<HTMLButtonElement>;
+}
+
+function tokenInputEvent(
+  currentTarget: HTMLInputElement,
+  options: {
+    target?: EventTarget;
+    nativeTarget?: EventTarget;
+    EventType?: typeof window.Event;
+    wrapperType?: string;
+    nativeType?: string;
+  } = {},
+) {
+  const target = options.target ?? currentTarget;
+  const nativeTarget = options.nativeTarget ?? target;
+  const EventType = options.EventType ?? currentTarget.ownerDocument.defaultView!.Event;
+  const nativeEvent = new EventType(options.nativeType ?? "input", { bubbles: true, cancelable: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return {
+    type: options.wrapperType ?? "change",
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+  } as unknown as ChangeEvent<HTMLInputElement>;
+}
+
+function tokenSubmitEvent(
+  currentTarget: HTMLFormElement,
+  options: {
+    target?: EventTarget;
+    nativeTarget?: EventTarget;
+    submitter?: HTMLElement | null;
+    nativeEvent?: Event;
+  } = {},
+) {
+  const target = options.target ?? currentTarget;
+  const nativeTarget = options.nativeTarget ?? target;
+  const ownerWindow = currentTarget.ownerDocument.defaultView!;
+  const nativeEvent = options.nativeEvent ?? new ownerWindow.SubmitEvent("submit", {
+    bubbles: true,
+    cancelable: true,
+    submitter: options.submitter ?? null,
+  });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    event: {
+      type: "submit",
+      currentTarget,
+      target,
+      nativeEvent,
+      defaultPrevented: false,
+      preventDefault,
+    } as unknown as FormEvent<HTMLFormElement>,
+    preventDefault,
+  };
 }
 
 type WindowHashListener = EventListenerOrEventListenerObject;
@@ -433,10 +535,11 @@ describe("synchronous mutation ownership", () => {
     const replace = screen.getByRole("button", { name: `Replace ${token.name}` });
     const revoke = screen.getByRole("button", { name: `Revoke ${token.name}` });
     const collaborators = screen.getByTestId("token-collaborators-may-ask");
+    const save = screen.getByRole("button", { name: "Save name" });
 
     act(() => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: save }));
+      form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true, submitter: save }));
       replace.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       revoke.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       collaborators.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -920,7 +1023,12 @@ describe("exact token control visits", () => {
         "onClick",
       );
       fireEvent.click(screen.getByRole("button", { name: `Rename ${row.name}` }));
-      fireEvent.submit(screen.getByLabelText("Token name").closest("form")!);
+      const form = screen.getByLabelText("Token name").closest("form")!;
+      form.dispatchEvent(new SubmitEvent("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: screen.getByRole("button", { name: "Save name" }),
+      }));
       await waitFor(() => expect(screen.getByRole("button", { name: `Rename ${row.name}` })).toHaveFocus());
 
       const currentDismiss = captureReactCallback<() => void>(
@@ -1007,6 +1115,328 @@ describe("exact token control visits", () => {
     expect(listeners.active).toHaveLength(1);
     expect(mutations()).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("exact token row presentations", () => {
+  it("rejects crossed, foreign, detached, changed, and reordered click sources before current B remains usable", async () => {
+    const other = { ...token, id: "token-other", name: "Other agent" };
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token, other] }));
+    renderPanel();
+    const rows = await screen.findAllByTestId("token-row");
+    const renameA = within(rows[0]).getByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+    const renameB = within(rows[1]).getByRole("button", { name: `Rename ${other.name}` }) as HTMLButtonElement;
+    const handlerA = captureReactCallback<TokenClickHandler>(renameA, "onClick");
+    const handlerB = captureReactCallback<TokenClickHandler>(renameB, "onClick");
+    const sibling = within(rows[0]).getByRole("button", { name: `Replace ${token.name}` });
+    const detached = document.createElement("button");
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as (Window & typeof globalThis) | null;
+    if (!foreignWindow) throw new Error("The foreign token document was not created");
+
+    act(() => {
+      handlerA(tokenClickEvent(renameB));
+      handlerA(tokenClickEvent(renameA, { target: sibling }));
+      handlerA(tokenClickEvent(renameA, { nativeTarget: sibling }));
+      handlerA(tokenClickEvent(renameA, { target: detached }));
+      handlerA(tokenClickEvent(renameA, { MouseEventType: foreignWindow.MouseEvent }));
+      handlerA(tokenClickEvent(renameA, { wrapperType: "pointerdown" }));
+      handlerA(tokenClickEvent(renameA, { nativeType: "pointerdown" }));
+      handlerA(tokenClickEvent(renameA, { button: 1 }));
+    });
+
+    const inserted = document.createElement("span");
+    renameA.append(inserted);
+    act(() => handlerA(tokenClickEvent(renameA, { target: inserted })));
+    inserted.remove();
+
+    renameA.disabled = true;
+    act(() => handlerA(tokenClickEvent(renameA)));
+    renameA.disabled = false;
+    renameA.setAttribute("aria-disabled", "true");
+    act(() => handlerA(tokenClickEvent(renameA)));
+    renameA.removeAttribute("aria-disabled");
+
+    const clone = renameA.cloneNode(true) as HTMLButtonElement;
+    renameA.replaceWith(clone);
+    act(() => handlerA(tokenClickEvent(clone)));
+    clone.replaceWith(renameA);
+
+    const list = rows[0].parentElement!;
+    list.insertBefore(rows[1], rows[0]);
+    act(() => handlerA(tokenClickEvent(renameA)));
+    list.insertBefore(rows[0], rows[1]);
+
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(mutations()).toHaveLength(0);
+
+    const exactB = tokenClickEvent(renameB);
+    act(() => {
+      handlerB(exactB);
+      handlerB(exactB);
+    });
+    expect(screen.getByLabelText("Token name")).toHaveValue(other.name);
+    expect(screen.getAllByLabelText("Token name")).toHaveLength(1);
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(mutations()).toHaveLength(0);
+    iframe.remove();
+  });
+
+  it("retires same-element handlers before parent layout and ignores late old refs and removal refs", async () => {
+    fetchMock.mockImplementation(async () => response({ tokens: [token] }));
+    const view = renderDirect(
+      <TokenBoundary origin="https://markdoc.test" userLogin="alice" />,
+    );
+    const firstButton = await screen.findByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+    const staleHandler = captureReactCallback<TokenClickHandler>(firstButton, "onClick");
+    const staleRef = captureReactCallback<RefCallback<HTMLButtonElement>>(firstButton, "ref");
+    let currentButton: HTMLButtonElement | null = null;
+
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        boundary={1}
+        onBoundary={() => {
+          currentButton = screen.getByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+          expect(currentButton).toBe(firstButton);
+          staleHandler(tokenClickEvent(firstButton));
+          staleRef(null);
+          staleRef(firstButton);
+          expect(screen.queryByLabelText("Token name")).toBeNull();
+        }}
+      />,
+    );
+
+    if (!currentButton) throw new Error("The current token button was not observed at the layout boundary");
+    const currentHandler = captureReactCallback<TokenClickHandler>(currentButton, "onClick");
+    expect(currentHandler).not.toBe(staleHandler);
+    act(() => currentHandler(tokenClickEvent(currentButton!)));
+    expect(screen.getByLabelText("Token name")).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel rename" }));
+    expect(currentButton).toHaveFocus();
+
+    const removedHandler = captureReactCallback<TokenClickHandler>(currentButton, "onClick");
+    const removedRef = captureReactCallback<RefCallback<HTMLButtonElement>>(currentButton, "ref");
+    view.rerender(
+      <TokenBoundary
+        origin="https://markdoc.test"
+        userLogin="alice"
+        present={false}
+        boundary={2}
+        onBoundary={() => {
+          expect(currentButton!.isConnected).toBe(false);
+          removedHandler(tokenClickEvent(currentButton!));
+          removedRef(null);
+          removedRef(currentButton);
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("token-manager")).toBeNull();
+    expect(mutations()).toHaveLength(0);
+
+    view.rerender(
+      <TokenBoundary origin="https://markdoc.test" userLogin="alice" boundary={3} />,
+    );
+    const replacement = await screen.findByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+    const replacementHandler = captureReactCallback<TokenClickHandler>(replacement, "onClick");
+    act(() => {
+      removedHandler(tokenClickEvent(currentButton!));
+      replacementHandler(tokenClickEvent(replacement));
+    });
+    expect(screen.getByLabelText("Token name")).toHaveValue(token.name);
+    expect(mutations()).toHaveLength(0);
+  });
+
+  it("accepts only the browser value of the exact input and the exact form SubmitEvent once", async () => {
+    const renamed = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] })).mockReturnValueOnce(renamed.promise);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: `Rename ${token.name}` }));
+
+    const input = screen.getByLabelText("Token name") as HTMLInputElement;
+    const firstInputHandler = captureReactCallback<TokenInputHandler>(input, "onChange");
+    input.value = "Reviewer";
+    const firstInputEvent = tokenInputEvent(input);
+    act(() => {
+      firstInputHandler(firstInputEvent);
+      firstInputHandler(firstInputEvent);
+    });
+    expect(screen.getByLabelText("Token name")).toHaveValue("Reviewer");
+
+    const currentInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    const currentInputHandler = captureReactCallback<TokenInputHandler>(currentInput, "onChange");
+    expect(currentInputHandler).not.toBe(firstInputHandler);
+    const foreignInput = document.createElement("input");
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as (Window & typeof globalThis) | null;
+    if (!foreignWindow) throw new Error("The foreign token input document was not created");
+
+    currentInput.value = "Ignored";
+    act(() => {
+      firstInputHandler(tokenInputEvent(currentInput));
+      currentInputHandler(tokenInputEvent(currentInput, { target: foreignInput }));
+      currentInputHandler(tokenInputEvent(currentInput, { nativeTarget: foreignInput }));
+      currentInputHandler(tokenInputEvent(currentInput, { EventType: foreignWindow.Event }));
+      currentInputHandler(tokenInputEvent(currentInput, { wrapperType: "click" }));
+      currentInputHandler(tokenInputEvent(currentInput, { nativeType: "click" }));
+    });
+    expect(mutations()).toHaveLength(0);
+
+    currentInput.value = "Reviewer";
+    currentInput.value = "Final reviewer";
+    act(() => currentInputHandler(tokenInputEvent(currentInput)));
+    expect(screen.getByLabelText("Token name")).toHaveValue("Final reviewer");
+
+    const form = currentInput.closest("form")!;
+    const submit = captureReactCallback<TokenSubmitHandler>(form, "onSubmit");
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" });
+    const wrongType = tokenSubmitEvent(form, {
+      nativeEvent: new form.ownerDocument.defaultView!.Event("submit", { bubbles: true, cancelable: true }),
+    });
+    const wrongTarget = tokenSubmitEvent(form, { target: currentInput, nativeTarget: currentInput });
+    const wrongSubmitter = tokenSubmitEvent(form, { submitter: cancel });
+    const mismatchedTarget = tokenSubmitEvent(form, { nativeTarget: currentInput, submitter: save });
+    act(() => {
+      submit(wrongType.event);
+      submit(wrongTarget.event);
+      submit(wrongSubmitter.event);
+      submit(mismatchedTarget.event);
+    });
+    expect(wrongType.preventDefault).not.toHaveBeenCalled();
+    expect(wrongTarget.preventDefault).not.toHaveBeenCalled();
+    expect(wrongSubmitter.preventDefault).not.toHaveBeenCalled();
+    expect(mismatchedTarget.preventDefault).not.toHaveBeenCalled();
+    expect(mutations()).toHaveLength(0);
+
+    save.disabled = true;
+    act(() => submit(tokenSubmitEvent(form, { submitter: save }).event));
+    save.disabled = false;
+    save.setAttribute("aria-disabled", "true");
+    act(() => submit(tokenSubmitEvent(form, { submitter: save }).event));
+    save.removeAttribute("aria-disabled");
+    const details = form.nextElementSibling!;
+    form.remove();
+    act(() => submit(tokenSubmitEvent(form, { submitter: save }).event));
+    details.parentElement!.insertBefore(form, details);
+    expect(mutations()).toHaveLength(0);
+
+    const keyboardSubmit = tokenSubmitEvent(form);
+    act(() => {
+      submit(keyboardSubmit.event);
+      submit(keyboardSubmit.event);
+    });
+    expect(keyboardSubmit.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0][1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(mutations()[0][1]?.body))).toEqual({ name: "Final reviewer" });
+    expect(screen.getByLabelText("Token name")).toBeDisabled();
+
+    await act(async () => renamed.resolve(response({ token: { ...token, name: "Final reviewer" } })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rename Final reviewer" })).toHaveFocus());
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    iframe.remove();
+  });
+
+  it("keeps a new equal-looking rename visit open across a late old Save settlement", async () => {
+    const oldSave = deferred<Response>();
+    const currentSave = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(oldSave.promise)
+      .mockResolvedValueOnce(response({ tokens: [{ ...token }] }))
+      .mockReturnValueOnce(currentSave.promise);
+    const view = renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: `Rename ${token.name}` }));
+    fireEvent.change(screen.getByLabelText("Token name"), { target: { value: "Old visit" } });
+    const oldForm = screen.getByLabelText("Token name").closest("form")!;
+    const oldSubmit = captureReactCallback<TokenSubmitHandler>(oldForm, "onSubmit");
+    act(() => oldSubmit(tokenSubmitEvent(oldForm, { submitter: screen.getByRole("button", { name: "Save name" }) }).event));
+    expect(mutations()).toHaveLength(1);
+
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open={false} />);
+    view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open />);
+    fireEvent.click(await screen.findByRole("button", { name: `Rename ${token.name}` }));
+    fireEvent.change(screen.getByLabelText("Token name"), { target: { value: "Current visit" } });
+    const currentInput = screen.getByLabelText("Token name");
+
+    await act(async () => {
+      oldSave.resolve(response({ token: { ...token, name: "Old visit" } }));
+      await Promise.resolve();
+    });
+    expect(currentInput.isConnected).toBe(true);
+    expect(currentInput).toHaveValue("Current visit");
+    expect(currentInput).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Rename Old visit" })).toBeNull();
+
+    const currentForm = currentInput.closest("form")!;
+    const currentSubmit = captureReactCallback<TokenSubmitHandler>(currentForm, "onSubmit");
+    const currentSaveButton = screen.getByRole("button", { name: "Save name" });
+    act(() => currentSubmit(tokenSubmitEvent(currentForm, { submitter: currentSaveButton }).event));
+    expect(mutations()).toHaveLength(2);
+    await act(async () => currentSave.resolve(response({ token: { ...token, name: "Current visit" } })));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rename Current visit" })).toHaveFocus());
+  });
+
+  it("retires token-object and eligibility presentations while a collaborator update is pending", async () => {
+    const update = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] })).mockReturnValueOnce(update.promise);
+    renderPanel();
+    const rename = await screen.findByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+    const staleHandler = captureReactCallback<TokenClickHandler>(rename, "onClick");
+    const staleRef = captureReactCallback<RefCallback<HTMLButtonElement>>(rename, "ref");
+    fireEvent.click(screen.getByTestId("token-collaborators-may-ask"));
+    expect(rename).toBeDisabled();
+
+    act(() => {
+      staleHandler(tokenClickEvent(rename));
+      staleRef(null);
+      staleRef(rename);
+    });
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(mutations()).toHaveLength(1);
+
+    await act(async () => update.resolve(response({ token: { ...token, collaboratorsMayAsk: true } })));
+    await waitFor(() => expect(rename).toBeEnabled());
+    expect(screen.getByTestId("token-collaborators-may-ask")).toHaveAttribute("aria-checked", "true");
+    const currentHandler = captureReactCallback<TokenClickHandler>(rename, "onClick");
+    act(() => {
+      staleHandler(tokenClickEvent(rename));
+      currentHandler(tokenClickEvent(rename));
+    });
+    expect(screen.getByLabelText("Token name")).toHaveValue(token.name);
+    expect(mutations()).toHaveLength(1);
+  });
+
+  it("leaves the current Strict Mode generation usable exactly once", async () => {
+    fetchMock.mockImplementation(async () => response({ tokens: [token] }));
+    render(
+      <StrictMode>
+        <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+    );
+    const rename = await screen.findByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement;
+    const handler = captureReactCallback<TokenClickHandler>(rename, "onClick");
+    const exact = tokenClickEvent(rename);
+    act(() => {
+      handler(exact);
+      handler(exact);
+    });
+    expect(screen.getAllByLabelText("Token name")).toHaveLength(1);
+    const input = screen.getByLabelText("Token name") as HTMLInputElement;
+    expect(input).toHaveFocus();
+    const inputHandler = captureReactCallback<TokenInputHandler>(input, "onChange");
+    input.value = "Strict reviewer";
+    act(() => inputHandler(tokenInputEvent(input)));
+    expect(captureReactCallback<TokenInputHandler>(input, "onChange")).not.toBe(inputHandler);
+    const cancel = screen.getByRole("button", { name: "Cancel rename" });
+    const cancelHandler = captureReactCallback<TokenClickHandler>(cancel, "onClick");
+    act(() => cancelHandler(tokenClickEvent(cancel)));
+    expect(rename).toHaveFocus();
+    expect(mutations()).toHaveLength(0);
   });
 });
 
