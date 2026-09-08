@@ -178,12 +178,56 @@ const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
   globalThis.Event.prototype,
   "currentTarget",
 )?.get;
+const suggestionEventTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "target",
+)?.get;
+const suggestionEventComposedPath = globalThis.Event.prototype.composedPath;
+const suggestionAddEventListener = globalThis.EventTarget.prototype.addEventListener;
+const suggestionRemoveEventListener = globalThis.EventTarget.prototype.removeEventListener;
+const suggestionWindowAddEventListener =
+  typeof globalThis.addEventListener === "function" ? globalThis.addEventListener : null;
+const suggestionWindowRemoveEventListener =
+  typeof globalThis.removeEventListener === "function" ? globalThis.removeEventListener : null;
+const suggestionGlobalWindow = typeof window === "undefined" ? null : window;
 const suggestionReflectApply = Reflect.apply;
 
 function suggestionNativeCurrentTarget(event: Event): EventTarget | null {
   return suggestionEventCurrentTargetGetter
     ? (suggestionReflectApply(suggestionEventCurrentTargetGetter, event, []) as EventTarget | null)
     : null;
+}
+
+function suggestionNativeTarget(event: Event): EventTarget | null {
+  return suggestionEventTargetGetter
+    ? (suggestionReflectApply(suggestionEventTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
+
+function suggestionNativeComposedPath(event: Event): EventTarget[] {
+  return suggestionReflectApply(suggestionEventComposedPath, event, []) as EventTarget[];
+}
+
+function addSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionAddEventListener, target, ["click", listener, options]);
+}
+
+function removeSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionRemoveEventListener, target, ["click", listener, options]);
+}
+
+function addSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean): boolean {
+  const intrinsic = target === suggestionGlobalWindow ? suggestionWindowAddEventListener : suggestionAddEventListener;
+  if (!intrinsic) return false;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
+  return true;
+}
+
+function removeSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean) {
+  const intrinsic =
+    target === suggestionGlobalWindow ? suggestionWindowRemoveEventListener : suggestionRemoveEventListener;
+  if (!intrinsic) return;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
 }
 
 type SuggestionActionKind = "accept" | "reject";
@@ -627,7 +671,7 @@ function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery)
     event.relatedTarget !== snapshot.relatedTarget ||
     event.view !== snapshot.view ||
     event.timeStamp !== snapshot.timeStamp ||
-    event.target !== target ||
+    suggestionNativeTarget(event) !== target ||
     event.defaultPrevented
   ) {
     return false;
@@ -641,7 +685,7 @@ function suggestionNativeSnapshotMatches(delivery: SuggestionNativeDelivery): bo
   if (!ownerWindow || event.eventPhase === ownerWindow.Event.NONE || !suggestionNativeSnapshotFieldsMatch(delivery)) {
     return false;
   }
-  const currentPath = event.composedPath();
+  const currentPath = suggestionNativeComposedPath(event);
   return currentPath.length === path.length && path.every((entry, index) => currentPath[index] === entry);
 }
 
@@ -745,9 +789,10 @@ function createSuggestionActionRender(
     const nativeBubbleTargets = new Set<EventTarget>();
 
     const removeListeners = () => {
-      publication.ownerDocument.defaultView?.removeEventListener("click", captureNative, true);
-      publication.elements.root.removeEventListener("click", crossNativeRoot);
-      for (const target of nativeBubbleTargets) target.removeEventListener("click", finalizeNative);
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (ownerWindow) removeSuggestionWindowClickListener(ownerWindow, captureNative, true);
+      removeSuggestionClickListener(publication.elements.root, crossNativeRoot);
+      for (const target of nativeBubbleTargets) removeSuggestionClickListener(target, finalizeNative);
       nativeBubbleTargets.clear();
     };
     const release = () => {
@@ -831,10 +876,10 @@ function createSuggestionActionRender(
       ) {
         return;
       }
-      const target = event.target;
+      const target = suggestionNativeTarget(event);
       const NodeConstructor = ownerWindow.Node;
       if (!(target instanceof NodeConstructor) || target.ownerDocument !== publication.ownerDocument) return;
-      const path = event.composedPath();
+      const path = suggestionNativeComposedPath(event);
       if (!path.includes(publication.elements.root)) return;
       const action =
         publication.elements.buttons
@@ -940,7 +985,7 @@ function createSuggestionActionRender(
         event.defaultPrevented ||
         event.currentTarget !== currentTarget ||
         event.target !== delivery.snapshot.target ||
-        nativeEvent.target !== event.target ||
+        suggestionNativeTarget(nativeEvent) !== event.target ||
         !suggestionNativeSnapshotMatches(delivery)
       ) {
         return null;
@@ -973,7 +1018,7 @@ function createSuggestionActionRender(
       }
       delivery.delegationTarget = delegationTarget;
       if (!nativeBubbleTargets.has(delegationTarget)) {
-        delegationTarget.addEventListener("click", finalizeNative);
+        addSuggestionClickListener(delegationTarget, finalizeNative);
         nativeBubbleTargets.add(delegationTarget);
       }
     };
@@ -1163,8 +1208,9 @@ function createSuggestionActionRender(
           if (!element) throw new Error("Cannot publish suggestion actions without every committed ref");
           return { owner, element, detached: false, reattached: false, handoffDetached: false };
         });
-        publication.ownerDocument.defaultView?.addEventListener("click", captureNative, true);
-        publication.elements.root.addEventListener("click", crossNativeRoot);
+        const ownerWindow = publication.ownerDocument.defaultView;
+        if (!ownerWindow || !addSuggestionWindowClickListener(ownerWindow, captureNative, true)) return false;
+        addSuggestionClickListener(publication.elements.root, crossNativeRoot);
         established = true;
         cells.active.current = publication;
         cells.successorOf.current = null;

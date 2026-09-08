@@ -241,6 +241,41 @@ function suggestionPanel(session: CollabSession) {
   );
 }
 
+async function hydrateSuggestionFrame(
+  session: CollabSession,
+  hydrationTarget: "host" | "document",
+  beforeHydrate?: (target: HTMLElement | Document) => void,
+) {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
+  const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
+  const page = (
+    <html>
+      {createElement("head")}
+      <body>{panel}</body>
+    </html>
+  );
+  ownerDocument.open();
+  ownerDocument.write(
+    hydrationTarget === "document"
+      ? `<!doctype html>${renderToString(page)}`
+      : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
+  );
+  ownerDocument.close();
+  const target =
+    hydrationTarget === "document"
+      ? ownerDocument
+      : ownerDocument.getElementById("root");
+  if (!target) throw new Error("The host hydration root was not rendered");
+  beforeHydrate?.(target);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
+  return { frame, ownerDocument, ownerWindow, target, errors, root };
+}
+
 function addCommentSuggestion(
   session: CollabSession,
   user: ReturnType<typeof makeCollabUser>,
@@ -783,6 +818,178 @@ describe("CommentsPanel", () => {
           await act(async () => root.unmount());
           errors.mockRestore();
           frame.remove();
+        }
+      },
+    );
+
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "rejects an own target/path %s hydration spoof from the action root during %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-target-path-spoof-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const mounted = await hydrateSuggestionFrame(session, hydrationTarget);
+
+        try {
+          const actions = captureSuggestionActions(mounted.target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const physicalPath: EventTarget[] = [];
+          for (let node: Node | null = actions.root; node; node = node.parentNode) physicalPath.push(node);
+          physicalPath.push(mounted.ownerWindow);
+          const nativeEvent = new mounted.ownerWindow.MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            detail: activation === "pointer Accept" ? 1 : 0,
+            view: mounted.ownerWindow,
+          });
+          Object.defineProperties(nativeEvent, {
+            target: { configurable: true, value: control.element },
+            composedPath: {
+              configurable: true,
+              value: () => [control.element, ...physicalPath],
+            },
+          });
+          const dispatchSpoof = () => actions.root.dispatchEvent(nativeEvent);
+          const user = userEvent.setup({ document: mounted.ownerDocument });
+
+          if (activation === "pointer Accept") {
+            const suppressPhysicalButtonClick = (event: Event) => event.stopImmediatePropagation();
+            control.element.addEventListener("pointerup", dispatchSpoof, { once: true });
+            control.element.addEventListener("click", suppressPhysicalButtonClick);
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+            control.element.removeEventListener("click", suppressPhysicalButtonClick);
+          } else {
+            control.element.addEventListener(
+              "keydown",
+              (event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                dispatchSpoof();
+              },
+              { once: true },
+            );
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(mounted.errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => mounted.root.unmount());
+          mounted.errors.mockRestore();
+          mounted.frame.remove();
+        }
+      },
+    );
+
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "keeps the private %s hydration finalizer hidden before React bubble during %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-finalizer-capture-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        let attackBeforeReactBubble: (event: Event) => void = () => {};
+        const mounted = await hydrateSuggestionFrame(session, hydrationTarget, (target) => {
+          target.addEventListener("click", (event) => attackBeforeReactBubble(event), { once: true });
+        });
+
+        try {
+          const actions = captureSuggestionActions(mounted.target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const ownAddDescriptor = Object.getOwnPropertyDescriptor(mounted.target, "addEventListener");
+          const ownerAddEventListener = mounted.ownerWindow.EventTarget.prototype.addEventListener;
+          let capturedFinalizer: EventListener | null = null;
+          Object.defineProperty(mounted.target, "addEventListener", {
+            configurable: true,
+            value(
+              this: EventTarget,
+              type: string,
+              listener: EventListenerOrEventListenerObject | null,
+              options?: boolean | AddEventListenerOptions,
+            ) {
+              if (type === "click" && typeof listener === "function") capturedFinalizer = listener;
+              return Reflect.apply(ownerAddEventListener, this, [type, listener, options]);
+            },
+          });
+          const forgedStopPropagation = vi.fn();
+          attackBeforeReactBubble = (nativeEvent) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation: forgedStopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+            capturedFinalizer?.call(mounted.target, click);
+            click.stopImmediatePropagation();
+          };
+          const user = userEvent.setup({ document: mounted.ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(capturedFinalizer).toBeNull();
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(forgedStopPropagation).not.toHaveBeenCalled();
+
+          if (ownAddDescriptor) {
+            Object.defineProperty(mounted.target, "addEventListener", ownAddDescriptor);
+          } else {
+            Reflect.deleteProperty(mounted.target, "addEventListener");
+          }
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(mounted.errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => mounted.root.unmount());
+          mounted.errors.mockRestore();
+          mounted.frame.remove();
         }
       },
     );
