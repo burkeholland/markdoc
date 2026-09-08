@@ -180,9 +180,9 @@ function invoke(control: CapturedControl, currentTarget: EventTarget | null = co
   control.click(capturedClick(control, currentTarget, target));
 }
 
-function renderDirect(node: ReactNode): DirectView {
+function renderDirect(node: ReactNode, parent: HTMLElement = document.body): DirectView {
   const host = document.createElement("div");
-  document.body.append(host);
+  parent.append(host);
   const view = { host, root: createRoot(host) };
   directViews.push(view);
   act(() => view.root.render(node));
@@ -768,6 +768,143 @@ describe("KeepAgentHerePanel exact control publications", () => {
     const current = capturePanel(view.host);
     fireEvent.click(current.copy.element);
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(docC));
+  });
+
+  it.each(["back", "retry", "copy"] as const)(
+    "permanently retires %s after the first mutate/restore rejection and gives a fresh successor one action",
+    async (kind) => {
+      const onBack = vi.fn();
+      const docB = { id: "doc-2", title: "Fresh authority" };
+      listTokens.mockReset().mockRejectedValueOnce(new ApiError(503, "Token service unavailable."));
+      const panelFor = (doc: typeof DOC) =>
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc, onBack }));
+      const view = renderDirect(panelFor(DOC));
+      await waitFor(() => expect(within(view.host).getByRole("alert")).toBeInTheDocument());
+      const stale = capturePanel(view.host);
+      const staleControl = stale[kind]!;
+
+      staleControl.element.setAttribute("data-replay-probe", "mutated");
+      staleControl.element.removeAttribute("data-replay-probe");
+      fireEvent.click(staleControl.element);
+      fireEvent.click(staleControl.element);
+
+      expect(onBack).not.toHaveBeenCalled();
+      expect(listTokens).toHaveBeenCalledOnce();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+
+      act(() => view.root.render(panelFor(docB)));
+      const current = capturePanel(view.host);
+      fireEvent.click(current[kind]!.element);
+
+      expect(onBack).toHaveBeenCalledTimes(kind === "back" ? 1 : 0);
+      expect(listTokens).toHaveBeenCalledTimes(kind === "retry" ? 2 : 1);
+      expect(copyText).toHaveBeenCalledTimes(kind === "copy" ? 1 : 0);
+      if (kind === "copy") {
+        expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(docB));
+      }
+    },
+  );
+
+  it("retires restored immediate-parent placement before late clipboard settlement reaches its successor", async () => {
+    const firstCopy = deferred<boolean>();
+    const docB = { id: "doc-2", title: "Reconnected" };
+    const onBackA = vi.fn();
+    const onBackB = vi.fn();
+    copyText.mockReset().mockReturnValueOnce(firstCopy.promise).mockResolvedValueOnce(true);
+    const strictPanel = (doc: typeof DOC, onBack: () => void) =>
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc, onBack }));
+    const view = renderDirect(strictPanel(DOC, onBackA));
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const stale = capturePanel(view.host);
+    vi.useFakeTimers();
+
+    fireEvent.click(stale.copy.element);
+    const parent = view.host.parentNode;
+    const next = view.host.nextSibling;
+    if (!parent) throw new Error("Expected the direct root host to be connected");
+    view.host.remove();
+    parent.insertBefore(view.host, next);
+    fireEvent.click(stale.back!.element);
+    fireEvent.click(stale.back!.element);
+
+    expect(onBackA).not.toHaveBeenCalled();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+
+    act(() => view.root.render(strictPanel(docB, onBackB)));
+    await resolve(firstCopy, true);
+    const current = capturePanel(view.host);
+    expect(current.copy.element).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+
+    fireEvent.click(current.back!.element);
+    fireEvent.click(current.copy.element);
+    expect(onBackB).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenLastCalledWith(keepAgentPrompt(docB));
+  });
+
+  it("retires restored higher-wrapper placement and isolates its copied-reset timer", async () => {
+    const wrapper = document.createElement("section");
+    document.body.append(wrapper);
+    const docB = { id: "doc-2", title: "After wrapper restore" };
+    const onBackA = vi.fn();
+    const onBackB = vi.fn();
+    const strictPanel = (doc: typeof DOC, onBack: () => void) =>
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc, onBack }));
+    const view = renderDirect(strictPanel(DOC, onBackA), wrapper);
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    vi.useFakeTimers();
+    const idle = capturePanel(view.host);
+
+    fireEvent.click(idle.copy.element);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const stale = capturePanel(view.host);
+    expect(stale.copy.element).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    const parent = wrapper.parentNode;
+    const next = wrapper.nextSibling;
+    if (!parent) throw new Error("Expected the higher wrapper to be connected");
+    wrapper.remove();
+    parent.insertBefore(wrapper, next);
+    fireEvent.click(stale.back!.element);
+    fireEvent.click(stale.back!.element);
+
+    expect(onBackA).not.toHaveBeenCalled();
+    act(() => view.root.render(strictPanel(docB, onBackB)));
+    expect(capturePanel(view.host).copy.element).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(1500));
+    expect(capturePanel(view.host).copy.element).toHaveTextContent("Copy");
+
+    fireEvent.click(capturePanel(view.host).back!.element);
+    expect(onBackB).toHaveBeenCalledOnce();
+    wrapper.remove();
+  });
+
+  it("ignores restored sibling placement and mutations confined to its nonadjacent branch", async () => {
+    const wrapper = document.createElement("section");
+    const sibling = document.createElement("aside");
+    wrapper.append(sibling);
+    document.body.append(wrapper);
+    const onBack = vi.fn();
+    const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC, onBack }), wrapper);
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+
+    const nonadjacent = document.createElement("span");
+    sibling.append(nonadjacent);
+    nonadjacent.remove();
+    sibling.remove();
+    wrapper.prepend(sibling);
+    const current = capturePanel(view.host);
+    fireEvent.click(current.back!.element);
+    fireEvent.click(current.copy.element);
+
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+    wrapper.remove();
   });
 
   it("isolates late clipboard settlement and copied-reset timers across Strict Mode A/B authorities", async () => {
