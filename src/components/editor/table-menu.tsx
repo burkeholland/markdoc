@@ -250,7 +250,9 @@ function publicationsMatchForReplay(
     && successor.tablePos === source.tablePos
     && successor.tableAlign === source.tableAlign
     && successor.canEdit === source.canEdit
-    && successor.activeSurface === source.activeSurface;
+    && successor.activeSurface === source.activeSurface
+    && !successor.view.isDestroyed
+    && !isTableMenuHidden(successor.view.state);
 }
 
 class TableMenuControlCoordinator {
@@ -293,6 +295,8 @@ class TableMenuControlCoordinator {
     if (
       this.#current
       || !publication.retired
+      || publication.view.isDestroyed
+      || isTableMenuHidden(publication.view.state)
       || !matchesDomSnapshot(candidate.snapshot, true)
       || [...candidate.refs.values()].some((ref) => !ref.detached || !ref.attached)
     ) {
