@@ -166,61 +166,672 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
   );
 }
 
-function TitleEditor({ session, fallback, compact }: { session: CollabSession; fallback: string; compact?: boolean }) {
-  const title = useSessionValue(session, (s) => s.title || fallback);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(title);
-  const input = useRef<HTMLInputElement>(null);
-  const canEdit = session.role === "owner" || session.role === "editor";
+interface TitleEditState {
+  readonly generation: object;
+  readonly session: CollabSession;
+  readonly draft: string;
+}
 
-  useEffect(() => {
-    if (!editing) setDraft(title);
-  }, [title, editing]);
+interface TitleRender {
+  readonly identity: object;
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly fallback: string;
+  readonly title: string;
+  readonly role: CollabSession["role"];
+  readonly canEdit: boolean;
+  readonly compact: boolean | undefined;
+  readonly editing: boolean;
+  readonly draft: string;
+  readonly generation: object | null;
+  readonly setTitle: CollabSession["setTitle"];
+  readonly buttonClassName: string;
+  readonly buttonTitle: string;
+  readonly titleClassName: string;
+  readonly iconClassName: string;
+  readonly inputClassName: string;
+  readonly inputLabel: string;
+}
+
+interface TitleDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly TitleDomSnapshot[];
+}
+
+interface TitleDisplayPresentation {
+  readonly kind: "display";
+  readonly render: TitleRender;
+  readonly document: Document;
+  readonly button: HTMLButtonElement;
+  readonly title: HTMLSpanElement;
+  readonly icon: SVGSVGElement | null;
+  readonly snapshot: TitleDomSnapshot;
+  readonly targets: WeakSet<Node>;
+}
+
+interface TitleInputPresentation {
+  readonly kind: "input";
+  readonly render: TitleRender;
+  readonly document: Document;
+  readonly input: HTMLInputElement;
+  readonly snapshot: TitleDomSnapshot;
+}
+
+type TitlePresentation = TitleDisplayPresentation | TitleInputPresentation;
+
+interface TitlePublicationRuntime {
+  readonly presentation: TitlePresentation;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+}
+
+class TitlePublicationAuthority {
+  #active: TitlePresentation | null = null;
+  #successorOf: TitlePresentation | null = null;
+  #claimedEvents = new WeakSet<Event>();
+  #claimedPresentations = new WeakSet<TitlePresentation>();
+  #settledGenerations = new WeakSet<object>();
+  #focusedInputs = new WeakMap<object, HTMLInputElement>();
+
+  active() {
+    return this.#active;
+  }
+
+  publish(presentation: TitlePresentation) {
+    this.#active = presentation;
+    this.#successorOf = null;
+  }
+
+  retire(presentation: TitlePresentation) {
+    if (this.#active !== presentation) return;
+    this.#active = null;
+    this.#successorOf = presentation;
+  }
+
+  acceptsSuccessorOf(presentation: TitlePresentation) {
+    return this.#active === null && this.#successorOf === presentation;
+  }
+
+  claim(presentation: TitlePresentation, event: Event, settle = false) {
+    const generation = presentation.render.generation;
+    if (
+      this.#claimedEvents.has(event) ||
+      this.#claimedPresentations.has(presentation) ||
+      (settle && (!generation || this.#settledGenerations.has(generation)))
+    ) {
+      return false;
+    }
+    this.#claimedEvents.add(event);
+    this.#claimedPresentations.add(presentation);
+    if (settle && generation) this.#settledGenerations.add(generation);
+    return true;
+  }
+
+  claimFocus(generation: object, input: HTMLInputElement) {
+    if (this.#settledGenerations.has(generation) || this.#focusedInputs.get(generation) === input) return false;
+    this.#focusedInputs.set(generation, input);
+    return true;
+  }
+}
+
+class TitleElementOwner<T extends Element> {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  element = () => this.#current;
+
+  capture: React.RefCallback<T> = (element) => {
+    if (this.#current === element) return;
+    const previous = this.#current;
+    const last = this.#last;
+    this.#current = element;
+    if (element) this.#last = element;
+    this.onChange(element, previous, last);
+  };
+}
+
+function snapshotTitleDom(node: Node): TitleDomSnapshot {
+  const ElementConstructor = node.ownerDocument?.defaultView?.Element;
+  const attributes = ElementConstructor && node instanceof ElementConstructor
+    ? Object.freeze(Array.from(node.attributes, (attribute) => Object.freeze([attribute.name, attribute.value] as const)))
+    : null;
+  const children = Object.freeze(Array.from(node.childNodes, snapshotTitleDom));
+  return Object.freeze({ node, nodeValue: node.nodeValue, attributes, children });
+}
+
+function titleDomMatches(snapshot: TitleDomSnapshot): boolean {
+  const { node, attributes, children } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue || node.childNodes.length !== children.length) return false;
+  if (attributes) {
+    const ElementConstructor = node.ownerDocument?.defaultView?.Element;
+    if (!ElementConstructor || !(node instanceof ElementConstructor) || node.attributes.length !== attributes.length) return false;
+    for (let index = 0; index < attributes.length; index++) {
+      const expected = attributes[index];
+      const actual = node.attributes.item(index);
+      if (!actual || actual.name !== expected[0] || actual.value !== expected[1]) return false;
+    }
+  }
+  for (let index = 0; index < children.length; index++) {
+    if (node.childNodes.item(index) !== children[index].node || !titleDomMatches(children[index])) return false;
+  }
+  return true;
+}
+
+function collectTitleTargets(snapshot: TitleDomSnapshot, targets: WeakSet<Node>) {
+  targets.add(snapshot.node);
+  for (const child of snapshot.children) collectTitleTargets(child, targets);
+}
+
+function titleRenderIsCurrent(render: TitleRender) {
+  const { session } = render;
+  const canEdit = session.role === "owner" || session.role === "editor";
+  return (
+    session.role === render.role &&
+    canEdit === render.canEdit &&
+    session.setTitle === render.setTitle &&
+    (session.title || render.fallback) === render.title
+  );
+}
+
+function titleDisplayIsExact(presentation: TitleDisplayPresentation) {
+  const { render, document, button, title, icon, snapshot } = presentation;
+  const ButtonElement = document.defaultView?.HTMLButtonElement;
+  const SpanElement = document.defaultView?.HTMLSpanElement;
+  const SvgElement = document.defaultView?.SVGSVGElement;
+  if (
+    !ButtonElement ||
+    !SpanElement ||
+    !(button instanceof ButtonElement) ||
+    !(title instanceof SpanElement) ||
+    !button.isConnected ||
+    button.ownerDocument !== document ||
+    title.ownerDocument !== document ||
+    button.tagName !== "BUTTON" ||
+    button.type !== "button" ||
+    button.disabled ||
+    button.getAttribute("aria-disabled") !== null ||
+    button.className !== render.buttonClassName ||
+    button.title !== render.buttonTitle ||
+    button.dataset.testid !== "title" ||
+    title.parentElement !== button ||
+    title.tagName !== "SPAN" ||
+    title.className !== render.titleClassName ||
+    title.textContent !== render.title ||
+    button.children.length !== (render.canEdit && !render.compact ? 2 : 1) ||
+    button.children.item(0) !== title
+  ) {
+    return false;
+  }
+  if (render.canEdit && !render.compact) {
+    if (
+      !SvgElement ||
+      !icon ||
+      !(icon instanceof SvgElement) ||
+      icon.ownerDocument !== document ||
+      icon.parentElement !== button ||
+      button.children.item(1) !== icon ||
+      icon.tagName.toLowerCase() !== "svg" ||
+      render.iconClassName.split(" ").some((token) => !icon.classList.contains(token))
+    ) {
+      return false;
+    }
+  } else if (icon !== null) {
+    return false;
+  }
+  return titleDomMatches(snapshot);
+}
+
+function titleInputIsExact(presentation: TitleInputPresentation, changing = false) {
+  const { render, document, input, snapshot } = presentation;
+  const InputElement = document.defaultView?.HTMLInputElement;
+  return Boolean(
+    InputElement &&
+    input instanceof InputElement &&
+    input.isConnected &&
+    input.ownerDocument === document &&
+    input.tagName === "INPUT" &&
+    input.type === "text" &&
+    !input.disabled &&
+    !input.readOnly &&
+    input.getAttribute("aria-disabled") === null &&
+    input.className === render.inputClassName &&
+    input.getAttribute("aria-label") === render.inputLabel &&
+    input.dataset.testid === "title-input" &&
+    input.childNodes.length === 0 &&
+    (changing || input.value === render.draft) &&
+    titleDomMatches(snapshot)
+  );
+}
+
+export function TitleEditor({ session, fallback, compact }: { session: CollabSession; fallback: string; compact?: boolean }) {
+  const title = useSessionValue(session, (current) => current.title || fallback);
+  const role = session.role;
+  const canEdit = role === "owner" || role === "editor";
+  const [mount] = useState(() => Symbol("title editor"));
+  const [authority] = useState(() => new TitlePublicationAuthority());
+  const [, setPublicationRevision] = useState(0);
+  const [storedEdit, setStoredEdit] = useState<TitleEditState | null>(null);
+  let edit = storedEdit;
+  if (edit && (edit.session !== session || !canEdit)) {
+    edit = null;
+    setStoredEdit(null);
+  }
+  const editing = edit !== null;
+  const draft = edit?.draft ?? title;
+  const identity = Object.freeze({});
+  const runtimeState: {
+    layoutPassed: boolean;
+    current: TitlePublicationRuntime | null;
+    last: TitlePublicationRuntime | null;
+    successorRequested: boolean;
+  } = {
+    layoutPassed: false,
+    current: null,
+    last: null,
+    successorRequested: false,
+  };
+  const requestSuccessor = () => {
+    setPublicationRevision((revision) => revision + 1);
+  };
+  const retireForElementChange = (
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    if (element === null || (runtimeState.layoutPassed && element !== previous) || (element && last && element !== last)) {
+      runtimeState.current?.retireForElement();
+    }
+    const runtime = runtimeState.last;
+    if (
+      !runtimeState.successorRequested &&
+      runtime?.isExactElementReplay() &&
+      authority.acceptsSuccessorOf(runtime.presentation) &&
+      titleRenderIsCurrent(render) &&
+      titleOwnersMatch(runtime.presentation)
+    ) {
+      runtimeState.successorRequested = true;
+      requestSuccessor();
+    }
+  };
+  const buttonOwner = new TitleElementOwner<HTMLButtonElement>(retireForElementChange);
+  const titleOwner = new TitleElementOwner<HTMLSpanElement>(retireForElementChange);
+  const iconOwner = new TitleElementOwner<SVGSVGElement>(retireForElementChange);
+  const inputOwner = new TitleElementOwner<HTMLInputElement>(retireForElementChange);
+  const buttonClassName = cn("group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left", canEdit && "hover:bg-surface-3");
+  const buttonTitle = canEdit ? "Rename" : title;
+  const titleClassName = cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-lg md:text-[22px]");
+  const iconClassName = "shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100 max-md:hidden";
+  const inputClassName = "h-9 min-w-[12rem] max-w-[28rem] rounded-lg border border-accent bg-surface px-2 text-[22px] font-semibold text-ink outline-none ring-2 ring-accent/20";
+  const inputLabel = "Document title";
+  const render = Object.freeze<TitleRender>({
+    identity,
+    mount,
+    session,
+    fallback,
+    title,
+    role,
+    canEdit,
+    compact,
+    editing,
+    draft,
+    generation: edit?.generation ?? null,
+    setTitle: session.setTitle,
+    buttonClassName,
+    buttonTitle,
+    titleClassName,
+    iconClassName,
+    inputClassName,
+    inputLabel,
+  });
+
+  function titleOwnersMatch(presentation: TitlePresentation) {
+    if (presentation.render !== render) return false;
+    if (presentation.kind === "input") {
+      return inputOwner.element() === presentation.input && titleInputIsExact(presentation);
+    }
+    return (
+      buttonOwner.element() === presentation.button &&
+      titleOwner.element() === presentation.title &&
+      iconOwner.element() === presentation.icon &&
+      titleDisplayIsExact(presentation)
+    );
+  }
+
+  function createRuntime(presentation: TitlePresentation): TitlePublicationRuntime {
+    type Retirement = "element" | "layout";
+    let retired = false;
+    let retirement: Retirement | null = null;
+    const matches = () => titleOwnersMatch(presentation);
+    const retire = (reason: Retirement) => {
+      if (retired) return;
+      retired = true;
+      retirement = reason;
+      authority.retire(presentation);
+      if (runtimeState.current?.presentation === presentation) runtimeState.current = null;
+    };
+    return Object.freeze({
+      presentation,
+      retireForElement: () => retire("element"),
+      retireForLayout: () => retire("layout"),
+      isExactElementReplay: () => retired && retirement === "element" && matches(),
+      isExactLayoutReplay: () => retired && retirement === "layout" && matches(),
+    });
+  }
+
   useEffect(() => {
     document.title = `${title} · Markdoc`;
   }, [title]);
-  useEffect(() => {
-    if (editing) {
-      input.current?.focus();
-      input.current?.select();
-    }
-  }, [editing]);
 
-  const commit = () => {
-    const next = draft.trim();
-    if (next && next !== title) session.setTitle(next);
-    setEditing(false);
+  useLayoutEffect(() => {
+    runtimeState.layoutPassed = true;
+    if (
+      (runtimeState.last && !runtimeState.last.isExactLayoutReplay()) ||
+      !titleRenderIsCurrent(render)
+    ) {
+      return;
+    }
+    let presentation: TitlePresentation;
+    if (render.editing) {
+      const input = inputOwner.element();
+      if (!input) return;
+      presentation = Object.freeze({
+        kind: "input",
+        render,
+        document: input.ownerDocument,
+        input,
+        snapshot: snapshotTitleDom(input),
+      });
+      if (!titleInputIsExact(presentation)) return;
+    } else {
+      const button = buttonOwner.element();
+      const titleElement = titleOwner.element();
+      const icon = iconOwner.element();
+      if (!button || !titleElement || (render.canEdit && !render.compact && !icon)) return;
+      const snapshot = snapshotTitleDom(button);
+      const targets = new WeakSet<Node>();
+      collectTitleTargets(snapshot, targets);
+      presentation = Object.freeze({
+        kind: "display",
+        render,
+        document: button.ownerDocument,
+        button,
+        title: titleElement,
+        icon,
+        snapshot,
+        targets,
+      });
+      if (!titleDisplayIsExact(presentation)) return;
+    }
+    const runtime = createRuntime(presentation);
+    const previous = authority.active();
+    if (previous && previous !== presentation) authority.retire(previous);
+    runtimeState.current = runtime;
+    runtimeState.last = runtime;
+    authority.publish(presentation);
+    if (
+      presentation.kind === "input" &&
+      presentation.render.generation &&
+      authority.active() === presentation &&
+      titleInputIsExact(presentation) &&
+      authority.claimFocus(presentation.render.generation, presentation.input)
+    ) {
+      presentation.input.focus();
+      if (
+        authority.active() === presentation &&
+        titleInputIsExact(presentation) &&
+        presentation.document.activeElement === presentation.input
+      ) {
+        presentation.input.select();
+      }
+    }
+    return runtime.retireForLayout;
+  });
+
+  const currentPresentation = (changing = false) => {
+    const presentation = authority.active();
+    if (
+      !presentation ||
+      presentation.render !== render ||
+      presentation.render.identity !== identity ||
+      presentation.render.mount !== mount ||
+      presentation.render.session !== session ||
+      !titleRenderIsCurrent(render)
+    ) {
+      return null;
+    }
+    return presentation.kind === "input"
+      ? (titleInputIsExact(presentation, changing) ? presentation : null)
+      : (titleDisplayIsExact(presentation) ? presentation : null);
+  };
+
+  const changePresentation = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = inputOwner.element();
+    if (
+      !input ||
+      (event.type !== "input" && event.type !== "change") ||
+      event.currentTarget !== input ||
+      event.target !== input ||
+      event.defaultPrevented
+    ) {
+      return null;
+    }
+    const ownerWindow = input.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      nativeEvent instanceof ownerWindow.MouseEvent ||
+      nativeEvent instanceof ownerWindow.KeyboardEvent ||
+      nativeEvent instanceof ownerWindow.FocusEvent ||
+      (nativeEvent.type !== "input" && nativeEvent.type !== "change") ||
+      nativeEvent.target !== input ||
+      nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    const presentation = currentPresentation(true);
+    if (
+      !presentation ||
+      presentation.kind !== "input" ||
+      presentation.input !== input ||
+      !authority.claim(presentation, nativeEvent)
+    ) {
+      return null;
+    }
+    return presentation;
+  };
+
+  const blurPresentation = (event: React.FocusEvent<HTMLInputElement>) => {
+    const input = inputOwner.element();
+    if (
+      !input ||
+      event.type !== "blur" ||
+      event.currentTarget !== input ||
+      event.target !== input ||
+      event.defaultPrevented
+    ) {
+      return null;
+    }
+    const ownerWindow = input.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.FocusEvent) ||
+      (nativeEvent.type !== "blur" && nativeEvent.type !== "focusout") ||
+      nativeEvent.target !== input ||
+      nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    const presentation = currentPresentation();
+    if (
+      !presentation ||
+      presentation.kind !== "input" ||
+      presentation.input !== input ||
+      !authority.claim(presentation, nativeEvent, true)
+    ) {
+      return null;
+    }
+    return presentation;
+  };
+
+  const keyboardPresentation = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter" && event.key !== "Escape") return null;
+    const input = inputOwner.element();
+    if (
+      !input ||
+      event.type !== "keydown" ||
+      event.currentTarget !== input ||
+      event.target !== input ||
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.repeat
+    ) {
+      return null;
+    }
+    const ownerWindow = input.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
+      nativeEvent.type !== "keydown" ||
+      nativeEvent.target !== input ||
+      nativeEvent.key !== event.key ||
+      nativeEvent.defaultPrevented ||
+      nativeEvent.altKey ||
+      nativeEvent.ctrlKey ||
+      nativeEvent.metaKey ||
+      nativeEvent.shiftKey ||
+      nativeEvent.repeat ||
+      nativeEvent.isComposing
+    ) {
+      return null;
+    }
+    const presentation = currentPresentation();
+    if (
+      !presentation ||
+      presentation.kind !== "input" ||
+      presentation.input !== input ||
+      !authority.claim(presentation, nativeEvent, true)
+    ) {
+      return null;
+    }
+    return presentation;
+  };
+
+  const finish = (presentation: TitleInputPresentation, commit: boolean) => {
+    const generation = presentation.render.generation;
+    if (!generation) return;
+    if (commit) {
+      const next = presentation.render.draft.trim();
+      if (next && next !== presentation.render.title) {
+        presentation.render.setTitle.call(presentation.render.session, next);
+      }
+    }
+    setStoredEdit((current) => current?.generation === generation ? null : current);
   };
 
   if (editing) {
     return (
       <input
-        ref={input}
+        ref={inputOwner.capture}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-          if (e.key === "Escape") setEditing(false);
+        onChange={(event) => {
+          const presentation = changePresentation(event);
+          const generation = presentation?.render.generation;
+          if (!presentation || !generation) return;
+          const nextDraft = presentation.input.value;
+          setStoredEdit((current) => current?.generation === generation
+            ? Object.freeze({ ...current, draft: nextDraft })
+            : current);
         }}
-        className="h-9 min-w-[12rem] max-w-[28rem] rounded-lg border border-accent bg-surface px-2 text-[22px] font-semibold text-ink outline-none ring-2 ring-accent/20"
-        aria-label="Document title"
+        onBlur={(event) => {
+          const presentation = blurPresentation(event);
+          if (presentation) finish(presentation, true);
+        }}
+        onKeyDown={(event) => {
+          const presentation = keyboardPresentation(event);
+          if (!presentation) return;
+          finish(presentation, event.key === "Enter");
+        }}
+        className={inputClassName}
+        aria-label={inputLabel}
         data-testid="title-input"
       />
     );
   }
   return (
     <button
+      ref={buttonOwner.capture}
       type="button"
-      onClick={() => canEdit && setEditing(true)}
-      className={cn("group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left", canEdit && "hover:bg-surface-3")}
-      title={canEdit ? "Rename" : title}
+      onClick={(event) => {
+        const button = buttonOwner.element();
+        if (
+          !button ||
+          event.type !== "click" ||
+          event.currentTarget !== button ||
+          event.defaultPrevented
+        ) {
+          return;
+        }
+        const ownerWindow = button.ownerDocument.defaultView;
+        const nativeEvent = event.nativeEvent;
+        const target = event.target;
+        if (
+          !ownerWindow ||
+          !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+          nativeEvent.type !== "click" ||
+          nativeEvent.button !== 0 ||
+          !(target instanceof ownerWindow.Node) ||
+          nativeEvent.target !== target ||
+          nativeEvent.defaultPrevented
+        ) {
+          return;
+        }
+        const presentation = currentPresentation();
+        if (
+          !presentation ||
+          presentation.kind !== "display" ||
+          presentation.button !== button ||
+          !presentation.render.canEdit ||
+          button.disabled ||
+          button.getAttribute("aria-disabled") !== null ||
+          !presentation.targets.has(target) ||
+          !button.contains(target) ||
+          !authority.claim(presentation, nativeEvent)
+        ) {
+          return;
+        }
+        const nextEdit = Object.freeze<TitleEditState>({
+          generation: Object.freeze({}),
+          session: presentation.render.session,
+          draft: presentation.render.title,
+        });
+        setStoredEdit((current) => current === null ? nextEdit : current);
+      }}
+      className={buttonClassName}
+      title={buttonTitle}
       data-testid="title"
     >
       {/* Phones render `compact` only after hydration; the `max-md:` rules make the server markup match its size and
           set of controls so the header does not shift when the breakpoint flips (#1470). */}
-      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-lg md:text-[22px]")}>{title}</span>
-      {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100 max-md:hidden" />}
+      <span ref={titleOwner.capture} className={titleClassName}>{title}</span>
+      {canEdit && !compact && <Pencil ref={iconOwner.capture} size={15} className={iconClassName} />}
     </button>
   );
 }
