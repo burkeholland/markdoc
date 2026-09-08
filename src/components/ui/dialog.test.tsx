@@ -1087,6 +1087,51 @@ describe("DialogContent exact Strict Mode publication", () => {
     },
   );
 
+  it.each(["an owned body descendant", "a nested root"] as const)(
+    "permanently rejects a third guard inserted and removed inside %s subtree",
+    async (location) => {
+      const taintedClosed = vi.fn();
+      const cleanClosed = vi.fn();
+      const tree = (rootKey: string, onClosed: () => void) => (
+        <StrictMode>
+          <ControlledDialog key={rootKey} title={`Guard restoration ${location}`} onClosed={onClosed}>
+            <div data-testid="owned-guard-host" />
+          </ControlledDialog>
+        </StrictMode>
+      );
+      const view = renderDirect(tree("tainted", taintedClosed));
+      const guard = createFocusGuard();
+      const nestedRoot = document.createElement("div");
+      nestedRoot.setAttribute("role", "dialog");
+      nestedRoot.setAttribute("data-state", "open");
+
+      act(() => {
+        if (location === "an owned body descendant") {
+          screen.getByTestId("owned-guard-host").append(guard);
+          guard.remove();
+        } else {
+          nestedRoot.append(guard);
+          document.body.append(nestedRoot);
+          nestedRoot.remove();
+        }
+      });
+      await act(() => Promise.resolve());
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Guard restoration ${location}`);
+      expect(taintedClosed).not.toHaveBeenCalled();
+
+      act(() => view.root.render(tree("clean", cleanClosed)));
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(cleanClosed).toHaveBeenCalledOnce();
+      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+    },
+  );
+
   it("accepts exact replay guard teardown before a later allowed passive cleanup mutation", async () => {
     const onClosed = vi.fn();
     renderDirect(

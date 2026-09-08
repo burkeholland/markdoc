@@ -828,7 +828,6 @@ class MutationJournal {
   #isAllowedChildList(record: MutationRecord, index: number) {
     const added = [...record.addedNodes];
     const removed = [...record.removedNodes];
-    if (this.#isBodyDescendant(record.target)) return true;
     if (
       record.target === this.#ownerDocument.body
       && added.length > 0
@@ -836,31 +835,6 @@ class MutationJournal {
       && added.every(isFocusGuard)
     ) {
       return this.#trackFocusGuardAdditions(record, added);
-    }
-    if (
-      record.target === this.#portalParent
-      && added.length > 0
-      && removed.length === 0
-      && added.every((node) => (
-        node instanceof Element
-        && node !== this.#overlay
-        && node !== this.#content
-        && node.getAttribute("data-state") === "open"
-        && (node.getAttribute("class") === OVERLAY_CLASS_NAME
-          || node.getAttribute("role") === "dialog")
-      ))
-    ) {
-      added.forEach((node) => this.#nestedRoots.add(node));
-      return true;
-    }
-    if (
-      record.target === this.#portalParent
-      && removed.length > 0
-      && added.length === 0
-      && removed.every((node) => this.#nestedRoots.has(node))
-    ) {
-      removed.forEach((node) => this.#nestedRoots.delete(node));
-      return true;
     }
     if (
       record.target === this.#ownerDocument.body
@@ -891,25 +865,51 @@ class MutationJournal {
       return true;
     }
     if (
+      this.#closing
+      && record.target === this.#portalParent
+      && added.length === 0
+      && removed.length > 0
+      && removed.every((node) => node === this.#overlay || node === this.#content)
+    ) {
+      return true;
+    }
+    if ([...added, ...removed].some(subtreeHasFocusGuardMarker)) return false;
+    if (this.#isBodyDescendant(record.target)) return true;
+    if (
+      record.target === this.#portalParent
+      && added.length > 0
+      && removed.length === 0
+      && added.every((node) => (
+        node instanceof Element
+        && node !== this.#overlay
+        && node !== this.#content
+        && node.getAttribute("data-state") === "open"
+        && (node.getAttribute("class") === OVERLAY_CLASS_NAME
+          || node.getAttribute("role") === "dialog")
+      ))
+    ) {
+      added.forEach((node) => this.#nestedRoots.add(node));
+      return true;
+    }
+    if (
+      record.target === this.#portalParent
+      && removed.length > 0
+      && added.length === 0
+      && removed.every((node) => this.#nestedRoots.has(node))
+    ) {
+      removed.forEach((node) => this.#nestedRoots.delete(node));
+      return true;
+    }
+    if (
       added.length + removed.length > 0
       && [...added, ...removed].every((node) => (
         !this.#focusGuards.has(node)
-        && !subtreeHasFocusGuardMarker(node)
         && !this.#nestedRoots.has(node)
         && !this.#isOwned(node)
         && !node.contains?.(this.#content)
         && !(this.#overlay
           && (this.#overlay.contains(node) || node.contains?.(this.#overlay)))
       ))
-    ) {
-      return true;
-    }
-    if (
-      this.#closing
-      && record.target === this.#portalParent
-      && added.length === 0
-      && removed.length > 0
-      && removed.every((node) => node === this.#overlay || node === this.#content)
     ) {
       return true;
     }
