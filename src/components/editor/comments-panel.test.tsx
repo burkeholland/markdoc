@@ -242,6 +242,38 @@ function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSu
   };
 }
 
+interface CapturedCommentNavigation {
+  panel: HTMLElement;
+  close: CapturedReviewControl;
+  open: CapturedReviewControl;
+  resolved: CapturedReviewControl;
+  suggestions: CapturedReviewControl;
+  emptySuggestions: CapturedReviewControl | null;
+}
+
+function captureCommentNavigation(scope: ParentNode = document): CapturedCommentNavigation {
+  const panel = scope.querySelector<HTMLElement>('[data-testid="comments-panel"]');
+  if (!panel) throw new Error("The Comments panel was not rendered");
+  const close = panel.querySelector<HTMLElement>('button[aria-label="Close comments"]');
+  const open = panel.querySelector<HTMLElement>('[data-testid="comments-tab-open"]');
+  const resolved = panel.querySelector<HTMLElement>('[data-testid="comments-tab-resolved"]');
+  const suggestions = panel.querySelector<HTMLElement>('[data-testid="comments-tab-suggestions"]');
+  if (!close || !open || !resolved || !suggestions) {
+    throw new Error("The Comments navigation controls were not rendered");
+  }
+  const emptySuggestions = panel.querySelector<HTMLElement>(
+    '[data-testid="comments-empty-suggestions-button"]',
+  );
+  return {
+    panel,
+    close: captureReviewControl(close),
+    open: captureReviewControl(open),
+    resolved: captureReviewControl(resolved),
+    suggestions: captureReviewControl(suggestions),
+    emptySuggestions: emptySuggestions ? captureReviewControl(emptySuggestions) : null,
+  };
+}
+
 function reviewSession(docId: string) {
   const user = makeCollabUser("alice", "Alice");
   const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
@@ -417,6 +449,28 @@ function ComposerBoundary({
       <CommentsPanel key={visit} session={session} onClose={() => {}} onReveal={() => {}} />
     </TooltipProvider>
   ) : null;
+}
+
+function CommentNavigationBoundary({
+  session,
+  onClose,
+  onLayout,
+}: {
+  session: CollabSession;
+  onClose: () => void;
+  onLayout: (navigation: CapturedCommentNavigation) => void;
+}) {
+  useLayoutEffect(() => {
+    onLayout(captureCommentNavigation());
+  }, [onLayout]);
+  return (
+    <CommentsPanel
+      session={session}
+      onClose={onClose}
+      onReveal={() => {}}
+      focusTab={{ tab: "open", nonce: 1 }}
+    />
+  );
 }
 
 describe("CommentsPanel", () => {
@@ -1400,6 +1454,151 @@ describe("CommentsPanel", () => {
     });
   });
 
+  it("keeps every Comments navigation path exact through Strict Mode replay", async () => {
+    const fixture = reviewSession("comment-navigation-strict");
+    session = fixture.session;
+    const { threadId } = addCommentSuggestion(session, fixture.user);
+    session.comments.setResolved(threadId, true, fixture.user);
+    const onClose = vi.fn();
+
+    render(
+      <StrictMode>
+        <CommentsPanel
+          session={session}
+          onClose={onClose}
+          onReveal={() => {}}
+          focusTab={{ tab: "open", nonce: 1 }}
+        />
+      </StrictMode>,
+    );
+
+    await screen.findByTestId("comments-empty-suggestions-button");
+    await act(async () => {});
+    const open = screen.getByTestId("comments-tab-open");
+    const resolved = screen.getByTestId("comments-tab-resolved");
+    const suggestions = screen.getByTestId("comments-tab-suggestions");
+    const tabpanel = screen.getByRole("tabpanel");
+    expect(resolved).toHaveTextContent("Resolved1");
+    expect(suggestions).toHaveTextContent("Suggestions1");
+
+    fireEvent.click(resolved);
+    await waitFor(() => expect(resolved).toHaveAttribute("aria-selected", "true"));
+    open.focus();
+    await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
+
+    fireEvent.click(await screen.findByTestId("comments-empty-suggestions-button"));
+    await waitFor(() => expect(suggestions).toHaveAttribute("aria-selected", "true"));
+    expect(tabpanel).toHaveAttribute("aria-labelledby", "comments-tab-suggestions");
+
+    suggestions.focus();
+    fireEvent.keyDown(suggestions, { key: "Home" });
+    expect(open).toHaveFocus();
+    await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
+    await act(async () => {});
+
+    const close = screen.getByRole("button", { name: "Close comments" });
+    fireEvent.click(close);
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("permanently retires the first Strict Mode publication before a successor can act", async () => {
+    const fixture = reviewSession("comment-navigation-retired");
+    session = fixture.session;
+    const layouts: CapturedCommentNavigation[] = [];
+    const onLayout = (navigation: CapturedCommentNavigation) => layouts.push(navigation);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <CommentNavigationBoundary
+              session={session!}
+              onClose={() => {}}
+              onLayout={onLayout}
+            />
+          </StrictMode>,
+        );
+      });
+      expect(layouts.length).toBeGreaterThan(0);
+      const stale = layouts[0]!;
+      const current = captureCommentNavigation(host);
+      expect(current.resolved.click).not.toBe(stale.resolved.click);
+
+      const restore = interceptReviewClick(
+        current.resolved.element,
+        (_original, event) => stale.resolved.click(event),
+      );
+      act(() => dispatchReviewClick(current.resolved.element));
+      restore();
+      expect(current.open.element).toHaveAttribute("aria-selected", "true");
+
+      stale.resolved.ref(null);
+      stale.resolved.ref(stale.resolved.element);
+      act(() => dispatchReviewClick(current.resolved.element));
+      expect(current.resolved.element).toHaveAttribute("aria-selected", "true");
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects fabricated, canceled, crossed, and mutation-restored tab events without poisoning recovery", async () => {
+    const fixture = reviewSession("comment-navigation-invalid-events");
+    session = fixture.session;
+    const firstClose = vi.fn();
+    const secondClose = vi.fn();
+    const rendered = render(
+      <CommentsPanel
+        session={session}
+        onClose={firstClose}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const stale = captureCommentNavigation();
+    rendered.rerender(
+      <CommentsPanel
+        session={session}
+        onClose={secondClose}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const current = captureCommentNavigation();
+    expect(current.resolved.click).not.toBe(stale.resolved.click);
+
+    act(() => stale.resolved.click(reviewMouseEvent(stale.resolved)));
+    expect(current.open.element).toHaveAttribute("aria-selected", "true");
+
+    const canceled = new MouseEvent("click", { bubbles: true, cancelable: true });
+    canceled.preventDefault();
+    act(() => dispatchReviewClick(current.resolved.element, canceled));
+    expect(current.open.element).toHaveAttribute("aria-selected", "true");
+
+    const restoreCross = interceptReviewClick(
+      current.resolved.element,
+      (_original, event) => stale.resolved.click(event),
+    );
+    act(() => dispatchReviewClick(current.resolved.element));
+    restoreCross();
+    expect(current.open.element).toHaveAttribute("aria-selected", "true");
+
+    current.resolved.element.setAttribute("aria-selected", "true");
+    current.resolved.element.setAttribute("aria-selected", "false");
+    act(() => dispatchReviewClick(current.resolved.element));
+    expect(current.open.element).toHaveAttribute("aria-selected", "true");
+
+    await act(async () => {});
+    const recovered = captureCommentNavigation();
+    act(() => dispatchReviewClick(recovered.resolved.element));
+    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
+    expect(firstClose).not.toHaveBeenCalled();
+    expect(secondClose).not.toHaveBeenCalled();
+  });
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({
@@ -1446,6 +1645,46 @@ describe("CommentsPanel", () => {
     expect(screen.getByRole("tablist").contains(screen.getByTestId("comment-document"))).toBe(false);
     await keyboard.tab();
     expect(screen.getByTestId("comments-empty-agent")).toHaveFocus();
+  });
+
+  it("navigates from exact owner-document focus after a programmatic tab change", async () => {
+    const fixture = reviewSession("comment-navigation-programmatic");
+    session = fixture.session;
+    const view = render(
+      <CommentsPanel
+        session={session}
+        onClose={() => {}}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const open = screen.getByTestId("comments-tab-open");
+    const resolved = screen.getByTestId("comments-tab-resolved");
+    const suggestions = screen.getByTestId("comments-tab-suggestions");
+    open.focus();
+
+    view.rerender(
+      <CommentsPanel
+        session={session}
+        onClose={() => {}}
+        onReveal={() => {}}
+        focusTab={{ tab: "suggestions", nonce: 2 }}
+      />,
+    );
+    await waitFor(() => expect(suggestions).toHaveAttribute("aria-selected", "true"));
+    expect(open).toHaveFocus();
+
+    fireEvent.keyDown(open, { key: "ArrowRight" });
+    expect(resolved).toHaveFocus();
+    expect(resolved).toHaveAttribute("aria-selected", "true");
+
+    open.focus();
+    await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
+    await act(async () => {});
+    const allowed = fireEvent.keyDown(open, { key: "Home" });
+    expect(allowed).toBe(false);
+    expect(open).toHaveFocus();
+    expect(open).toHaveAttribute("aria-selected", "true");
   });
 
   it("tones resolved card backgrounds without dimming their metadata", () => {
@@ -1501,6 +1740,12 @@ describe("CommentsPanel", () => {
     editorControl.focus();
     view.rerender(<Harness open focusOnMount />);
     await waitFor(() => expect(screen.getByRole("tab", { name: "Open" })).toHaveFocus());
+
+    const documentComment = screen.getByTestId("comment-document");
+    documentComment.focus();
+    act(() => session!.ytext.insert(0, "A"));
+    await act(async () => {});
+    expect(documentComment).toHaveFocus();
   });
 
   describe("review metadata loading", () => {
