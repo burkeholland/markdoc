@@ -134,13 +134,32 @@ function selectRich(anchor = 5, head = anchor) {
 function clickRichHighlight() {
   const mark = rich!.dom.querySelector<HTMLElement>(`[data-highlight-id="${threadId}"]`)!;
   expect(mark).not.toBeNull();
-  // jsdom cannot hit-test text coordinates. Call the real ProseMirror click handler with its
-  // actual decorated target; native placement/double-click geometry is covered by the browser spec.
-  const event = new MouseEvent("click", { bubbles: true });
-  Object.defineProperty(event, "target", { value: mark });
-  act(() => {
-    rich!.someProp("handleClick", (handler) => handler(rich!, 5, event));
-  });
+  const hitTest = vi.spyOn(rich!, "posAtCoords").mockReturnValue({ pos: 5, inside: 0 });
+  const dispatch = (type: string, init: MouseEventInit = {}) => {
+    mark.dispatchEvent(new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 5,
+      clientY: 5,
+      detail: 1,
+      ...init,
+    }));
+  };
+  vi.useFakeTimers();
+  try {
+    act(() => {
+      dispatch("pointerdown", { buttons: 1 });
+      dispatch("mousedown", { buttons: 1 });
+      dispatch("pointerup");
+      dispatch("mouseup");
+      dispatch("click");
+      vi.advanceTimersByTime(750);
+    });
+  } finally {
+    hitTest.mockRestore();
+    vi.useRealTimers();
+  }
 }
 function expectClosed() {
   expect(screen.queryByTestId("comments-panel")).toBeNull();

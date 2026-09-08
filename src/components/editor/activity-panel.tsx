@@ -7,7 +7,13 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { Activity as ActivityIcon, Bot, Loader2, X } from "lucide-react";
+import {
+  Activity as ActivityIcon,
+  Bot,
+  Loader2,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api, apiErrorText, type ActivityItemDto } from "@/lib/api";
 import { cn, formatDateTime, relativeTime } from "@/lib/utils";
@@ -58,7 +64,7 @@ type ActivityGroupFacts = Readonly<{
 }>;
 
 type ActivityContentMode = "loading" | "empty" | "list" | "none";
-type ActivityActionKind = "close" | "retry" | "load-more";
+type ActivityActionKind = "close" | "refresh" | "retry" | "load-more";
 
 interface ActivitySourceFacts {
   readonly stateVisit: ActivityVisit;
@@ -85,6 +91,8 @@ interface ActivityPresentation {
   readonly nextBefore: string | null;
   readonly error: string | null;
   readonly listError: string | null;
+  readonly refreshAvailable: boolean;
+  readonly refreshing: boolean;
   readonly retrying: boolean;
   readonly loadingMore: boolean;
   readonly now: number;
@@ -107,6 +115,7 @@ interface ActivityPublicationSet {
   readonly establish: () => (() => void) | undefined;
   readonly capturePanel: (element: HTMLElement | null) => void;
   readonly captureHeader: (element: HTMLDivElement | null) => void;
+  readonly captureRefresh: (element: HTMLButtonElement | null) => void;
   readonly captureClose: (element: HTMLButtonElement | null) => void;
   readonly captureScroll: (element: HTMLDivElement | null) => void;
   readonly captureContent: (element: HTMLDivElement | null) => void;
@@ -116,6 +125,7 @@ interface ActivityPublicationSet {
   readonly captureGroup: (index: number) => (element: HTMLDivElement | null) => void;
   readonly captureRow: (index: number) => (element: HTMLLIElement | null) => void;
   readonly captureLoadMore: (element: HTMLButtonElement | null) => void;
+  readonly manualRefresh: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly close: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly retry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly loadMore: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -664,6 +674,8 @@ function createActivityPresentation(
     nextBefore: source.nextBefore,
     error: source.error,
     listError: source.listError,
+    refreshAvailable: items !== null || source.listError !== null,
+    refreshing: source.refresh !== null,
     retrying: source.retrying,
     loadingMore: source.loadingMore,
     now: source.now,
@@ -849,6 +861,8 @@ function activityReplayFactsMatch(
     source.nextBefore === successor.nextBefore &&
     source.error === successor.error &&
     source.listError === successor.listError &&
+    source.refreshAvailable === successor.refreshAvailable &&
+    source.refreshing === successor.refreshing &&
     source.retrying === successor.retrying &&
     source.loadingMore === successor.loadingMore &&
     source.contentMode === successor.contentMode &&
@@ -911,6 +925,10 @@ function createActivityPublication({
   let successorRequested = false;
   const actions: Readonly<Record<ActivityActionKind, ActivityAction>> = Object.freeze({
     close: Object.freeze({ identity: Symbol("activity-close"), kind: "close" }),
+    refresh: Object.freeze({
+      identity: Symbol("activity-refresh"),
+      kind: "refresh",
+    }),
     retry: Object.freeze({ identity: Symbol("activity-retry"), kind: "retry" }),
     "load-more": Object.freeze({
       identity: Symbol("activity-load-more"),
@@ -946,6 +964,9 @@ function createActivityPublication({
   };
   const panel = new ActivityElementOwner<HTMLElement>(retireForElementChange);
   const header = new ActivityElementOwner<HTMLDivElement>(retireForElementChange);
+  const manualRefresh = new ActivityElementOwner<HTMLButtonElement>(
+    retireForElementChange,
+  );
   const close = new ActivityElementOwner<HTMLButtonElement>(retireForElementChange);
   const scroll = new ActivityElementOwner<HTMLDivElement>(retireForElementChange);
   const content = new ActivityElementOwner<HTMLDivElement>(retireForElementChange);
@@ -969,6 +990,9 @@ function createActivityPublication({
       source.nextBefore === presentation.nextBefore &&
       source.error === presentation.error &&
       source.listError === presentation.listError &&
+      (source.items !== null || source.listError !== null) ===
+        presentation.refreshAvailable &&
+      Boolean(source.refresh) === presentation.refreshing &&
       source.retrying === presentation.retrying &&
       source.loadingMore === presentation.loadingMore &&
       source.now === presentation.now &&
@@ -997,6 +1021,7 @@ function createActivityPublication({
   const exactDomIsCurrent = () => {
     const panelElement = panel.element();
     const headerElement = header.element();
+    const refreshElement = manualRefresh.element();
     const closeElement = close.element();
     const scrollElement = scroll.element();
     const contentElement = content.element();
@@ -1013,8 +1038,11 @@ function createActivityPublication({
       panelElement.children.item(0) !== headerElement ||
       panelElement.children.item(1) !== scrollElement ||
       headerElement.parentElement !== panelElement ||
-      headerElement.children.length !== 2 ||
-      headerElement.children.item(1) !== closeElement ||
+      headerElement.children.length !==
+        (presentation.refreshAvailable ? 3 : 2) ||
+      headerElement.children.item(
+        presentation.refreshAvailable ? 2 : 1,
+      ) !== closeElement ||
       headerElement.children.item(0)?.tagName !== "SPAN" ||
       headerElement.children.item(0)?.textContent !== "Activity" ||
       closeElement.parentElement !== headerElement ||
@@ -1026,6 +1054,23 @@ function createActivityPublication({
       scrollElement.firstElementChild !== contentElement ||
       contentElement.parentElement !== scrollElement
     ) {
+      return false;
+    }
+    if (presentation.refreshAvailable) {
+      if (
+        !refreshElement ||
+        headerElement.children.item(1) !== refreshElement ||
+        refreshElement.parentElement !== headerElement ||
+        refreshElement.type !== "button" ||
+        refreshElement.disabled !== presentation.refreshing ||
+        refreshElement.getAttribute("aria-label") !==
+          (presentation.refreshing
+            ? "Refreshing activity"
+            : "Refresh activity")
+      ) {
+        return false;
+      }
+    } else if (refreshElement) {
       return false;
     }
 
@@ -1046,7 +1091,8 @@ function createActivityPublication({
         listErrorElement.children.item(1) !== retryElement ||
         retryElement.parentElement !== listErrorElement ||
         retryElement.type !== "button" ||
-        retryElement.disabled !== presentation.retrying ||
+        retryElement.disabled !==
+          (presentation.retrying || presentation.refreshing) ||
         retryElement.textContent?.trim() !== (presentation.retrying ? "Retrying…" : "Retry")
       ) {
         return false;
@@ -1136,6 +1182,7 @@ function createActivityPublication({
     const owners: ActivityElementOwnerView[] = [
       panel,
       header,
+      ...(presentation.refreshAvailable ? [manualRefresh] : []),
       close,
       scroll,
       content,
@@ -1183,9 +1230,11 @@ function createActivityPublication({
     }
     const element = kind === "close"
       ? close.element()
-      : kind === "retry"
-        ? retry.element()
-        : loadMore.element();
+      : kind === "refresh"
+        ? manualRefresh.element()
+        : kind === "retry"
+          ? retry.element()
+          : loadMore.element();
     const document = element?.ownerDocument;
     const MouseEventConstructor = document?.defaultView?.MouseEvent;
     const nativeEvent = event.nativeEvent;
@@ -1206,6 +1255,14 @@ function createActivityPublication({
       !factsAreCurrent() ||
       !exactDomIsCurrent() ||
       !publication.publishedDomMatches()
+    ) {
+      return null;
+    }
+    if (
+      kind === "refresh" &&
+      (!presentation.refreshAvailable ||
+        presentation.refreshing ||
+        current.hasRefresh(presentation.visit))
     ) {
       return null;
     }
@@ -1433,6 +1490,7 @@ function createActivityPublication({
     },
     capturePanel: panel.capture,
     captureHeader: header.capture,
+    captureRefresh: manualRefresh.capture,
     captureClose: close.capture,
     captureScroll: scroll.capture,
     captureContent: content.capture,
@@ -1442,6 +1500,10 @@ function createActivityPublication({
     captureGroup: (index: number) => groups[index]?.capture ?? (() => {}),
     captureRow: (index: number) => rows[index]?.capture ?? (() => {}),
     captureLoadMore: loadMore.capture,
+    manualRefresh: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (!claim("refresh", event)) return;
+      refresh(presentation.visit, false);
+    },
     close: (event: ReactMouseEvent<HTMLButtonElement>) => {
       const publication = claim("close", event);
       if (!publication) return;
@@ -1704,6 +1766,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     establish,
     capturePanel,
     captureHeader,
+    captureRefresh,
     captureClose,
     captureScroll,
     captureContent,
@@ -1713,6 +1776,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     captureGroup,
     captureRow,
     captureLoadMore,
+    manualRefresh,
     close,
     retry,
     loadMore: requestMore,
@@ -1724,6 +1788,25 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     <aside ref={capturePanel} className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="activity-panel">
       <div ref={captureHeader} className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Activity</span>
+        {presentation.refreshAvailable && (
+          <button
+            ref={captureRefresh}
+            type="button"
+            className="icon-btn ml-auto h-8 w-8"
+            onClick={manualRefresh}
+            disabled={presentation.refreshing}
+            aria-label={
+              presentation.refreshing
+                ? "Refreshing activity"
+                : "Refresh activity"
+            }
+          >
+            <RefreshCw
+              size={15}
+              className={cn(presentation.refreshing && "animate-spin")}
+            />
+          </button>
+        )}
         <button ref={captureClose} type="button" className="icon-btn h-8 w-8" onClick={close} aria-label="Close activity">
           <X size={16} />
         </button>
@@ -1733,7 +1816,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
           {presentation.listError && (
             <div ref={captureListError} className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
               <div>{presentation.listError}</div>
-              <button ref={captureRetry} type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={presentation.retrying}>
+              <button ref={captureRetry} type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={presentation.retrying || presentation.refreshing}>
                 {presentation.retrying && <Loader2 size={13} className="animate-spin" />}
                 {presentation.retrying ? "Retrying…" : "Retry"}
               </button>

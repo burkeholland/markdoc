@@ -30,6 +30,7 @@ import { RichPane } from "./rich-pane";
 import { CodePane } from "./code-pane";
 
 const SOURCE = "Before [**nested** *label*](https://example.test/guide) after\n\n## Section\n";
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const sessions: CollabSession[] = [];
 const rangeMethods = ["getClientRects", "getBoundingClientRect"] as const;
 const originalRangeMethods = rangeMethods.map((name) => Object.getOwnPropertyDescriptor(Range.prototype, name));
@@ -53,6 +54,7 @@ afterEach(() => {
     if (original) Object.defineProperty(Range.prototype, name, original);
     else Reflect.deleteProperty(Range.prototype, name);
   });
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -88,10 +90,22 @@ function mouse(target: EventTarget, type: string, init: MouseEventInit = {}) {
 }
 
 function gesture(target: EventTarget, init: MouseEventInit) {
+  mouse(target, "pointerdown", { ...init, buttons: 1 });
   const down = mouse(target, "mousedown", { ...init, buttons: 1 });
+  mouse(target, "pointerup", init);
   const up = mouse(target, "mouseup", init);
   const click = mouse(target, "click", init);
   return { down, up, click };
+}
+
+function nativeDoubleClick(target: EventTarget, init: MouseEventInit) {
+  gesture(target, { ...init, detail: 1 });
+  gesture(target, { ...init, detail: 2 });
+  return mouse(target, "dblclick", { ...init, detail: 2 });
+}
+
+function flushHighlightActivation() {
+  act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS));
 }
 
 function mountEditor(
@@ -209,7 +223,9 @@ describe.each(["rich", "source"] as const)("%s editor link input", (surface) => 
     expect(editor.session.ytext.toString()).toBe(markdown);
     expect(window.open).not.toHaveBeenCalled();
 
+    vi.useFakeTimers();
     gesture(target, { clientX: from + 2 });
+    flushHighlightActivation();
     expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(kind, id, from + 2);
     expect(editor.highlightOpens()).toBe(1);
     expect(kind === "comment" ? editor.session.activeCommentId : editor.session.activeSuggestionId).toBe(id);
@@ -342,7 +358,9 @@ describe.each(["rich", "source"] as const)("%s editor link input", (surface) => 
     expect(editor.selection()).toEqual(before);
     expect(document.activeElement).toBe(focused);
     expect(editor.session.ytext.toString()).toBe(markdown);
+    vi.useFakeTimers();
     gesture(target!, { clientX: from + 2 });
+    flushHighlightActivation();
     expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(targetKind, targetId, from + 2);
     expect(editor.highlightOpens()).toBe(1);
     expect(
@@ -350,6 +368,159 @@ describe.each(["rich", "source"] as const)("%s editor link input", (surface) => 
     ).toBe(targetId);
     expect([suggestionId, editor.session.comments.list()[0].id]).toContain(targetId);
     expect(window.open).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["comment", "suggest-insert"] as const)(
+    "keeps a native double-click on an overlapping linked %s as selection only",
+    async (kind) => {
+      const editor = mountEditor(surface, SOURCE, "owner", true);
+      const from = SOURCE.indexOf("nested");
+      act(() => {
+        addLiveHighlight(editor.session, kind, from, from + "nested".length);
+        if (editor.rich) refreshRichHighlights(editor.rich);
+      });
+      const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+      await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+      const target = editor.dom.querySelector<HTMLElement>(selector)!;
+      const markdown = editor.session.ytext.toString();
+
+      vi.useFakeTimers();
+      const doubleClick = nativeDoubleClick(target, { clientX: from + 2 });
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      expect(editor.onHighlightClick).not.toHaveBeenCalled();
+      expect(editor.highlightOpens()).toBe(0);
+      expect(editor.session.activeCommentId).toBeNull();
+      expect(editor.session.activeSuggestionId).toBeNull();
+      expect(editor.session.ytext.toString()).toBe(markdown);
+      expect(window.open).not.toHaveBeenCalled();
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it.each(["comment", "suggest-insert"] as const)(
+    "keeps a browser-classified %s double-click inside 750 ms on an overlapping link as selection only",
+    async (kind) => {
+      const editor = mountEditor(surface, SOURCE, "owner", true);
+      const from = SOURCE.indexOf("nested");
+      act(() => {
+        addLiveHighlight(editor.session, kind, from, from + "nested".length);
+        if (editor.rich) refreshRichHighlights(editor.rich);
+      });
+      const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+      await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+      const target = editor.dom.querySelector<HTMLElement>(selector)!;
+      const before = editor.selection();
+      const markdown = editor.session.ytext.toString();
+      vi.useFakeTimers();
+
+      gesture(target, { clientX: from + 2, detail: 1 });
+      act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 1));
+      gesture(target, { clientX: from + 2, detail: 2 });
+      const doubleClick = mouse(target, "dblclick", { clientX: from + 2, detail: 2 });
+      flushHighlightActivation();
+
+      expect(editor.onHighlightClick).not.toHaveBeenCalled();
+      expect(editor.highlightOpens()).toBe(0);
+      expect(editor.session.activeCommentId).toBeNull();
+      expect(editor.session.activeSuggestionId).toBeNull();
+      if (surface === "source") {
+        expect(editor.selection()).not.toEqual(before);
+      } else {
+        expect(editor.selection()).toEqual(before);
+      }
+      expect(editor.session.ytext.toString()).toBe(markdown);
+      expect(window.open).not.toHaveBeenCalled();
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it.each(["comment", "suggest-insert"] as const)(
+    "does not duplicate a committed %s click when browser detail 2 arrives after 750 ms",
+    async (kind) => {
+      const editor = mountEditor(surface, SOURCE, "owner", true);
+      const from = SOURCE.indexOf("nested");
+      let id = "";
+      act(() => {
+        id = addLiveHighlight(editor.session, kind, from, from + "nested".length);
+        if (editor.rich) refreshRichHighlights(editor.rich);
+      });
+      const selector = kind === "comment" ? ".md-comment" : ".md-suggest-insert";
+      await waitFor(() => expect(editor.dom.querySelector(selector)).not.toBeNull());
+      const before = editor.selection();
+      const markdown = editor.session.ytext.toString();
+      vi.useFakeTimers();
+
+      gesture(editor.dom.querySelector(selector)!, { clientX: from + 2, detail: 1 });
+      act(() => vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS + 1));
+      expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith(kind, id, from + 2);
+      expect(editor.highlightOpens()).toBe(1);
+
+      const currentTarget = editor.dom.querySelector<HTMLElement>(selector)!;
+      gesture(currentTarget, { clientX: from + 2, detail: 2 });
+      const doubleClick = mouse(currentTarget, "dblclick", { clientX: from + 2, detail: 2 });
+      flushHighlightActivation();
+
+      expect(editor.onHighlightClick).toHaveBeenCalledTimes(1);
+      expect(editor.highlightOpens()).toBe(1);
+      expect(kind === "comment" ? editor.session.activeCommentId : editor.session.activeSuggestionId).toBe(id);
+      if (surface === "source") {
+        expect(editor.selection()).not.toEqual(before);
+      } else {
+        expect(editor.selection()).toEqual(before);
+      }
+      expect(editor.session.ytext.toString()).toBe(markdown);
+      expect(window.open).not.toHaveBeenCalled();
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it("retires stale and unmounted deferred highlights before a later fresh single click", async () => {
+    const source = "Before highlighted passage after";
+    const editor = mountEditor(surface, source, "owner", true);
+    const from = source.indexOf("highlighted");
+    let staleId = "";
+    act(() => {
+      staleId = addLiveHighlight(editor.session, "comment", from, from + "highlighted".length);
+      if (editor.rich) refreshRichHighlights(editor.rich);
+    });
+    await waitFor(() => expect(editor.dom.querySelector(`[data-highlight-id="${staleId}"]`)).not.toBeNull());
+    vi.useFakeTimers();
+
+    gesture(editor.dom.querySelector(`[data-highlight-id="${staleId}"]`)!, { clientX: from + 2 });
+    let freshId = "";
+    act(() => {
+      editor.session.comments.remove(staleId);
+      freshId = addLiveHighlight(editor.session, "comment", from, from + "highlighted".length);
+      if (editor.rich) refreshRichHighlights(editor.rich);
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(editor.onHighlightClick).not.toHaveBeenCalled();
+    expect(editor.highlightOpens()).toBe(0);
+    expect(editor.session.activeCommentId).toBeNull();
+
+    const freshTarget = editor.dom.querySelector<HTMLElement>(`[data-highlight-id="${freshId}"]`);
+    expect(freshTarget).not.toBeNull();
+    gesture(freshTarget!, { clientX: from + 2 });
+    flushHighlightActivation();
+    expect(editor.onHighlightClick).toHaveBeenCalledExactlyOnceWith("comment", freshId, from + 2);
+    expect(editor.highlightOpens()).toBe(1);
+    expect(editor.session.activeCommentId).toBe(freshId);
+
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    const currentTarget = editor.dom.querySelector<HTMLElement>(`[data-highlight-id="${freshId}"]`)!;
+    gesture(currentTarget, { clientX: from + 2 });
+    editor.unmount();
+    flushHighlightActivation();
+    expect(editor.onHighlightClick).toHaveBeenCalledTimes(1);
+    expect(editor.session.ytext.toString()).toBe(source);
   });
 
   it.each(["comment", "suggest-insert"] as const)("turns a modified non-link %s drag into selection without opening", async (kind) => {

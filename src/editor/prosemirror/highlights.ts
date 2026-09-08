@@ -108,7 +108,7 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
   return DecorationSet.create(doc, decorations);
 }
 
-function refreshSignature(session: CollabSession, getFocus: () => number | null): string {
+function highlightSignature(session: CollabSession): string {
   const highlights = collectHighlights(session, null);
   const parts = highlights.map((highlight) => {
     const rangeMatters =
@@ -121,8 +121,11 @@ function refreshSignature(session: CollabSession, getFocus: () => number | null)
   });
   parts.push(`identity:${session.relativePositionVersion}:${session.commentRangeVersion}`);
   parts.push(`held:${session.binding.hasHeldSync ? 1 : 0}`);
-  parts.push(`focus:${getFocus() ?? ""}`);
   return parts.join("|");
+}
+
+function refreshSignature(session: CollabSession, getFocus: () => number | null): string {
+  return `${highlightSignature(session)}|focus:${getFocus() ?? ""}`;
 }
 
 export interface HighlightHandlers {
@@ -133,6 +136,8 @@ export interface HighlightHandlers {
 
 export interface PositionedHighlightTarget extends HighlightTarget {
   sourcePosition: number;
+  from: number;
+  to: number;
 }
 
 function richHighlightAtPosition(
@@ -144,14 +149,12 @@ function richHighlightAtPosition(
   const target = eventHighlightTarget(view.dom, event.target);
   if (!target) return null;
   const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
-  const ownsRange =
-    range &&
-    key
-      .getState(view.state)
-      ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
-      .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
+  const ownsRange = range && key
+    .getState(view.state)
+    ?.find(range.from, range.to, (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id)
+    .some((decoration) => decoration.from <= range.from && range.to <= decoration.to);
   if (!ownsRange) return null;
-  return { ...target, sourcePosition: session.binding.getSourceMap().pmToSrc(position) };
+  return { ...target, sourcePosition: session.binding.getSourceMap().pmToSrc(position), ...range };
 }
 
 export function richHighlightAtPointer(
@@ -161,6 +164,247 @@ export function richHighlightAtPointer(
 ): PositionedHighlightTarget | null {
   const position = view.posAtCoords({ left: event.clientX, top: event.clientY });
   return position ? richHighlightAtPosition(view, session, event, position.pos) : null;
+}
+
+// Product policy: classify clicks for 750 ms from the first press. A later detail-2
+// gesture cannot undo an activation that has already committed.
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
+const DRAG_TOLERANCE_PX = 4;
+
+interface RichHighlightPress {
+  down: MouseEvent;
+  startedAt: number;
+  pointerId: number | null;
+  target: PositionedHighlightTarget;
+  signature: string;
+  released: boolean;
+}
+
+interface PendingRichHighlightActivation {
+  target: PositionedHighlightTarget;
+  signature: string;
+  selection: EditorView["state"]["selection"];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+function isPlainPrimaryEvent(event: MouseEvent): boolean {
+  return event.button === 0 &&
+    event.detail === 1 &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey;
+}
+
+function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlightTarget | null): boolean {
+  return !!b &&
+    a.kind === b.kind &&
+    a.id === b.id &&
+    a.sourcePosition === b.sourcePosition &&
+    a.from === b.from &&
+    a.to === b.to;
+}
+
+function movedPastClickTolerance(start: MouseEvent, current: MouseEvent): boolean {
+  return Math.abs(start.clientX - current.clientX) > DRAG_TOLERANCE_PX ||
+    Math.abs(start.clientY - current.clientY) > DRAG_TOLERANCE_PX;
+}
+
+function richHighlightIsCurrent(view: EditorView, target: PositionedHighlightTarget): boolean {
+  return !!key
+    .getState(view.state)
+    ?.find(
+      target.from,
+      target.to,
+      (spec) => spec.highlightKind === target.kind && spec.highlightId === target.id,
+    )
+    .some((decoration) => decoration.from <= target.from && target.to <= decoration.to);
+}
+
+function installRichHighlightActivation(
+  view: EditorView,
+  session: CollabSession,
+  onClick: HighlightClickHandler,
+  currentSignature: () => string,
+): {
+  update(view: EditorView, previousState: EditorView["state"]): void;
+  retire(): void;
+  destroy(): void;
+} {
+  const dom = view.dom;
+  const owner = dom.ownerDocument;
+  const win = owner.defaultView;
+  let press: RichHighlightPress | null = null;
+  let pending: PendingRichHighlightActivation | null = null;
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  let nextPointerId: number | null = null;
+  let nextPressStartedAt: number | null = null;
+
+  const pointerId = (event: Event) => {
+    const value = (event as Partial<PointerEvent>).pointerId;
+    return typeof value === "number" ? value : null;
+  };
+  const stopPressTracking = () => {
+    owner.removeEventListener("mousemove", move, true);
+    owner.removeEventListener("mouseup", up, true);
+    owner.removeEventListener("pointerup", pointerUp, true);
+  };
+  const clearPress = () => {
+    stopPressTracking();
+    clearTimeout(releaseTimer);
+    releaseTimer = undefined;
+    press = null;
+  };
+  const clearPending = () => {
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending = null;
+  };
+  const retire = () => {
+    clearPress();
+    clearPending();
+    nextPointerId = null;
+    nextPressStartedAt = null;
+  };
+  const pointerDown = (event: PointerEvent) => {
+    retire();
+    nextPointerId = pointerId(event);
+    nextPressStartedAt = Date.now();
+  };
+  const pointerUp = (event: PointerEvent) => {
+    if (!press) {
+      nextPointerId = null;
+      nextPressStartedAt = null;
+    } else if (press.pointerId !== null && pointerId(event) !== press.pointerId) {
+      clearPress();
+    }
+  };
+  const schedule = (current: RichHighlightPress) => {
+    clearPending();
+    const activation: PendingRichHighlightActivation = {
+      target: current.target,
+      signature: current.signature,
+      selection: view.state.selection,
+      timer: setTimeout(() => {
+        if (pending !== activation) return;
+        pending = null;
+        if (
+          view.isDestroyed ||
+          !dom.isConnected ||
+          activation.signature !== currentSignature() ||
+          !activation.selection.eq(view.state.selection) ||
+          !richHighlightIsCurrent(view, activation.target)
+        ) {
+          return;
+        }
+        onClick(activation.target.kind, activation.target.id, activation.target.sourcePosition);
+      }, Math.max(0, HIGHLIGHT_ACTIVATION_WINDOW_MS - (Date.now() - current.startedAt))),
+    };
+    pending = activation;
+  };
+  const move = (event: MouseEvent) => {
+    if (!press) return;
+    if (
+      event.buttons !== 1 ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      movedPastClickTolerance(press.down, event)
+    ) {
+      clearPress();
+    }
+  };
+  const up = (event: MouseEvent) => {
+    const current = press;
+    if (
+      !current ||
+      !isPlainPrimaryEvent(event) ||
+      event.buttons !== 0 ||
+      movedPastClickTolerance(current.down, event) ||
+      current.signature !== currentSignature() ||
+      !samePositionedTarget(current.target, richHighlightAtPointer(view, session, event))
+    ) {
+      clearPress();
+      return;
+    }
+    current.released = true;
+    stopPressTracking();
+    schedule(current);
+    releaseTimer = setTimeout(clearPress, 0);
+  };
+  const down = (event: MouseEvent) => {
+    const currentPointerId = nextPointerId;
+    const startedAt = nextPressStartedAt ?? Date.now();
+    retire();
+    if (event.defaultPrevented || !isPlainPrimaryEvent(event) || event.buttons !== 1 || !key.getState(view.state)) return;
+    const target = richHighlightAtPointer(view, session, event);
+    if (!target) return;
+    press = {
+      down: event,
+      startedAt,
+      pointerId: currentPointerId,
+      target,
+      signature: currentSignature(),
+      released: false,
+    };
+    owner.addEventListener("mousemove", move, true);
+    owner.addEventListener("mouseup", up, true);
+    owner.addEventListener("pointerup", pointerUp, true);
+  };
+  const click = (event: MouseEvent) => {
+    const current = press;
+    clearPress();
+    if (
+      event.defaultPrevented ||
+      !current?.released ||
+      !isPlainPrimaryEvent(event) ||
+      event.buttons !== 0 ||
+      current.signature !== currentSignature() ||
+      !samePositionedTarget(current.target, richHighlightAtPointer(view, session, event))
+    ) {
+      clearPending();
+      return;
+    }
+    if (!pending || pending.target !== current.target) {
+      clearPending();
+      return;
+    }
+    pending.selection = view.state.selection;
+  };
+
+  dom.addEventListener("pointerdown", pointerDown, true);
+  dom.addEventListener("pointercancel", retire, true);
+  dom.addEventListener("mousedown", down, true);
+  dom.addEventListener("click", click, true);
+  dom.addEventListener("dblclick", retire, true);
+  dom.addEventListener("blur", retire, true);
+  win?.addEventListener("blur", retire);
+
+  return {
+    update(currentView, previousState) {
+      if (press && currentView.state.doc !== previousState.doc) clearPress();
+      if (
+        pending &&
+        (currentView.state.doc !== previousState.doc ||
+          !pending.selection.eq(currentView.state.selection))
+      ) {
+        clearPending();
+      }
+      if (!dom.isConnected) retire();
+    },
+    retire,
+    destroy() {
+      retire();
+      dom.removeEventListener("pointerdown", pointerDown, true);
+      dom.removeEventListener("pointercancel", retire, true);
+      dom.removeEventListener("mousedown", down, true);
+      dom.removeEventListener("click", click, true);
+      dom.removeEventListener("dblclick", retire, true);
+      dom.removeEventListener("blur", retire, true);
+      win?.removeEventListener("blur", retire);
+    },
+  };
 }
 
 /** Comments, suggestions and cross-pane focus rendered as inline decorations in the rich editor. */
@@ -180,32 +424,29 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
     },
     props: {
       decorations: (state) => key.getState(state),
-      handleClick(view, pos, event) {
-        if (
-          event.button !== 0 ||
-          event.detail > 1 ||
-          event.ctrlKey ||
-          event.metaKey ||
-          event.altKey ||
-          event.shiftKey
-        ) {
-          return false;
-        }
-        const target = richHighlightAtPosition(view, session, event, pos);
-        if (!target) return false;
-        handlers.onHighlightClick?.(target.kind, target.id, target.sourcePosition);
-        return false;
-      },
     },
     view(view) {
+      let activationSignature = highlightSignature(session);
       let signature = refreshSignature(session, getFocus);
+      const activation = handlers.onHighlightClick
+        ? installRichHighlightActivation(view, session, handlers.onHighlightClick, () => activationSignature)
+        : null;
       const unsubscribe = session.subscribe(() => {
+        const nextActivationSignature = highlightSignature(session);
         const next = refreshSignature(session, getFocus);
         if (next === signature) return;
+        if (nextActivationSignature !== activationSignature) activation?.retire();
+        activationSignature = nextActivationSignature;
         signature = next;
         scheduleRefresh(view);
       });
-      return { destroy: unsubscribe };
+      return {
+        update: activation?.update,
+        destroy() {
+          activation?.destroy();
+          unsubscribe();
+        },
+      };
     },
   });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
@@ -786,7 +786,7 @@ function createSuggestionActionRender(
       !runtime.publishedDomMatches() ||
       !runtime.stageSuccessorHandoff()
     ) {
-      return;
+      return false;
     }
     successorRequested = true;
     cells.replay.current = Object.freeze({
@@ -6342,6 +6342,2712 @@ function PublishedSuggestionBatchActions({
   );
 }
 
+const COMMENTS_PANEL_CLASS = "flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2";
+const COMMENTS_HEADER_CLASS = "flex h-12 items-center justify-between border-b border-line pl-4 pr-2";
+const COMMENTS_CLOSE_CLASS = "icon-btn h-8 w-8";
+const COMMENTS_NAV_ROW_CLASS = "flex items-center gap-1 border-b border-line px-3 py-2";
+const COMMENTS_TABLIST_CLASS = "flex min-w-0 flex-1 gap-1";
+const COMMENTS_TAB_BASE_CLASS = "rounded-md px-2.5 py-1 text-xs font-medium";
+const COMMENTS_TAB_SELECTED_CLASS = "bg-surface text-ink shadow-sm ring-1 ring-line";
+const COMMENTS_TAB_IDLE_CLASS = "text-ink-3 hover:text-ink";
+const COMMENTS_TABPANEL_CLASS = "scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3";
+const COMMENTS_EMPTY_SUGGESTIONS_CLASS = "mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3";
+const COMMENTS_EMPTY_SUGGESTIONS_BUTTON_CLASS = "inline-flex items-center gap-1 font-medium text-accent hover:underline";
+const seenCommentNavigationNativeEvents = new WeakSet<Event>();
+const claimedCommentNavigationNativeEvents = new WeakSet<Event>();
+const commentNavigationPreventDefault = globalThis.Event.prototype.preventDefault;
+const commentNavigationGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const commentNavigationReflectGet = Reflect.get;
+const COMMENT_NAVIGATION_MAX_MUTATION_NODES = 256;
+
+type CommentNavigationNativeGetter = () => unknown;
+type CommentNavigationNativeGetters<Field extends string> = Readonly<
+  Record<Field, CommentNavigationNativeGetter>
+>;
+type CommentNavigationEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "composed"
+  | "timeStamp";
+type CommentNavigationUiEventField = "detail" | "view";
+type CommentNavigationMouseEventField =
+  | "screenX"
+  | "screenY"
+  | "clientX"
+  | "clientY"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey"
+  | "button"
+  | "buttons"
+  | "relatedTarget";
+type CommentNavigationFocusEventField = "relatedTarget";
+type CommentNavigationKeyboardEventField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey";
+type CommentNavigationMutationRecordField =
+  | "type"
+  | "target"
+  | "previousSibling"
+  | "nextSibling"
+  | "addedNodes"
+  | "removedNodes"
+  | "attributeName"
+  | "oldValue";
+
+interface CommentNavigationEventIntrinsics {
+  readonly document: CommentNavigationNativeGetters<"activeElement">;
+  readonly event: CommentNavigationNativeGetters<CommentNavigationEventField>;
+  readonly uiEvent: CommentNavigationNativeGetters<CommentNavigationUiEventField>;
+  readonly mouseEvent: CommentNavigationNativeGetters<CommentNavigationMouseEventField>;
+  readonly focusEvent: CommentNavigationNativeGetters<CommentNavigationFocusEventField>;
+  readonly keyboardEvent: CommentNavigationNativeGetters<CommentNavigationKeyboardEventField>;
+  readonly composedPath: Event["composedPath"];
+}
+
+interface CommentNavigationMutationObserverIntrinsics {
+  readonly Constructor: typeof MutationObserver;
+  readonly observe: MutationObserver["observe"];
+  readonly takeRecords: MutationObserver["takeRecords"];
+  readonly disconnect: MutationObserver["disconnect"];
+  readonly record: CommentNavigationNativeGetters<CommentNavigationMutationRecordField>;
+  readonly nodeList: Readonly<{
+    length: CommentNavigationNativeGetter;
+    item: NodeList["item"];
+  }>;
+  readonly node: CommentNavigationNativeGetters<"nodeType" | "ownerDocument">;
+}
+
+function captureCommentNavigationGetters<const Fields extends readonly string[]>(
+  prototype: object,
+  fields: Fields,
+): CommentNavigationNativeGetters<Fields[number]> | null {
+  const entries: [Fields[number], CommentNavigationNativeGetter][] = [];
+  for (const field of fields) {
+    const descriptor = suggestionReflectApply(
+      commentNavigationGetOwnPropertyDescriptor,
+      Object,
+      [prototype, field],
+    ) as PropertyDescriptor | undefined;
+    if (typeof descriptor?.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+  }
+  return Object.freeze(Object.fromEntries(entries)) as CommentNavigationNativeGetters<
+    Fields[number]
+  >;
+}
+
+function captureCommentNavigationMethod<Method>(
+  prototype: object,
+  name: string,
+): Method | null {
+  const descriptor = suggestionReflectApply(
+    commentNavigationGetOwnPropertyDescriptor,
+    Object,
+    [prototype, name],
+  ) as PropertyDescriptor | undefined;
+  return typeof descriptor?.value === "function" ? (descriptor.value as Method) : null;
+}
+
+function captureCommentNavigationEventIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): CommentNavigationEventIntrinsics | null {
+  const document = captureCommentNavigationGetters(ownerWindow.Document.prototype, [
+    "activeElement",
+  ] as const);
+  const event = captureCommentNavigationGetters(ownerWindow.Event.prototype, [
+    "type",
+    "target",
+    "currentTarget",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "composed",
+    "timeStamp",
+  ] as const);
+  const uiEvent = captureCommentNavigationGetters(ownerWindow.UIEvent.prototype, [
+    "detail",
+    "view",
+  ] as const);
+  const mouseEvent = captureCommentNavigationGetters(ownerWindow.MouseEvent.prototype, [
+    "screenX",
+    "screenY",
+    "clientX",
+    "clientY",
+    "ctrlKey",
+    "shiftKey",
+    "altKey",
+    "metaKey",
+    "button",
+    "buttons",
+    "relatedTarget",
+  ] as const);
+  const focusEvent = captureCommentNavigationGetters(ownerWindow.FocusEvent.prototype, [
+    "relatedTarget",
+  ] as const);
+  const keyboardEvent = captureCommentNavigationGetters(
+    ownerWindow.KeyboardEvent.prototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "shiftKey",
+      "altKey",
+      "metaKey",
+    ] as const,
+  );
+  const composedPath = captureCommentNavigationMethod<Event["composedPath"]>(
+    ownerWindow.Event.prototype,
+    "composedPath",
+  );
+  if (
+    !document ||
+    !event ||
+    !uiEvent ||
+    !mouseEvent ||
+    !focusEvent ||
+    !keyboardEvent ||
+    !composedPath
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    document,
+    event,
+    uiEvent,
+    mouseEvent,
+    focusEvent,
+    keyboardEvent,
+    composedPath,
+  });
+}
+
+function captureCommentNavigationMutationObserverIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): CommentNavigationMutationObserverIntrinsics | null {
+  const Constructor = ownerWindow.MutationObserver;
+  const observe = captureCommentNavigationMethod<MutationObserver["observe"]>(
+    Constructor.prototype,
+    "observe",
+  );
+  const takeRecords = captureCommentNavigationMethod<MutationObserver["takeRecords"]>(
+    Constructor.prototype,
+    "takeRecords",
+  );
+  const disconnect = captureCommentNavigationMethod<MutationObserver["disconnect"]>(
+    Constructor.prototype,
+    "disconnect",
+  );
+  const record = captureCommentNavigationGetters(ownerWindow.MutationRecord.prototype, [
+    "type",
+    "target",
+    "previousSibling",
+    "nextSibling",
+    "addedNodes",
+    "removedNodes",
+    "attributeName",
+    "oldValue",
+  ] as const);
+  const nodeListLength = captureCommentNavigationGetters(
+    ownerWindow.NodeList.prototype,
+    ["length"] as const,
+  );
+  const nodeListItem = captureCommentNavigationMethod<NodeList["item"]>(
+    ownerWindow.NodeList.prototype,
+    "item",
+  );
+  const node = captureCommentNavigationGetters(ownerWindow.Node.prototype, [
+    "nodeType",
+    "ownerDocument",
+  ] as const);
+  if (
+    !observe ||
+    !takeRecords ||
+    !disconnect ||
+    !record ||
+    !nodeListLength ||
+    !nodeListItem ||
+    !node
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    Constructor,
+    observe,
+    takeRecords,
+    disconnect,
+    record,
+    nodeList: Object.freeze({
+      length: nodeListLength.length,
+      item: nodeListItem,
+    }),
+    node,
+  });
+}
+
+function commentNavigationNativeValue<Value>(
+  getter: CommentNavigationNativeGetter,
+  event: Event,
+): Value {
+  return suggestionReflectApply(getter, event, []) as Value;
+}
+
+function commentNavigationNativeTarget(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget | null {
+  return commentNavigationNativeValue<EventTarget | null>(
+    publication.eventIntrinsics.event.target,
+    event,
+  );
+}
+
+function commentNavigationNativeCurrentTarget(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget | null {
+  return commentNavigationNativeValue<EventTarget | null>(
+    publication.eventIntrinsics.event.currentTarget,
+    event,
+  );
+}
+
+function commentNavigationNativeComposedPath(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget[] {
+  return suggestionReflectApply(
+    publication.eventIntrinsics.composedPath,
+    event,
+    [],
+  ) as EventTarget[];
+}
+
+function commentNavigationNativeDefaultPrevented(
+  publication: CommentNavigationPublication,
+  event: Event,
+): boolean {
+  return commentNavigationNativeValue<boolean>(
+    publication.eventIntrinsics.event.defaultPrevented,
+    event,
+  );
+}
+
+function commentNavigationActiveElement(
+  publication: CommentNavigationPublication,
+): Element | null {
+  return suggestionReflectApply(
+    publication.eventIntrinsics.document.activeElement,
+    publication.ownerDocument,
+    [],
+  ) as Element | null;
+}
+
+interface CommentNavigationMutationRecordSnapshot {
+  readonly type: MutationRecordType;
+  readonly target: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly addedNodes: readonly Node[];
+  readonly removedNodes: readonly Node[];
+  readonly attributeName: string | null;
+  readonly oldValue: string | null;
+}
+
+function snapshotCommentNavigationMutationRecord(
+  record: MutationRecord,
+  intrinsics: CommentNavigationMutationObserverIntrinsics,
+  ownerDocument: Document,
+): CommentNavigationMutationRecordSnapshot | null {
+  try {
+    const get = <Value,>(field: CommentNavigationMutationRecordField) =>
+      suggestionReflectApply(intrinsics.record[field], record, []) as Value;
+    const exactNode = (value: unknown): value is Node => {
+      if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+        return false;
+      }
+      const nodeType = suggestionReflectApply(
+        intrinsics.node.nodeType,
+        value,
+        [],
+      ) as number;
+      const document = suggestionReflectApply(
+        intrinsics.node.ownerDocument,
+        value,
+        [],
+      );
+      return (
+        Number.isSafeInteger(nodeType) &&
+        nodeType >= 1 &&
+        nodeType <= 12 &&
+        document === ownerDocument
+      );
+    };
+    const snapshotNodes = (nodes: NodeList): readonly Node[] | null => {
+      const length = suggestionReflectApply(
+        intrinsics.nodeList.length,
+        nodes,
+        [],
+      ) as number;
+      if (
+        !Number.isSafeInteger(length) ||
+        length < 0 ||
+        length > COMMENT_NAVIGATION_MAX_MUTATION_NODES
+      ) {
+        return null;
+      }
+      const snapshot: Node[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const item = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
+          index,
+        ]) as unknown;
+        const indexed = suggestionReflectApply(commentNavigationReflectGet, Reflect, [
+          nodes,
+          String(index),
+          nodes,
+        ]) as unknown;
+        if (item !== indexed || !exactNode(item)) return null;
+        snapshot[index] = item;
+      }
+      const terminalItem = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
+        length,
+      ]) as unknown;
+      const terminalIndex = suggestionReflectApply(
+        commentNavigationReflectGet,
+        Reflect,
+        [nodes, String(length), nodes],
+      ) as unknown;
+      if (terminalItem !== null || terminalIndex !== undefined) return null;
+      return Object.freeze(snapshot);
+    };
+    const target = get<unknown>("target");
+    const previousSibling = get<unknown>("previousSibling");
+    const nextSibling = get<unknown>("nextSibling");
+    const addedNodes = snapshotNodes(get<NodeList>("addedNodes"));
+    const removedNodes = snapshotNodes(get<NodeList>("removedNodes"));
+    if (
+      !exactNode(target) ||
+      (previousSibling !== null && !exactNode(previousSibling)) ||
+      (nextSibling !== null && !exactNode(nextSibling)) ||
+      !addedNodes ||
+      !removedNodes
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: get<MutationRecordType>("type"),
+      target,
+      previousSibling,
+      nextSibling,
+      addedNodes,
+      removedNodes,
+      attributeName: get<string | null>("attributeName"),
+      oldValue: get<string | null>("oldValue"),
+    });
+  } catch {
+    return null;
+  }
+}
+
+interface CommentNavigationTabFacts {
+  readonly index: number;
+  readonly id: Tab;
+  readonly label: string;
+  readonly count: number;
+}
+
+interface CommentNavigationTabPresentation extends CommentNavigationTabFacts {
+  readonly buttonId: string;
+  readonly className: string;
+  readonly selected: boolean;
+  readonly tabIndex: 0 | -1;
+  readonly testId: string;
+}
+
+interface CommentNavigationPresentation {
+  readonly panelClassName: string;
+  readonly panelTestId: string;
+  readonly headerClassName: string;
+  readonly titleClassName: string;
+  readonly title: string;
+  readonly closeClassName: string;
+  readonly closeLabel: string;
+  readonly navRowClassName: string;
+  readonly tablistClassName: string;
+  readonly tablistLabel: string;
+  readonly tablistOrientation: "horizontal";
+  readonly tabs: readonly CommentNavigationTabPresentation[];
+  readonly tabpanelClassName: string;
+  readonly tabpanelId: string;
+  readonly tabpanelLabelledBy: string;
+  readonly emptySuggestions: Readonly<{
+    containerClassName: string;
+    containerTestId: string;
+    buttonClassName: string;
+    buttonTestId: string;
+    label: string;
+  }> | null;
+}
+
+interface CommentNavigationAuthority {
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly selectedTab: Tab;
+  readonly tabs: readonly CommentNavigationTabFacts[];
+  readonly canComment: boolean;
+  readonly onSelect: (tab: Tab) => void;
+  readonly onClose: () => void;
+  readonly rowActions: CommentRowActionCoordinator;
+  readonly presentation: CommentNavigationPresentation;
+}
+
+type CommentNavigationActionKind = "close" | "tab" | "empty-suggestions" | "keyboard";
+type CommentNavigationNativeType = "click" | "focusin" | "keydown";
+
+interface CommentNavigationAction {
+  readonly identity: symbol;
+  readonly renderIdentity: symbol;
+  readonly kind: CommentNavigationActionKind;
+  readonly tab: Tab | null;
+  readonly index: number;
+  readonly onClickCapture: ((event: MouseEvent<HTMLElement>) => void) | null;
+  readonly onClick: ((event: MouseEvent<HTMLElement>) => void) | null;
+  readonly onFocusCapture: ((event: FocusEvent<HTMLElement>) => void) | null;
+  readonly onFocus: ((event: FocusEvent<HTMLElement>) => void) | null;
+  readonly onKeyDownCapture: ((event: KeyboardEvent<HTMLElement>) => void) | null;
+  readonly onKeyDown: ((event: KeyboardEvent<HTMLElement>) => void) | null;
+}
+
+interface CommentNavigationElements {
+  readonly panel: HTMLElement;
+  readonly header: HTMLDivElement;
+  readonly title: HTMLSpanElement;
+  readonly close: HTMLButtonElement;
+  readonly navRow: HTMLDivElement;
+  readonly tablist: HTMLDivElement;
+  readonly tabs: readonly HTMLButtonElement[];
+  readonly tabpanel: HTMLDivElement;
+  readonly emptyContainer: HTMLSpanElement | null;
+  readonly emptySuggestions: HTMLButtonElement | null;
+}
+
+interface CommentNavigationNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface CommentNavigationPlacement {
+  readonly document: Document;
+  readonly chain: readonly CommentNavigationNodePlacement[];
+}
+
+interface CommentNavigationDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface CommentNavigationSelectiveDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly CommentNavigationSelectiveDomSnapshot[] | null;
+}
+
+interface CommentNavigationDomSnapshot {
+  readonly shell: CommentNavigationSelectiveDomSnapshot;
+  readonly emptySuggestions: SuggestionActionDomSnapshot | null;
+  readonly emptyPlacement: CommentNavigationPlacement | null;
+}
+
+interface CommentNavigationPublication {
+  readonly identity: symbol;
+  readonly render: CommentNavigationRender;
+  readonly authority: CommentNavigationAuthority;
+  readonly elements: CommentNavigationElements;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window;
+  readonly constructors: Readonly<{
+    Event: typeof Event;
+    MouseEvent: typeof globalThis.MouseEvent;
+    FocusEvent: typeof globalThis.FocusEvent;
+    KeyboardEvent: typeof globalThis.KeyboardEvent;
+    Node: typeof Node;
+  }>;
+  readonly focus: typeof HTMLElement.prototype.focus;
+  readonly windowAddEventListener: Window["addEventListener"];
+  readonly windowRemoveEventListener: Window["removeEventListener"];
+  readonly eventIntrinsics: CommentNavigationEventIntrinsics;
+  readonly mutationObserverIntrinsics: CommentNavigationMutationObserverIntrinsics;
+  readonly dom: CommentNavigationDomSnapshot;
+  readonly placement: CommentNavigationPlacement;
+}
+
+interface CommentNavigationElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface CommentNavigationRefReplay {
+  readonly owner: CommentNavigationElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface CommentNavigationReplay {
+  readonly source: CommentNavigationPublication;
+  readonly dom: CommentNavigationDomSnapshot;
+  readonly placement: CommentNavigationPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface CommentNavigationCells {
+  readonly active: { current: CommentNavigationPublication | null };
+  readonly successorOf: { current: CommentNavigationPublication | null };
+  readonly replay: { current: CommentNavigationReplay | null };
+  readonly retired: WeakSet<CommentNavigationPublication>;
+  readonly claimedPublications: WeakSet<CommentNavigationPublication>;
+  readonly claimedActions: WeakSet<CommentNavigationAction>;
+  readonly claimedControls: WeakMap<HTMLElement, WeakSet<CommentNavigationPublication>>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+}
+
+interface CommentNavigationNativeSnapshot {
+  readonly event: Event;
+  readonly publication: CommentNavigationPublication;
+  readonly action: CommentNavigationAction;
+  readonly control: HTMLElement;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly type: CommentNavigationNativeType;
+  readonly reactType: "click" | "focus" | "keydown";
+  readonly nextTab: Tab | null;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly mouse: Readonly<{
+    button: number;
+    buttons: number;
+    detail: number;
+    clientX: number;
+    clientY: number;
+    screenX: number;
+    screenY: number;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+    relatedTarget: EventTarget | null;
+    view: Window | null;
+  }> | null;
+  readonly focus: Readonly<{
+    relatedTarget: EventTarget | null;
+    view: Window | null;
+    activeElement: Element | null;
+  }> | null;
+  readonly keyboard: Readonly<{
+    key: string;
+    code: string;
+    location: number;
+    repeat: boolean;
+    isComposing: boolean;
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+    activeElement: Element | null;
+  }> | null;
+}
+
+function commentNavigationControlIsClaimed(
+  cells: CommentNavigationCells,
+  publication: CommentNavigationPublication,
+  control: HTMLElement,
+): boolean {
+  return cells.claimedControls.get(control)?.has(publication) ?? false;
+}
+
+function claimCommentNavigationControl(
+  cells: CommentNavigationCells,
+  publication: CommentNavigationPublication,
+  control: HTMLElement,
+) {
+  let publications = cells.claimedControls.get(control);
+  if (!publications) {
+    publications = new WeakSet();
+    cells.claimedControls.set(control, publications);
+  }
+  publications.add(publication);
+}
+
+interface CommentNavigationNativeDelivery {
+  readonly snapshot: CommentNavigationNativeSnapshot;
+  delegationTarget: EventTarget | null;
+  crossedPanel: boolean;
+  captureInvalid: boolean;
+  captureRootEvent: object | null;
+  captureActionEvent: object | null;
+  captureRootCount: number;
+  captureActionCount: number;
+  bubbleInvalid: boolean;
+  bubbleActionEvent: object | null;
+  bubbleRootEvent: object | null;
+  bubbleActionCount: number;
+  bubbleRootCount: number;
+}
+
+type CommentNavigationReactEvent =
+  | MouseEvent<HTMLElement>
+  | FocusEvent<HTMLElement>
+  | KeyboardEvent<HTMLElement>;
+
+interface CommentNavigationPublicationRuntime {
+  readonly publication: CommentNavigationPublication;
+  readonly publish: (owners: readonly CommentNavigationElementOwnerView[]) => boolean;
+  readonly stageCaptureRoot: (event: CommentNavigationReactEvent) => void;
+  readonly stageCaptureAction: (action: CommentNavigationAction, event: CommentNavigationReactEvent) => void;
+  readonly stageBubbleAction: (action: CommentNavigationAction, event: CommentNavigationReactEvent) => void;
+  readonly stageBubbleRoot: (event: CommentNavigationReactEvent) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly noteRef: (
+    owner: CommentNavigationElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface CommentNavigationRender {
+  readonly identity: symbol;
+  readonly authority: CommentNavigationAuthority;
+  readonly close: CommentNavigationAction;
+  readonly tabs: readonly CommentNavigationAction[];
+  readonly emptySuggestions: CommentNavigationAction | null;
+  readonly keyboard: CommentNavigationAction;
+  readonly capturePanel: (element: HTMLElement | null) => void;
+  readonly captureHeader: (element: HTMLDivElement | null) => void;
+  readonly captureTitle: (element: HTMLSpanElement | null) => void;
+  readonly captureClose: (element: HTMLButtonElement | null) => void;
+  readonly captureNavRow: (element: HTMLDivElement | null) => void;
+  readonly captureTablist: (element: HTMLDivElement | null) => void;
+  readonly captureTabs: readonly ((element: HTMLButtonElement | null) => void)[];
+  readonly captureTabpanel: (element: HTMLDivElement | null) => void;
+  readonly captureEmptyContainer: ((element: HTMLSpanElement | null) => void) | null;
+  readonly captureEmptySuggestions: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onPanelClickCapture: (event: MouseEvent<HTMLElement>) => void;
+  readonly onPanelClick: (event: MouseEvent<HTMLElement>) => void;
+  readonly onPanelFocusCapture: (event: FocusEvent<HTMLElement>) => void;
+  readonly onPanelFocus: (event: FocusEvent<HTMLElement>) => void;
+  readonly onPanelKeyDownCapture: (event: KeyboardEvent<HTMLElement>) => void;
+  readonly onPanelKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
+  readonly establish: () => void | (() => void);
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly focusSelected: () => boolean;
+}
+
+class CommentNavigationElementOwner<T extends HTMLElement>
+  implements CommentNavigationElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: CommentNavigationElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+function commentNavigationPresentation(
+  selectedTab: Tab,
+  tabs: readonly CommentNavigationTabFacts[],
+  showEmptySuggestions: boolean,
+): CommentNavigationPresentation {
+  return Object.freeze({
+    panelClassName: COMMENTS_PANEL_CLASS,
+    panelTestId: "comments-panel",
+    headerClassName: COMMENTS_HEADER_CLASS,
+    titleClassName: "pane-label",
+    title: "Comments",
+    closeClassName: COMMENTS_CLOSE_CLASS,
+    closeLabel: "Close comments",
+    navRowClassName: COMMENTS_NAV_ROW_CLASS,
+    tablistClassName: COMMENTS_TABLIST_CLASS,
+    tablistLabel: "Comment lists",
+    tablistOrientation: "horizontal",
+    tabs: Object.freeze(
+      tabs.map((tab) =>
+        Object.freeze({
+          ...tab,
+          buttonId: `comments-tab-${tab.id}`,
+          className: cn(
+            COMMENTS_TAB_BASE_CLASS,
+            selectedTab === tab.id ? COMMENTS_TAB_SELECTED_CLASS : COMMENTS_TAB_IDLE_CLASS,
+          ),
+          selected: selectedTab === tab.id,
+          tabIndex: selectedTab === tab.id ? 0 : -1,
+          testId: `comments-tab-${tab.id}`,
+        }),
+      ),
+    ),
+    tabpanelClassName: COMMENTS_TABPANEL_CLASS,
+    tabpanelId: "comments-tabpanel",
+    tabpanelLabelledBy: `comments-tab-${selectedTab}`,
+    emptySuggestions: showEmptySuggestions
+      ? Object.freeze({
+          containerClassName: COMMENTS_EMPTY_SUGGESTIONS_CLASS,
+          containerTestId: "comments-empty-suggestions",
+          buttonClassName: COMMENTS_EMPTY_SUGGESTIONS_BUTTON_CLASS,
+          buttonTestId: "comments-empty-suggestions-button",
+          label: `${tabs[2]!.count} ${tabs[2]!.count === 1 ? "suggestion" : "suggestions"} waiting`,
+        })
+      : null,
+  });
+}
+
+function commentNavigationPresentationsMatch(
+  previous: CommentNavigationPresentation,
+  current: CommentNavigationPresentation,
+): boolean {
+  const previousEmpty = previous.emptySuggestions;
+  const currentEmpty = current.emptySuggestions;
+  return (
+    previous.panelClassName === current.panelClassName &&
+    previous.panelTestId === current.panelTestId &&
+    previous.headerClassName === current.headerClassName &&
+    previous.titleClassName === current.titleClassName &&
+    previous.title === current.title &&
+    previous.closeClassName === current.closeClassName &&
+    previous.closeLabel === current.closeLabel &&
+    previous.navRowClassName === current.navRowClassName &&
+    previous.tablistClassName === current.tablistClassName &&
+    previous.tablistLabel === current.tablistLabel &&
+    previous.tablistOrientation === current.tablistOrientation &&
+    previous.tabpanelClassName === current.tabpanelClassName &&
+    previous.tabpanelId === current.tabpanelId &&
+    previous.tabpanelLabelledBy === current.tabpanelLabelledBy &&
+    previous.tabs.length === current.tabs.length &&
+    previous.tabs.every((tab, index) => {
+      const next = current.tabs[index];
+      return Boolean(
+        next &&
+          tab.index === next.index &&
+          tab.id === next.id &&
+          tab.label === next.label &&
+          tab.count === next.count &&
+          tab.buttonId === next.buttonId &&
+          tab.className === next.className &&
+          tab.selected === next.selected &&
+          tab.tabIndex === next.tabIndex &&
+          tab.testId === next.testId,
+      );
+    }) &&
+    (previousEmpty === currentEmpty ||
+      Boolean(
+        previousEmpty &&
+          currentEmpty &&
+          previousEmpty.containerClassName === currentEmpty.containerClassName &&
+          previousEmpty.containerTestId === currentEmpty.containerTestId &&
+          previousEmpty.buttonClassName === currentEmpty.buttonClassName &&
+          previousEmpty.buttonTestId === currentEmpty.buttonTestId &&
+          previousEmpty.label === currentEmpty.label,
+      ))
+  );
+}
+
+function commentNavigationAuthoritiesMatch(
+  previous: CommentNavigationAuthority,
+  current: CommentNavigationAuthority,
+): boolean {
+  return (
+    previous.mount === current.mount &&
+    previous.session === current.session &&
+    previous.documentId === current.documentId &&
+    previous.selectedTab === current.selectedTab &&
+    previous.canComment === current.canComment &&
+    previous.onSelect === current.onSelect &&
+    previous.onClose === current.onClose &&
+    previous.rowActions === current.rowActions &&
+    previous.tabs.length === current.tabs.length &&
+    previous.tabs.every((tab, index) => {
+      const next = current.tabs[index];
+      return Boolean(
+        next &&
+          tab.index === next.index &&
+          tab.id === next.id &&
+          tab.label === next.label &&
+          tab.count === next.count,
+      );
+    }) &&
+    commentNavigationPresentationsMatch(previous.presentation, current.presentation)
+  );
+}
+
+function commentNavigationFactsAreCurrent(authority: CommentNavigationAuthority): boolean {
+  const { presentation, session, tabs } = authority;
+  return (
+    session.docId === authority.documentId &&
+    session.canComment === authority.canComment &&
+    authority.rowActions.session === session &&
+    authority.rowActions.documentId === authority.documentId &&
+    authority.rowActions.mounted &&
+    tabs.length === 3 &&
+    tabs[0]?.index === 0 &&
+    tabs[0]?.id === "open" &&
+    tabs[0]?.label === "Open" &&
+    tabs[1]?.index === 1 &&
+    tabs[1]?.id === "resolved" &&
+    tabs[1]?.label === "Resolved" &&
+    tabs[2]?.index === 2 &&
+    tabs[2]?.id === "suggestions" &&
+    tabs[2]?.label === "Suggestions" &&
+    tabs.every((tab) => Number.isSafeInteger(tab.count) && tab.count >= 0) &&
+    tabs.some((tab) => tab.id === authority.selectedTab) &&
+    commentNavigationPresentationsMatch(
+      presentation,
+      commentNavigationPresentation(
+        authority.selectedTab,
+        tabs,
+        presentation.emptySuggestions !== null,
+      ),
+    )
+  );
+}
+
+function captureCommentNavigationPlacement(panel: HTMLElement): CommentNavigationPlacement | null {
+  const document = panel.ownerDocument;
+  if (!panel.isConnected) return null;
+  const chain: CommentNavigationNodePlacement[] = [];
+  let node: Node = panel;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    chain.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+      }),
+    );
+    node = parent;
+  }
+  return Object.freeze({ document, chain: Object.freeze(chain) });
+}
+
+function commentNavigationPlacementMatches(
+  root: Node,
+  placement: CommentNavigationPlacement,
+): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.chain.length > 0 &&
+    placement.chain[0]?.node === root &&
+    placement.chain.every(
+      ({ node, parent, previousSibling, nextSibling }) =>
+        node.parentNode === parent &&
+        node.previousSibling === previousSibling &&
+        node.nextSibling === nextSibling,
+    )
+  );
+}
+
+function commentNavigationPlacementMutationIsRelevant(
+  record: CommentNavigationMutationRecordSnapshot,
+  placement: CommentNavigationPlacement,
+): boolean {
+  if (record.type !== "childList") {
+    return placement.chain.some(({ node }) => record.target === node);
+  }
+  return placement.chain.some(({ node, parent }) => {
+    if (record.target !== parent) return false;
+    const collectionContains = (nodes: readonly Node[]) => {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const changed = nodes[index]!;
+        if (changed === node || changed.contains?.(node)) return true;
+      }
+      return false;
+    };
+    return (
+      record.previousSibling === node ||
+      record.nextSibling === node ||
+      collectionContains(record.addedNodes) ||
+      collectionContains(record.removedNodes)
+    );
+  });
+}
+
+function snapshotCommentNavigationSelectiveDom(
+  node: Node,
+  openContent: Node,
+): CommentNavigationSelectiveDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: suggestionActionSnapshotAttributes(node),
+    children:
+      node === openContent
+        ? null
+        : Object.freeze(
+            [...node.childNodes].map((child) =>
+              snapshotCommentNavigationSelectiveDom(child, openContent),
+            ),
+          ),
+  });
+}
+
+function commentNavigationSelectiveDomMatches(
+  snapshot: CommentNavigationSelectiveDomSnapshot,
+): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = suggestionActionSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  if (snapshot.children === null) return true;
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node &&
+        commentNavigationSelectiveDomMatches(child),
+    )
+  );
+}
+
+function commentNavigationSelectiveDomEntry(
+  snapshot: CommentNavigationSelectiveDomSnapshot,
+  target: Node,
+): CommentNavigationSelectiveDomSnapshot | null {
+  if (snapshot.node === target) return snapshot;
+  if (snapshot.children === null) return null;
+  for (const child of snapshot.children) {
+    const entry = commentNavigationSelectiveDomEntry(child, target);
+    if (entry) return entry;
+  }
+  return null;
+}
+
+function commentNavigationDomContains(
+  snapshot: CommentNavigationDomSnapshot,
+  target: Node,
+): boolean {
+  return (
+    commentNavigationSelectiveDomEntry(snapshot.shell, target) !== null ||
+    Boolean(
+      snapshot.emptySuggestions &&
+        suggestionActionDomContains(snapshot.emptySuggestions, target),
+    )
+  );
+}
+
+function snapshotCommentNavigationDom(
+  elements: CommentNavigationElements,
+): CommentNavigationDomSnapshot | null {
+  const emptyPlacement = elements.emptyContainer
+    ? captureCommentNavigationPlacement(elements.emptyContainer)
+    : null;
+  if (elements.emptyContainer && !emptyPlacement) return null;
+  return Object.freeze({
+    shell: snapshotCommentNavigationSelectiveDom(elements.panel, elements.tabpanel),
+    emptySuggestions: elements.emptyContainer
+      ? snapshotSuggestionActionDom(elements.emptyContainer)
+      : null,
+    emptyPlacement,
+  });
+}
+
+function commentNavigationDomMatches(snapshot: CommentNavigationDomSnapshot): boolean {
+  return (
+    commentNavigationSelectiveDomMatches(snapshot.shell) &&
+    (!snapshot.emptySuggestions ||
+      suggestionActionDomMatches(snapshot.emptySuggestions)) &&
+    (!snapshot.emptyPlacement ||
+      commentNavigationPlacementMatches(
+        snapshot.emptySuggestions!.node,
+        snapshot.emptyPlacement,
+      ))
+  );
+}
+
+function commentNavigationDomMutationIsRelevant(
+  record: CommentNavigationMutationRecordSnapshot,
+  dom: CommentNavigationDomSnapshot,
+): boolean {
+  const shellEntry = commentNavigationSelectiveDomEntry(dom.shell, record.target);
+  if (shellEntry && (record.type !== "childList" || shellEntry.children !== null)) {
+    return true;
+  }
+  if (
+    dom.emptySuggestions &&
+    suggestionActionDomContains(dom.emptySuggestions, record.target)
+  ) {
+    return true;
+  }
+  return Boolean(
+    dom.emptyPlacement &&
+      commentNavigationPlacementMutationIsRelevant(record, dom.emptyPlacement),
+  );
+}
+
+function createCommentNavigationDomGuard(
+  dom: CommentNavigationDomSnapshot,
+  placement: CommentNavigationPlacement,
+  intrinsics: CommentNavigationMutationObserverIntrinsics,
+  onChange: () => void,
+): CommentNavigationDomGuard | null {
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    for (let index = 0; index < records.length; index += 1) {
+      const record = snapshotCommentNavigationMutationRecord(
+        records[index]!,
+        intrinsics,
+        placement.document,
+      );
+      if (
+        !record ||
+        commentNavigationDomMutationIsRelevant(record, dom) ||
+        commentNavigationPlacementMutationIsRelevant(record, placement)
+      ) {
+        changed = true;
+        onChange();
+        return;
+      }
+    }
+  };
+  const observer = new intrinsics.Constructor(recordChanges);
+  suggestionReflectApply(intrinsics.observe, observer, [
+    placement.document,
+    {
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+      childList: true,
+      subtree: true,
+    },
+  ]);
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(
+        suggestionReflectApply(intrinsics.takeRecords, observer, []) as MutationRecord[],
+      );
+      return !changed;
+    },
+    release: () => {
+      recordChanges(
+        suggestionReflectApply(intrinsics.takeRecords, observer, []) as MutationRecord[],
+      );
+      suggestionReflectApply(intrinsics.disconnect, observer, []);
+    },
+  });
+}
+
+function currentCommentNavigationElements(
+  authority: CommentNavigationAuthority,
+  owners: Readonly<{
+    panel: CommentNavigationElementOwner<HTMLElement>;
+    header: CommentNavigationElementOwner<HTMLDivElement>;
+    title: CommentNavigationElementOwner<HTMLSpanElement>;
+    close: CommentNavigationElementOwner<HTMLButtonElement>;
+    navRow: CommentNavigationElementOwner<HTMLDivElement>;
+    tablist: CommentNavigationElementOwner<HTMLDivElement>;
+    tabs: readonly CommentNavigationElementOwner<HTMLButtonElement>[];
+    tabpanel: CommentNavigationElementOwner<HTMLDivElement>;
+    emptyContainer: CommentNavigationElementOwner<HTMLSpanElement> | null;
+    emptySuggestions: CommentNavigationElementOwner<HTMLButtonElement> | null;
+  }>,
+): CommentNavigationElements | null {
+  const panel = owners.panel.element();
+  const ownerDocument = panel?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!panel || !ownerDocument || !ownerWindow || !(panel instanceof ownerWindow.HTMLElement)) return null;
+  const header = owners.header.element();
+  const title = owners.title.element();
+  const close = owners.close.element();
+  const navRow = owners.navRow.element();
+  const tablist = owners.tablist.element();
+  const tabs = owners.tabs.map((owner) => owner.element());
+  const tabpanel = owners.tabpanel.element();
+  const emptyContainer = owners.emptyContainer?.element() ?? null;
+  const emptySuggestions = owners.emptySuggestions?.element() ?? null;
+  if (
+    !header ||
+    !title ||
+    !close ||
+    !navRow ||
+    !tablist ||
+    tabs.some((button) => !button) ||
+    !tabpanel
+  ) {
+    return null;
+  }
+  const exactTabs = tabs as HTMLButtonElement[];
+  const { presentation } = authority;
+  const sameDocument = [
+    panel,
+    header,
+    title,
+    close,
+    navRow,
+    tablist,
+    ...exactTabs,
+    tabpanel,
+    ...(emptyContainer ? [emptyContainer] : []),
+    ...(emptySuggestions ? [emptySuggestions] : []),
+  ].every((element) => element.ownerDocument === ownerDocument && element.isConnected);
+  if (
+    !sameDocument ||
+    panel.tagName !== "ASIDE" ||
+    panel.className !== presentation.panelClassName ||
+    panel.dataset.testid !== presentation.panelTestId ||
+    panel.children.length !== 3 ||
+    panel.children.item(0) !== header ||
+    panel.children.item(1) !== navRow ||
+    panel.children.item(2) !== tabpanel ||
+    header.parentElement !== panel ||
+    header.tagName !== "DIV" ||
+    header.className !== presentation.headerClassName ||
+    header.children.length !== 2 ||
+    header.children.item(0) !== title ||
+    header.children.item(1) !== close ||
+    title.parentElement !== header ||
+    title.tagName !== "SPAN" ||
+    title.className !== presentation.titleClassName ||
+    title.textContent !== presentation.title ||
+    close.parentElement !== header ||
+    close.tagName !== "BUTTON" ||
+    close.type !== "button" ||
+    close.className !== presentation.closeClassName ||
+    close.getAttribute("aria-label") !== presentation.closeLabel ||
+    !commentNavigationControlIsEnabled(close) ||
+    navRow.parentElement !== panel ||
+    navRow.tagName !== "DIV" ||
+    navRow.className !== presentation.navRowClassName ||
+    navRow.children.length !== (authority.canComment ? 2 : 1) ||
+    navRow.children.item(0) !== tablist ||
+    tablist.parentElement !== navRow ||
+    tablist.tagName !== "DIV" ||
+    tablist.className !== presentation.tablistClassName ||
+    tablist.getAttribute("role") !== "tablist" ||
+    tablist.getAttribute("aria-label") !== presentation.tablistLabel ||
+    tablist.getAttribute("aria-orientation") !== presentation.tablistOrientation ||
+    tablist.children.length !== presentation.tabs.length ||
+    tabpanel.parentElement !== panel ||
+    tabpanel.tagName !== "DIV" ||
+    tabpanel.className !== presentation.tabpanelClassName ||
+    tabpanel.id !== presentation.tabpanelId ||
+    tabpanel.getAttribute("role") !== "tabpanel" ||
+    tabpanel.getAttribute("aria-labelledby") !== presentation.tabpanelLabelledBy
+  ) {
+    return null;
+  }
+  for (const tabPresentation of presentation.tabs) {
+    const button = exactTabs[tabPresentation.index];
+    if (
+      !button ||
+      tablist.children.item(tabPresentation.index) !== button ||
+      button.parentElement !== tablist ||
+      button.tagName !== "BUTTON" ||
+      button.type !== "button" ||
+      button.id !== tabPresentation.buttonId ||
+      button.className !== tabPresentation.className ||
+      button.dataset.testid !== tabPresentation.testId ||
+      button.getAttribute("role") !== "tab" ||
+      button.getAttribute("aria-selected") !== String(tabPresentation.selected) ||
+      button.getAttribute("aria-controls") !== presentation.tabpanelId ||
+      button.tabIndex !== tabPresentation.tabIndex ||
+      button.textContent !== `${tabPresentation.label}${tabPresentation.count > 0 ? tabPresentation.count : ""}` ||
+      !commentNavigationControlIsEnabled(button)
+    ) {
+      return null;
+    }
+  }
+  const emptyPresentation = presentation.emptySuggestions;
+  if (!emptyPresentation) {
+    if (emptyContainer || emptySuggestions) return null;
+  } else if (
+    !emptyContainer ||
+    !emptySuggestions ||
+    emptyContainer.tagName !== "SPAN" ||
+    emptyContainer.className !== emptyPresentation.containerClassName ||
+    emptyContainer.dataset.testid !== emptyPresentation.containerTestId ||
+    !tabpanel.contains(emptyContainer) ||
+    emptyContainer.children.length !== 1 ||
+    emptyContainer.children.item(0) !== emptySuggestions ||
+    emptySuggestions.parentElement !== emptyContainer ||
+    emptySuggestions.tagName !== "BUTTON" ||
+    emptySuggestions.type !== "button" ||
+    emptySuggestions.className !== emptyPresentation.buttonClassName ||
+    emptySuggestions.dataset.testid !== emptyPresentation.buttonTestId ||
+    emptySuggestions.textContent?.trim().replace(/\s+/g, " ") !== emptyPresentation.label ||
+    !commentNavigationControlIsEnabled(emptySuggestions)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    panel,
+    header,
+    title,
+    close,
+    navRow,
+    tablist,
+    tabs: Object.freeze(exactTabs),
+    tabpanel,
+    emptyContainer,
+    emptySuggestions,
+  });
+}
+
+function commentNavigationElementsAreSame(
+  current: CommentNavigationElements,
+  published: CommentNavigationElements,
+): boolean {
+  return (
+    current.panel === published.panel &&
+    current.header === published.header &&
+    current.title === published.title &&
+    current.close === published.close &&
+    current.navRow === published.navRow &&
+    current.tablist === published.tablist &&
+    current.tabpanel === published.tabpanel &&
+    current.emptyContainer === published.emptyContainer &&
+    current.emptySuggestions === published.emptySuggestions &&
+    current.tabs.length === published.tabs.length &&
+    current.tabs.every((button, index) => button === published.tabs[index])
+  );
+}
+
+function addCommentNavigationListener(
+  target: EventTarget,
+  type: CommentNavigationNativeType,
+  listener: EventListener,
+  options?: boolean,
+) {
+  const intrinsic =
+    target === suggestionGlobalWindow && suggestionWindowAddEventListener
+      ? suggestionWindowAddEventListener
+      : suggestionAddEventListener;
+  suggestionReflectApply(intrinsic, target, [type, listener, options]);
+}
+
+function removeCommentNavigationListener(
+  target: EventTarget,
+  type: CommentNavigationNativeType,
+  listener: EventListener,
+  options?: boolean,
+) {
+  const intrinsic =
+    target === suggestionGlobalWindow && suggestionWindowRemoveEventListener
+      ? suggestionWindowRemoveEventListener
+      : suggestionRemoveEventListener;
+  if (!intrinsic) return;
+  suggestionReflectApply(intrinsic, target, [type, listener, options]);
+}
+
+function commentNavigationControlIsEnabled(control: HTMLElement): boolean {
+  const Button = control.ownerDocument.defaultView?.HTMLButtonElement;
+  if (
+    (Button && control instanceof Button && control.disabled) ||
+    control.matches(":disabled") ||
+    control.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (
+      element.hasAttribute("inert") ||
+      element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function commentNavigationActionControl(
+  publication: CommentNavigationPublication,
+  action: CommentNavigationAction,
+): HTMLElement | null {
+  if (action.renderIdentity !== publication.render.identity) return null;
+  if (action.kind === "close") {
+    return publication.render.close === action ? publication.elements.close : null;
+  }
+  if (action.kind === "tab") {
+    return publication.render.tabs[action.index] === action
+      ? publication.elements.tabs[action.index] ?? null
+      : null;
+  }
+  if (action.kind === "empty-suggestions") {
+    return publication.render.emptySuggestions === action
+      ? publication.elements.emptySuggestions
+      : null;
+  }
+  return publication.render.keyboard === action ? publication.elements.tablist : null;
+}
+
+function commentNavigationNativeSnapshotMatches(
+  delivery: CommentNavigationNativeDelivery,
+): boolean {
+  const { snapshot } = delivery;
+  const { event, publication, target } = snapshot;
+  const { constructors } = publication;
+  const { event: eventGetters } = publication.eventIntrinsics;
+  if (
+    !(event instanceof constructors.Event) ||
+    commentNavigationNativeValue<string>(eventGetters.type, event) !== snapshot.type ||
+    commentNavigationNativeValue<boolean>(eventGetters.bubbles, event) !==
+      snapshot.bubbles ||
+    commentNavigationNativeValue<boolean>(eventGetters.cancelable, event) !==
+      snapshot.cancelable ||
+    commentNavigationNativeValue<boolean>(eventGetters.composed, event) !==
+      snapshot.composed ||
+    commentNavigationNativeValue<number>(eventGetters.timeStamp, event) !==
+      snapshot.timeStamp ||
+    commentNavigationNativeTarget(publication, event) !== target ||
+    commentNavigationNativeDefaultPrevented(publication, event)
+  ) {
+    return false;
+  }
+  const currentPath = commentNavigationNativeComposedPath(publication, event);
+  if (
+    currentPath.length !== snapshot.path.length ||
+    snapshot.path.some((entry, index) => currentPath[index] !== entry)
+  ) {
+    return false;
+  }
+  if (snapshot.type === "click") {
+    const mouse = snapshot.mouse;
+    if (!mouse || !(event instanceof constructors.MouseEvent)) return false;
+    const { mouseEvent, uiEvent } = publication.eventIntrinsics;
+    return (
+      commentNavigationNativeValue<number>(mouseEvent.button, event) === mouse.button &&
+      commentNavigationNativeValue<number>(mouseEvent.buttons, event) ===
+        mouse.buttons &&
+      commentNavigationNativeValue<number>(uiEvent.detail, event) === mouse.detail &&
+      commentNavigationNativeValue<number>(mouseEvent.clientX, event) ===
+        mouse.clientX &&
+      commentNavigationNativeValue<number>(mouseEvent.clientY, event) ===
+        mouse.clientY &&
+      commentNavigationNativeValue<number>(mouseEvent.screenX, event) ===
+        mouse.screenX &&
+      commentNavigationNativeValue<number>(mouseEvent.screenY, event) ===
+        mouse.screenY &&
+      commentNavigationNativeValue<boolean>(mouseEvent.ctrlKey, event) ===
+        mouse.ctrlKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.shiftKey, event) ===
+        mouse.shiftKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.altKey, event) === mouse.altKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.metaKey, event) ===
+        mouse.metaKey &&
+      commentNavigationNativeValue<EventTarget | null>(
+        mouseEvent.relatedTarget,
+        event,
+      ) === mouse.relatedTarget &&
+      commentNavigationNativeValue<Window | null>(uiEvent.view, event) === mouse.view
+    );
+  }
+  if (snapshot.type === "focusin") {
+    const focus = snapshot.focus;
+    const { focusEvent, uiEvent } = publication.eventIntrinsics;
+    return Boolean(
+      focus &&
+        event instanceof constructors.FocusEvent &&
+        commentNavigationNativeValue<EventTarget | null>(
+          focusEvent.relatedTarget,
+          event,
+        ) === focus.relatedTarget &&
+        commentNavigationNativeValue<Window | null>(uiEvent.view, event) === focus.view &&
+        focus.activeElement === snapshot.control &&
+        commentNavigationActiveElement(publication) === focus.activeElement,
+    );
+  }
+  const keyboard = snapshot.keyboard;
+  const { keyboardEvent } = publication.eventIntrinsics;
+  return Boolean(
+    keyboard &&
+      event instanceof constructors.KeyboardEvent &&
+      commentNavigationNativeValue<string>(keyboardEvent.key, event) === keyboard.key &&
+      commentNavigationNativeValue<string>(keyboardEvent.code, event) === keyboard.code &&
+      commentNavigationNativeValue<number>(keyboardEvent.location, event) ===
+        keyboard.location &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.repeat, event) ===
+        keyboard.repeat &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.isComposing, event) ===
+        keyboard.isComposing &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.ctrlKey, event) ===
+        keyboard.ctrlKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.shiftKey, event) ===
+        keyboard.shiftKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.altKey, event) ===
+        keyboard.altKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.metaKey, event) ===
+        keyboard.metaKey &&
+      commentNavigationActiveElement(publication) === keyboard.activeElement,
+  );
+}
+
+function createCommentNavigationRender(
+  authority: CommentNavigationAuthority,
+  cells: CommentNavigationCells,
+  requestSuccessor: () => void,
+): CommentNavigationRender {
+  const render = {} as CommentNavigationRender;
+  const identity = Symbol("comment-navigation-render");
+  let currentRuntime: CommentNavigationPublicationRuntime | null = null;
+  let lastRuntime: CommentNavigationPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+
+  const acceptsSuccessorOf = (publication: CommentNavigationPublication) =>
+    cells.active.current === null &&
+    cells.successorOf.current === publication &&
+    cells.retired.has(publication) &&
+    publication.render.isRetired() &&
+    !cells.claimedPublications.has(publication);
+
+  const requestReplaySuccessor = (runtime: CommentNavigationPublicationRuntime) => {
+    const { publication } = runtime;
+    if (
+      successorRequested ||
+      cells.replay.current !== null ||
+      !acceptsSuccessorOf(publication) ||
+      !commentNavigationAuthoritiesMatch(publication.authority, authority) ||
+      !commentNavigationFactsAreCurrent(authority) ||
+      !runtime.publishedDomMatches() ||
+      !runtime.stageSuccessorHandoff()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: publication,
+      dom: publication.dom,
+      placement: publication.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: CommentNavigationElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.publication)) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+
+  const owners = Object.freeze({
+    panel: new CommentNavigationElementOwner<HTMLElement>(onElementChange),
+    header: new CommentNavigationElementOwner<HTMLDivElement>(onElementChange),
+    title: new CommentNavigationElementOwner<HTMLSpanElement>(onElementChange),
+    close: new CommentNavigationElementOwner<HTMLButtonElement>(onElementChange),
+    navRow: new CommentNavigationElementOwner<HTMLDivElement>(onElementChange),
+    tablist: new CommentNavigationElementOwner<HTMLDivElement>(onElementChange),
+    tabs: Object.freeze(
+      authority.tabs.map(
+        () => new CommentNavigationElementOwner<HTMLButtonElement>(onElementChange),
+      ),
+    ),
+    tabpanel: new CommentNavigationElementOwner<HTMLDivElement>(onElementChange),
+    emptyContainer: authority.presentation.emptySuggestions
+      ? new CommentNavigationElementOwner<HTMLSpanElement>(onElementChange)
+      : null,
+    emptySuggestions: authority.presentation.emptySuggestions
+      ? new CommentNavigationElementOwner<HTMLButtonElement>(onElementChange)
+      : null,
+  });
+
+  const expectedOwners = (): readonly CommentNavigationElementOwnerView[] =>
+    Object.freeze([
+      owners.panel,
+      owners.header,
+      owners.title,
+      owners.close,
+      owners.navRow,
+      owners.tablist,
+      ...owners.tabs,
+      owners.tabpanel,
+      ...(owners.emptyContainer ? [owners.emptyContainer] : []),
+      ...(owners.emptySuggestions ? [owners.emptySuggestions] : []),
+    ]);
+
+  const createRuntime = (
+    publication: CommentNavigationPublication,
+    replayOwners: ReadonlySet<CommentNavigationElementOwnerView>,
+  ): CommentNavigationPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let released = false;
+    let replayRefs: CommentNavigationRefReplay[] = [];
+    let domGuard: CommentNavigationDomGuard | null = null;
+    const nativeDeliveries = new WeakMap<Event, CommentNavigationNativeDelivery>();
+    const nativeBubbleTargets = new Map<EventTarget, Set<CommentNavigationNativeType>>();
+
+    const removeListeners = () => {
+      for (const type of ["click", "focusin", "keydown"] as const) {
+        suggestionReflectApply(
+          publication.windowRemoveEventListener,
+          publication.ownerWindow,
+          [type, captureNative, true],
+        );
+        removeCommentNavigationListener(publication.ownerDocument, type, captureNative, true);
+        removeCommentNavigationListener(publication.elements.panel, type, crossNativePanel);
+      }
+      for (const [target, types] of nativeBubbleTargets) {
+        for (const type of types) {
+          removeCommentNavigationListener(target, type, finalizeNative);
+        }
+      }
+      nativeBubbleTargets.clear();
+    };
+    const release = () => {
+      if (released) return;
+      released = true;
+      removeListeners();
+      domGuard?.release();
+    };
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(publication);
+      removeListeners();
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every(
+        (entry) =>
+          !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+      );
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.detached && entry.reattached && entry.owner.element() === entry.element,
+      );
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached &&
+            entry.reattached &&
+            entry.owner.element() === entry.element
+          : !entry.detached &&
+            !entry.reattached &&
+            entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () => {
+      const current = currentCommentNavigationElements(authority, owners);
+      return Boolean(
+        domGuard &&
+          domGuard.isClean() &&
+          current &&
+          commentNavigationElementsAreSame(current, publication.elements) &&
+          publication.elements.panel === publication.dom.shell.node &&
+          commentNavigationPlacementMatches(
+            publication.elements.panel,
+            publication.placement,
+          ) &&
+          commentNavigationDomMatches(publication.dom),
+      );
+    };
+    const retireAndRequestSuccessor = () => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.claimedPublications.has(publication)
+      ) {
+        return;
+      }
+      retire("action");
+      if (successorRequested) return;
+      successorRequested = true;
+      flushSync(requestSuccessor);
+    };
+    const publicationIsCurrent = (allowClaimed = false) => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.retired.has(publication) ||
+        publication.render !== render ||
+        publication.authority !== authority ||
+        (!allowClaimed && cells.claimedPublications.has(publication))
+      ) {
+        return false;
+      }
+      if (!commentNavigationFactsAreCurrent(authority)) {
+        retireAndRequestSuccessor();
+        return false;
+      }
+      return publishedDomMatches();
+    };
+    const retireForMutation = () => {
+      retireAndRequestSuccessor();
+    };
+
+    const resolveAction = (
+      event: Event,
+      target: Node,
+      path: readonly EventTarget[],
+    ): Readonly<{
+      action: CommentNavigationAction;
+      control: HTMLElement;
+      nextTab: Tab | null;
+      reactType: "click" | "focus" | "keydown";
+    }> | null => {
+      const eventType = commentNavigationNativeValue<string>(
+        publication.eventIntrinsics.event.type,
+        event,
+      );
+      if (eventType === "click") {
+        if (
+          !(event instanceof publication.constructors.MouseEvent) ||
+          commentNavigationNativeValue<number>(
+            publication.eventIntrinsics.mouseEvent.button,
+            event,
+          ) !== 0
+        ) {
+          return null;
+        }
+        const candidates = [
+          { action: render.close, control: publication.elements.close },
+          ...render.tabs.map((action, index) => ({
+            action,
+            control: publication.elements.tabs[index]!,
+          })),
+          ...(render.emptySuggestions && publication.elements.emptySuggestions
+            ? [
+                {
+                  action: render.emptySuggestions,
+                  control: publication.elements.emptySuggestions,
+                },
+              ]
+            : []),
+        ].filter(
+          ({ control }) => control.contains(target) && path.includes(control),
+        );
+        if (candidates.length !== 1) return null;
+        const [{ action, control }] = candidates;
+        if (action.kind === "tab" && action.tab === authority.selectedTab) return null;
+        return Object.freeze({
+          action,
+          control,
+          nextTab: action.tab,
+          reactType: "click" as const,
+        });
+      }
+      if (eventType === "focusin") {
+        if (!(event instanceof publication.constructors.FocusEvent)) return null;
+        const index = publication.elements.tabs.indexOf(target as HTMLButtonElement);
+        const action = index < 0 ? null : render.tabs[index];
+        const control = index < 0 ? null : publication.elements.tabs[index];
+        if (
+          !action ||
+          !control ||
+          target !== control ||
+          !path.includes(control) ||
+          commentNavigationActiveElement(publication) !== control ||
+          action.tab === authority.selectedTab
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          action,
+          control,
+          nextTab: action.tab,
+          reactType: "focus" as const,
+        });
+      }
+      if (!(event instanceof publication.constructors.KeyboardEvent)) return null;
+      const { keyboardEvent } = publication.eventIntrinsics;
+      if (
+        commentNavigationNativeValue<boolean>(keyboardEvent.altKey, event) ||
+        commentNavigationNativeValue<boolean>(keyboardEvent.ctrlKey, event) ||
+        commentNavigationNativeValue<boolean>(keyboardEvent.metaKey, event)
+      ) {
+        return null;
+      }
+      const activeIndex = publication.elements.tabs.findIndex(
+        (button) => button === target,
+      );
+      const active = publication.elements.tabs[activeIndex];
+      if (
+        !active ||
+        target !== active ||
+        commentNavigationActiveElement(publication) !== active ||
+        !path.includes(active) ||
+        !path.includes(publication.elements.tablist)
+      ) {
+        return null;
+      }
+      const nextIndex = rovingIndex(
+        commentNavigationNativeValue<string>(keyboardEvent.key, event),
+        activeIndex,
+        authority.tabs.length,
+        {
+          orientation: "horizontal",
+          wrap: true,
+        },
+      );
+      if (nextIndex < 0) return null;
+      return Object.freeze({
+        action: render.keyboard,
+        control: publication.elements.tablist,
+        nextTab: authority.tabs[nextIndex]!.id,
+        reactType: "keydown" as const,
+      });
+    };
+
+    function captureNative(event: Event) {
+      const { event: eventGetters } = publication.eventIntrinsics;
+      const eventType = commentNavigationNativeValue<string>(eventGetters.type, event);
+      if (
+        nativeDeliveries.has(event) ||
+        !(event instanceof publication.constructors.Event) ||
+        !["click", "focusin", "keydown"].includes(eventType) ||
+        commentNavigationNativeValue<number>(eventGetters.eventPhase, event) !==
+          publication.constructors.Event.CAPTURING_PHASE ||
+        !commentNavigationNativeValue<boolean>(eventGetters.bubbles, event) ||
+        commentNavigationNativeDefaultPrevented(publication, event) ||
+        cells.claimedNativeEvents.has(event) ||
+        seenCommentNavigationNativeEvents.has(event) ||
+        claimedCommentNavigationNativeEvents.has(event)
+      ) {
+        return;
+      }
+      const target = commentNavigationNativeTarget(publication, event);
+      if (
+        !(target instanceof publication.constructors.Node) ||
+        target.ownerDocument !== publication.ownerDocument
+      ) {
+        return;
+      }
+      const path = commentNavigationNativeComposedPath(publication, event);
+      const currentTarget = commentNavigationNativeCurrentTarget(publication, event);
+      if (
+        !currentTarget ||
+        !path.includes(currentTarget) ||
+        !path.includes(publication.elements.panel)
+      ) {
+        return;
+      }
+      seenCommentNavigationNativeEvents.add(event);
+      if (!publicationIsCurrent()) return;
+      const resolved = resolveAction(event, target, path);
+      if (
+        !resolved ||
+        commentNavigationActionControl(publication, resolved.action) !== resolved.control ||
+        !commentNavigationControlIsEnabled(resolved.control)
+      ) {
+        return;
+      }
+      const { mouseEvent, uiEvent, focusEvent, keyboardEvent } =
+        publication.eventIntrinsics;
+      const mouse =
+        event instanceof publication.constructors.MouseEvent
+          ? Object.freeze({
+              button: commentNavigationNativeValue<number>(mouseEvent.button, event),
+              buttons: commentNavigationNativeValue<number>(mouseEvent.buttons, event),
+              detail: commentNavigationNativeValue<number>(uiEvent.detail, event),
+              clientX: commentNavigationNativeValue<number>(mouseEvent.clientX, event),
+              clientY: commentNavigationNativeValue<number>(mouseEvent.clientY, event),
+              screenX: commentNavigationNativeValue<number>(mouseEvent.screenX, event),
+              screenY: commentNavigationNativeValue<number>(mouseEvent.screenY, event),
+              ctrlKey: commentNavigationNativeValue<boolean>(mouseEvent.ctrlKey, event),
+              shiftKey: commentNavigationNativeValue<boolean>(
+                mouseEvent.shiftKey,
+                event,
+              ),
+              altKey: commentNavigationNativeValue<boolean>(mouseEvent.altKey, event),
+              metaKey: commentNavigationNativeValue<boolean>(mouseEvent.metaKey, event),
+              relatedTarget: commentNavigationNativeValue<EventTarget | null>(
+                mouseEvent.relatedTarget,
+                event,
+              ),
+              view: commentNavigationNativeValue<Window | null>(uiEvent.view, event),
+            })
+          : null;
+      const focus =
+        event instanceof publication.constructors.FocusEvent
+          ? Object.freeze({
+              relatedTarget: commentNavigationNativeValue<EventTarget | null>(
+                focusEvent.relatedTarget,
+                event,
+              ),
+              view: commentNavigationNativeValue<Window | null>(uiEvent.view, event),
+              activeElement: commentNavigationActiveElement(publication),
+            })
+          : null;
+      const keyboard =
+        event instanceof publication.constructors.KeyboardEvent
+          ? Object.freeze({
+              key: commentNavigationNativeValue<string>(keyboardEvent.key, event),
+              code: commentNavigationNativeValue<string>(keyboardEvent.code, event),
+              location: commentNavigationNativeValue<number>(
+                keyboardEvent.location,
+                event,
+              ),
+              repeat: commentNavigationNativeValue<boolean>(
+                keyboardEvent.repeat,
+                event,
+              ),
+              isComposing: commentNavigationNativeValue<boolean>(
+                keyboardEvent.isComposing,
+                event,
+              ),
+              ctrlKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.ctrlKey,
+                event,
+              ),
+              shiftKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.shiftKey,
+                event,
+              ),
+              altKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.altKey,
+                event,
+              ),
+              metaKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.metaKey,
+                event,
+              ),
+              activeElement: commentNavigationActiveElement(publication),
+            })
+          : null;
+      const snapshot: CommentNavigationNativeSnapshot = Object.freeze({
+        event,
+        publication,
+        action: resolved.action,
+        control: resolved.control,
+        target,
+        path: Object.freeze([...path]),
+        type: eventType as CommentNavigationNativeType,
+        reactType: resolved.reactType,
+        nextTab: resolved.nextTab,
+        bubbles: commentNavigationNativeValue<boolean>(eventGetters.bubbles, event),
+        cancelable: commentNavigationNativeValue<boolean>(
+          eventGetters.cancelable,
+          event,
+        ),
+        composed: commentNavigationNativeValue<boolean>(eventGetters.composed, event),
+        timeStamp: commentNavigationNativeValue<number>(eventGetters.timeStamp, event),
+        mouse,
+        focus,
+        keyboard,
+      });
+      const delivery: CommentNavigationNativeDelivery = {
+        snapshot,
+        delegationTarget: null,
+        crossedPanel: false,
+        captureInvalid: false,
+        captureRootEvent: null,
+        captureActionEvent: null,
+        captureRootCount: 0,
+        captureActionCount: 0,
+        bubbleInvalid: false,
+        bubbleActionEvent: null,
+        bubbleRootEvent: null,
+        bubbleActionCount: 0,
+        bubbleRootCount: 0,
+      };
+      nativeDeliveries.set(event, delivery);
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          if (nativeDeliveries.get(event) === delivery) nativeDeliveries.delete(event);
+        });
+      });
+    }
+
+    function crossNativePanel(event: Event) {
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        commentNavigationNativeCurrentTarget(publication, event) !==
+          publication.elements.panel ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          event,
+        ) !== publication.constructors.Event.BUBBLING_PHASE ||
+        !commentNavigationNativeSnapshotMatches(delivery)
+      ) {
+        return;
+      }
+      delivery.crossedPanel = true;
+      if (
+        delivery.captureInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        !delivery.captureRootEvent ||
+        !delivery.captureActionEvent
+      ) {
+        delivery.captureInvalid = true;
+      }
+    }
+
+    const reactDelivery = (
+      event: CommentNavigationReactEvent,
+      currentTarget: HTMLElement,
+      phase: "capture" | "bubble",
+    ): CommentNavigationNativeDelivery | null => {
+      if (!event || typeof event !== "object") return null;
+      const nativeEvent = event.nativeEvent;
+      if (!(nativeEvent instanceof publication.constructors.Event)) return null;
+      const delivery = nativeDeliveries.get(nativeEvent);
+      const nativePhase =
+        phase === "capture"
+          ? publication.constructors.Event.CAPTURING_PHASE
+          : publication.constructors.Event.BUBBLING_PHASE;
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        delivery.snapshot.event !== nativeEvent ||
+        delivery.snapshot.reactType !== event.type ||
+        event.currentTarget !== currentTarget ||
+        event.target !== delivery.snapshot.target ||
+        event.bubbles !== delivery.snapshot.bubbles ||
+        event.cancelable !== delivery.snapshot.cancelable ||
+        event.defaultPrevented ||
+        commentNavigationNativeTarget(publication, nativeEvent) !== event.target ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          nativeEvent,
+        ) !== nativePhase ||
+        (delivery.delegationTarget !== null &&
+          commentNavigationNativeCurrentTarget(publication, nativeEvent) !==
+            delivery.delegationTarget) ||
+        !commentNavigationNativeSnapshotMatches(delivery)
+      ) {
+        return null;
+      }
+      return delivery;
+    };
+
+    const stageCaptureRoot = (event: CommentNavigationReactEvent) => {
+      if (
+        event?.nativeEvent instanceof publication.constructors.Event &&
+        !nativeDeliveries.has(event.nativeEvent)
+      ) {
+        captureNative(event.nativeEvent);
+      }
+      const delivery = reactDelivery(event, publication.elements.panel, "capture");
+      if (
+        !delivery ||
+        delivery.crossedPanel ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(delivery.snapshot.action) ||
+        commentNavigationControlIsClaimed(cells, publication, delivery.snapshot.control) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(delivery.snapshot.event) ||
+        claimedCommentNavigationNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureRootCount += 1;
+      if (
+        delivery.captureRootCount !== 1 ||
+        (delivery.captureRootEvent && delivery.captureRootEvent !== event)
+      ) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureRootEvent = event;
+      const delegationTarget = commentNavigationNativeCurrentTarget(
+        publication,
+        delivery.snapshot.event,
+      );
+      if (
+        !delegationTarget ||
+        delegationTarget === publication.elements.panel ||
+        !delivery.snapshot.path.includes(delegationTarget)
+      ) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.delegationTarget = delegationTarget;
+      let types = nativeBubbleTargets.get(delegationTarget);
+      if (!types) {
+        types = new Set();
+        nativeBubbleTargets.set(delegationTarget, types);
+      }
+      if (!types.has(delivery.snapshot.type)) {
+        addCommentNavigationListener(
+          delegationTarget,
+          delivery.snapshot.type,
+          finalizeNative,
+        );
+        types.add(delivery.snapshot.type);
+      }
+    };
+
+    const stageCaptureAction = (
+      action: CommentNavigationAction,
+      event: CommentNavigationReactEvent,
+    ) => {
+      const control = commentNavigationActionControl(publication, action);
+      const delivery = control ? reactDelivery(event, control, "capture") : null;
+      if (
+        !delivery ||
+        delivery.crossedPanel ||
+        !control ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.control !== control ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureRootEvent !== event ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        commentNavigationControlIsClaimed(cells, publication, control) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(delivery.snapshot.event) ||
+        claimedCommentNavigationNativeEvents.has(delivery.snapshot.event) ||
+        !commentNavigationControlIsEnabled(control) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureActionCount += 1;
+      if (
+        delivery.captureActionCount !== 1 ||
+        (delivery.captureActionEvent && delivery.captureActionEvent !== event)
+      ) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureActionEvent = event;
+    };
+
+    const stageBubbleAction = (
+      action: CommentNavigationAction,
+      event: CommentNavigationReactEvent,
+    ) => {
+      const control = commentNavigationActionControl(publication, action);
+      const delivery = control ? reactDelivery(event, control, "bubble") : null;
+      if (
+        !delivery ||
+        !delivery.crossedPanel ||
+        delivery.captureInvalid ||
+        !control ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.control !== control ||
+        delivery.captureActionCount !== 1 ||
+        !delivery.captureActionEvent ||
+        delivery.captureActionEvent === event ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        commentNavigationControlIsClaimed(cells, publication, control) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(delivery.snapshot.event) ||
+        claimedCommentNavigationNativeEvents.has(delivery.snapshot.event) ||
+        !commentNavigationControlIsEnabled(control) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.bubbleActionCount += 1;
+      if (
+        delivery.bubbleActionCount !== 1 ||
+        (delivery.bubbleActionEvent && delivery.bubbleActionEvent !== event)
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleActionEvent = event;
+    };
+
+    const stageBubbleRoot = (event: CommentNavigationReactEvent) => {
+      const delivery = reactDelivery(event, publication.elements.panel, "bubble");
+      if (!delivery || !delivery.crossedPanel || !publicationIsCurrent()) return;
+      delivery.bubbleRootCount += 1;
+      if (
+        delivery.bubbleRootCount !== 1 ||
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.bubbleActionCount !== 1 ||
+        delivery.bubbleActionEvent !== event ||
+        delivery.captureRootEvent === event ||
+        (delivery.bubbleRootEvent && delivery.bubbleRootEvent !== event)
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleRootEvent = event;
+    };
+
+    function finalizeNative(event: Event) {
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        commentNavigationNativeCurrentTarget(publication, event) !==
+          delivery.delegationTarget ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          event,
+        ) !== publication.constructors.Event.BUBBLING_PHASE
+      ) {
+        return;
+      }
+      const { action, control, nextTab } = delivery.snapshot;
+      if (
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        delivery.bubbleActionCount !== 1 ||
+        delivery.bubbleRootCount !== 1 ||
+        !delivery.captureRootEvent ||
+        !delivery.captureActionEvent ||
+        !delivery.bubbleActionEvent ||
+        !delivery.bubbleRootEvent ||
+        delivery.captureRootEvent !== delivery.captureActionEvent ||
+        delivery.bubbleActionEvent !== delivery.bubbleRootEvent ||
+        delivery.captureRootEvent === delivery.bubbleRootEvent ||
+        commentNavigationActionControl(publication, action) !== control ||
+        !commentNavigationControlIsEnabled(control) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        commentNavigationControlIsClaimed(cells, publication, control) ||
+        cells.claimedReactEvents.has(delivery.captureRootEvent) ||
+        cells.claimedReactEvents.has(delivery.bubbleRootEvent) ||
+        cells.claimedNativeEvents.has(event) ||
+        claimedCommentNavigationNativeEvents.has(event) ||
+        !commentNavigationNativeSnapshotMatches(delivery) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(action);
+      claimCommentNavigationControl(cells, publication, control);
+      cells.claimedReactEvents.add(delivery.captureRootEvent);
+      cells.claimedReactEvents.add(delivery.bubbleRootEvent);
+      cells.claimedNativeEvents.add(event);
+      claimedCommentNavigationNativeEvents.add(event);
+      nativeDeliveries.delete(event);
+
+      if (action.kind === "keyboard") {
+        const nextIndex = authority.tabs.findIndex((tab) => tab.id === nextTab);
+        const next = publication.elements.tabs[nextIndex];
+        if (!next || nextTab === null) return;
+        suggestionReflectApply(commentNavigationPreventDefault, event, []);
+        if (commentNavigationActiveElement(publication) !== next) {
+          suggestionReflectApply(publication.focus, next, [{ preventScroll: true }]);
+        }
+        if (
+          commentNavigationActiveElement(publication) !== next ||
+          !publicationIsCurrent(true)
+        ) {
+          if (cells.active.current === publication && retire("action")) {
+            if (!successorRequested) {
+              successorRequested = true;
+              requestSuccessor();
+            }
+          }
+          return;
+        }
+        if (nextTab === authority.selectedTab) {
+          if (retire("action") && !successorRequested) {
+            successorRequested = true;
+            requestSuccessor();
+          }
+          return;
+        }
+        authority.onSelect(nextTab);
+        return;
+      }
+      if (action.kind === "close") {
+        retireCommentRowActions(authority.rowActions);
+        authority.onClose();
+        return;
+      }
+      if (nextTab !== null) authority.onSelect(nextTab);
+    }
+
+    const runtime: CommentNavigationPublicationRuntime = Object.freeze({
+      publication,
+      publish: (expected: readonly CommentNavigationElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        domGuard = createCommentNavigationDomGuard(
+          publication.dom,
+          publication.placement,
+          publication.mutationObserverIntrinsics,
+          retireForMutation,
+        );
+        if (!domGuard) return false;
+        replayRefs = expected.map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish comment navigation without every committed ref",
+            );
+          }
+          return {
+            owner,
+            element,
+            detached: false,
+            reattached: false,
+            handoffDetached: false,
+          };
+        });
+        for (const type of ["click", "focusin", "keydown"] as const) {
+          suggestionReflectApply(
+            publication.windowAddEventListener,
+            publication.ownerWindow,
+            [type, captureNative, true],
+          );
+          addCommentNavigationListener(
+            publication.ownerDocument,
+            type,
+            captureNative,
+            true,
+          );
+          addCommentNavigationListener(
+            publication.elements.panel,
+            type,
+            crossNativePanel,
+          );
+        }
+        established = true;
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      stageCaptureRoot,
+      stageCaptureAction,
+      stageBubbleAction,
+      stageBubbleRoot,
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      noteRef: (
+        owner: CommentNavigationElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (
+            element === null &&
+            previous === proof.element &&
+            !proof.handoffDetached
+          ) {
+            proof.handoffDetached = true;
+          } else if (element !== previous) {
+            invalidReplay = true;
+          }
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) ||
+          (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every(
+          (entry) => entry.handoffDetached && entry.owner.element() === null,
+        ),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release,
+    });
+    return runtime;
+  };
+
+  const stageCaptureAction = (
+    action: CommentNavigationAction,
+    event: CommentNavigationReactEvent,
+  ) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureAction(action, event);
+  };
+  const stageBubbleAction = (
+    action: CommentNavigationAction,
+    event: CommentNavigationReactEvent,
+  ) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleAction(action, event);
+  };
+  const createAction = (
+    kind: CommentNavigationActionKind,
+    tab: Tab | null,
+    index: number,
+    types: readonly CommentNavigationNativeType[],
+  ): CommentNavigationAction => {
+    const action = {} as CommentNavigationAction;
+    Object.assign(action, {
+      identity: Symbol(`comment-navigation-${kind}`),
+      renderIdentity: identity,
+      kind,
+      tab,
+      index,
+      onClickCapture: types.includes("click")
+        ? (event: MouseEvent<HTMLElement>) => stageCaptureAction(action, event)
+        : null,
+      onClick: types.includes("click")
+        ? (event: MouseEvent<HTMLElement>) => stageBubbleAction(action, event)
+        : null,
+      onFocusCapture: types.includes("focusin")
+        ? (event: FocusEvent<HTMLElement>) => stageCaptureAction(action, event)
+        : null,
+      onFocus: types.includes("focusin")
+        ? (event: FocusEvent<HTMLElement>) => stageBubbleAction(action, event)
+        : null,
+      onKeyDownCapture: types.includes("keydown")
+        ? (event: KeyboardEvent<HTMLElement>) => stageCaptureAction(action, event)
+        : null,
+      onKeyDown: types.includes("keydown")
+        ? (event: KeyboardEvent<HTMLElement>) => stageBubbleAction(action, event)
+        : null,
+    });
+    return Object.freeze(action);
+  };
+
+  const close = createAction("close", null, -1, ["click"]);
+  const tabs = Object.freeze(
+    authority.tabs.map((tab) =>
+      createAction("tab", tab.id, tab.index, ["click", "focusin"]),
+    ),
+  );
+  const emptySuggestions = authority.presentation.emptySuggestions
+    ? createAction("empty-suggestions", "suggestions", -1, ["click"])
+    : null;
+  const keyboard = createAction("keyboard", null, -1, ["keydown"]);
+
+  const establish = () => {
+    if (lastRuntime) {
+      const exactReplay =
+        lastRuntime.isExactLayoutReplay() ||
+        lastRuntime.isExactElementReplay();
+      if (exactReplay && acceptsSuccessorOf(lastRuntime.publication)) {
+        requestReplaySuccessor(lastRuntime);
+      } else if (
+        lastRuntime.isRetired() &&
+        !lastRuntime.mutationHistoryIsClean() &&
+        !successorRequested
+      ) {
+        successorRequested = true;
+        const replay = cells.replay.current;
+        if (replay?.source === lastRuntime.publication) {
+          cells.replay.current = null;
+          replay.release();
+        } else {
+          lastRuntime.release();
+        }
+        requestSuccessor();
+      }
+      return undefined;
+    }
+    if (
+      renderRetired ||
+      invalidBeforeEstablish ||
+      !commentNavigationFactsAreCurrent(authority)
+    ) {
+      return undefined;
+    }
+    const elements = currentCommentNavigationElements(authority, owners);
+    const placement = elements
+      ? captureCommentNavigationPlacement(elements.panel)
+      : null;
+    const dom = elements ? snapshotCommentNavigationDom(elements) : null;
+    const ownerWindow = elements?.panel.ownerDocument.defaultView;
+    const eventIntrinsics = ownerWindow
+      ? captureCommentNavigationEventIntrinsics(ownerWindow)
+      : null;
+    const mutationObserverIntrinsics = ownerWindow
+      ? captureCommentNavigationMutationObserverIntrinsics(ownerWindow)
+      : null;
+    if (
+      !elements ||
+      !placement ||
+      !dom ||
+      !ownerWindow ||
+      !eventIntrinsics ||
+      !mutationObserverIntrinsics
+    ) {
+      return undefined;
+    }
+    const publication: CommentNavigationPublication = Object.freeze({
+      identity: Symbol("comment-navigation-publication"),
+      render,
+      authority,
+      elements,
+      ownerDocument: elements.panel.ownerDocument,
+      ownerWindow,
+      constructors: Object.freeze({
+        Event: ownerWindow.Event,
+        MouseEvent: ownerWindow.MouseEvent,
+        FocusEvent: ownerWindow.FocusEvent,
+        KeyboardEvent: ownerWindow.KeyboardEvent,
+        Node: ownerWindow.Node,
+      }),
+      focus: ownerWindow.HTMLElement.prototype.focus,
+      windowAddEventListener: ownerWindow.addEventListener,
+      windowRemoveEventListener: ownerWindow.removeEventListener,
+      eventIntrinsics,
+      mutationObserverIntrinsics,
+      dom,
+      placement,
+    });
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = commentNavigationAuthoritiesMatch(
+        replay.source.authority,
+        authority,
+      );
+      const exactReplay =
+        sameAuthority &&
+        replay.source.render.isRetired() &&
+        cells.retired.has(replay.source) &&
+        cells.successorOf.current === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.panel === replay.dom.shell.node &&
+        commentNavigationPlacementMatches(elements.panel, replay.placement) &&
+        commentNavigationDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (sameAuthority && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(publication);
+        if (!successorRequested) {
+          successorRequested = true;
+          requestSuccessor();
+        }
+        return undefined;
+      }
+    }
+
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.render.retire();
+    const transitionSource = cells.successorOf.current;
+    const allOwners = expectedOwners();
+    const replayedOwners = new Set<CommentNavigationElementOwnerView>();
+    if (transitionSource?.authority.mount === authority.mount) {
+      for (const owner of allOwners) {
+        const element = owner.element();
+        if (element && !commentNavigationDomContains(transitionSource.dom, element)) {
+          replayedOwners.add(owner);
+        }
+      }
+    }
+    const runtime = createRuntime(publication, replayedOwners);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish(allOwners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const retire = () => {
+    if (renderRetired) return false;
+    if (currentRuntime) {
+      currentRuntime.retireForAction();
+      return true;
+    }
+    renderRetired = true;
+    return true;
+  };
+  const stageRootCapture = (event: CommentNavigationReactEvent) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureRoot(event);
+  };
+  const stageRootBubble = (event: CommentNavigationReactEvent) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleRoot(event);
+  };
+
+  Object.assign(render, {
+    identity,
+    authority,
+    close,
+    tabs,
+    emptySuggestions,
+    keyboard,
+    capturePanel: owners.panel.capture,
+    captureHeader: owners.header.capture,
+    captureTitle: owners.title.capture,
+    captureClose: owners.close.capture,
+    captureNavRow: owners.navRow.capture,
+    captureTablist: owners.tablist.capture,
+    captureTabs: Object.freeze(owners.tabs.map((owner) => owner.capture)),
+    captureTabpanel: owners.tabpanel.capture,
+    captureEmptyContainer: owners.emptyContainer?.capture ?? null,
+    captureEmptySuggestions: owners.emptySuggestions?.capture ?? null,
+    onPanelClickCapture: stageRootCapture,
+    onPanelClick: stageRootBubble,
+    onPanelFocusCapture: stageRootCapture,
+    onPanelFocus: stageRootBubble,
+    onPanelKeyDownCapture: stageRootCapture,
+    onPanelKeyDown: stageRootBubble,
+    establish,
+    retire,
+    isRetired: () => renderRetired,
+    focusSelected: () => {
+      const runtime = currentRuntime;
+      const publication = runtime?.publication;
+      const index = authority.tabs.findIndex(
+        (tab) => tab.id === authority.selectedTab,
+      );
+      const selected = publication?.elements.tabs[index];
+      if (
+        !runtime ||
+        !publication ||
+        runtime.isRetired() ||
+        cells.active.current !== publication ||
+        !selected ||
+        !runtime.publishedDomMatches()
+      ) {
+        return;
+      }
+      suggestionReflectApply(publication.focus, selected, [{ preventScroll: true }]);
+      return commentNavigationActiveElement(publication) === selected;
+    },
+  });
+  return Object.freeze(render);
+}
+
 export function CommentsPanel({
   session,
   onClose,
@@ -6500,15 +9206,6 @@ export function CommentsPanel({
   // the affected review and thread cards update without rerendering unrelated cards.
   const suggestionBatchState = useCommentBatchState(actionCoordinator, SUGGESTIONS_SCOPE, tab === "suggestions" ? renderedSuggestionBatchTargets : []);
   const canAct = session.role === "owner" || session.role === "editor";
-  const tablistRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!focusOnMount) return;
-    const timer = window.setTimeout(() => {
-      tablistRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
-    });
-    return () => window.clearTimeout(timer);
-  }, [focusOnMount]);
 
   // The first suggestion that appears while the panel is open switches to the Suggestions tab, once per mount,
   // so a user who switched back is not fought. Skipped while a comment is being composed on the Open tab.
@@ -6571,61 +9268,162 @@ export function CommentsPanel({
   const localNonce = useRef(0);
   const commentOnDocument = useCallback((mention: boolean) => startDocumentComment({ mention, nonce: -++localNonce.current }), [startDocumentComment]);
 
-  const tabs: { id: Tab; label: string; count: number }[] = [
-    { id: "open", label: "Open", count: open.length },
-    { id: "resolved", label: "Resolved", count: resolved.length },
-    { id: "suggestions", label: "Suggestions", count: suggestionCount },
-  ];
-
-  const onTablistKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = rovingIndex(event.key, current, items.length, { orientation: "horizontal", wrap: true });
-    if (next < 0) return;
-    event.preventDefault();
-    setTab(tabs[next].id);
-    items[next]?.focus();
-  };
+  const tabs: readonly CommentNavigationTabFacts[] = Object.freeze([
+    Object.freeze({ index: 0, id: "open", label: "Open", count: open.length }),
+    Object.freeze({ index: 1, id: "resolved", label: "Resolved", count: resolved.length }),
+    Object.freeze({ index: 2, id: "suggestions", label: "Suggestions", count: suggestionCount }),
+  ]);
+  const showEmptySuggestions =
+    tab === "open" && open.length === 0 && !pending && reviewsLoaded && suggestionCount > 0;
+  const [navigationMount] = useState(() => Symbol("comment-navigation"));
+  const [navigationCells] = useState<CommentNavigationCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet<CommentNavigationPublication>(),
+    claimedPublications: new WeakSet<CommentNavigationPublication>(),
+    claimedActions: new WeakSet<CommentNavigationAction>(),
+    claimedControls: new WeakMap<HTMLElement, WeakSet<CommentNavigationPublication>>(),
+    claimedReactEvents: new WeakSet<object>(),
+    claimedNativeEvents: new WeakSet<Event>(),
+  }));
+  const navigationReplayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    navigationReplayCleanup.current += 1;
+    return () => {
+      navigationReplayCleanup.current += 1;
+      const cleanup = navigationReplayCleanup.current;
+      queueMicrotask(() => {
+        if (navigationReplayCleanup.current !== cleanup) return;
+        const replay = navigationCells.replay.current;
+        if (!replay) return;
+        navigationCells.replay.current = null;
+        if (navigationCells.successorOf.current === replay.source) {
+          navigationCells.successorOf.current = null;
+        }
+        replay.release();
+      });
+    };
+  }, [navigationCells]);
+  const [, setNavigationRevision] = useState(0);
+  const requestNavigationSuccessor = useCallback(() => {
+    setNavigationRevision((revision) => revision + 1);
+  }, []);
+  const navigationPresentation = commentNavigationPresentation(
+    tab,
+    tabs,
+    showEmptySuggestions,
+  );
+  const navigationAuthority: CommentNavigationAuthority = Object.freeze({
+    mount: navigationMount,
+    session,
+    documentId: session.docId,
+    selectedTab: tab,
+    tabs,
+    canComment: session.canComment,
+    onSelect: setTab,
+    onClose,
+    rowActions: actionCoordinator,
+    presentation: navigationPresentation,
+  });
+  const navigation = createCommentNavigationRender(
+    navigationAuthority,
+    navigationCells,
+    requestNavigationSuccessor,
+  );
+  useLayoutEffect(() => navigation.establish(), [navigation]);
+  const focusOnMountComplete = useRef(false);
+  useEffect(() => {
+    if (!focusOnMount || focusOnMountComplete.current) return;
+    const timer = window.setTimeout(() => {
+      if (navigation.focusSelected()) focusOnMountComplete.current = true;
+    });
+    return () => window.clearTimeout(timer);
+  }, [focusOnMount, navigation]);
+  const {
+    close: closeNavigation,
+    tabs: tabNavigation,
+    emptySuggestions: emptySuggestionsNavigation,
+    keyboard: keyboardNavigation,
+    capturePanel,
+    captureHeader,
+    captureTitle,
+    captureClose,
+    captureNavRow,
+    captureTablist,
+    captureTabs,
+    captureTabpanel,
+    captureEmptyContainer,
+    captureEmptySuggestions,
+    onPanelClickCapture,
+    onPanelClick,
+    onPanelFocusCapture,
+    onPanelFocus,
+    onPanelKeyDownCapture,
+    onPanelKeyDown,
+  } = navigation;
 
   return (
     <MentionCandidatesContext.Provider value={mentionValue}>
     <AgentNamesContext.Provider value={agentNamesValue}>
-    <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
-      <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
-        <span className="pane-label">Comments</span>
+    <aside
+      ref={capturePanel}
+      className={navigationPresentation.panelClassName}
+      data-testid={navigationPresentation.panelTestId}
+      onClickCapture={onPanelClickCapture}
+      onClick={onPanelClick}
+      onFocusCapture={onPanelFocusCapture}
+      onFocus={onPanelFocus}
+      onKeyDownCapture={onPanelKeyDownCapture}
+      onKeyDown={onPanelKeyDown}
+    >
+      <div ref={captureHeader} className={navigationPresentation.headerClassName}>
+        <span ref={captureTitle} className={navigationPresentation.titleClassName}>{navigationPresentation.title}</span>
         <button
+          ref={captureClose}
           type="button"
-          className="icon-btn h-8 w-8"
-          onClick={() => {
-            retireCommentRowActions(actionCoordinator);
-            onClose();
-          }}
-          aria-label="Close comments"
+          className={navigationPresentation.closeClassName}
+          onClickCapture={closeNavigation.onClickCapture ?? undefined}
+          onClick={closeNavigation.onClick ?? undefined}
+          aria-label={navigationPresentation.closeLabel}
         >
           <X size={16} />
         </button>
       </div>
-      <div className="flex items-center gap-1 border-b border-line px-3 py-2">
-        <div ref={tablistRef} className="flex min-w-0 flex-1 gap-1" role="tablist" aria-label="Comment lists" aria-orientation="horizontal" onKeyDown={onTablistKeyDown}>
-          {tabs.map((t) => (
+      <div ref={captureNavRow} className={navigationPresentation.navRowClassName}>
+        <div
+          ref={captureTablist}
+          className={navigationPresentation.tablistClassName}
+          role="tablist"
+          aria-label={navigationPresentation.tablistLabel}
+          aria-orientation={navigationPresentation.tablistOrientation}
+          onKeyDownCapture={keyboardNavigation.onKeyDownCapture ?? undefined}
+          onKeyDown={keyboardNavigation.onKeyDown ?? undefined}
+        >
+          {navigationPresentation.tabs.map((t) => {
+            const currentTabNavigation = tabNavigation[t.index]!;
+            return (
             <button
               key={t.id}
+              ref={captureTabs[t.index]}
               type="button"
               role="tab"
-              id={`comments-tab-${t.id}`}
-              aria-selected={tab === t.id}
-              aria-controls="comments-tabpanel"
-              tabIndex={tab === t.id ? 0 : -1}
-              className={cn("rounded-md px-2.5 py-1 text-xs font-medium", tab === t.id ? "bg-surface text-ink shadow-sm ring-1 ring-line" : "text-ink-3 hover:text-ink")}
-              onClick={() => setTab(t.id)}
-              onFocus={() => setTab(t.id)}
-              data-testid={`comments-tab-${t.id}`}
+              id={t.buttonId}
+              aria-selected={t.selected}
+              aria-controls={navigationPresentation.tabpanelId}
+              tabIndex={t.tabIndex}
+              className={t.className}
+              onClickCapture={currentTabNavigation.onClickCapture ?? undefined}
+              onClick={currentTabNavigation.onClick ?? undefined}
+              onFocusCapture={currentTabNavigation.onFocusCapture ?? undefined}
+              onFocus={currentTabNavigation.onFocus ?? undefined}
+              data-testid={t.testId}
             >
               {t.label}
               {t.count > 0 && <span className="ml-1 text-ink-4">{t.count}</span>}
             </button>
-          ))}
+            );
+          })}
         </div>
         {/* Outside the tablist (which holds only tabs): a comment on the whole document, no selection needed (#1025). */}
         {session.canComment && (
@@ -6634,7 +9432,7 @@ export function CommentsPanel({
           </button>
         )}
       </div>
-      <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
+      <div ref={captureTabpanel} className={navigationPresentation.tabpanelClassName} role="tabpanel" id={navigationPresentation.tabpanelId} aria-labelledby={navigationPresentation.tabpanelLabelledBy}>
         {tab !== "suggestions" && reviewsError && (
           <div className="flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="reviews-error">
             <span className="min-w-0 flex-1">{reviewsLoaded ? "Review details may be out of date." : "Couldn’t load review details."}</span>
@@ -6699,8 +9497,19 @@ export function CommentsPanel({
           (open.length === 0 && !pending && reviewsLoaded ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
               {suggestionCount > 0 && (
-                <span className="mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3" data-testid="comments-empty-suggestions">
-                  <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={() => setTab("suggestions")} data-testid="comments-empty-suggestions-button">
+                <span
+                  ref={captureEmptyContainer ?? undefined}
+                  className={navigationPresentation.emptySuggestions!.containerClassName}
+                  data-testid={navigationPresentation.emptySuggestions!.containerTestId}
+                >
+                  <button
+                    ref={captureEmptySuggestions ?? undefined}
+                    type="button"
+                    className={navigationPresentation.emptySuggestions!.buttonClassName}
+                    onClickCapture={emptySuggestionsNavigation!.onClickCapture ?? undefined}
+                    onClick={emptySuggestionsNavigation!.onClick ?? undefined}
+                    data-testid={navigationPresentation.emptySuggestions!.buttonTestId}
+                  >
                     <Sparkles size={13} /> {suggestionCount === 1 ? "1 suggestion" : `${suggestionCount} suggestions`} waiting <ArrowRight size={13} />
                   </button>
                 </span>
