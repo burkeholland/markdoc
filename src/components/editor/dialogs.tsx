@@ -652,6 +652,7 @@ const IMAGE_HAS_INSTANCE = Function.prototype[Symbol.hasInstance];
 const IMAGE_ARRAY_INCLUDES = Array.prototype.includes;
 const IMAGE_HAS_OWN = Object.prototype.hasOwnProperty;
 const IMAGE_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const IMAGE_DEFINE_PROPERTY = Object.defineProperty;
 const IMAGE_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const IMAGE_OWN_KEYS = Reflect.ownKeys;
 const IMAGE_WEAK_MAP_DELETE = WeakMap.prototype.delete;
@@ -660,6 +661,9 @@ const IMAGE_WEAK_MAP_SET = WeakMap.prototype.set;
 const IMAGE_SET_ADD = Set.prototype.add;
 const IMAGE_SET_DELETE = Set.prototype.delete;
 const IMAGE_SET_FOR_EACH = Set.prototype.forEach;
+const IMAGE_WEAK_SET_ADD = WeakSet.prototype.add;
+const IMAGE_WEAK_SET_DELETE = WeakSet.prototype.delete;
+const IMAGE_WEAK_SET_HAS = WeakSet.prototype.has;
 
 function imageUploadErrorText(error: unknown) {
   try {
@@ -990,12 +994,24 @@ interface ImageNativeSubmitIntrinsics {
   readonly composedPath: (event: Event) => EventTarget[];
   readonly submitter: (event: Event) => HTMLElement | null;
   readonly preventDefault: (event: Event) => boolean;
+  readonly externalPreventionAttempted: (event: Event) => boolean;
   readonly capturePublicSurface: (event: Event) => boolean;
   readonly publicSurfaceIsCanonical: (event: Event) => boolean;
   readonly releasePublicSurface: (event: Event) => void;
   readonly propagationStopped: (event: Event) => boolean;
   readonly stopImmediatePropagation: (event: Event) => void;
 }
+
+interface ImageNativeSubmitCancellationMonitor {
+  readonly wrappedPreventDefault: (this: Event) => void;
+  readonly preventDefault: (event: Event) => boolean;
+  readonly externalPreventionAttempted: (event: Event) => boolean;
+}
+
+const IMAGE_NATIVE_SUBMIT_CANCELLATION_MONITORS = new WeakMap<
+  object,
+  ImageNativeSubmitCancellationMonitor
+>();
 
 interface ImageReplayValidation {
   readonly complete: () => boolean;
@@ -1197,6 +1213,14 @@ class ImagePublicationCoordinator {
   rejectReplay(publication: ImagePublication) {
     this.#rejectedReplayAuthority = publication.authority;
     this.abandonReplay(publication);
+  }
+
+  releaseTerminal(publication: ImagePublication) {
+    if (this.#active === publication) this.#active = null;
+    this.abandonReplay(publication);
+    if (this.#rejectedReplayAuthority === publication.authority) {
+      this.#rejectedReplayAuthority = null;
+    }
   }
 
   acceptsAuthority(authority: ImageAuthority) {
@@ -1487,7 +1511,7 @@ class ImageDismissalListener {
     const finalizer = (event: Event) => {
       if (event !== proof.nativeEvent) return;
       const applicationEligible =
-        !intrinsics.defaultPrevented(event) &&
+        !intrinsics.externalPreventionAttempted(event) &&
         proof.publication !== null;
       intrinsics.preventDefault(event);
       IMAGE_APPLY(IMAGE_WEAK_MAP_SET, this.#submitFinalizations, [
@@ -1539,6 +1563,10 @@ class ImageDismissalListener {
 
   clearSubmit() {
     this.releaseSubmit();
+  }
+
+  releaseTerminal(form: HTMLFormElement) {
+    if (this.#submitForm === form) this.release();
   }
 
   retainSubmitSuppression(form: HTMLFormElement | null) {
@@ -2522,6 +2550,91 @@ function imageNativeRelationPropertyMatches(
   );
 }
 
+function captureImageNativeSubmitCancellationMonitor(
+  ownerWindow: Window & typeof globalThis,
+): ImageNativeSubmitCancellationMonitor | null {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const descriptor = IMAGE_APPLY(
+    IMAGE_GET_OWN_PROPERTY_DESCRIPTOR,
+    null,
+    [eventPrototype, "preventDefault"],
+  ) as PropertyDescriptor | undefined;
+  const existing = IMAGE_APPLY(
+    IMAGE_WEAK_MAP_GET,
+    IMAGE_NATIVE_SUBMIT_CANCELLATION_MONITORS,
+    [eventPrototype],
+  ) as ImageNativeSubmitCancellationMonitor | undefined;
+  if (
+    existing &&
+    descriptor?.value === existing.wrappedPreventDefault
+  ) {
+    return existing;
+  }
+  const nativePreventDefault = descriptor?.value;
+  const defaultPrevented = IMAGE_APPLY(
+    IMAGE_GET_OWN_PROPERTY_DESCRIPTOR,
+    null,
+    [eventPrototype, "defaultPrevented"],
+  )?.get;
+  if (
+    typeof nativePreventDefault !== "function" ||
+    typeof defaultPrevented !== "function"
+  ) {
+    return null;
+  }
+  const internalEvents = new WeakSet<Event>();
+  const externalEvents = new WeakSet<Event>();
+  const wrappedPreventDefault = function (this: Event) {
+    if (
+      !IMAGE_APPLY(IMAGE_WEAK_SET_HAS, internalEvents, [this])
+    ) {
+      IMAGE_APPLY(IMAGE_WEAK_SET_ADD, externalEvents, [this]);
+    }
+    IMAGE_APPLY(nativePreventDefault, this, []);
+  };
+  const monitor: ImageNativeSubmitCancellationMonitor = Object.freeze({
+    wrappedPreventDefault,
+    preventDefault: (event: Event) => {
+      IMAGE_APPLY(IMAGE_WEAK_SET_ADD, internalEvents, [event]);
+      try {
+        IMAGE_APPLY(wrappedPreventDefault, event, []);
+      } finally {
+        IMAGE_APPLY(IMAGE_WEAK_SET_DELETE, internalEvents, [event]);
+      }
+      return IMAGE_APPLY(defaultPrevented, event, []) as boolean;
+    },
+    externalPreventionAttempted: (event: Event) =>
+      IMAGE_APPLY(IMAGE_WEAK_SET_HAS, externalEvents, [event]) as boolean,
+  });
+  try {
+    IMAGE_APPLY(IMAGE_DEFINE_PROPERTY, null, [
+      eventPrototype,
+      "preventDefault",
+      { ...descriptor, value: wrappedPreventDefault },
+    ]);
+  } catch {
+    return Object.freeze({
+      wrappedPreventDefault: nativePreventDefault,
+      preventDefault: (event: Event) => {
+        IMAGE_APPLY(nativePreventDefault, event, []);
+        return IMAGE_APPLY(defaultPrevented, event, []) as boolean;
+      },
+      externalPreventionAttempted: () => true,
+    });
+  }
+  IMAGE_APPLY(IMAGE_WEAK_MAP_SET, IMAGE_NATIVE_SUBMIT_CANCELLATION_MONITORS, [
+    eventPrototype,
+    monitor,
+  ]);
+  return monitor;
+}
+
+if (typeof window !== "undefined") {
+  captureImageNativeSubmitCancellationMonitor(
+    window as Window & typeof globalThis,
+  );
+}
+
 function captureImageNativeSubmitOwnerRealm(
   node: Node,
 ): ImageNativeSubmitOwnerRealm | null {
@@ -2954,6 +3067,9 @@ function captureImageNativeSubmitIntrinsics(
   const EventConstructor = ownerWindow.Event;
   const SubmitEventConstructor = ownerWindow.SubmitEvent;
   const eventPrototype = EventConstructor.prototype;
+  const cancellationMonitor =
+    captureImageNativeSubmitCancellationMonitor(ownerWindow);
+  if (!cancellationMonitor) return null;
   const getOwnPropertyDescriptor = (
     target: object,
     property: PropertyKey,
@@ -3144,10 +3260,9 @@ function captureImageNativeSubmitIntrinsics(
       isSubmitEvent(event) && submitter
         ? (IMAGE_APPLY(submitter, event, []) as HTMLElement | null)
         : null,
-    preventDefault: (event: Event) => {
-      IMAGE_APPLY(preventDefault, event, []);
-      return defaultPrevented(event);
-    },
+    preventDefault: cancellationMonitor.preventDefault,
+    externalPreventionAttempted:
+      cancellationMonitor.externalPreventionAttempted,
     capturePublicSurface: (event: Event) => {
       IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, publicSurfaces, [event]);
       const prototypeChain = canonicalChain(event);
@@ -3895,6 +4010,7 @@ function createImagePresentation(
   ) => void,
   resumeUploadSettlement: () => void,
   abandonDeferredUpload: () => boolean,
+  releaseTerminalResources: (publication: ImagePublication) => void,
   afterClose: ImageAfterCloseAuthority,
   completeClose: (closer: object) => void,
 ): ImagePresentation {
@@ -3905,6 +4021,12 @@ function createImagePresentation(
   let successorRequested = false;
   let partialRecoveryQueued = false;
   let portalSettlement = 0;
+  let commitTimer:
+    | {
+        readonly ownerWindow: Window & typeof globalThis;
+        readonly id: number;
+      }
+    | null = null;
   let replayRejected = false;
   let dismissal: ImageDismissalProof | null = null;
   let dismissalTimer: number | null = null;
@@ -3927,14 +4049,24 @@ function createImagePresentation(
       dismissalTimer = null;
     }
   };
+  const clearCommitFinish = () => {
+    portalSettlement += 1;
+    if (commitTimer) {
+      commitTimer.ownerWindow.clearTimeout(commitTimer.id);
+      commitTimer = null;
+    }
+  };
   const scheduleCommitFinish = (runtime: ImagePublicationRuntime | null) => {
     if (!runtime) return;
-    const settlement = ++portalSettlement;
+    clearCommitFinish();
+    const settlement = portalSettlement;
     const ownerWindow = runtime.publication.ownerDocument.defaultView;
     if (ownerWindow) {
-      ownerWindow.setTimeout(() => {
+      const id = ownerWindow.setTimeout(() => {
+        if (commitTimer?.id === id) commitTimer = null;
         if (settlement === portalSettlement) runtime.finishCommit();
       }, 0);
+      commitTimer = { ownerWindow, id };
     } else {
       queueMicrotask(() => {
         if (settlement === portalSettlement) runtime.finishCommit();
@@ -4597,6 +4729,9 @@ function createImagePresentation(
     }
     else afterClose.cancel();
     publication.retire();
+    coordinator.releaseTerminal(publication);
+    clearCommitFinish();
+    releaseTerminalResources(publication);
     authority.onOpenChange(false);
   };
   const onCancelClick = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -4706,6 +4841,7 @@ function createImagePresentation(
       ? provenance.nativeEvent.defaultPrevented(nativeEvent)
       : false;
     if (!nativeEvent) return;
+    if (!provenance.nativeEvent.preventDefault(nativeEvent)) return;
     let proofPublication: ImagePublication | null = null;
     const runtime = lastRuntime;
     if (runtime) {
@@ -4796,9 +4932,7 @@ function createImagePresentation(
       return;
     }
     clearDismissal();
-    afterClose.cancel();
-    proof.publication.retire();
-    authority.onOpenChange(false);
+    closeCurrent(proof.publication, false);
   };
   const settlePortal = () => {
     let cleanup: void | (() => void) = undefined;
@@ -4953,6 +5087,27 @@ export const ImageDialog = memo(function ImageDialog({
     const deferred = deferredUploadOutcome.get();
     return deferred ? abandonUploadOwner(deferred.owner) : false;
   }, [abandonUploadOwner, deferredUploadOutcome]);
+  const releaseTerminalResources = useCallback(
+    (publication: ImagePublication) => {
+      const owner = activeUpload.get();
+      if (
+        owner &&
+        (owner.origin === publication ||
+          imageUploadMatchesAuthority(owner, publication.authority))
+      ) {
+        activeUpload.set(null);
+        const deferred = deferredUploadOutcome.get();
+        if (deferred?.owner === owner) deferredUploadOutcome.set(null);
+        setDraft((current) =>
+          current.visit === owner.visit && current.upload === owner
+            ? nextImageDraft(current, { upload: null })
+            : current,
+        );
+      }
+      dismissalListener.releaseTerminal(publication.dom.form);
+    },
+    [activeUpload, deferredUploadOutcome, dismissalListener],
+  );
   const leaseUpload = useCallback(
     (owner: ImageUploadOwner): ImageUploadLease | null => {
       const publication = coordinator.active();
@@ -5328,6 +5483,7 @@ export const ImageDialog = memo(function ImageDialog({
         startUpload,
         resumeUploadSettlement,
         abandonDeferredUpload,
+        releaseTerminalResources,
         afterClose,
         completeClose,
       ),
@@ -5341,6 +5497,7 @@ export const ImageDialog = memo(function ImageDialog({
       dismissalListener,
       latestAuthority,
       requestSuccessor,
+      releaseTerminalResources,
       resumeUploadSettlement,
       startUpload,
     ],

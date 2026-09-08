@@ -21,6 +21,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
 
+const PRE_RENDER_EVENT_PREVENT_DEFAULT = Event.prototype.preventDefault;
+
 interface UploadResult {
   url: string;
   alt?: string;
@@ -272,6 +274,104 @@ afterEach(async () => {
 });
 
 describe("ImageDialog upload lifecycle", () => {
+  it("releases a canceled pending upload and its native form guard", async () => {
+    const pending = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(pending.promise)
+      .mockReturnValueOnce(retry.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(
+      <Harness onUpload={onUpload} onSubmit={onSubmit} />,
+    );
+    const selected = new File(["selected"], "selected.png", {
+      type: "image/png",
+    });
+    choose(selected);
+    const oldForm = imageForm();
+    const oldInput = screen.getByTestId("image-file");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const staleListener = vi.fn();
+    oldForm.addEventListener("submit", staleListener, { once: true });
+    const staleSubmit = submitEvent();
+    expect(oldForm.dispatchEvent(staleSubmit)).toBe(true);
+    expect(staleSubmit.defaultPrevented).toBe(false);
+    expect(staleListener).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    const readUrl = vi.fn(() => "/api/assets/stale");
+    const staleResult = {} as UploadResult;
+    Object.defineProperty(staleResult, "url", { get: readUrl });
+    await act(async () => {
+      pending.resolve(staleResult);
+      await pending.promise;
+    });
+    expect(readUrl).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open image dialog" }),
+    );
+    const currentInput = screen.getByTestId("image-file");
+    expect(currentInput).not.toBe(oldInput);
+    const currentFile = new File(["current"], "current.png", {
+      type: "image/png",
+    });
+    choose(currentFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(currentFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/current" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/current",
+    );
+  });
+
+  it("releases an inserted form guard and reopens with distinct controls", async () => {
+    const onSubmit = vi.fn();
+    await renderStrictRoot(
+      <Harness onUpload={vi.fn()} onSubmit={onSubmit} />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/first.png" },
+    });
+    await act(async () => {});
+    const oldForm = imageForm();
+    const oldInput = screen.getByTestId("image-url");
+    const firstSubmit = submitEvent();
+    expect(oldForm.dispatchEvent(firstSubmit)).toBe(false);
+    expect(firstSubmit.defaultPrevented).toBe(true);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const staleListener = vi.fn();
+    oldForm.addEventListener("submit", staleListener, { once: true });
+    const staleSubmit = submitEvent();
+    expect(oldForm.dispatchEvent(staleSubmit)).toBe(true);
+    expect(staleSubmit.defaultPrevented).toBe(false);
+    expect(staleListener).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open image dialog" }),
+    );
+    expect(screen.getByTestId("image-url")).not.toBe(oldInput);
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/second.png" },
+    });
+    await act(async () => {});
+    expect(imageForm().dispatchEvent(submitEvent())).toBe(false);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      "https://example.com/second.png",
+      "",
+    );
+  });
+
   it("suppresses synchronous duplicate choices and blocks insertion of an older URL while pending", async () => {
     const pending = deferred<UploadResult>();
     const first = new File(["first"], "first.png", { type: "image/png" });
@@ -2446,16 +2546,9 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       });
       await act(async () => {});
       const form = imageForm();
-      const intrinsicPreventDefault = Object.getOwnPropertyDescriptor(
-        Event.prototype,
-        "preventDefault",
-      )?.value;
-      if (typeof intrinsicPreventDefault !== "function") {
-        throw new Error("Event.preventDefault intrinsic is unavailable");
-      }
       const veto = vi.fn((event: Event) => {
         if (kind === "public") event.preventDefault();
-        else Reflect.apply(intrinsicPreventDefault, event, []);
+        else Reflect.apply(PRE_RENDER_EVENT_PREVENT_DEFAULT, event, []);
       });
       const later = vi.fn();
       form.addEventListener("submit", veto, { capture: true, once: true });
@@ -2523,6 +2616,61 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       currentClose,
       currentSubmit,
       "https://example.com/form-stop-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("cancels before form-capture immediate propagation stop", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/form-immediate-stop.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const intrinsicStopImmediate = Object.getOwnPropertyDescriptor(
+      Event.prototype,
+      "stopImmediatePropagation",
+    )?.value;
+    if (typeof intrinsicStopImmediate !== "function") {
+      throw new Error(
+        "Event.stopImmediatePropagation intrinsic is unavailable",
+      );
+    }
+    const stop = vi.fn((event: Event) => {
+      Reflect.apply(intrinsicStopImmediate, event, []);
+    });
+    const later = vi.fn();
+    form.addEventListener("submit", stop, { capture: true, once: true });
+    form.addEventListener("submit", later, { once: true });
+    const submit = submitEvent();
+    let dispatched = true;
+    act(() => {
+      dispatched = form.dispatchEvent(submit);
+    });
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/form-immediate-stop-recovery.png",
     );
     expect(staleClose).not.toHaveBeenCalled();
     expect(staleSubmit).not.toHaveBeenCalled();
