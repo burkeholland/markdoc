@@ -589,9 +589,29 @@ class PanelPublicationCoordinator {
 
     const pendingReplay = this.#replay;
     if (pendingReplay) {
-      const sameAuthority =
-        candidate.presentation.revision === pendingReplay.source.presentation.revision + 1 &&
-        panelPresentationsMatch(pendingReplay.source.presentation, candidate.presentation);
+      const revisionMatches =
+        candidate.presentation.revision ===
+        pendingReplay.source.presentation.revision + 1;
+      const presentationsMatch = panelPresentationsMatch(
+        pendingReplay.source.presentation,
+        candidate.presentation,
+      );
+      const sameAuthority = revisionMatches && presentationsMatch;
+      if (sameAuthority) {
+        pendingReplay.source.guard?.acceptReactCommit(
+          [
+            candidate.url.element,
+            ...candidate.choices.map((choice) => choice.element),
+            candidate.docs.element,
+          ].filter((input): input is HTMLInputElement => input !== null),
+          () =>
+            factsAreCurrent() &&
+            domIsExact() &&
+            pendingReplay.dom.node === root &&
+            panelPlacementMatches(root, pendingReplay.placement) &&
+            panelDomMatches(pendingReplay.dom),
+        );
+      }
       const exactReplay =
         sameAuthority &&
         this.#acceptsSuccessorOf(pendingReplay.source) &&
