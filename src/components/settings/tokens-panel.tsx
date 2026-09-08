@@ -857,17 +857,29 @@ function tokenRenameEscapeMatches(
 class TokenRenameMutationHistory {
   private dirty = false;
   private readonly observer: MutationObserver;
+  private settlingInput: Readonly<{
+    input: HTMLInputElement;
+    name: string | null;
+  }> | null;
 
   constructor(
     ownerWindow: Window & typeof globalThis,
     root: HTMLElement,
     placement: readonly SecretNoticePlacement[],
+    settlingInput: HTMLInputElement | null,
   ) {
+    this.settlingInput = settlingInput
+      ? Object.freeze({
+        input: settlingInput,
+        name: settlingInput.getAttribute("name"),
+      })
+      : null;
     this.observer = new ownerWindow.MutationObserver((records) => {
-      if (records.length > 0) this.dirty = true;
+      this.record(records);
     });
     this.observer.observe(root, {
       attributes: true,
+      attributeOldValue: true,
       childList: true,
       characterData: true,
       subtree: true,
@@ -882,13 +894,33 @@ class TokenRenameMutationHistory {
   }
 
   readonly isPristine = () => {
-    if (this.observer.takeRecords().length > 0) this.dirty = true;
+    this.record(this.observer.takeRecords());
     return !this.dirty;
   };
 
   readonly disconnect = () => {
+    this.settlingInput = null;
     this.observer.disconnect();
   };
+
+  private record(records: MutationRecord[]) {
+    if (records.length === 0) return;
+    const settling = this.settlingInput;
+    this.settlingInput = null;
+    if (
+      settling
+      && records.length === 2
+      && settling.input.getAttribute("name") === settling.name
+      && records.every((record, index) =>
+        record.type === "attributes"
+        && record.target === settling.input
+        && record.attributeName === "name"
+        && record.oldValue === (index === 0 ? settling.name : ""))
+    ) {
+      return;
+    }
+    this.dirty = true;
+  }
 }
 
 function exactSecretEventPath(
@@ -1769,6 +1801,24 @@ function SecretNotice({
       </div>
     </div>
   );
+}
+
+interface TokenRenameLayoutCycle {
+  readonly setup: () => void;
+  readonly cleanup: () => void;
+}
+
+function TokenRenameLayoutBoundary({
+  cycle,
+}: {
+  cycle: TokenRenameLayoutCycle;
+}) {
+  const [mountCycle] = useState(() => cycle);
+  useLayoutEffect(() => {
+    mountCycle.setup();
+    return mountCycle.cleanup;
+  }, [mountCycle]);
+  return null;
 }
 
 /** Closing a host dialog unmounts all transient state, including late creation responses. */
@@ -2870,11 +2920,13 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     readonly released: Set<HTMLElement>;
     readonly rebound: Set<HTMLElement>;
     successor: RowCandidate | null;
+    layoutRetired: boolean;
     invalid: boolean;
   }
   type CompletedRenameRefReplay = Readonly<{
     identity: symbol;
     replayIdentity: symbol;
+    source: RowCandidate;
     target: RowCandidate;
     bindings: readonly RenameRefExpectation[];
   }>;
@@ -2889,6 +2941,12 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   }>;
   type FocusIntent = Readonly<{ mount: symbol; visit: RenameVisit; tokenId: string }>;
   type InputOverride = Readonly<{ input: HTMLInputElement; value: string }>;
+  type ControlledInputUpdate = Readonly<{
+    commit: RowCommit;
+    visit: RenameVisit;
+    input: HTMLInputElement;
+    value: string;
+  }>;
 
   const slot = <T extends HTMLElement>(role: RowElementRole): ElementSlot<T> => ({
     identity: Symbol(`token-row-${role}-slot`),
@@ -2909,6 +2967,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const partialRenameRefElements = useRef(new WeakSet<HTMLElement>());
   const renameRefReplay = useRef<RenameRefReplay | null>(null);
   const completedRenameRefReplay = useRef<CompletedRenameRefReplay | null>(null);
+  const controlledInputUpdate = useRef<ControlledInputUpdate | null>(null);
   const saveOwner = useRef<SaveOwner | null>(null);
   const returnFocus = useRef<FocusIntent | null>(null);
   const focusedRename = useRef<{ visit: RenameVisit; input: HTMLInputElement } | null>(null);
@@ -3049,6 +3108,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       .filter((binding): binding is RenameRefExpectation => binding !== null);
     if (
       replay.invalid
+      || !replay.layoutRetired
       || !renameRefReplayComplete(replay)
       || bindings.length !== replay.expected.length
       || replay.expected.some(({ role, element }) => target[role].element !== element)
@@ -3059,6 +3119,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     const completion = Object.freeze<CompletedRenameRefReplay>({
       identity: Symbol("completed-token-rename-ref-replay"),
       replayIdentity: replay.identity,
+      source: replay.candidate,
       target,
       bindings: Object.freeze(bindings),
     });
@@ -3106,6 +3167,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         released: new Set(),
         rebound: new Set(),
         successor: null,
+        layoutRetired: false,
         invalid: expected.length !== 5,
       };
       renameRefReplay.current = replay;
@@ -3113,8 +3175,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       queueMicrotask(() => {
         const current = renameRefReplay.current;
         if (current?.identity !== replayIdentity) return;
-        if (renameRefReplayComplete(current)) renameRefReplay.current = null;
-        else quarantineRenameRefReplay(current);
+        quarantineRenameRefReplay(current);
       });
     }
     const expectedRole = replay?.expected.find(({ role }) => role === owner.role);
@@ -3167,7 +3228,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       }
       if (replay.invalid) {
         quarantineRenameRefReplay(replay);
-      } else if (renameRefReplayComplete(replay)) {
+      } else if (replay.layoutRetired && renameRefReplayComplete(replay)) {
         completeRenameRefReplay(replay);
       }
     }
@@ -3538,7 +3599,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         )
         && event.defaultPrevented === false
         && event.repeat === false
-        && event.isComposing === false
+        && (event.isComposing === false || typeof event.isComposing === "undefined")
         && event.altKey === false
         && event.ctrlKey === false
         && event.metaKey === false
@@ -3599,7 +3660,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       )
       && domIsExact(commit);
   };
-  const establishRenameEscape = (commit: RowCommit) => {
+  const establishRenameEscape = (
+    commit: RowCommit,
+    settlingInput: HTMLInputElement | null = null,
+  ) => {
     const visit = commit.facts.renameVisit;
     const draft = commit.facts.draft;
     const input = commit.input;
@@ -3629,6 +3693,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       ownerWindow,
       commit.row,
       placement,
+      settlingInput,
     );
     const authority: RenameEscapeAuthority = {
       identity: Symbol("token-rename-escape-authority"),
@@ -3851,6 +3916,15 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     claimedEvents.current.add(event);
     claimedEvents.current.add(nativeEvent);
     consumedCommits.current.add(commit);
+    const visit = commit.facts.renameVisit;
+    if (visit) {
+      controlledInputUpdate.current = Object.freeze({
+        commit,
+        visit,
+        input,
+        value: next,
+      });
+    }
     return { commit, next };
   };
   const claimSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -3899,6 +3973,76 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     returnFocus.current = Object.freeze({ mount, visit, tokenId: commit.facts.token.id });
     setRenameDraft((current) => current?.visit === visit ? null : current);
   };
+  const retireRenameLayout = (value: RowCandidate) => {
+    retireCandidate(value);
+    const replay = renameRefReplay.current;
+    if (!replay || replay.candidate !== value) return;
+    const row = replay.expected.find(({ role }) => role === "row");
+    if (
+      replay.invalid
+      || replay.layoutRetired
+      || replay.expected.length !== 5
+      || !row
+      || row.ownerIdentity !== value.row.identity
+    ) {
+      quarantineRenameRefReplay(replay);
+      return;
+    }
+    if (value.row.element === row.element) {
+      if (replay.released.has(row.element) || replay.rebound.has(row.element)) {
+        quarantineRenameRefReplay(replay);
+        return;
+      }
+      replay.released.add(row.element);
+      replay.rebound.add(row.element);
+    } else if (
+      value.row.element !== null
+      || !replay.released.has(row.element)
+      || replay.rebound.has(row.element)
+    ) {
+      quarantineRenameRefReplay(replay);
+      return;
+    }
+    replay.layoutRetired = true;
+    if (renameRefReplayComplete(replay)) completeRenameRefReplay(replay);
+  };
+  const recoverRenameLayout = (value: RowCandidate): RowCommit | null => {
+    const completion = completedRenameRefReplay.current;
+    const replayResult = consumeCompletedRenameRefReplay(value);
+    if (replayResult === "mismatched") return null;
+    const existing = currentCommit(value);
+    if (existing) return existing;
+    const commit = buildCommit();
+    if (
+      !commit
+      || commit.candidate !== value
+      || !factsAreCurrent(commit.facts)
+      || activeCommit.current !== null
+    ) {
+      return null;
+    }
+    const inputUpdate = controlledInputUpdate.current;
+    const settlingInput = replayResult === "matched"
+      && completion
+      && inputUpdate
+      && inputUpdate.commit.candidate === completion.source
+      && completion.bindings.some(({ role, element }) =>
+        role === "input" && element === inputUpdate.input)
+      && inputUpdate.visit === commit.facts.renameVisit
+      && inputUpdate.value === commit.facts.draft
+      ? inputUpdate.input
+      : null;
+    if (inputUpdate && (settlingInput || inputUpdate.commit.candidate === value)) {
+      controlledInputUpdate.current = null;
+    }
+    activeCommit.current = commit;
+    establishRenameEscape(commit, settlingInput);
+    return commit;
+  };
+  const renameLayoutCycle = Object.freeze<TokenRenameLayoutCycle>({
+    setup: () => recoverRenameLayout(candidate),
+    cleanup: () => retireRenameLayout(candidate),
+  });
 
   useLayoutEffect(() => {
     activeMount.current = mount;
@@ -3910,21 +4054,22 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       if (renameEscape?.mount === mount) retireRenameEscape(renameEscape);
       const replay = renameRefReplay.current;
       if (replay?.candidate.facts.mount === mount) quarantineRenameRefReplay(replay);
+      controlledInputUpdate.current = null;
       pendingRenameEscapes.current.clear();
       if (saveOwner.current?.mount === mount) saveOwner.current = null;
       if (returnFocus.current?.mount === mount) returnFocus.current = null;
     };
   }, [mount]);
   useLayoutEffect(() => {
-    retireCandidate(candidate);
-    const replaySetup = consumeCompletedRenameRefReplay(candidate);
-    if (replaySetup === "mismatched") return;
-    const commit = buildCommit();
+    const commit = recoverRenameLayout(candidate);
     if (!commit || !factsAreCurrent(facts)) return;
-    activeCommit.current = commit;
-    establishRenameEscape(commit);
     return () => {
-      if (activeCommit.current === commit) retireCandidate(candidate);
+      if (
+        activeCommit.current === commit
+        || renameRefReplay.current?.candidate === candidate
+      ) {
+        retireRenameLayout(candidate);
+      }
       else {
         const renameEscape = activeRenameEscape.current;
         if (renameEscape?.commit === commit) retireRenameEscape(renameEscape);
@@ -4019,7 +4164,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
             }
           }} aria-label={facts.revokeLabel} data-testid="token-revoke">Revoke</button>
       </div>}
-      {facts.renameVisit && <form ref={(element) => bindElement(candidate.form, element)} className="flex min-w-0 flex-col gap-2"
+      {facts.renameVisit && <><form ref={(element) => bindElement(candidate.form, element)} className="flex min-w-0 flex-col gap-2"
         onKeyDown={deliverRenameEscape}
         onSubmit={(event) => {
           const commit = claimSubmit(event);
@@ -4070,7 +4215,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
               if (commit) closeRename(commit);
             }}>Cancel rename</button>
         </div>
-      </form>}
+      </form><TokenRenameLayoutBoundary cycle={renameLayoutCycle} /></>}
       <details ref={(element) => bindElement(candidate.details, element)} className="min-w-0 text-xs text-ink-3">
         <summary className="cursor-pointer">Details &amp; agent requests</summary>
         <div ref={(element) => bindElement(candidate.detailsBody, element)} className="mt-2 flex min-w-0 flex-col gap-2 break-words">

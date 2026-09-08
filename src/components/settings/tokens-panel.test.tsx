@@ -747,6 +747,7 @@ describe("Settings → Agents: token rename Escape authority", () => {
 
   it.each([
     "restored input attribute",
+    "restored input name after draft",
     "restored form order",
     "replaced and restored input",
   ] as const)("retires %s history with no prevention, state, or request work", async (mutation) => {
@@ -755,6 +756,10 @@ describe("Settings → Agents: token rename Escape authority", () => {
     if (mutation === "restored input attribute") {
       rename.input.setAttribute("data-transient", "true");
       rename.input.removeAttribute("data-transient");
+    } else if (mutation === "restored input name after draft") {
+      fireEvent.change(rename.input, { target: { value: "Unsaved agent name" } });
+      rename.input.setAttribute("name", "transient");
+      rename.input.removeAttribute("name");
     } else if (mutation === "restored form order") {
       const guidance = rename.form.children.item(1);
       if (!guidance) throw new Error("The rename guidance is missing");
