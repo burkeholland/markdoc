@@ -46,7 +46,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 import { ApiError } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
-import { Dashboard, TemplateGrid } from "./dashboard";
+import { Dashboard, TemplateGrid, TrashView } from "./dashboard";
 
 const SEARCH_DEBOUNCE_MS = 250;
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
@@ -141,6 +141,65 @@ function TemplateGridBoundary({
     </>
   ) : (
     <button type="button" data-testid="grid-replacement">Replacement control</button>
+  );
+}
+
+interface TrashViewBoundaryProps {
+  documents: DocumentSummaryDto[] | null;
+  busy?: string | null;
+  loading?: boolean;
+  error?: string | null;
+  canRetry?: (error: string) => boolean;
+  canAct?: (document: DocumentSummaryDto, kind: "restore" | "purge") => boolean;
+  onRetry: () => void;
+  onRestore: (document: DocumentSummaryDto) => void;
+  onPurge: (document: DocumentSummaryDto) => void;
+  present?: boolean;
+  mountKey?: string;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup: () => void;
+}
+
+function TrashViewBoundary({
+  documents,
+  busy = null,
+  loading = false,
+  error = null,
+  canRetry,
+  canAct,
+  onRetry,
+  onRestore,
+  onPurge,
+  present = true,
+  mountKey = "trash",
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: TrashViewBoundaryProps) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  return present ? (
+    <>
+      <TrashView
+        key={mountKey}
+        documents={documents}
+        busy={busy}
+        loading={loading}
+        error={error}
+        canRetry={canRetry}
+        canAct={canAct}
+        onRetry={onRetry}
+        onRestore={onRestore}
+        onPurge={onPurge}
+      />
+      <PassiveCleanupProbe key={`${mountKey}:${boundary}`} onCleanup={onPassiveCleanup} />
+    </>
+  ) : (
+    <button type="button" data-testid="trash-replacement">
+      Replacement control
+    </button>
   );
 }
 
@@ -243,6 +302,8 @@ type CapturedClickEvent = {
 
 type CapturedClick = (event?: unknown) => void;
 type CapturedTemplateClick = (event: CapturedClickEvent) => void;
+type CapturedReactClick = (event: unknown) => void;
+type CapturedReactRef = (node: Element | null) => void;
 
 function captureClick(element: HTMLElement): CapturedClick {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
@@ -258,6 +319,66 @@ function captureTemplateClick(element: HTMLButtonElement): CapturedTemplateClick
   const props = (element as unknown as Record<string, { onClick?: CapturedTemplateClick } | undefined>)[propsKey];
   if (!props?.onClick) throw new Error("The template button did not have an onClick handler");
   return props.onClick;
+}
+
+function reactPropsEntry(element: Element): {
+  key: string;
+  record: Record<string, { onClick?: CapturedReactClick; ref?: CapturedReactRef }>;
+  props: { onClick?: CapturedReactClick; ref?: CapturedReactRef };
+} {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the element");
+  const record = element as unknown as Record<string, { onClick?: CapturedReactClick; ref?: CapturedReactRef }>;
+  return { key: propsKey, record, props: record[propsKey]! };
+}
+
+function reactProps(element: Element): { onClick?: CapturedReactClick; ref?: CapturedReactRef } {
+  return reactPropsEntry(element).props;
+}
+
+function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
+  const onClick = reactProps(element).onClick;
+  if (!onClick) throw new Error("The button did not have an onClick handler");
+  return onClick;
+}
+
+function captureReactRef(element: Element): CapturedReactRef {
+  const ref = reactProps(element).ref;
+  if (!ref) throw new Error("The element did not have a callback ref");
+  return ref;
+}
+
+function interceptReactClick(
+  element: HTMLButtonElement,
+  invoke: (original: CapturedReactClick, event: unknown) => void,
+): () => void {
+  const { key, record, props } = reactPropsEntry(element);
+  const original = props.onClick;
+  if (!original) throw new Error("The button did not have an onClick handler");
+  const intercepted = { ...props, onClick: (event: unknown) => invoke(original, event) };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
+
+function directTrashCard(host: HTMLElement, title: string): HTMLLIElement {
+  const heading = Array.from(host.querySelectorAll("h3")).find((candidate) => candidate.textContent === title);
+  const card = heading?.closest<HTMLLIElement>('[data-testid="trash-card"]');
+  if (!card) throw new Error(`Trash card ${title} was not rendered`);
+  return card;
+}
+
+function directTrashButton(host: HTMLElement, title: string, action: "restore-button" | "purge-button"): HTMLButtonElement {
+  const button = directTrashCard(host, title).querySelector<HTMLButtonElement>(`[data-testid="${action}"]`);
+  if (!button) throw new Error(`${action} was not rendered for ${title}`);
+  return button;
+}
+
+function directRetryButton(host: HTMLElement): HTMLButtonElement {
+  const button = host.querySelector<HTMLButtonElement>('[data-testid="trash-error"] button');
+  if (!button) throw new Error("Trash Retry was not rendered");
+  return button;
 }
 
 function templateButton(host: HTMLElement, id: string): HTMLButtonElement {
@@ -2027,6 +2148,648 @@ describe("dashboard star recovery", () => {
     });
 
     expect(console.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("TrashView publication ownership", () => {
+  it("preserves every Trash state and gives genuine Retry, Restore, and Delete clicks their exact callbacks once", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const local = trashedDoc("local-trash", "Local trash");
+    const repository = {
+      ...trashedDoc("repo-trash", "Repository trash"),
+      excerpt: "Repository excerpt",
+      storage: "repo" as const,
+      repoOwner: "acme",
+      repoName: "docs",
+      repoPath: "plans/repository.md",
+    };
+    const onRetry = vi.fn();
+    const onRestore = vi.fn<(document: DocumentSummaryDto) => void>();
+    const onPurge = vi.fn<(document: DocumentSummaryDto) => void>();
+    const canRetry = vi.fn(() => true);
+    const canAct = vi.fn(() => true);
+
+    try {
+      await act(async () => {
+        root.render(
+          <TrashView
+            documents={[local, repository]}
+            busy={null}
+            loading={false}
+            error="Trash service unavailable"
+            canRetry={canRetry}
+            canAct={canAct}
+            onRetry={onRetry}
+            onRestore={onRestore}
+            onPurge={onPurge}
+          />,
+        );
+      });
+
+      expect(host.querySelector('[data-testid="trash-note"]')).toHaveTextContent("Items are deleted forever after 30 days.");
+      expect(host.querySelector('[data-testid="trash-error"]')).toHaveTextContent("Trash service unavailable");
+      expect(Array.from(host.querySelectorAll('[data-testid="trash-card"] h3'), (heading) => heading.textContent)).toEqual([
+        local.title,
+        repository.title,
+      ]);
+      expect(directTrashCard(host, repository.title)).toHaveTextContent(repository.excerpt);
+      expect(directTrashCard(host, repository.title).querySelector('[data-testid="storage-badge"]')).toHaveAttribute(
+        "title",
+        "acme/docs: plans/repository.md",
+      );
+      expect(directTrashCard(host, local.title).querySelector("time")).toHaveAttribute("dateTime", local.deletedAt);
+
+      const restore = directTrashButton(host, local.title, "restore-button");
+      const restoreIntercept = interceptReactClick(restore, (original, event) => {
+        original(event);
+        original(event);
+      });
+      restore.click();
+      restoreIntercept();
+      directTrashButton(host, repository.title, "purge-button").click();
+      directRetryButton(host).click();
+
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenLastCalledWith(local);
+      expect(onPurge).toHaveBeenCalledTimes(1);
+      expect(onPurge).toHaveBeenLastCalledWith(repository);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(canRetry).toHaveBeenCalledTimes(1);
+      expect(canRetry).toHaveBeenLastCalledWith("Trash service unavailable");
+      expect(canAct.mock.calls).toEqual([
+        [local, "restore"],
+        [repository, "purge"],
+      ]);
+
+      await act(async () => {
+        root.render(
+          <TrashView
+            documents={null}
+            busy={null}
+            loading
+            error={null}
+            onRetry={onRetry}
+            onRestore={onRestore}
+            onPurge={onPurge}
+          />,
+        );
+      });
+      expect(host).toHaveTextContent("Loading trash…");
+      expect(host.querySelector('[data-testid="trash-list"]')).toBeNull();
+
+      await act(async () => {
+        root.render(
+          <TrashView
+            documents={[]}
+            busy={null}
+            loading={false}
+            error={null}
+            onRetry={onRetry}
+            onRestore={onRestore}
+            onPurge={onPurge}
+          />,
+        );
+      });
+      expect(host).toHaveTextContent("The trash is empty");
+      expect(host).toHaveTextContent("restored here for 30 days");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("re-reads parent eligibility before claiming and leaves rejected native events, focus, and DOM untouched", async () => {
+    const host = document.createElement("div");
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    const trashDocument = trashedDoc("eligibility", "Eligibility");
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    let retryEligible = false;
+    let actionEligible = false;
+    const canRetry = vi.fn(() => retryEligible);
+    const canAct = vi.fn(() => actionEligible);
+    type RejectedEvent = {
+      isDefaultPrevented: () => boolean;
+      isPropagationStopped: () => boolean;
+    };
+    const rejectedRetryEvent: { current: RejectedEvent | null } = { current: null };
+    const rejectedRestoreEvent: { current: RejectedEvent | null } = { current: null };
+
+    try {
+      await act(async () => {
+        root.render(
+          <TrashView
+            documents={[trashDocument]}
+            busy={null}
+            loading={false}
+            error="Retry me"
+            canRetry={canRetry}
+            canAct={canAct}
+            onRetry={onRetry}
+            onRestore={onRestore}
+            onPurge={onPurge}
+          />,
+        );
+      });
+      const retry = directRetryButton(host);
+      const restore = directTrashButton(host, trashDocument.title, "restore-button");
+      const restoreRetry = interceptReactClick(retry, (original, event) => {
+        original(event);
+        rejectedRetryEvent.current = event as RejectedEvent;
+      });
+      const restoreRestore = interceptReactClick(restore, (original, event) => {
+        original(event);
+        rejectedRestoreEvent.current = event as RejectedEvent;
+      });
+      focusOwner.focus();
+      const markup = host.innerHTML;
+
+      retry.click();
+      restore.click();
+
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+      expect(rejectedRetryEvent.current?.isDefaultPrevented()).toBe(false);
+      expect(rejectedRetryEvent.current?.isPropagationStopped()).toBe(false);
+      expect(rejectedRestoreEvent.current?.isDefaultPrevented()).toBe(false);
+      expect(rejectedRestoreEvent.current?.isPropagationStopped()).toBe(false);
+      expect(document.activeElement).toBe(focusOwner);
+      expect(host.innerHTML).toBe(markup);
+
+      retryEligible = true;
+      actionEligible = true;
+      retry.click();
+      restore.click();
+      restoreRetry();
+      restoreRestore();
+
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenLastCalledWith(trashDocument);
+      expect(canRetry).toHaveBeenCalledTimes(2);
+      expect(canAct).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      focusOwner.remove();
+      host.remove();
+    }
+  });
+
+  it("rejects fabricated, wrong-type, mismatched-target, foreign, disabled, detached, and replaced sources without consuming the real click", async () => {
+    const host = document.createElement("div");
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    const first = trashedDoc("provenance", "Provenance");
+    const second = trashedDoc("other", "Other");
+    const onRestore = vi.fn<(document: DocumentSummaryDto) => void>();
+    let targetHandler: CapturedReactClick | null = null;
+
+    try {
+      await act(async () => {
+        root.render(
+          <>
+            <TrashView
+              documents={[first, second]}
+              busy={null}
+              loading={false}
+              error="Retry"
+              onRetry={() => {}}
+              onRestore={onRestore}
+              onPurge={() => {}}
+            />
+            <button type="button" data-testid="foreign-trash-control" onClick={(event) => targetHandler?.(event)}>
+              Foreign
+            </button>
+          </>,
+        );
+      });
+      const button = directTrashButton(host, first.title, "restore-button");
+      const card = directTrashCard(host, first.title);
+      targetHandler = captureReactClick(button);
+      focusOwner.focus();
+      const markup = host.innerHTML;
+      targetHandler(undefined);
+      targetHandler({});
+      targetHandler(new MouseEvent("click", { bubbles: true }));
+      expect(onRestore).not.toHaveBeenCalled();
+
+      const reset = interceptReactClick(button, (current, event) => {
+        const genuine = event as {
+          _reactName: string;
+          nativeEvent: MouseEvent;
+          type: string;
+          button: number;
+          bubbles: boolean;
+          currentTarget: EventTarget;
+          target: EventTarget;
+          isDefaultPrevented: () => boolean;
+          isPropagationStopped: () => boolean;
+          persist: () => void;
+        };
+        const fabricated = {
+          _reactName: genuine._reactName,
+          nativeEvent: genuine.nativeEvent,
+          type: genuine.type,
+          button: genuine.button,
+          bubbles: genuine.bubbles,
+          currentTarget: genuine.currentTarget,
+          target: genuine.target,
+          isDefaultPrevented: genuine.isDefaultPrevented,
+          isPropagationStopped: genuine.isPropagationStopped,
+          persist: genuine.persist,
+        };
+        const wrongType = new Proxy(genuine, {
+          get(target, property, receiver) {
+            return property === "type" ? "dblclick" : Reflect.get(target, property, receiver);
+          },
+        });
+        const mismatchedTarget = new Proxy(genuine, {
+          get(target, property, receiver) {
+            return property === "target" ? card : Reflect.get(target, property, receiver);
+          },
+        });
+        current(fabricated);
+        current(wrongType);
+        current(mismatchedTarget);
+        current(event);
+      });
+      button.click();
+      reset();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenLastCalledWith(first);
+      expect(document.activeElement).toBe(focusOwner);
+      expect(host.innerHTML).toBe(markup);
+
+      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+
+      button.disabled = true;
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      button.disabled = false;
+
+      const note = host.querySelector<HTMLElement>('[data-testid="trash-note"]')!;
+      const noteReplacement = note.cloneNode(true) as HTMLElement;
+      note.replaceWith(noteReplacement);
+      button.click();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      noteReplacement.replaceWith(note);
+
+      const alert = host.querySelector<HTMLElement>('[data-testid="trash-error"]')!;
+      const alertReplacement = alert.cloneNode(true) as HTMLElement;
+      alert.replaceWith(alertReplacement);
+      button.click();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      alertReplacement.replaceWith(alert);
+
+      const clone = button.cloneNode(true) as HTMLButtonElement;
+      button.replaceWith(clone);
+      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      clone.replaceWith(button);
+
+      button.remove();
+      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
+      expect(onRestore).toHaveBeenCalledTimes(1);
+      card.querySelector("div:last-child > div")!.prepend(button);
+
+      button.click();
+      expect(onRestore).toHaveBeenCalledTimes(2);
+      expect(onRestore).toHaveBeenLastCalledWith(first);
+    } finally {
+      await act(async () => root.unmount());
+      focusOwner.remove();
+      host.remove();
+    }
+  });
+
+  it.each(["wrong-before-current", "current-before-wrong"] as const)(
+    "rejects sibling, cross-action, and sibling-view handlers while the exact control stays usable in %s order",
+    async (order) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const first = trashedDoc("first-row", "Equal row");
+      const second = trashedDoc("second-row", "Second row");
+      const siblingViewDocument = { ...first };
+      const restoreA = vi.fn<(document: DocumentSummaryDto) => void>();
+      const purgeA = vi.fn<(document: DocumentSummaryDto) => void>();
+      const restoreB = vi.fn<(document: DocumentSummaryDto) => void>();
+
+      try {
+        await act(async () => {
+          root.render(
+            <>
+              <div data-testid="trash-a">
+                <TrashView
+                  documents={[first, second]}
+                  busy={null}
+                  loading={false}
+                  error={null}
+                  onRetry={() => {}}
+                  onRestore={restoreA}
+                  onPurge={purgeA}
+                />
+              </div>
+              <div data-testid="trash-b">
+                <TrashView
+                  documents={[siblingViewDocument]}
+                  busy={null}
+                  loading={false}
+                  error={null}
+                  onRetry={() => {}}
+                  onRestore={restoreB}
+                  onPurge={() => {}}
+                />
+              </div>
+            </>,
+          );
+        });
+        const hostA = host.querySelector<HTMLElement>('[data-testid="trash-a"]')!;
+        const hostB = host.querySelector<HTMLElement>('[data-testid="trash-b"]')!;
+        const firstRestoreHandler = captureReactClick(directTrashButton(hostA, first.title, "restore-button"));
+        const secondRestore = directTrashButton(hostA, second.title, "restore-button");
+        const secondRestoreReset = interceptReactClick(secondRestore, (current, event) => {
+          if (order === "wrong-before-current") {
+            firstRestoreHandler(event);
+            current(event);
+          } else {
+            current(event);
+            firstRestoreHandler(event);
+          }
+        });
+        secondRestore.click();
+        secondRestoreReset();
+        expect(restoreA).toHaveBeenCalledTimes(1);
+        expect(restoreA).toHaveBeenLastCalledWith(second);
+
+        const firstRestore = directTrashButton(hostA, first.title, "restore-button");
+        const firstRestoreCurrent = captureReactClick(firstRestore);
+        const firstPurge = directTrashButton(hostA, first.title, "purge-button");
+        const purgeReset = interceptReactClick(firstPurge, (current, event) => {
+          if (order === "wrong-before-current") {
+            firstRestoreCurrent(event);
+            current(event);
+          } else {
+            current(event);
+            firstRestoreCurrent(event);
+          }
+        });
+        firstPurge.click();
+        purgeReset();
+        expect(restoreA).toHaveBeenCalledTimes(1);
+        expect(purgeA).toHaveBeenCalledTimes(1);
+        expect(purgeA).toHaveBeenLastCalledWith(first);
+
+        const siblingViewRestore = directTrashButton(hostB, siblingViewDocument.title, "restore-button");
+        const siblingViewReset = interceptReactClick(siblingViewRestore, (current, event) => {
+          if (order === "wrong-before-current") {
+            firstRestoreHandler(event);
+            current(event);
+          } else {
+            current(event);
+            firstRestoreHandler(event);
+          }
+        });
+        const focusOwner = document.createElement("button");
+        document.body.append(focusOwner);
+        focusOwner.focus();
+        const markup = host.innerHTML;
+        siblingViewRestore.click();
+        siblingViewReset();
+        expect(restoreA).toHaveBeenCalledTimes(1);
+        expect(restoreB).toHaveBeenCalledTimes(1);
+        expect(restoreB).toHaveBeenLastCalledWith(siblingViewDocument);
+        expect(document.activeElement).toBe(focusOwner);
+        expect(host.innerHTML).toBe(markup);
+        focusOwner.remove();
+
+        firstRestore.click();
+        expect(restoreA).toHaveBeenCalledTimes(2);
+        expect(restoreA).toHaveBeenLastCalledWith(first);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retires callback, document, order, and DOM authority before parent layout while preserving the current view after rejection", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const firstA = trashedDoc("first", "First row");
+    const secondA = trashedDoc("second", "Second row");
+    const documentsA = [firstA, secondA];
+    const firstB = { ...firstA };
+    const secondB = { ...secondA };
+    const documentsB = [firstB, secondB];
+    const staleRestore = vi.fn<(document: DocumentSummaryDto) => void>();
+    const currentRestore = vi.fn<(document: DocumentSummaryDto) => void>();
+    const passiveCleanup = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(
+          <TrashViewBoundary
+            documents={documentsA}
+            error="Same error"
+            onRetry={() => {}}
+            onRestore={staleRestore}
+            onPurge={() => {}}
+            onPassiveCleanup={passiveCleanup}
+          />,
+        );
+      });
+      const oldButton = directTrashButton(host, firstA.title, "restore-button");
+      const staleHandler = captureReactClick(oldButton);
+      let boundaryReached!: () => void;
+      const atBoundary = new Promise<void>((resolve) => {
+        boundaryReached = resolve;
+      });
+
+      root.render(
+        <TrashViewBoundary
+          documents={documentsB}
+          error="Same error"
+          boundary={1}
+          onRetry={() => {}}
+          onRestore={currentRestore}
+          onPurge={() => {}}
+          onPassiveCleanup={passiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanup).not.toHaveBeenCalled();
+            const currentButton = directTrashButton(host, firstB.title, "restore-button");
+            expect(currentButton).toBe(oldButton);
+            const reset = interceptReactClick(currentButton, (current, event) => {
+              staleHandler(event);
+              current(event);
+            });
+            currentButton.click();
+            reset();
+            expect(staleRestore).not.toHaveBeenCalled();
+            expect(currentRestore).toHaveBeenCalledTimes(1);
+            expect(currentRestore).toHaveBeenLastCalledWith(firstB);
+            boundaryReached();
+          }}
+        />,
+      );
+      await atBoundary;
+      await act(async () => {});
+      expect(passiveCleanup).toHaveBeenCalledTimes(1);
+
+      const currentButton = directTrashButton(host, firstB.title, "restore-button");
+      const markup = host.innerHTML;
+      firstB.title = "Mutated title";
+      currentButton.click();
+      expect(currentRestore).toHaveBeenCalledTimes(1);
+      expect(host.innerHTML).toBe(markup);
+      firstB.title = firstA.title;
+
+      documentsB.reverse();
+      currentButton.click();
+      expect(currentRestore).toHaveBeenCalledTimes(1);
+      documentsB.reverse();
+
+      const injected = document.createElement("span");
+      injected.textContent = "Injected";
+      currentButton.append(injected);
+      currentButton.click();
+      expect(currentRestore).toHaveBeenCalledTimes(1);
+      injected.remove();
+
+      currentButton.click();
+      expect(currentRestore).toHaveBeenCalledTimes(2);
+      expect(currentRestore).toHaveBeenLastCalledWith(firstB);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps late old refs and equal-looking remount cleanup from clearing the replacement publication", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const first = trashedDoc("same", "Same row");
+    const replacement = { ...first };
+    const staleRestore = vi.fn();
+    const currentRestore = vi.fn();
+    const remountedRestore = vi.fn();
+    const passiveCleanup = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(
+          <TrashViewBoundary
+            mountKey="a"
+            documents={[first]}
+            onRetry={() => {}}
+            onRestore={staleRestore}
+            onPurge={() => {}}
+            onPassiveCleanup={passiveCleanup}
+          />,
+        );
+      });
+      const oldRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
+      const oldButton = directTrashButton(host, first.title, "restore-button");
+      const oldRootRef = captureReactRef(oldRoot);
+      const oldButtonRef = captureReactRef(oldButton);
+      const staleHandler = captureReactClick(oldButton);
+      let replacementBoundaryReached!: () => void;
+      const atReplacementBoundary = new Promise<void>((resolve) => {
+        replacementBoundaryReached = resolve;
+      });
+
+      root.render(
+        <TrashViewBoundary
+          mountKey="b"
+          documents={[replacement]}
+          boundary={1}
+          onRetry={() => {}}
+          onRestore={currentRestore}
+          onPurge={() => {}}
+          onPassiveCleanup={passiveCleanup}
+          onBoundary={() => {
+            expect(passiveCleanup).not.toHaveBeenCalled();
+            const currentRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
+            const currentButton = directTrashButton(host, replacement.title, "restore-button");
+            expect(currentRoot).not.toBe(oldRoot);
+            expect(currentButton).not.toBe(oldButton);
+            expect(oldRoot.isConnected).toBe(false);
+            expect(oldButton.isConnected).toBe(false);
+            oldRootRef(oldRoot);
+            oldButtonRef(oldButton);
+            oldButtonRef(null);
+            oldRootRef(null);
+            const reset = interceptReactClick(currentButton, (current, event) => {
+              staleHandler(event);
+              current(event);
+            });
+            currentButton.click();
+            reset();
+            expect(staleRestore).not.toHaveBeenCalled();
+            expect(currentRestore).toHaveBeenCalledTimes(1);
+            expect(currentRestore).toHaveBeenLastCalledWith(replacement);
+            replacementBoundaryReached();
+          }}
+        />,
+      );
+      await atReplacementBoundary;
+      await act(async () => {});
+      expect(passiveCleanup).toHaveBeenCalledTimes(1);
+
+      let removalBoundaryReached!: () => void;
+      const atRemovalBoundary = new Promise<void>((resolve) => {
+        removalBoundaryReached = resolve;
+      });
+      root.render(
+        <TrashViewBoundary
+          present={false}
+          documents={[replacement]}
+          boundary={2}
+          onRetry={() => {}}
+          onRestore={currentRestore}
+          onPurge={() => {}}
+          onPassiveCleanup={passiveCleanup}
+          onBoundary={() => {
+            expect(host.querySelector('[data-testid="trash-view"]')).toBeNull();
+            expect(currentRestore).toHaveBeenCalledTimes(1);
+            removalBoundaryReached();
+          }}
+        />,
+      );
+      await atRemovalBoundary;
+      await act(async () => {});
+      expect(passiveCleanup).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        root.render(
+          <TrashViewBoundary
+            mountKey="c"
+            documents={[replacement]}
+            boundary={3}
+            onRetry={() => {}}
+            onRestore={remountedRestore}
+            onPurge={() => {}}
+            onPassiveCleanup={passiveCleanup}
+          />,
+        );
+      });
+      directTrashButton(host, replacement.title, "restore-button").click();
+      expect(remountedRestore).toHaveBeenCalledTimes(1);
+      expect(remountedRestore).toHaveBeenLastCalledWith(replacement);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 
