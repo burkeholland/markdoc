@@ -361,6 +361,15 @@ async function renderHintRoot(root: Root, node: React.ReactNode) {
   await flushPromises();
 }
 
+async function crossTaskBoundary() {
+  let crossed = false;
+  setTimeout(() => {
+    crossed = true;
+  }, 0);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(crossed).toBe(true);
+}
+
 describe("HintBar collaborator discovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1334,6 +1343,199 @@ describe("HintBar collaborator discovery", () => {
         expect(onComment).not.toHaveBeenCalled();
         pointerActivate(current.dismissElement);
         expect(storageWrites).toHaveBeenCalledOnce();
+      } finally {
+        outside.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["pointer", "primary"],
+    ["Enter", "primary"],
+    [" ", "dismiss"],
+  ] as const)(
+    "expires a Strict Mode %s precursor before a later-task %s click without affecting fresh B",
+    async (provenance, kind) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed: ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const comment = vi.fn();
+      const editorActions = {
+        focus: vi.fn(),
+      } as unknown as EditorActions;
+      const session = fakeSession(
+        `strict-task-boundary-${provenance}`,
+        { threads: 1 },
+      );
+      const root = createHintRoot();
+      const tree = (instance: string) => (
+        <StrictMode>
+          <HintBoundary
+            instance={instance}
+            session={session}
+            editorActions={editorActions}
+            comment={comment}
+          />
+        </StrictMode>
+      );
+
+      await renderHintRoot(root, tree("A"));
+      const stale = captureHint();
+      const staleControl =
+        kind === "primary" ? stale.actionElement : stale.dismissElement;
+      const detail = provenance === "pointer" ? 1 : 0;
+      if (provenance === "pointer") {
+        fireEvent.mouseDown(staleControl, {
+          bubbles: true,
+          button: 0,
+          buttons: 1,
+          detail,
+        });
+        fireEvent.mouseUp(staleControl, {
+          bubbles: true,
+          button: 0,
+          buttons: 0,
+          detail,
+        });
+      } else {
+        staleControl.focus();
+        fireEvent.keyDown(staleControl, {
+          bubbles: true,
+          key: provenance,
+        });
+        fireEvent.keyUp(staleControl, {
+          bubbles: true,
+          key: provenance,
+        });
+      }
+      await crossTaskBoundary();
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+
+      fireEvent.click(staleControl, {
+        bubbles: true,
+        button: 0,
+        detail,
+      });
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(comment).not.toHaveBeenCalled();
+      expect(editorActions.focus).not.toHaveBeenCalled();
+      expect(screen.getByTestId("hint-bar")).toBe(stale.root);
+
+      await renderHintRoot(root, tree("B"));
+      const current = captureHint();
+      expect(current.root).not.toBe(stale.root);
+      const currentControl =
+        kind === "primary" ? current.actionElement : current.dismissElement;
+      if (provenance === "pointer") {
+        pointerActivate(currentControl);
+      } else {
+        keyboardActivate(currentControl, provenance);
+      }
+
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(comment).toHaveBeenCalledTimes(kind === "primary" ? 1 : 0);
+      expect(editorActions.focus).toHaveBeenCalledTimes(
+        kind === "dismiss" ? 1 : 0,
+      );
+      fireEvent.click(staleControl, {
+        bubbles: true,
+        button: 0,
+        detail,
+      });
+      expect(storageWrites).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    "focus loss",
+    "window blur",
+    "visibility loss",
+    "incompatible input",
+  ] as const)(
+    "cancels Strict Mode precursor authority on %s without poisoning the current publication",
+    async (cancellation) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed: ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      const comment = vi.fn();
+      const root = createHintRoot();
+      try {
+        await renderHintRoot(
+          root,
+          <StrictMode>
+            <HintBar
+              session={fakeSession(`strict-cancel-${cancellation}`, {
+                threads: 1,
+              })}
+              actions={actions}
+              onShare={onShare}
+              onComment={comment}
+            />
+          </StrictMode>,
+        );
+        const current = captureHint();
+        const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+        if (
+          cancellation === "focus loss" ||
+          cancellation === "window blur"
+        ) {
+          current.actionElement.focus();
+          fireEvent.keyDown(current.actionElement, {
+            bubbles: true,
+            key: " ",
+          });
+          if (cancellation === "focus loss") outside.focus();
+          else window.dispatchEvent(new Event("blur"));
+          fireEvent.click(current.actionElement, {
+            bubbles: true,
+            button: 0,
+            detail: 0,
+          });
+        } else {
+          fireEvent.mouseDown(current.actionElement, {
+            bubbles: true,
+            button: 0,
+            buttons: 1,
+            detail: 1,
+          });
+          fireEvent.mouseUp(current.actionElement, {
+            bubbles: true,
+            button: 0,
+            buttons: 0,
+            detail: 1,
+          });
+          if (cancellation === "visibility loss") {
+            setVisibility("hidden");
+            setVisibility("visible");
+          } else {
+            fireEvent.keyUp(current.actionElement, {
+              bubbles: true,
+              key: "Escape",
+            });
+          }
+          fireEvent.click(current.actionElement, {
+            bubbles: true,
+            button: 0,
+            detail: 1,
+          });
+        }
+
+        expect(storageWrites).not.toHaveBeenCalled();
+        expect(comment).not.toHaveBeenCalled();
+        expect(actions.focus).not.toHaveBeenCalled();
+        pointerActivate(current.actionElement);
+        expect(storageWrites).toHaveBeenCalledOnce();
+        expect(comment).toHaveBeenCalledOnce();
       } finally {
         outside.remove();
       }

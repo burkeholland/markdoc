@@ -893,6 +893,26 @@ function createHintPublication(
       reactMouseDown = null;
       reactClick = null;
     };
+    const expirePointerProof = (
+      down: HintNativeMouseProof,
+      up: HintNativeMouseProof,
+    ) => {
+      queueMicrotask(() => {
+        if (nativeMouseDown !== down || nativeMouseUp !== up) return;
+        releasePrimaryPress();
+        clearInteractionProofs();
+      });
+    };
+    const expireKeyboardProof = (
+      down: HintKeyboardProof,
+      up: HintKeyboardReleaseProof | null,
+    ) => {
+      queueMicrotask(() => {
+        if (keyboardDown !== down || keyboardUp !== up) return;
+        releasePrimaryPress();
+        clearInteractionProofs();
+      });
+    };
 
     const controlForTarget = (target: Node) =>
       (Object.values(controls) as HintControl[]).find((control) =>
@@ -969,6 +989,11 @@ function createHintPublication(
         return;
       }
       const down = nativeMouseDown;
+      if (!down) {
+        releasePrimaryPress();
+        clearInteractionProofs();
+        return;
+      }
       const up = exactNativeMouse(event, "mouseup");
       const preventedByOwnedPress =
         down?.control.kind === "primary" &&
@@ -987,8 +1012,10 @@ function createHintPublication(
           : null;
       if (!nativeMouseUp) {
         releasePrimaryPress();
-        nativeMouseDown = null;
+        clearInteractionProofs();
+        return;
       }
+      expirePointerProof(down, nativeMouseUp);
     };
     const onNativeKeyDown = (event: KeyboardEvent) => {
       const target = event.target;
@@ -1031,14 +1058,15 @@ function createHintPublication(
         target,
         path,
       });
+      if (keyboardDown.key === "Enter") {
+        expireKeyboardProof(keyboardDown, null);
+      }
     };
     const onNativeKeyUp = (event: KeyboardEvent) => {
       const proof = keyboardDown;
       const target = event.target;
-      keyboardDown = null;
-      keyboardUp = null;
-      nativeClick = null;
-      reactClick = null;
+      releasePrimaryPress();
+      clearInteractionProofs();
       if (
         !proof ||
         !publicationOwnsCurrentDom() ||
@@ -1057,7 +1085,6 @@ function createHintPublication(
         event.defaultPrevented ||
         proof.event.defaultPrevented
       ) {
-        releasePrimaryPress();
         return;
       }
       const path = eventPath(event, proof.target);
@@ -1066,7 +1093,6 @@ function createHintPublication(
         !path ||
         !hintEventPathsEqual(path, proof.path)
       ) {
-        releasePrimaryPress();
         return;
       }
       keyboardDown = proof;
@@ -1078,16 +1104,29 @@ function createHintPublication(
         path,
         down: proof,
       });
+      expireKeyboardProof(proof, keyboardUp);
     };
     const onNativeFocusChange = (event: FocusEvent) => {
       if (
-        keyboardDown &&
-        (event.type === "focusout" ||
-          event.target !== keyboardDown.target)
+        (keyboardDown &&
+          (event.type === "focusout" ||
+            event.target !== keyboardDown.target)) ||
+        (nativeMouseDown &&
+          event.type === "focusout" &&
+          event.target === nativeMouseDown.control.element)
       ) {
         releasePrimaryPress();
         clearInteractionProofs();
       }
+    };
+    const onNativeVisibilityChange = () => {
+      if (ownerDocument.visibilityState === "visible") return;
+      releasePrimaryPress();
+      clearInteractionProofs();
+    };
+    const onNativeWindowBlur = () => {
+      releasePrimaryPress();
+      clearInteractionProofs();
     };
     const onNativeClick = (event: MouseEvent) => {
       if (!publicationOwnsCurrentDom()) {
@@ -1137,7 +1176,16 @@ function createHintPublication(
         proof && source
           ? Object.freeze({ ...proof, source, pointerUp })
           : null;
-      if (!nativeClick) releasePrimaryPress();
+      if (!nativeClick) {
+        releasePrimaryPress();
+        return;
+      }
+      const capturedClick = nativeClick;
+      queueMicrotask(() => {
+        if (nativeClick !== capturedClick) return;
+        releasePrimaryPress();
+        clearInteractionProofs();
+      });
     };
     const releaseNativeListeners = () => {
       ownerDocument.removeEventListener("mousedown", onNativeMouseDown, true);
@@ -1146,6 +1194,12 @@ function createHintPublication(
       ownerDocument.removeEventListener("keyup", onNativeKeyUp, true);
       ownerDocument.removeEventListener("focusin", onNativeFocusChange, true);
       ownerDocument.removeEventListener("focusout", onNativeFocusChange, true);
+      ownerDocument.removeEventListener(
+        "visibilitychange",
+        onNativeVisibilityChange,
+        true,
+      );
+      ownerWindow.removeEventListener("blur", onNativeWindowBlur, true);
       ownerDocument.removeEventListener("click", onNativeClick, true);
     };
     const addNativeListeners = () => {
@@ -1155,6 +1209,12 @@ function createHintPublication(
       ownerDocument.addEventListener("keyup", onNativeKeyUp, true);
       ownerDocument.addEventListener("focusin", onNativeFocusChange, true);
       ownerDocument.addEventListener("focusout", onNativeFocusChange, true);
+      ownerDocument.addEventListener(
+        "visibilitychange",
+        onNativeVisibilityChange,
+        true,
+      );
+      ownerWindow.addEventListener("blur", onNativeWindowBlur, true);
       ownerDocument.addEventListener("click", onNativeClick, true);
     };
     const publishedDomMatches = () =>
@@ -1168,6 +1228,8 @@ function createHintPublication(
           hintDomMatches(dom),
       );
     const release = () => {
+      releasePrimaryPress();
+      clearInteractionProofs();
       guard?.release();
       guard = null;
       releaseNativeListeners();
@@ -1177,6 +1239,8 @@ function createHintPublication(
       if (retired) return false;
       retired = true;
       retirement = reason;
+      releasePrimaryPress();
+      clearInteractionProofs();
       if (cells.active.current === publication) {
         cells.active.current = null;
         cells.successorOf.current = publication;
