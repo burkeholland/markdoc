@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useLayoutEffect, type ComponentProps, type SetStateAction } from "react";
+import { StrictMode, useLayoutEffect, type ComponentProps, type SetStateAction } from "react";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
@@ -22,7 +22,8 @@ type CapturedMouseEvent = {
   preventDefault: ReturnType<typeof vi.fn>;
 };
 type MouseHandler = (event: CapturedMouseEvent) => void;
-type ButtonRef = (element: HTMLButtonElement | null) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void | (() => void);
+type ButtonRef = ElementRef<HTMLButtonElement>;
 const TOOLBAR_LABELS = ["Bold", "Italic", "Strikethrough", "Inline code", "Link", "Comment"] as const;
 
 vi.mock("@hocuspocus/provider", async () => {
@@ -429,6 +430,75 @@ function productionFixture() {
 }
 
 describe("SelectionBubble geometry scheduling", () => {
+  it("restores every action family after Strict Mode replay without letting retired controls poison a successor", () => {
+    const env = environment();
+    const f = fixture();
+    const permissions = instrumentPermissions(f.session);
+    const retiredActions = instrumentActions();
+    const retiredLink = vi.fn();
+    const retiredComment = vi.fn();
+    const retiredBubble = {
+      ...f.props,
+      actions: retiredActions.actions,
+      onLink: retiredLink,
+      onComment: retiredComment,
+    };
+
+    const rendered = render(
+      <StrictMode>
+        <SelectionBubble {...retiredBubble} />
+      </StrictMode>,
+    );
+    env.flush();
+    const retired = captureToolbar();
+    const retiredBubbleRef = reactProperty<ElementRef<HTMLDivElement>>(screen.getByTestId("selection-bubble"), "ref");
+    const retiredRootRef = reactProperty<ElementRef<HTMLDivElement>>(screen.getByRole("toolbar", { name: "Selection" }), "ref");
+    invokeToolbar(retired);
+    expectToolbarCalls(retiredActions, retiredLink, retiredComment);
+
+    const currentActions = instrumentActions();
+    const currentLink = vi.fn();
+    const currentComment = vi.fn();
+    const currentBubble = {
+      ...retiredBubble,
+      actions: currentActions.actions,
+      onLink: currentLink,
+      onComment: currentComment,
+    };
+    rendered.rerender(
+      <StrictMode>
+        <SelectionBubble {...currentBubble} />
+      </StrictMode>,
+    );
+    env.flush();
+    const current = captureToolbar();
+    const reusedMouseEvents = retired.map(({ element }) => mouseEvent(element));
+    permissions.editReads.mockClear();
+    permissions.commentReads.mockClear();
+
+    retiredBubbleRef?.(null);
+    retiredRootRef?.(null);
+    for (const [index, control] of retired.entries()) {
+      control.buttonRef?.(null);
+      control.mouseDown(reusedMouseEvents[index]);
+      control.click(mouseEvent(control.element));
+    }
+    expectToolbarCalls(retiredActions, retiredLink, retiredComment);
+    expect(currentActions.toggleMark).not.toHaveBeenCalled();
+    expect(currentLink).not.toHaveBeenCalled();
+    expect(currentComment).not.toHaveBeenCalled();
+    expect(permissions.editReads).not.toHaveBeenCalled();
+    expect(permissions.commentReads).not.toHaveBeenCalled();
+
+    for (const [index, control] of current.entries()) {
+      reusedMouseEvents[index].currentTarget = control.element;
+      control.mouseDown(reusedMouseEvents[index]);
+      control.click(mouseEvent(control.element));
+      expect(reusedMouseEvents[index].preventDefault).toHaveBeenCalledTimes(1);
+    }
+    expectToolbarCalls(currentActions, currentLink, currentComment);
+  });
+
   it("coalesces all owned signals, observes selected content, and cleans exact replacement owners", () => {
     const env = environment();
     const first = fixture();

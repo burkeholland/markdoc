@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
 import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
@@ -72,9 +72,7 @@ interface BubbleActionAuthority {
 type BubbleControlPermission = "edit" | "comment";
 type BubbleMark = Parameters<EditorActions["toggleMark"]>[0];
 
-interface BubbleControlPublication {
-  identity: symbol;
-  retired: boolean;
+interface BubbleControlFacts {
   mount: symbol;
   geometry: BubbleGeometry;
   owner: BubbleOwner;
@@ -92,20 +90,31 @@ interface BubbleControlPublication {
   canComment: boolean;
   onLink: () => void;
   onComment: () => void;
-  bubble: HTMLDivElement | null;
-  root: HTMLDivElement | null;
-  controls: Set<BubbleControl>;
+}
+
+interface BubbleControlPublication {
+  identity: symbol;
+  retired: boolean;
+  generation: BubbleControlGeneration;
+  facts: Readonly<BubbleControlFacts>;
+  bubbleBinding: BubbleElementBinding<HTMLDivElement>;
+  rootBinding: BubbleElementBinding<HTMLDivElement>;
+  controlBindings: ReadonlyMap<BubbleControl, BubbleElementBinding<HTMLButtonElement>>;
+  topology: BubbleControlTopology;
   mouseEvents: WeakSet<object>;
+  mouseEventSeen: boolean;
+  claimed: Set<BubbleControl>;
+  mutationObserver: MutationObserver | null;
+  mutated: boolean;
 }
 
 interface BubbleControl {
   identity: symbol;
-  publication: BubbleControlPublication;
+  generation: BubbleControlGeneration;
   permission: BubbleControlPermission;
   enabled: boolean;
-  element: HTMLButtonElement | null;
-  captureButton: (element: HTMLButtonElement | null) => void;
-  claimed: boolean;
+  binding: BubbleElementBinding<HTMLButtonElement> | null;
+  captureButton: RefCallback<HTMLButtonElement>;
   invoke: () => void;
 }
 
@@ -120,13 +129,46 @@ interface BubbleControls {
 
 type BubbleContainerRole = "bubble" | "root";
 
-interface BubbleElementOwner {
-  publication: BubbleControlPublication;
-  publicationIdentity: symbol;
-  role: BubbleContainerRole | "control";
-  control?: BubbleControl;
-  controlIdentity?: symbol;
+interface BubbleControlGeneration {
+  identity: symbol;
+  facts: Readonly<BubbleControlFacts>;
+  bubbleBinding: BubbleElementBinding<HTMLDivElement> | null;
+  rootBinding: BubbleElementBinding<HTMLDivElement> | null;
+  controls: readonly BubbleControl[];
 }
+
+interface BubbleElementBinding<T extends HTMLElement> {
+  identity: symbol;
+  generation: BubbleControlGeneration;
+  role: BubbleContainerRole | "control";
+  control: BubbleControl | null;
+  element: T;
+  active: boolean;
+}
+
+interface BubbleControlTopology {
+  nodes: readonly Node[];
+  markup: string;
+  layerParent: Node | null;
+}
+
+interface BubbleElementOwner {
+  generation: BubbleControlGeneration;
+  generationIdentity: symbol;
+  binding: BubbleElementBinding<HTMLElement>;
+  bindingIdentity: symbol;
+}
+
+interface BubbleControlReplay {
+  publication: BubbleControlPublication;
+  generation: BubbleControlGeneration;
+  expectedBindings: ReadonlySet<BubbleElementBinding<HTMLElement>>;
+  released: Set<BubbleElementBinding<HTMLElement>>;
+  rebound: Map<BubbleElementBinding<HTMLElement>, BubbleElementBinding<HTMLElement>>;
+  invalid: boolean;
+}
+
+const ControlMutationObserver = typeof MutationObserver === "function" ? MutationObserver : null;
 
 class BubbleControlCurrent {
   #geometry: BubbleGeometry | null = null;
@@ -174,142 +216,339 @@ class BubbleControlCurrent {
   }
 
   matches(publication: BubbleControlPublication, geometry: BubbleGeometry | null, mount: symbol) {
-    const values = publication.formatValues;
+    const facts = publication.facts;
+    const values = facts.formatValues;
     return (
-      publication.mount === mount &&
-      publication.geometry === geometry &&
-      publication.geometry.owner === publication.owner &&
-      publication.geometry.authority === publication.authority &&
-      publication.geometry.layer.isConnected &&
-      this.#geometry === publication.geometry &&
-      this.#owner === publication.owner &&
-      this.#authority === publication.authority &&
-      publication.owner.view === publication.view &&
-      publication.owner.editor === publication.editor &&
-      publication.owner.scroller === publication.scroller &&
-      publication.owner.session === publication.session &&
-      publication.view.dom === publication.editor &&
-      !publication.view.isDestroyed &&
-      publication.editor.isConnected &&
-      publication.scroller.isConnected &&
-      this.#readContainer?.() === publication.scroller &&
-      publication.authority.owner === publication.owner &&
-      publication.authority.view === publication.view &&
-      publication.authority.session === publication.session &&
-      publication.authority.actions === publication.actions &&
-      publication.authority.onLink === publication.onLink &&
-      publication.authority.onComment === publication.onComment &&
-      publication.actions.toggleMark === publication.toggleMark &&
-      publication.format.strong === values.strong &&
-      publication.format.em === values.em &&
-      publication.format.strike === values.strike &&
-      publication.format.code === values.code &&
-      publication.format.link === values.link &&
-      publication.activeSurface === "rich" &&
-      publication.session.activeSurface === publication.activeSurface &&
-      publication.session.canEdit === publication.canEdit &&
-      publication.session.canComment === publication.canComment
+      facts.mount === mount &&
+      facts.geometry === geometry &&
+      facts.geometry.owner === facts.owner &&
+      facts.geometry.authority === facts.authority &&
+      facts.geometry.layer.isConnected &&
+      this.#geometry === facts.geometry &&
+      this.#owner === facts.owner &&
+      this.#authority === facts.authority &&
+      facts.owner.view === facts.view &&
+      facts.owner.editor === facts.editor &&
+      facts.owner.scroller === facts.scroller &&
+      facts.owner.session === facts.session &&
+      facts.view.dom === facts.editor &&
+      !facts.view.isDestroyed &&
+      facts.editor.isConnected &&
+      facts.scroller.isConnected &&
+      this.#readContainer?.() === facts.scroller &&
+      facts.authority.owner === facts.owner &&
+      facts.authority.view === facts.view &&
+      facts.authority.session === facts.session &&
+      facts.authority.actions === facts.actions &&
+      facts.authority.onLink === facts.onLink &&
+      facts.authority.onComment === facts.onComment &&
+      facts.actions.toggleMark === facts.toggleMark &&
+      facts.format.strong === values.strong &&
+      facts.format.em === values.em &&
+      facts.format.strike === values.strike &&
+      facts.format.code === values.code &&
+      facts.format.link === values.link &&
+      facts.activeSurface === "rich" &&
+      facts.session.activeSurface === facts.activeSurface &&
+      facts.session.canEdit === facts.canEdit &&
+      facts.session.canComment === facts.canComment
     );
   }
+}
+
+function controlTopology(bubble: HTMLDivElement, layer: HTMLDivElement): BubbleControlTopology {
+  const nodes: Node[] = [];
+  const visit = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(bubble);
+  return {
+    nodes: Object.freeze(nodes),
+    markup: bubble.outerHTML,
+    layerParent: layer.parentNode,
+  };
+}
+
+function topologyMatches(topology: BubbleControlTopology, bubble: HTMLDivElement, layer: HTMLDivElement) {
+  if (topology.layerParent !== layer.parentNode || topology.markup !== bubble.outerHTML) return false;
+  const nodes: Node[] = [];
+  const visit = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(bubble);
+  return nodes.length === topology.nodes.length && nodes.every((node, index) => node === topology.nodes[index]);
 }
 
 class BubbleControlCoordinator {
   #current: BubbleControlPublication | null = null;
   #elementOwners = new WeakMap<HTMLElement, BubbleElementOwner>();
+  #publishedGenerations = new WeakSet<BubbleControlGeneration>();
+  #replayedGenerations = new WeakSet<BubbleControlGeneration>();
+  #replay: BubbleControlReplay | null = null;
 
   publish(publication: BubbleControlPublication) {
+    if (publication.retired || this.#current) return false;
     this.#current = publication;
+    if (ControlMutationObserver) {
+      const observer = new ControlMutationObserver(() => {
+        publication.mutated = true;
+      });
+      observer.observe(publication.facts.geometry.layer, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      const layerParent = publication.facts.geometry.layer.parentNode;
+      if (layerParent) observer.observe(layerParent, { childList: true });
+      publication.mutationObserver = observer;
+    }
+    return true;
   }
 
   retire(publication: BubbleControlPublication | null) {
-    if (!publication) return;
+    if (!publication || publication.retired) return;
+    const wasCurrent = this.#current === publication;
+    const replayable = wasCurrent && this.#canReplay(publication);
     publication.retired = true;
-    if (this.#current === publication) this.#current = null;
-    this.bindContainer(publication, "bubble", null);
-    this.bindContainer(publication, "root", null);
-    for (const control of publication.controls) this.bindControl(control, null);
+    if (!wasCurrent) {
+      this.#disconnect(publication);
+      return;
+    }
+    this.#current = null;
+    if (!replayable) {
+      this.#disconnect(publication);
+      return;
+    }
+    const expectedBindings = new Set<BubbleElementBinding<HTMLElement>>([
+      publication.bubbleBinding,
+      publication.rootBinding,
+      ...publication.controlBindings.values(),
+    ]);
+    const replay: BubbleControlReplay = {
+      publication,
+      generation: publication.generation,
+      expectedBindings,
+      released: new Set(),
+      rebound: new Map(),
+      invalid: false,
+    };
+    this.#replay = replay;
+    queueMicrotask(() => {
+      if (this.#replay !== replay) return;
+      this.#replay = null;
+      this.#disconnect(publication);
+    });
   }
 
   bindContainer(
-    publication: BubbleControlPublication,
+    generation: BubbleControlGeneration,
     role: BubbleContainerRole,
     element: HTMLDivElement | null,
   ) {
-    const previous = publication[role];
-    if (previous) {
-      const owner = this.#elementOwners.get(previous);
-      if (owner?.publication === publication && owner.publicationIdentity === publication.identity && owner.role === role) {
-        this.#elementOwners.delete(previous);
-      }
+    const previous = role === "bubble" ? generation.bubbleBinding : generation.rootBinding;
+    if (!element) {
+      if (previous) this.#release(previous, "null");
+      return;
     }
-    publication[role] = null;
-    if (!element || publication.retired) return;
-    this.#elementOwners.set(element, {
-      publication,
-      publicationIdentity: publication.identity,
+    if (previous) this.#release(previous, "replace");
+    const binding: BubbleElementBinding<HTMLDivElement> = {
+      identity: Symbol(`selection-bubble-${role}-binding`),
+      generation,
       role,
+      control: null,
+      element,
+      active: true,
+    };
+    if (role === "bubble") generation.bubbleBinding = binding;
+    else generation.rootBinding = binding;
+    this.#elementOwners.set(element, {
+      generation,
+      generationIdentity: generation.identity,
+      binding,
+      bindingIdentity: binding.identity,
     });
-    publication[role] = element;
+    this.#recordRebound(binding);
+    return () => this.#release(binding, "cleanup");
   }
 
   bindControl(control: BubbleControl, element: HTMLButtonElement | null) {
-    const previous = control.element;
-    if (previous) {
-      const owner = this.#elementOwners.get(previous);
-      if (
-        owner?.publication === control.publication &&
-        owner.publicationIdentity === control.publication.identity &&
-        owner.control === control &&
-        owner.controlIdentity === control.identity
-      ) {
-        this.#elementOwners.delete(previous);
-      }
+    const previous = control.binding;
+    if (!element) {
+      if (previous) this.#release(previous, "null");
+      return;
     }
-    control.element = null;
-    if (!element || control.publication.retired) return;
-    this.#elementOwners.set(element, {
-      publication: control.publication,
-      publicationIdentity: control.publication.identity,
+    if (previous) this.#release(previous, "replace");
+    const binding: BubbleElementBinding<HTMLButtonElement> = {
+      identity: Symbol("selection-bubble-control-binding"),
+      generation: control.generation,
       role: "control",
       control,
-      controlIdentity: control.identity,
+      element,
+      active: true,
+    };
+    control.binding = binding;
+    this.#elementOwners.set(element, {
+      generation: control.generation,
+      generationIdentity: control.generation.identity,
+      binding,
+      bindingIdentity: binding.identity,
     });
-    control.element = element;
+    this.#recordRebound(binding);
+    return () => this.#release(binding, "cleanup");
   }
 
-  ownsElements(publication: BubbleControlPublication) {
-    const { bubble, root, geometry } = publication;
-    if (!bubble || !root || !bubble.isConnected || !root.isConnected || !geometry.layer.isConnected) return false;
-    const bubbleOwner = this.#elementOwners.get(bubble);
-    const rootOwner = this.#elementOwners.get(root);
+  prepare(generation: BubbleControlGeneration) {
+    const replay = this.#replay;
+    if (replay) {
+      this.#replay = null;
+      const mutationFree = this.#mutationFree(replay.publication);
+      this.#disconnect(replay.publication);
+      if (replay.generation === generation) {
+        if (
+          this.#replayedGenerations.has(generation) ||
+          replay.invalid ||
+          !mutationFree ||
+          replay.released.size !== replay.expectedBindings.size ||
+          replay.rebound.size !== replay.expectedBindings.size ||
+          [...replay.expectedBindings].some((binding) => {
+            const rebound = replay.rebound.get(binding);
+            return !rebound || rebound.element !== binding.element;
+          })
+        ) {
+          return null;
+        }
+        this.#replayedGenerations.add(generation);
+        return this.#createPublication(generation, replay.publication.topology);
+      }
+    }
+    if (this.#publishedGenerations.has(generation)) return null;
+    this.#publishedGenerations.add(generation);
+    return this.#createPublication(generation);
+  }
+
+  discard(publication: BubbleControlPublication | null) {
+    if (!publication) return;
+    publication.retired = true;
+    this.#disconnect(publication);
+  }
+
+  ownsControl(
+    generation: BubbleControlGeneration,
+    control: BubbleControl,
+    element: HTMLButtonElement,
+  ) {
+    const publication = this.#current;
     if (
-      bubbleOwner?.publication !== publication ||
-      bubbleOwner.publicationIdentity !== publication.identity ||
-      bubbleOwner.role !== "bubble" ||
-      rootOwner?.publication !== publication ||
-      rootOwner.publicationIdentity !== publication.identity ||
-      rootOwner.role !== "root"
+      !publication ||
+      publication.retired ||
+      publication.generation !== generation ||
+      publication.claimed.has(control) ||
+      control.generation !== generation
+    ) {
+      return null;
+    }
+    const binding = publication.controlBindings.get(control);
+    if (!binding || binding.element !== element || control.binding !== binding || !binding.active) return null;
+    const owner = this.#elementOwners.get(element);
+    if (
+      owner?.generation !== generation ||
+      owner.generationIdentity !== generation.identity ||
+      owner.binding !== binding ||
+      owner.bindingIdentity !== binding.identity
+    ) {
+      return null;
+    }
+    if (!control.enabled || element.disabled || !element.isConnected || !this.#ownsElements(publication)) return null;
+    return publication;
+  }
+
+  current(generation: BubbleControlGeneration) {
+    const publication = this.#current;
+    return publication?.generation === generation && !publication.retired ? publication : null;
+  }
+
+  #release(
+    binding: BubbleElementBinding<HTMLElement>,
+    source: "cleanup" | "null" | "replace",
+  ) {
+    if (!binding.active) return;
+    binding.active = false;
+    const { generation, control, role, element } = binding;
+    if (role === "bubble" && generation.bubbleBinding === binding) generation.bubbleBinding = null;
+    else if (role === "root" && generation.rootBinding === binding) generation.rootBinding = null;
+    else if (role === "control" && control?.binding === binding) control.binding = null;
+    const owner = this.#elementOwners.get(element);
+    if (owner?.binding === binding && owner.bindingIdentity === binding.identity) {
+      this.#elementOwners.delete(element);
+    }
+    const replay = this.#replay;
+    if (replay?.generation !== generation) return;
+    if (
+      source !== "cleanup" ||
+      !replay.expectedBindings.has(binding) ||
+      replay.released.has(binding)
+    ) {
+      replay.invalid = true;
+      return;
+    }
+    replay.released.add(binding);
+  }
+
+  #recordRebound(binding: BubbleElementBinding<HTMLElement>) {
+    const replay = this.#replay;
+    if (replay?.generation !== binding.generation) return;
+    const expected = [...replay.expectedBindings].find((candidate) =>
+      candidate.role === binding.role && candidate.control === binding.control);
+    if (
+      !expected ||
+      !replay.released.has(expected) ||
+      replay.rebound.has(expected) ||
+      expected.element !== binding.element
+    ) {
+      replay.invalid = true;
+      return;
+    }
+    replay.rebound.set(expected, binding);
+  }
+
+  #ownsBinding(binding: BubbleElementBinding<HTMLElement>) {
+    if (!binding.active) return false;
+    const owner = this.#elementOwners.get(binding.element);
+    return owner?.generation === binding.generation &&
+      owner.generationIdentity === binding.generation.identity &&
+      owner.binding === binding &&
+      owner.bindingIdentity === binding.identity;
+  }
+
+  #ownsElements(publication: BubbleControlPublication) {
+    const { facts, generation, bubbleBinding, rootBinding } = publication;
+    const bubble = bubbleBinding.element;
+    const root = rootBinding.element;
+    if (
+      generation.bubbleBinding !== bubbleBinding ||
+      generation.rootBinding !== rootBinding ||
+      !this.#ownsBinding(bubbleBinding) ||
+      !this.#ownsBinding(rootBinding) ||
+      !bubble.isConnected ||
+      !root.isConnected ||
+      !facts.geometry.layer.isConnected ||
+      !bubble.contains(root) ||
+      !facts.geometry.layer.contains(bubble) ||
+      !topologyMatches(publication.topology, bubble, facts.geometry.layer)
     ) {
       return false;
     }
-    return bubble.contains(root) && geometry.layer.contains(bubble);
-  }
-
-  canPublish(publication: BubbleControlPublication) {
-    if (publication.retired || publication.controls.size !== 6 || !this.ownsElements(publication)) return false;
-    for (const control of publication.controls) {
-      const element = control.element;
-      const owner = element ? this.#elementOwners.get(element) : null;
+    for (const [control, binding] of publication.controlBindings) {
       if (
-        !element ||
-        !element.isConnected ||
-        owner?.publication !== publication ||
-        owner.publicationIdentity !== publication.identity ||
-        owner.control !== control ||
-        owner.controlIdentity !== control.identity ||
-        !publication.root?.contains(element) ||
-        !publication.bubble?.contains(element) ||
-        !publication.geometry.layer.contains(element)
+        control.binding !== binding ||
+        !this.#ownsBinding(binding) ||
+        !binding.element.isConnected ||
+        !root.contains(binding.element) ||
+        !bubble.contains(binding.element) ||
+        !facts.geometry.layer.contains(binding.element)
       ) {
         return false;
       }
@@ -317,38 +556,83 @@ class BubbleControlCoordinator {
     return true;
   }
 
-  ownsControl(
-    publication: BubbleControlPublication,
-    control: BubbleControl,
-    element: HTMLButtonElement,
-  ) {
+  #createPublication(
+    generation: BubbleControlGeneration,
+    expectedTopology?: BubbleControlTopology,
+  ): BubbleControlPublication | null {
+    const { facts, bubbleBinding, rootBinding } = generation;
     if (
-      this.#current !== publication ||
-      publication.retired ||
-      control.claimed ||
-      control.publication !== publication ||
-      !publication.controls.has(control) ||
-      control.element !== element
+      !bubbleBinding ||
+      !rootBinding ||
+      generation.controls.length !== 6 ||
+      !this.#ownsBinding(bubbleBinding) ||
+      !this.#ownsBinding(rootBinding)
     ) {
-      return false;
+      return null;
     }
-    const owner = this.#elementOwners.get(element);
+    const controlBindings = new Map<BubbleControl, BubbleElementBinding<HTMLButtonElement>>();
+    for (const control of generation.controls) {
+      const binding = control.binding;
+      if (!binding || !this.#ownsBinding(binding)) return null;
+      controlBindings.set(control, binding);
+    }
+    const buttons = [...rootBinding.element.querySelectorAll("button")];
     if (
-      owner?.publication !== publication ||
-      owner.publicationIdentity !== publication.identity ||
-      owner.control !== control ||
-      owner.controlIdentity !== control.identity
+      buttons.length !== generation.controls.length ||
+      generation.controls.some((control, index) => controlBindings.get(control)?.element !== buttons[index])
     ) {
-      return false;
+      return null;
     }
-    if (!control.enabled || element.disabled || !element.isConnected || !this.ownsElements(publication)) return false;
-    return publication.root!.contains(element) &&
-      publication.bubble!.contains(element) &&
-      publication.geometry.layer.contains(element);
+    const topology = controlTopology(bubbleBinding.element, facts.geometry.layer);
+    if (
+      expectedTopology &&
+      (
+        !topologyMatches(expectedTopology, bubbleBinding.element, facts.geometry.layer) ||
+        topology.nodes.length !== expectedTopology.nodes.length ||
+        topology.nodes.some((node, index) => node !== expectedTopology.nodes[index])
+      )
+    ) {
+      return null;
+    }
+    const publication: BubbleControlPublication = {
+      identity: Symbol("selection-bubble-control-publication"),
+      retired: false,
+      generation,
+      facts,
+      bubbleBinding,
+      rootBinding,
+      controlBindings,
+      topology,
+      mouseEvents: new WeakSet(),
+      mouseEventSeen: false,
+      claimed: new Set(),
+      mutationObserver: null,
+      mutated: false,
+    };
+    return this.#ownsElements(publication) ? publication : null;
+  }
+
+  #canReplay(publication: BubbleControlPublication) {
+    return (
+      !this.#replayedGenerations.has(publication.generation) &&
+      publication.claimed.size === 0 &&
+      !publication.mouseEventSeen &&
+      this.#mutationFree(publication) &&
+      this.#ownsElements(publication)
+    );
+  }
+
+  #mutationFree(publication: BubbleControlPublication) {
+    return !publication.mutated && (publication.mutationObserver?.takeRecords().length ?? 0) === 0;
+  }
+
+  #disconnect(publication: BubbleControlPublication) {
+    publication.mutationObserver?.disconnect();
+    publication.mutationObserver = null;
   }
 }
 
-function createControlPublication({
+function createControlGeneration({
   coordinator,
   mount,
   geometry,
@@ -375,14 +659,12 @@ function createControlPublication({
   onLink: () => void;
   onComment: () => void;
 }): {
-  publication: BubbleControlPublication;
+  generation: BubbleControlGeneration;
   controls: BubbleControls;
-  captureBubble: (element: HTMLDivElement | null) => void;
-  captureRoot: (element: HTMLDivElement | null) => void;
+  captureBubble: RefCallback<HTMLDivElement>;
+  captureRoot: RefCallback<HTMLDivElement>;
 } {
-  const publication: BubbleControlPublication = {
-    identity: Symbol("selection-bubble-control-publication"),
-    retired: false,
+  const facts = Object.freeze({
     mount,
     geometry,
     owner: geometry.owner,
@@ -406,10 +688,13 @@ function createControlPublication({
     canComment,
     onLink,
     onComment,
-    bubble: null,
-    root: null,
-    controls: new Set<BubbleControl>(),
-    mouseEvents: new WeakSet(),
+  } satisfies BubbleControlFacts);
+  const generation: BubbleControlGeneration = {
+    identity: Symbol("selection-bubble-control-generation"),
+    facts,
+    bubbleBinding: null,
+    rootBinding: null,
+    controls: [],
   };
   const control = (
     permission: BubbleControlPermission,
@@ -417,33 +702,33 @@ function createControlPublication({
   ): BubbleControl => {
     const owned: BubbleControl = {
       identity: Symbol("selection-bubble-control"),
-      publication,
+      generation,
       permission,
       enabled: permission === "edit" ? canEdit : canComment,
-      element: null,
+      binding: null,
       captureButton: (element) => coordinator.bindControl(owned, element),
-      claimed: false,
       invoke,
     };
-    publication.controls.add(owned);
     return owned;
   };
-  const toggleMark = publication.toggleMark;
+  const toggleMark = facts.toggleMark;
   const mark = (value: BubbleMark) =>
     control("edit", () => toggleMark.call(actions, value));
 
+  const controls = {
+    bold: mark("strong"),
+    italic: mark("em"),
+    strike: mark("strike"),
+    code: mark("code"),
+    link: control("edit", onLink),
+    comment: control("comment", onComment),
+  };
+  generation.controls = Object.freeze(Object.values(controls));
   return {
-    publication,
-    captureBubble: (element) => coordinator.bindContainer(publication, "bubble", element),
-    captureRoot: (element) => coordinator.bindContainer(publication, "root", element),
-    controls: {
-      bold: mark("strong"),
-      italic: mark("em"),
-      strike: mark("strike"),
-      code: mark("code"),
-      link: control("edit", onLink),
-      comment: control("comment", onComment),
-    },
+    generation,
+    captureBubble: (element) => coordinator.bindContainer(generation, "bubble", element),
+    captureRoot: (element) => coordinator.bindContainer(generation, "root", element),
+    controls,
   };
 }
 
@@ -458,7 +743,7 @@ function BubbleButton({
 }: {
   label: string;
   active?: boolean;
-  captureButton: (element: HTMLButtonElement | null) => void;
+  captureButton: RefCallback<HTMLButtonElement>;
   onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
@@ -477,6 +762,137 @@ function BubbleButton({
     >
       {children}
     </button>
+  );
+}
+
+function SelectionBubbleControls({
+  geometry,
+  session,
+  actions,
+  format,
+  onComment,
+  onLink,
+  activeSurface,
+  canEdit,
+  canComment,
+  controlMount,
+  controlCoordinator,
+  controlCurrent,
+}: {
+  geometry: BubbleGeometry;
+  session: CollabSession;
+  actions: EditorActions;
+  format: FormatState;
+  onComment: () => void;
+  onLink: () => void;
+  activeSurface: CollabSession["activeSurface"] | null;
+  canEdit: boolean;
+  canComment: boolean;
+  controlMount: symbol;
+  controlCoordinator: BubbleControlCoordinator;
+  controlCurrent: BubbleControlCurrent;
+}) {
+  const controlSet = createControlGeneration({
+    coordinator: controlCoordinator,
+    mount: controlMount,
+    geometry,
+    view: geometry.owner.view,
+    session,
+    activeSurface,
+    actions,
+    format,
+    canEdit,
+    canComment,
+    onLink,
+    onComment,
+  });
+  const { generation, controls, captureBubble, captureRoot } = controlSet;
+
+  useLayoutEffect(() => {
+    const candidate = controlCoordinator.prepare(generation);
+    const publication =
+      candidate &&
+      controlCurrent.matches(candidate, geometry, controlMount) &&
+      controlCoordinator.publish(candidate)
+        ? candidate
+        : null;
+    if (candidate !== publication) controlCoordinator.discard(candidate);
+    return () => controlCoordinator.retire(publication);
+  }, [controlCoordinator, controlCurrent, controlMount, generation, geometry]);
+
+  const ownsControl = (
+    control: BubbleControl,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    const element = control.binding?.element;
+    if (!element || event.currentTarget !== element) return null;
+    const publication = controlCoordinator.ownsControl(generation, control, element);
+    if (!publication || !controlCurrent.matches(publication, geometry, controlMount)) return null;
+    const { facts } = publication;
+    return control.permission === "edit"
+      ? facts.canEdit ? publication : null
+      : facts.canComment ? publication : null;
+  };
+  const onMouseDown = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const current = controlCoordinator.current(generation);
+    if (event.currentTarget !== control.binding?.element || current?.mouseEvents.has(event)) return;
+    const publication = ownsControl(control, event);
+    if (!publication) return;
+    publication.mouseEvents.add(event);
+    publication.mouseEventSeen = true;
+    event.preventDefault();
+  };
+  const onClick = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const publication = ownsControl(control, event);
+    if (!publication) return;
+    publication.claimed.add(control);
+    control.invoke();
+  };
+  const { position: pos, placement, layer } = geometry;
+
+  return createPortal(
+    <div
+      ref={captureBubble}
+      className="selection-bubble touch-target absolute z-30 rounded-lg bg-inverse shadow-xl dark:ring-1 dark:ring-white/10"
+      style={{ left: placement.left, top: placement.top, width: pos.width, transform: `scale(${placement.scaleX}, ${placement.scaleY})`, transformOrigin: "top left" }}
+      data-testid="selection-bubble"
+      data-below={pos.below || undefined}
+    >
+      <div
+        ref={captureRoot}
+        className="selection-bubble-scroll flex items-center gap-[2px] overflow-x-auto overflow-y-hidden rounded-lg p-[4px]"
+        tabIndex={0}
+        role="toolbar"
+        aria-label="Selection"
+        aria-orientation="horizontal"
+      >
+        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} captureButton={controls.bold.captureButton} onMouseDown={onMouseDown(controls.bold)} onClick={onClick(controls.bold)}>
+          <Bold size={16} strokeWidth={2.6} />
+        </BubbleButton>
+        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} captureButton={controls.italic.captureButton} onMouseDown={onMouseDown(controls.italic)} onClick={onClick(controls.italic)}>
+          <Italic size={16} />
+        </BubbleButton>
+        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} captureButton={controls.strike.captureButton} onMouseDown={onMouseDown(controls.strike)} onClick={onClick(controls.strike)}>
+          <Strikethrough size={16} />
+        </BubbleButton>
+        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} captureButton={controls.code.captureButton} onMouseDown={onMouseDown(controls.code)} onClick={onClick(controls.code)}>
+          <Code size={16} />
+        </BubbleButton>
+        <BubbleButton label="Link" active={format.link} disabled={!canEdit} captureButton={controls.link.captureButton} onMouseDown={onMouseDown(controls.link)} onClick={onClick(controls.link)}>
+          <LinkIcon size={16} />
+        </BubbleButton>
+        <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
+        <BubbleButton label="Comment" disabled={!canComment} captureButton={controls.comment.captureButton} onMouseDown={onMouseDown(controls.comment)} onClick={onClick(controls.comment)}>
+          <MessageSquarePlus size={16} />
+        </BubbleButton>
+      </div>
+      <span
+        className="absolute -translate-x-1/2 rotate-45 bg-inverse"
+        style={{ left: pos.arrowLeft, width: SELECTION_BUBBLE_ARROW_SIZE, height: SELECTION_BUBBLE_ARROW_SIZE, ...(pos.below ? { top: -4 } : { bottom: -4 }) }}
+        aria-hidden
+      />
+    </div>,
+    layer,
   );
 }
 
@@ -840,106 +1256,21 @@ export function SelectionBubble({
   const canEdit = geometryIsCurrent ? session.canEdit : false;
   const canComment = geometryIsCurrent ? session.canComment : false;
   const activeSurface = geometryIsCurrent ? session.activeSurface : null;
-  const controlSet = geometryIsCurrent && geometry
-    ? createControlPublication({
-        coordinator: controlCoordinator,
-        mount: controlMount,
-        geometry,
-        view: geometry.owner.view,
-        session,
-        activeSurface,
-        actions,
-        format,
-        canEdit,
-        canComment,
-        onLink,
-        onComment,
-      })
-    : null;
-  const controlPublication = controlSet?.publication ?? null;
-
-  useLayoutEffect(() => {
-    if (
-      controlPublication &&
-      controlCoordinator.canPublish(controlPublication) &&
-      controlCurrent.matches(controlPublication, geometry, controlMount)
-    ) {
-      controlCoordinator.publish(controlPublication);
-    }
-    return () => controlCoordinator.retire(controlPublication);
-  }, [controlCoordinator, controlCurrent, controlMount, controlPublication, geometry]);
-
-  if (!controlSet) return null;
-  const { publication, controls, captureBubble, captureRoot } = controlSet;
-  const { position: pos, placement, layer } = publication.geometry;
-  const ownsControl = (
-    control: BubbleControl,
-    event: ReactMouseEvent<HTMLButtonElement>,
-  ) => {
-    const element = control.element;
-    if (
-      event.currentTarget !== element ||
-      !element ||
-      !controlCoordinator.ownsControl(publication, control, element) ||
-      !controlCurrent.matches(publication, geometry, controlMount)
-    ) {
-      return false;
-    }
-    return control.permission === "edit" ? publication.canEdit : publication.canComment;
-  };
-  const onMouseDown = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
-    if (event.currentTarget !== control.element || publication.mouseEvents.has(event) || !ownsControl(control, event)) return;
-    publication.mouseEvents.add(event);
-    event.preventDefault();
-  };
-  const onClick = (control: BubbleControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
-    if (!ownsControl(control, event)) return;
-    control.claimed = true;
-    control.invoke();
-  };
-
-  return createPortal(
-    <div
-      ref={captureBubble}
-      className="selection-bubble touch-target absolute z-30 rounded-lg bg-inverse shadow-xl dark:ring-1 dark:ring-white/10"
-      style={{ left: placement.left, top: placement.top, width: pos.width, transform: `scale(${placement.scaleX}, ${placement.scaleY})`, transformOrigin: "top left" }}
-      data-testid="selection-bubble"
-      data-below={pos.below || undefined}
-    >
-      <div
-        ref={captureRoot}
-        className="selection-bubble-scroll flex items-center gap-[2px] overflow-x-auto overflow-y-hidden rounded-lg p-[4px]"
-        tabIndex={0}
-        role="toolbar"
-        aria-label="Selection"
-        aria-orientation="horizontal"
-      >
-        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} captureButton={controls.bold.captureButton} onMouseDown={onMouseDown(controls.bold)} onClick={onClick(controls.bold)}>
-          <Bold size={16} strokeWidth={2.6} />
-        </BubbleButton>
-        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} captureButton={controls.italic.captureButton} onMouseDown={onMouseDown(controls.italic)} onClick={onClick(controls.italic)}>
-          <Italic size={16} />
-        </BubbleButton>
-        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} captureButton={controls.strike.captureButton} onMouseDown={onMouseDown(controls.strike)} onClick={onClick(controls.strike)}>
-          <Strikethrough size={16} />
-        </BubbleButton>
-        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} captureButton={controls.code.captureButton} onMouseDown={onMouseDown(controls.code)} onClick={onClick(controls.code)}>
-          <Code size={16} />
-        </BubbleButton>
-        <BubbleButton label="Link" active={format.link} disabled={!canEdit} captureButton={controls.link.captureButton} onMouseDown={onMouseDown(controls.link)} onClick={onClick(controls.link)}>
-          <LinkIcon size={16} />
-        </BubbleButton>
-        <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
-        <BubbleButton label="Comment" disabled={!canComment} captureButton={controls.comment.captureButton} onMouseDown={onMouseDown(controls.comment)} onClick={onClick(controls.comment)}>
-          <MessageSquarePlus size={16} />
-        </BubbleButton>
-      </div>
-      <span
-        className="absolute -translate-x-1/2 rotate-45 bg-inverse"
-        style={{ left: pos.arrowLeft, width: SELECTION_BUBBLE_ARROW_SIZE, height: SELECTION_BUBBLE_ARROW_SIZE, ...(pos.below ? { top: -4 } : { bottom: -4 }) }}
-        aria-hidden
-      />
-    </div>,
-    layer,
+  if (!geometryIsCurrent || !geometry) return null;
+  return (
+    <SelectionBubbleControls
+      geometry={geometry}
+      session={session}
+      actions={actions}
+      format={format}
+      onComment={onComment}
+      onLink={onLink}
+      activeSurface={activeSurface}
+      canEdit={canEdit}
+      canComment={canComment}
+      controlMount={controlMount}
+      controlCoordinator={controlCoordinator}
+      controlCurrent={controlCurrent}
+    />
   );
 }
