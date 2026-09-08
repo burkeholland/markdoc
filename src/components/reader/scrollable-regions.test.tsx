@@ -18,7 +18,7 @@ vi.mock("react", async (original) => {
   };
 });
 
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { ReaderScrollableRegions } from "./scrollable-regions";
 
 type RegionSpec = {
@@ -36,12 +36,18 @@ type TabIndexWrite = {
 
 class InstrumentedResizeObserver implements ResizeObserver {
   static instances: InstrumentedResizeObserver[] = [];
+  static onDisconnect: ((observer: InstrumentedResizeObserver) => void) | null = null;
+  static onObserve: ((observer: InstrumentedResizeObserver, target: Element) => void) | null = null;
 
   readonly observed: Element[] = [];
   connected = true;
-  readonly observe = vi.fn((target: Element) => this.observed.push(target));
+  readonly observe = vi.fn((target: Element) => {
+    this.observed.push(target);
+    InstrumentedResizeObserver.onObserve?.(this, target);
+  });
   readonly unobserve = vi.fn();
   readonly disconnect = vi.fn(() => {
+    InstrumentedResizeObserver.onDisconnect?.(this);
     this.connected = false;
   });
 
@@ -60,12 +66,20 @@ class InstrumentedResizeObserver implements ResizeObserver {
 
 class InstrumentedFonts {
   readonly callbacks: Array<() => void> = [];
-  readonly ready = {
-    then: (continuation: (fonts: FontFaceSet) => unknown) => {
-      this.callbacks.push(() => continuation(document.fonts));
-      return Promise.resolve(document.fonts);
-    },
-  } as Promise<FontFaceSet>;
+  ready = this.createReady();
+
+  private createReady() {
+    return {
+      then: (continuation: (fonts: FontFaceSet) => unknown) => {
+        this.callbacks.push(() => continuation(document.fonts));
+        return Promise.resolve(document.fonts);
+      },
+    } as Promise<FontFaceSet>;
+  }
+
+  replaceReady() {
+    this.ready = this.createReady();
+  }
 
   publish(index: number) {
     const callback = this.callbacks[index];
@@ -161,6 +175,8 @@ const originalClientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototyp
 const originalScrollWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
 const originalFonts = Object.getOwnPropertyDescriptor(document, "fonts");
 let fonts: InstrumentedFonts;
+let geometryReads: Array<{ target: HTMLElement; name: "clientWidth" | "scrollWidth" }>;
+let onGeometryRead: ((target: HTMLElement, name: "clientWidth" | "scrollWidth") => void) | null;
 let tabIndexReads: Element[];
 let tabIndexWrites: TabIndexWrite[];
 
@@ -195,10 +211,128 @@ function writesFor(target: Element) {
   return tabIndexWrites.filter((write) => write.target === target).map((write) => write.value);
 }
 
+async function buildScrollableRegionsBrowserHarness() {
+  const testUint8Array = globalThis.Uint8Array;
+  globalThis.Uint8Array = Object.getPrototypeOf(
+    new TextEncoder().encode(""),
+  ).constructor as typeof Uint8Array;
+  try {
+    const [{ build }, path] = await Promise.all([
+      import("esbuild"),
+      import("node:path"),
+    ]);
+    const root = process.cwd();
+    const result = await build({
+      bundle: true,
+      define: {
+        "process.env.NODE_ENV": '"development"',
+      },
+      format: "iife",
+      platform: "browser",
+      target: "chrome120",
+      write: false,
+      stdin: {
+        contents: `
+          import React from "react";
+          import { createRoot } from "react-dom/client";
+          import { ReaderScrollableRegions } from "./scrollable-regions";
+
+          const observers = [];
+          const fontCallbacks = [];
+          const fonts = {};
+          const createReady = () => ({
+            then(continuation) {
+              fontCallbacks.push(() => continuation(fonts));
+              return Promise.resolve(fonts);
+            },
+          });
+          fonts.ready = createReady();
+
+          class HarnessResizeObserver {
+            constructor(callback) {
+              this.callback = callback;
+              this.connected = true;
+              this.targets = [];
+              observers.push(this);
+            }
+            observe(target) {
+              this.targets.push(target);
+            }
+            unobserve() {}
+            disconnect() {
+              this.connected = false;
+            }
+            publish() {
+              this.callback([], this);
+            }
+          }
+
+          Object.defineProperty(document, "fonts", {
+            configurable: true,
+            value: fonts,
+          });
+          Object.defineProperty(window, "ResizeObserver", {
+            configurable: true,
+            value: HarnessResizeObserver,
+          });
+
+          window.__readerOverflowHarness = {
+            fontCallbacks,
+            observers,
+            replaceReady() {
+              fonts.ready = createReady();
+            },
+            publishFont(index) {
+              fontCallbacks[index]();
+            },
+          };
+
+          createRoot(document.getElementById("mount")).render(
+            <>
+              <div data-reader-overflow-root>
+                <pre
+                  data-region="target"
+                  style={{
+                    boxSizing: "content-box",
+                    margin: 0,
+                    overflow: "auto",
+                    padding: 0,
+                    width: 100,
+                  }}
+                >
+                  <code
+                    data-region-content
+                    style={{ display: "inline-block", width: 100 }}
+                  >
+                    content
+                  </code>
+                </pre>
+              </div>
+              <ReaderScrollableRegions contentKey="browser-content" />
+            </>,
+          );
+        `,
+        loader: "tsx",
+        resolveDir: path.join(root, "src", "components", "reader"),
+        sourcefile: "scrollable-regions-browser-harness.tsx",
+      },
+    });
+    const output = result.outputFiles[0];
+    if (!output) throw new Error("Scrollable regions browser harness did not bundle");
+    return output.text;
+  } finally {
+    globalThis.Uint8Array = testUint8Array;
+  }
+}
+
 beforeEach(() => {
   InstrumentedResizeObserver.instances = [];
+  InstrumentedResizeObserver.onDisconnect = null;
+  InstrumentedResizeObserver.onObserve = null;
   capturedLayoutCleanups.length = 0;
   fonts = new InstrumentedFonts();
+  geometryReads = [];
+  onGeometryRead = null;
   tabIndexReads = [];
   tabIndexWrites = [];
   vi.stubGlobal("ResizeObserver", InstrumentedResizeObserver);
@@ -207,12 +341,16 @@ beforeEach(() => {
     clientWidth: {
       configurable: true,
       get(this: HTMLElement) {
+        geometryReads.push({ target: this, name: "clientWidth" });
+        onGeometryRead?.(this, "clientWidth");
         return Number(nativeGetAttribute.call(this, "data-client-width") ?? 0);
       },
     },
     scrollWidth: {
       configurable: true,
       get(this: HTMLElement) {
+        geometryReads.push({ target: this, name: "scrollWidth" });
+        onGeometryRead?.(this, "scrollWidth");
         return Number(nativeGetAttribute.call(this, "data-scroll-width") ?? 0);
       },
     },
@@ -304,11 +442,12 @@ describe("ReaderScrollableRegions exact content visits", () => {
 
     expect(target.getAttribute("tabindex")).toBe(applied);
     expect(writesFor(target)).toEqual([applied]);
-    view.unmount();
+    view.rerender(<ReaderFixture html={html} showHelper={false} />);
 
     expect(target.getAttribute("tabindex")).toBe(restored);
     expect(writesFor(target)).toEqual([applied, restored]);
     expect(observer.disconnect).toHaveBeenCalledTimes(1);
+    view.unmount();
   });
 
   it.each([
@@ -622,4 +761,504 @@ describe("ReaderScrollableRegions exact content visits", () => {
     expect(oldObserver.disconnect).toHaveBeenCalledTimes(1);
     expect(currentObserver.disconnect).toHaveBeenCalledTimes(1);
   });
+
+  it("publishes one exact Strict Mode successor and makes every late A continuation inert", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    const view = render(
+      <StrictMode>
+        <ReaderFixture html={html} />
+      </StrictMode>,
+    );
+    const target = region(readerRoot(view.container), "target");
+    const [retired, current] = InstrumentedResizeObserver.instances;
+    const lateResize = retired.capture();
+
+    expect(InstrumentedResizeObserver.instances).toHaveLength(2);
+    expect(writesFor(target)).toEqual(["0", null, "0"]);
+    expect(retired.disconnect).toHaveBeenCalledTimes(1);
+    expect(current.disconnect).not.toHaveBeenCalled();
+
+    tabIndexReads.length = 0;
+    tabIndexWrites.length = 0;
+    geometryReads.length = 0;
+    lateResize();
+    fonts.publish(0);
+    expect(tabIndexReads).toHaveLength(0);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(retired.disconnect).toHaveBeenCalledTimes(1);
+    expect(current.disconnect).not.toHaveBeenCalled();
+
+    setGeometry(target, 100, 101);
+    current.publish();
+    expect(target).not.toHaveAttribute("tabindex");
+    expect(writesFor(target)).toEqual([null]);
+  });
+
+  it("rejects an equal-looking partial Strict Mode replay and recovers on a fresh commit", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    let replaced: HTMLElement | null = null;
+    InstrumentedResizeObserver.onDisconnect = (observer) => {
+      if (observer !== InstrumentedResizeObserver.instances[0]) return;
+      const root = observer.observed[0] as HTMLElement;
+      root.innerHTML = html;
+      replaced = region(root, "target");
+      InstrumentedResizeObserver.onDisconnect = null;
+    };
+    const view = render(
+      <StrictMode>
+        <ReaderFixture html={html} />
+      </StrictMode>,
+    );
+    const root = readerRoot(view.container);
+
+    expect(InstrumentedResizeObserver.instances).toHaveLength(1);
+    expect(replaced).toBe(region(root, "target"));
+    expect(replaced).not.toHaveAttribute("tabindex");
+    expect(InstrumentedResizeObserver.instances[0].disconnect).toHaveBeenCalledTimes(1);
+
+    view.rerender(
+      <StrictMode>
+        <ReaderFixture html={html} commit={1} />
+      </StrictMode>,
+    );
+    const current = InstrumentedResizeObserver.instances[1];
+    const recovered = region(root, "target");
+    expect(current.observed).toEqual([root, recovered]);
+    expect(recovered).toHaveAttribute("tabindex", "0");
+    expect(current.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("publishes nothing for an intervening Strict Mode replay and admits a later exact layout", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    let intervening: HTMLElement | null = null;
+    InstrumentedResizeObserver.onDisconnect = (observer) => {
+      if (observer !== InstrumentedResizeObserver.instances[0]) return;
+      const root = observer.observed[0] as HTMLElement;
+      const marker = root.nextSibling;
+      intervening = document.createElement("i");
+      root.parentNode?.insertBefore(intervening, marker);
+      InstrumentedResizeObserver.onDisconnect = null;
+    };
+    const view = render(
+      <StrictMode>
+        <ReaderFixture html={html} />
+      </StrictMode>,
+    );
+
+    expect(InstrumentedResizeObserver.instances).toHaveLength(1);
+    expect(intervening).not.toBeNull();
+    view.container.querySelector("i")?.remove();
+    view.rerender(
+      <StrictMode>
+        <ReaderFixture html={html} commit={1} />
+      </StrictMode>,
+    );
+    const root = readerRoot(view.container);
+    const target = region(root, "target");
+    const current = InstrumentedResizeObserver.instances[1];
+    expect(current.observed).toEqual([root, target]);
+    expect(target).toHaveAttribute("tabindex", "0");
+  });
+
+  it.each([
+    "root",
+    "region reorder",
+    "region subtree",
+    "marker presentation",
+    "root presentation",
+    "immediate ancestor",
+    "higher ancestor",
+  ] as const)("permanently retires after restored %s mutation history", (kind) => {
+    const html = bodyHtml(
+      { id: "first", clientWidth: 100, scrollWidth: 102 },
+      { id: "second", tag: "table", clientWidth: 100, scrollWidth: 102 },
+    );
+    const outer = document.createElement("section");
+    const mount = document.createElement("div");
+    outer.append(mount);
+    document.body.append(outer);
+    const view = render(<ReaderFixture html={html} />, { container: mount });
+    const root = readerRoot(mount);
+    const [first, second] = regions(root);
+    const observer = InstrumentedResizeObserver.instances[0];
+    const lateResize = observer.capture();
+    const lateFonts = fonts.callbacks[0];
+
+    if (kind === "root") {
+      const parent = root.parentNode!;
+      const next = root.nextSibling;
+      root.remove();
+      parent.insertBefore(root, next);
+    } else if (kind === "region reorder") {
+      root.insertBefore(second, first);
+      root.insertBefore(first, second);
+    } else if (kind === "region subtree") {
+      const child = first.firstChild as ChildNode;
+      const replacement = child.cloneNode(true) as ChildNode;
+      child.replaceWith(replacement);
+      replacement.replaceWith(child);
+    } else if (kind === "marker presentation") {
+      const marker = root.nextSibling as HTMLElement;
+      marker.removeAttribute("hidden");
+      marker.setAttribute("hidden", "");
+    } else if (kind === "root presentation") {
+      root.removeAttribute("data-reader-overflow-root");
+      root.setAttribute("data-reader-overflow-root", "");
+    } else {
+      const target = kind === "immediate ancestor" ? mount : outer;
+      const parent = target.parentNode!;
+      const next = target.nextSibling;
+      target.remove();
+      parent.insertBefore(target, next);
+    }
+
+    tabIndexReads.length = 0;
+    tabIndexWrites.length = 0;
+    geometryReads.length = 0;
+    lateResize();
+    lateFonts();
+    expect(tabIndexReads).toHaveLength(0);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(observer.disconnect).toHaveBeenCalledTimes(1);
+    expect(first).toHaveAttribute("tabindex", "0");
+    expect(second).toHaveAttribute("tabindex", "0");
+
+    view.unmount();
+    outer.remove();
+  });
+
+  it.each(["text", "comment", "element"] as const)(
+    "permanently retires after restored marker %s subtree mutation",
+    (kind) => {
+      const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+      const view = render(<ReaderFixture html={html} />);
+      const root = readerRoot(view.container);
+      const target = region(root, "target");
+      const marker = view.container.querySelector<HTMLElement>("[data-reader-overflow-marker]")!;
+      const observer = InstrumentedResizeObserver.instances[0];
+      const lateResize = observer.capture();
+      const lateFonts = fonts.callbacks[0];
+      const child = kind === "text"
+        ? document.createTextNode("temporary")
+        : kind === "comment"
+          ? document.createComment("temporary")
+          : document.createElement("i");
+
+      marker.append(child);
+      if (kind === "text") child.nodeValue = "changed";
+      child.remove();
+      tabIndexReads.length = 0;
+      tabIndexWrites.length = 0;
+      geometryReads.length = 0;
+      lateResize();
+      lateFonts();
+
+      expect(marker).toHaveTextContent("");
+      expect(marker.childNodes).toHaveLength(0);
+      expect(tabIndexReads).toHaveLength(0);
+      expect(tabIndexWrites).toHaveLength(0);
+      expect(geometryReads).toHaveLength(0);
+      expect(observer.disconnect).toHaveBeenCalledTimes(1);
+      expect(target).toHaveAttribute("tabindex", "0");
+    },
+  );
+
+  it("transfers only the externally replaced region and restores the independently owned peer", () => {
+    const html = bodyHtml(
+      { id: "external", clientWidth: 100, scrollWidth: 102 },
+      { id: "owned", tag: "table", clientWidth: 100, scrollWidth: 102 },
+    );
+    const view = render(<ReaderFixture html={html} />);
+    const root = readerRoot(view.container);
+    const external = region(root, "external");
+    const owned = region(root, "owned");
+    const observer = InstrumentedResizeObserver.instances[0];
+
+    setExternalTabIndex(external, "-1");
+    setGeometry(external, 100, 101);
+    tabIndexWrites.length = 0;
+    observer.publish();
+    expect(external).toHaveAttribute("tabindex", "-1");
+    expect(owned).toHaveAttribute("tabindex", "0");
+    expect(tabIndexWrites).toHaveLength(0);
+
+    view.rerender(<ReaderFixture html={html} showHelper={false} />);
+    expect(external).toHaveAttribute("tabindex", "-1");
+    expect(owned).not.toHaveAttribute("tabindex");
+    expect(writesFor(external)).toEqual([]);
+    expect(writesFor(owned)).toEqual([null]);
+  });
+
+  it("carries a restored mutation's owned value only into a fresh exact commit", async () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    const directRegions = [{ id: "target", clientWidth: 100, scrollWidth: 102 }];
+    const view = render(<ReaderFixture html={html} directRegions={directRegions} />);
+    const root = readerRoot(view.container);
+    const target = region(root, "target");
+    const oldObserver = InstrumentedResizeObserver.instances[0];
+    const parent = target.parentNode!;
+    const next = target.nextSibling;
+    target.remove();
+    parent.insertBefore(target, next);
+    oldObserver.publish();
+    expect(oldObserver.disconnect).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    view.rerender(<ReaderFixture html={html} directRegions={directRegions} commit={1} />);
+    const currentObserver = InstrumentedResizeObserver.instances[1];
+    expect(region(root, "target")).toBe(target);
+    expect(target).toHaveAttribute("tabindex", "0");
+    expect(currentObserver.disconnect).not.toHaveBeenCalled();
+
+    tabIndexWrites.length = 0;
+    view.rerender(
+      <ReaderFixture html={html} directRegions={directRegions} showHelper={false} commit={2} />,
+    );
+    expect(target).not.toHaveAttribute("tabindex");
+    expect(writesFor(target)).toEqual([null]);
+    expect(currentObserver.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["before", "during"] as const)(
+    "permanently transfers one region after an external tabindex write %s sync",
+    (timing) => {
+      const html = bodyHtml(
+        { id: "external", clientWidth: 100, scrollWidth: 102 },
+        { id: "owned", tag: "table", clientWidth: 100, scrollWidth: 102 },
+      );
+      if (timing === "before") {
+        InstrumentedResizeObserver.onObserve = (_observer, target) => {
+          if (!(target instanceof HTMLElement) || !target.matches("[data-reader-overflow-root]")) return;
+          setExternalTabIndex(region(target, "external"), "-1");
+          InstrumentedResizeObserver.onObserve = null;
+        };
+      }
+      const view = render(<ReaderFixture html={html} />);
+      const root = readerRoot(view.container);
+      const external = region(root, "external");
+      const owned = region(root, "owned");
+      const observer = InstrumentedResizeObserver.instances[0];
+      if (timing === "during") {
+        onGeometryRead = (target, name) => {
+          if (target !== external || name !== "clientWidth") return;
+          setExternalTabIndex(external, "-1");
+          onGeometryRead = null;
+        };
+        observer.publish();
+      }
+
+      expect(external).toHaveAttribute("tabindex", "-1");
+      expect(owned).toHaveAttribute("tabindex", "0");
+      expect(writesFor(external)).toEqual(timing === "before" ? [] : ["0"]);
+      expect(writesFor(owned)).toEqual(["0"]);
+
+      setGeometry(external, 100, 101);
+      setGeometry(owned, 100, 101);
+      tabIndexWrites.length = 0;
+      observer.publish();
+      expect(external).toHaveAttribute("tabindex", "-1");
+      expect(owned).not.toHaveAttribute("tabindex");
+      expect(writesFor(external)).toEqual([]);
+      expect(writesFor(owned)).toEqual([null]);
+    },
+  );
+
+  it("ignores truly nonadjacent churn while retaining the strict overflow boundary", () => {
+    const unrelated = document.createElement("aside");
+    document.body.append(unrelated);
+    const html = bodyHtml(
+      { id: "boundary", clientWidth: 100, scrollWidth: 101 },
+      { id: "overflow", tag: "table", clientWidth: 100, scrollWidth: 102 },
+    );
+    const view = render(<ReaderFixture html={html} />);
+    const root = readerRoot(view.container);
+    const boundary = region(root, "boundary");
+    const overflow = region(root, "overflow");
+    const observer = InstrumentedResizeObserver.instances[0];
+    expect(boundary).not.toHaveAttribute("tabindex");
+    expect(overflow).toHaveAttribute("tabindex", "0");
+
+    unrelated.append(document.createElement("b"));
+    setGeometry(boundary, 100, 102);
+    setGeometry(overflow, 100, 101);
+    tabIndexWrites.length = 0;
+    observer.publish();
+    expect(boundary).toHaveAttribute("tabindex", "0");
+    expect(overflow).not.toHaveAttribute("tabindex");
+    expect(writesFor(boundary)).toEqual(["0"]);
+    expect(writesFor(overflow)).toEqual([null]);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+
+    view.unmount();
+    unrelated.remove();
+  });
+
+  it("retires a font continuation whose frozen FontFaceSet source was replaced", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    const view = render(<ReaderFixture html={html} />);
+    const target = region(readerRoot(view.container), "target");
+    const observer = InstrumentedResizeObserver.instances[0];
+    const retiredFonts = fonts.callbacks[0];
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: new InstrumentedFonts(),
+    });
+    tabIndexReads.length = 0;
+    tabIndexWrites.length = 0;
+    geometryReads.length = 0;
+
+    retiredFonts();
+    expect(tabIndexReads).toHaveLength(0);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(observer.disconnect).toHaveBeenCalledTimes(1);
+    expect(target).toHaveAttribute("tabindex", "0");
+
+    view.unmount();
+  });
+
+  it("rearms a new FontFaceSet ready cycle without a render and keeps the stale cycle inert", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 101 });
+    const view = render(<ReaderFixture html={html} />);
+    const target = region(readerRoot(view.container), "target");
+    const observer = InstrumentedResizeObserver.instances[0];
+    const staleReady = fonts.callbacks[0];
+
+    fonts.replaceReady();
+    setGeometry(target, 100, 102);
+    geometryReads.length = 0;
+    tabIndexWrites.length = 0;
+
+    observer.publish();
+    expect(fonts.callbacks).toHaveLength(2);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(target).not.toHaveAttribute("tabindex");
+
+    staleReady();
+    expect(fonts.callbacks).toHaveLength(2);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+
+    fonts.publish(1);
+    expect(target).toHaveAttribute("tabindex", "0");
+    expect(writesFor(target)).toEqual(["0"]);
+    expect(geometryReads).toEqual([
+      { target, name: "clientWidth" },
+      { target, name: "scrollWidth" },
+    ]);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.env.SCROLLABLE_REGIONS_CHROMIUM !== "1")(
+    "mounts in Chromium and resumes exact synchronization on the next font-ready cycle",
+    async () => {
+      const [{ chromium }, harness] = await Promise.all([
+        import("playwright-core"),
+        buildScrollableRegionsBrowserHarness(),
+      ]);
+      const browser = await chromium.launch({
+        headless: true,
+        executablePath: process.env.CHROMIUM_PATH || undefined,
+      });
+      try {
+        const page = await browser.newPage();
+        await page.route("http://reader-overflow.test/", (route) =>
+          route.fulfill({
+            body: `<div id="mount"></div><script>${harness}</script>`,
+            contentType: "text/html",
+          }),
+        );
+        await page.goto("http://reader-overflow.test/");
+        const target = page.locator("[data-region='target']");
+        await target.waitFor({ state: "visible" });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+        expect(await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                fontCallbacks: Array<() => void>;
+                observers: Array<{ connected: boolean }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          const target = document.querySelector<HTMLElement>("[data-region='target']")!;
+          return {
+            callbacks: harness.fontCallbacks.length,
+            clientWidth: target.clientWidth,
+            connected: harness.observers[0]?.connected,
+            observers: harness.observers.length,
+            scrollWidth: target.scrollWidth,
+          };
+        })).toEqual({
+          callbacks: 1,
+          clientWidth: 100,
+          connected: true,
+          observers: 1,
+          scrollWidth: 100,
+        });
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                replaceReady: () => void;
+                observers: Array<{ publish: () => void }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.replaceReady();
+          document.querySelector<HTMLElement>("[data-region-content]")!.style.width = "120px";
+          harness.observers[0]!.publish();
+        });
+        expect(await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                fontCallbacks: Array<() => void>;
+                observers: Array<{ connected: boolean }>;
+              };
+            }
+          ).__readerOverflowHarness;
+          return {
+            callbacks: harness.fontCallbacks.length,
+            connected: harness.observers[0]?.connected,
+          };
+        })).toEqual({ callbacks: 2, connected: true });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                publishFont: (index: number) => void;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.publishFont(0);
+        });
+        await expect.poll(() => target.getAttribute("tabindex")).toBeNull();
+
+        await page.evaluate(() => {
+          const harness = (
+            window as unknown as {
+              __readerOverflowHarness: {
+                publishFont: (index: number) => void;
+              };
+            }
+          ).__readerOverflowHarness;
+          harness.publishFont(1);
+        });
+        await expect.poll(() => target.getAttribute("tabindex")).toBe("0");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });
