@@ -278,6 +278,25 @@ async function waitForOutsideListener() {
 
 beforeEach(() => {
   vi.spyOn(window, "open").mockImplementation(() => null);
+  const eventTargetAdd = EventTarget.prototype.addEventListener;
+  const eventTargetRemove = EventTarget.prototype.removeEventListener;
+  const windowAdd = window.addEventListener;
+  const windowRemove = window.removeEventListener;
+  // jsdom's Window methods do not delegate through EventTarget.prototype.
+  vi.spyOn(EventTarget.prototype, "addEventListener").mockImplementation(
+    function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
+      if (this === window) windowAdd.call(window, type, callback, options);
+      else eventTargetAdd.call(this, type, callback, options);
+    },
+  );
+  vi.spyOn(EventTarget.prototype, "removeEventListener").mockImplementation(
+    function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
+      if (this === window) windowRemove.call(window, type, callback, options);
+      else eventTargetRemove.call(this, type, callback, options);
+    },
+  );
 });
 
 afterEach(async () => {
@@ -312,6 +331,48 @@ describe("editor header More menu authority", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it("keeps the exact native selection through a mid-dispatch microtask checkpoint", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+    history.addEventListener("click", () => {
+      vi.runAllTicks();
+    }, { capture: true, once: true });
+
+    try {
+      fireEvent.click(history);
+    } finally {
+      vi.runAllTicks();
+      vi.useRealTimers();
+    }
+
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("retires unconsumed selection authority at the native window boundary", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    const staleSelect = captureSelect(history);
+    history.addEventListener("click", (event) => event.preventDefault(), { once: true });
+
+    fireEvent.click(history);
+    act(() => dispatchUnadmittedSelection(history, staleSelect));
+
+    expect(actions.onHistory).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(history);
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it.each([
     ["history", "onHistory"],
     ["name-version", "onNameVersion"],
@@ -325,7 +386,7 @@ describe("editor header More menu authority", () => {
     menuTrigger.focus();
 
     openMenu();
-    fireEvent.click(item(name));
+    await userEvent.click(item(name));
 
     expect(actions[callback]).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
