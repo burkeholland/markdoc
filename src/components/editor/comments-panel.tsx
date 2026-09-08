@@ -6356,6 +6356,233 @@ const COMMENTS_EMPTY_SUGGESTIONS_BUTTON_CLASS = "inline-flex items-center gap-1 
 const seenCommentNavigationNativeEvents = new WeakSet<Event>();
 const claimedCommentNavigationNativeEvents = new WeakSet<Event>();
 const commentNavigationPreventDefault = globalThis.Event.prototype.preventDefault;
+const commentNavigationGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+
+type CommentNavigationNativeGetter = () => unknown;
+type CommentNavigationNativeGetters<Field extends string> = Readonly<
+  Record<Field, CommentNavigationNativeGetter>
+>;
+type CommentNavigationEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "composed"
+  | "timeStamp";
+type CommentNavigationUiEventField = "detail" | "view";
+type CommentNavigationMouseEventField =
+  | "screenX"
+  | "screenY"
+  | "clientX"
+  | "clientY"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey"
+  | "button"
+  | "buttons"
+  | "relatedTarget";
+type CommentNavigationFocusEventField = "relatedTarget";
+type CommentNavigationKeyboardEventField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey";
+
+interface CommentNavigationEventIntrinsics {
+  readonly event: CommentNavigationNativeGetters<CommentNavigationEventField>;
+  readonly uiEvent: CommentNavigationNativeGetters<CommentNavigationUiEventField>;
+  readonly mouseEvent: CommentNavigationNativeGetters<CommentNavigationMouseEventField>;
+  readonly focusEvent: CommentNavigationNativeGetters<CommentNavigationFocusEventField>;
+  readonly keyboardEvent: CommentNavigationNativeGetters<CommentNavigationKeyboardEventField>;
+  readonly composedPath: Event["composedPath"];
+}
+
+interface CommentNavigationMutationObserverIntrinsics {
+  readonly Constructor: typeof MutationObserver;
+  readonly observe: MutationObserver["observe"];
+  readonly takeRecords: MutationObserver["takeRecords"];
+  readonly disconnect: MutationObserver["disconnect"];
+}
+
+function captureCommentNavigationGetters<const Fields extends readonly string[]>(
+  prototype: object,
+  fields: Fields,
+): CommentNavigationNativeGetters<Fields[number]> | null {
+  const entries: [Fields[number], CommentNavigationNativeGetter][] = [];
+  for (const field of fields) {
+    const descriptor = suggestionReflectApply(
+      commentNavigationGetOwnPropertyDescriptor,
+      Object,
+      [prototype, field],
+    ) as PropertyDescriptor | undefined;
+    if (typeof descriptor?.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+  }
+  return Object.freeze(Object.fromEntries(entries)) as CommentNavigationNativeGetters<
+    Fields[number]
+  >;
+}
+
+function captureCommentNavigationMethod<Method>(
+  prototype: object,
+  name: string,
+): Method | null {
+  const descriptor = suggestionReflectApply(
+    commentNavigationGetOwnPropertyDescriptor,
+    Object,
+    [prototype, name],
+  ) as PropertyDescriptor | undefined;
+  return typeof descriptor?.value === "function" ? (descriptor.value as Method) : null;
+}
+
+function captureCommentNavigationEventIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): CommentNavigationEventIntrinsics | null {
+  const event = captureCommentNavigationGetters(ownerWindow.Event.prototype, [
+    "type",
+    "target",
+    "currentTarget",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "composed",
+    "timeStamp",
+  ] as const);
+  const uiEvent = captureCommentNavigationGetters(ownerWindow.UIEvent.prototype, [
+    "detail",
+    "view",
+  ] as const);
+  const mouseEvent = captureCommentNavigationGetters(ownerWindow.MouseEvent.prototype, [
+    "screenX",
+    "screenY",
+    "clientX",
+    "clientY",
+    "ctrlKey",
+    "shiftKey",
+    "altKey",
+    "metaKey",
+    "button",
+    "buttons",
+    "relatedTarget",
+  ] as const);
+  const focusEvent = captureCommentNavigationGetters(ownerWindow.FocusEvent.prototype, [
+    "relatedTarget",
+  ] as const);
+  const keyboardEvent = captureCommentNavigationGetters(
+    ownerWindow.KeyboardEvent.prototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "shiftKey",
+      "altKey",
+      "metaKey",
+    ] as const,
+  );
+  const composedPath = captureCommentNavigationMethod<Event["composedPath"]>(
+    ownerWindow.Event.prototype,
+    "composedPath",
+  );
+  if (
+    !event ||
+    !uiEvent ||
+    !mouseEvent ||
+    !focusEvent ||
+    !keyboardEvent ||
+    !composedPath
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    event,
+    uiEvent,
+    mouseEvent,
+    focusEvent,
+    keyboardEvent,
+    composedPath,
+  });
+}
+
+function captureCommentNavigationMutationObserverIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): CommentNavigationMutationObserverIntrinsics | null {
+  const Constructor = ownerWindow.MutationObserver;
+  const observe = captureCommentNavigationMethod<MutationObserver["observe"]>(
+    Constructor.prototype,
+    "observe",
+  );
+  const takeRecords = captureCommentNavigationMethod<MutationObserver["takeRecords"]>(
+    Constructor.prototype,
+    "takeRecords",
+  );
+  const disconnect = captureCommentNavigationMethod<MutationObserver["disconnect"]>(
+    Constructor.prototype,
+    "disconnect",
+  );
+  if (!observe || !takeRecords || !disconnect) return null;
+  return Object.freeze({ Constructor, observe, takeRecords, disconnect });
+}
+
+function commentNavigationNativeValue<Value>(
+  getter: CommentNavigationNativeGetter,
+  event: Event,
+): Value {
+  return suggestionReflectApply(getter, event, []) as Value;
+}
+
+function commentNavigationNativeTarget(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget | null {
+  return commentNavigationNativeValue<EventTarget | null>(
+    publication.eventIntrinsics.event.target,
+    event,
+  );
+}
+
+function commentNavigationNativeCurrentTarget(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget | null {
+  return commentNavigationNativeValue<EventTarget | null>(
+    publication.eventIntrinsics.event.currentTarget,
+    event,
+  );
+}
+
+function commentNavigationNativeComposedPath(
+  publication: CommentNavigationPublication,
+  event: Event,
+): EventTarget[] {
+  return suggestionReflectApply(
+    publication.eventIntrinsics.composedPath,
+    event,
+    [],
+  ) as EventTarget[];
+}
+
+function commentNavigationNativeDefaultPrevented(
+  publication: CommentNavigationPublication,
+  event: Event,
+): boolean {
+  return commentNavigationNativeValue<boolean>(
+    publication.eventIntrinsics.event.defaultPrevented,
+    event,
+  );
+}
 
 interface CommentNavigationTabFacts {
   readonly index: number;
@@ -6487,6 +6714,8 @@ interface CommentNavigationPublication {
   readonly focus: typeof HTMLElement.prototype.focus;
   readonly windowAddEventListener: Window["addEventListener"];
   readonly windowRemoveEventListener: Window["removeEventListener"];
+  readonly eventIntrinsics: CommentNavigationEventIntrinsics;
+  readonly mutationObserverIntrinsics: CommentNavigationMutationObserverIntrinsics;
   readonly dom: CommentNavigationDomSnapshot;
   readonly placement: CommentNavigationPlacement;
 }
@@ -7031,10 +7260,9 @@ function commentNavigationDomMutationIsRelevant(
 function createCommentNavigationDomGuard(
   dom: CommentNavigationDomSnapshot,
   placement: CommentNavigationPlacement,
+  intrinsics: CommentNavigationMutationObserverIntrinsics,
   onChange: () => void,
 ): CommentNavigationDomGuard | null {
-  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
-  if (!MutationObserverConstructor) return null;
   let changed = false;
   const recordChanges = (records: readonly MutationRecord[]) => {
     if (changed) return;
@@ -7049,23 +7277,30 @@ function createCommentNavigationDomGuard(
       onChange();
     }
   };
-  const observer = new MutationObserverConstructor(recordChanges);
-  observer.observe(placement.document, {
-    attributes: true,
-    attributeOldValue: true,
-    characterData: true,
-    characterDataOldValue: true,
-    childList: true,
-    subtree: true,
-  });
+  const observer = new intrinsics.Constructor(recordChanges);
+  suggestionReflectApply(intrinsics.observe, observer, [
+    placement.document,
+    {
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+      childList: true,
+      subtree: true,
+    },
+  ]);
   return Object.freeze({
     isClean: () => {
-      recordChanges(observer.takeRecords());
+      recordChanges(
+        suggestionReflectApply(intrinsics.takeRecords, observer, []) as MutationRecord[],
+      );
       return !changed;
     },
     release: () => {
-      recordChanges(observer.takeRecords());
-      observer.disconnect();
+      recordChanges(
+        suggestionReflectApply(intrinsics.takeRecords, observer, []) as MutationRecord[],
+      );
+      suggestionReflectApply(intrinsics.disconnect, observer, []);
     },
   });
 }
@@ -7319,19 +7554,24 @@ function commentNavigationNativeSnapshotMatches(
   const { snapshot } = delivery;
   const { event, publication, target } = snapshot;
   const { constructors } = publication;
+  const { event: eventGetters } = publication.eventIntrinsics;
   if (
     !(event instanceof constructors.Event) ||
-    event.type !== snapshot.type ||
-    event.bubbles !== snapshot.bubbles ||
-    event.cancelable !== snapshot.cancelable ||
-    event.composed !== snapshot.composed ||
-    event.timeStamp !== snapshot.timeStamp ||
-    suggestionNativeTarget(event) !== target ||
-    suggestionNativeDefaultPrevented(event)
+    commentNavigationNativeValue<string>(eventGetters.type, event) !== snapshot.type ||
+    commentNavigationNativeValue<boolean>(eventGetters.bubbles, event) !==
+      snapshot.bubbles ||
+    commentNavigationNativeValue<boolean>(eventGetters.cancelable, event) !==
+      snapshot.cancelable ||
+    commentNavigationNativeValue<boolean>(eventGetters.composed, event) !==
+      snapshot.composed ||
+    commentNavigationNativeValue<number>(eventGetters.timeStamp, event) !==
+      snapshot.timeStamp ||
+    commentNavigationNativeTarget(publication, event) !== target ||
+    commentNavigationNativeDefaultPrevented(publication, event)
   ) {
     return false;
   }
-  const currentPath = suggestionNativeComposedPath(event);
+  const currentPath = commentNavigationNativeComposedPath(publication, event);
   if (
     currentPath.length !== snapshot.path.length ||
     snapshot.path.some((entry, index) => currentPath[index] !== entry)
@@ -7341,44 +7581,68 @@ function commentNavigationNativeSnapshotMatches(
   if (snapshot.type === "click") {
     const mouse = snapshot.mouse;
     if (!mouse || !(event instanceof constructors.MouseEvent)) return false;
+    const { mouseEvent, uiEvent } = publication.eventIntrinsics;
     return (
-      event.button === mouse.button &&
-      event.buttons === mouse.buttons &&
-      event.detail === mouse.detail &&
-      event.clientX === mouse.clientX &&
-      event.clientY === mouse.clientY &&
-      event.screenX === mouse.screenX &&
-      event.screenY === mouse.screenY &&
-      event.ctrlKey === mouse.ctrlKey &&
-      event.shiftKey === mouse.shiftKey &&
-      event.altKey === mouse.altKey &&
-      event.metaKey === mouse.metaKey &&
-      event.relatedTarget === mouse.relatedTarget &&
-      event.view === mouse.view
+      commentNavigationNativeValue<number>(mouseEvent.button, event) === mouse.button &&
+      commentNavigationNativeValue<number>(mouseEvent.buttons, event) ===
+        mouse.buttons &&
+      commentNavigationNativeValue<number>(uiEvent.detail, event) === mouse.detail &&
+      commentNavigationNativeValue<number>(mouseEvent.clientX, event) ===
+        mouse.clientX &&
+      commentNavigationNativeValue<number>(mouseEvent.clientY, event) ===
+        mouse.clientY &&
+      commentNavigationNativeValue<number>(mouseEvent.screenX, event) ===
+        mouse.screenX &&
+      commentNavigationNativeValue<number>(mouseEvent.screenY, event) ===
+        mouse.screenY &&
+      commentNavigationNativeValue<boolean>(mouseEvent.ctrlKey, event) ===
+        mouse.ctrlKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.shiftKey, event) ===
+        mouse.shiftKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.altKey, event) === mouse.altKey &&
+      commentNavigationNativeValue<boolean>(mouseEvent.metaKey, event) ===
+        mouse.metaKey &&
+      commentNavigationNativeValue<EventTarget | null>(
+        mouseEvent.relatedTarget,
+        event,
+      ) === mouse.relatedTarget &&
+      commentNavigationNativeValue<Window | null>(uiEvent.view, event) === mouse.view
     );
   }
   if (snapshot.type === "focusin") {
     const focus = snapshot.focus;
+    const { focusEvent, uiEvent } = publication.eventIntrinsics;
     return Boolean(
       focus &&
         event instanceof constructors.FocusEvent &&
-        event.relatedTarget === focus.relatedTarget &&
-        event.view === focus.view,
+        commentNavigationNativeValue<EventTarget | null>(
+          focusEvent.relatedTarget,
+          event,
+        ) === focus.relatedTarget &&
+        commentNavigationNativeValue<Window | null>(uiEvent.view, event) === focus.view,
     );
   }
   const keyboard = snapshot.keyboard;
+  const { keyboardEvent } = publication.eventIntrinsics;
   return Boolean(
     keyboard &&
       event instanceof constructors.KeyboardEvent &&
-      event.key === keyboard.key &&
-      event.code === keyboard.code &&
-      event.location === keyboard.location &&
-      event.repeat === keyboard.repeat &&
-      event.isComposing === keyboard.isComposing &&
-      event.ctrlKey === keyboard.ctrlKey &&
-      event.shiftKey === keyboard.shiftKey &&
-      event.altKey === keyboard.altKey &&
-      event.metaKey === keyboard.metaKey &&
+      commentNavigationNativeValue<string>(keyboardEvent.key, event) === keyboard.key &&
+      commentNavigationNativeValue<string>(keyboardEvent.code, event) === keyboard.code &&
+      commentNavigationNativeValue<number>(keyboardEvent.location, event) ===
+        keyboard.location &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.repeat, event) ===
+        keyboard.repeat &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.isComposing, event) ===
+        keyboard.isComposing &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.ctrlKey, event) ===
+        keyboard.ctrlKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.shiftKey, event) ===
+        keyboard.shiftKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.altKey, event) ===
+        keyboard.altKey &&
+      commentNavigationNativeValue<boolean>(keyboardEvent.metaKey, event) ===
+        keyboard.metaKey &&
       publication.ownerDocument.activeElement === keyboard.activeElement,
   );
 }
@@ -7622,8 +7886,18 @@ function createCommentNavigationRender(
       nextTab: Tab | null;
       reactType: "click" | "focus" | "keydown";
     }> | null => {
-      if (event.type === "click") {
-        if (!(event instanceof publication.constructors.MouseEvent) || event.button !== 0) {
+      const eventType = commentNavigationNativeValue<string>(
+        publication.eventIntrinsics.event.type,
+        event,
+      );
+      if (eventType === "click") {
+        if (
+          !(event instanceof publication.constructors.MouseEvent) ||
+          commentNavigationNativeValue<number>(
+            publication.eventIntrinsics.mouseEvent.button,
+            event,
+          ) !== 0
+        ) {
           return null;
         }
         const candidates = [
@@ -7653,7 +7927,7 @@ function createCommentNavigationRender(
           reactType: "click" as const,
         });
       }
-      if (event.type === "focusin") {
+      if (eventType === "focusin") {
         if (!(event instanceof publication.constructors.FocusEvent)) return null;
         const index = publication.elements.tabs.indexOf(target as HTMLButtonElement);
         const action = index < 0 ? null : render.tabs[index];
@@ -7675,7 +7949,14 @@ function createCommentNavigationRender(
         });
       }
       if (!(event instanceof publication.constructors.KeyboardEvent)) return null;
-      if (event.altKey || event.ctrlKey || event.metaKey) return null;
+      const { keyboardEvent } = publication.eventIntrinsics;
+      if (
+        commentNavigationNativeValue<boolean>(keyboardEvent.altKey, event) ||
+        commentNavigationNativeValue<boolean>(keyboardEvent.ctrlKey, event) ||
+        commentNavigationNativeValue<boolean>(keyboardEvent.metaKey, event)
+      ) {
+        return null;
+      }
       const activeIndex = publication.elements.tabs.findIndex(
         (button) => button === target,
       );
@@ -7689,10 +7970,15 @@ function createCommentNavigationRender(
       ) {
         return null;
       }
-      const nextIndex = rovingIndex(event.key, activeIndex, authority.tabs.length, {
-        orientation: "horizontal",
-        wrap: true,
-      });
+      const nextIndex = rovingIndex(
+        commentNavigationNativeValue<string>(keyboardEvent.key, event),
+        activeIndex,
+        authority.tabs.length,
+        {
+          orientation: "horizontal",
+          wrap: true,
+        },
+      );
       if (nextIndex < 0) return null;
       return Object.freeze({
         action: render.keyboard,
@@ -7703,28 +7989,31 @@ function createCommentNavigationRender(
     };
 
     function captureNative(event: Event) {
+      const { event: eventGetters } = publication.eventIntrinsics;
+      const eventType = commentNavigationNativeValue<string>(eventGetters.type, event);
       if (
         nativeDeliveries.has(event) ||
         !(event instanceof publication.constructors.Event) ||
-        !["click", "focusin", "keydown"].includes(event.type) ||
-        event.eventPhase !== publication.constructors.Event.CAPTURING_PHASE ||
-        !event.bubbles ||
-        suggestionNativeDefaultPrevented(event) ||
+        !["click", "focusin", "keydown"].includes(eventType) ||
+        commentNavigationNativeValue<number>(eventGetters.eventPhase, event) !==
+          publication.constructors.Event.CAPTURING_PHASE ||
+        !commentNavigationNativeValue<boolean>(eventGetters.bubbles, event) ||
+        commentNavigationNativeDefaultPrevented(publication, event) ||
         cells.claimedNativeEvents.has(event) ||
         seenCommentNavigationNativeEvents.has(event) ||
         claimedCommentNavigationNativeEvents.has(event)
       ) {
         return;
       }
-      const target = suggestionNativeTarget(event);
+      const target = commentNavigationNativeTarget(publication, event);
       if (
         !(target instanceof publication.constructors.Node) ||
         target.ownerDocument !== publication.ownerDocument
       ) {
         return;
       }
-      const path = suggestionNativeComposedPath(event);
-      const currentTarget = suggestionNativeCurrentTarget(event);
+      const path = commentNavigationNativeComposedPath(publication, event);
+      const currentTarget = commentNavigationNativeCurrentTarget(publication, event);
       if (
         !currentTarget ||
         !path.includes(currentTarget) ||
@@ -7742,43 +8031,75 @@ function createCommentNavigationRender(
       ) {
         return;
       }
+      const { mouseEvent, uiEvent, focusEvent, keyboardEvent } =
+        publication.eventIntrinsics;
       const mouse =
         event instanceof publication.constructors.MouseEvent
           ? Object.freeze({
-              button: event.button,
-              buttons: event.buttons,
-              detail: event.detail,
-              clientX: event.clientX,
-              clientY: event.clientY,
-              screenX: event.screenX,
-              screenY: event.screenY,
-              ctrlKey: event.ctrlKey,
-              shiftKey: event.shiftKey,
-              altKey: event.altKey,
-              metaKey: event.metaKey,
-              relatedTarget: event.relatedTarget,
-              view: event.view,
+              button: commentNavigationNativeValue<number>(mouseEvent.button, event),
+              buttons: commentNavigationNativeValue<number>(mouseEvent.buttons, event),
+              detail: commentNavigationNativeValue<number>(uiEvent.detail, event),
+              clientX: commentNavigationNativeValue<number>(mouseEvent.clientX, event),
+              clientY: commentNavigationNativeValue<number>(mouseEvent.clientY, event),
+              screenX: commentNavigationNativeValue<number>(mouseEvent.screenX, event),
+              screenY: commentNavigationNativeValue<number>(mouseEvent.screenY, event),
+              ctrlKey: commentNavigationNativeValue<boolean>(mouseEvent.ctrlKey, event),
+              shiftKey: commentNavigationNativeValue<boolean>(
+                mouseEvent.shiftKey,
+                event,
+              ),
+              altKey: commentNavigationNativeValue<boolean>(mouseEvent.altKey, event),
+              metaKey: commentNavigationNativeValue<boolean>(mouseEvent.metaKey, event),
+              relatedTarget: commentNavigationNativeValue<EventTarget | null>(
+                mouseEvent.relatedTarget,
+                event,
+              ),
+              view: commentNavigationNativeValue<Window | null>(uiEvent.view, event),
             })
           : null;
       const focus =
         event instanceof publication.constructors.FocusEvent
           ? Object.freeze({
-              relatedTarget: event.relatedTarget,
-              view: event.view,
+              relatedTarget: commentNavigationNativeValue<EventTarget | null>(
+                focusEvent.relatedTarget,
+                event,
+              ),
+              view: commentNavigationNativeValue<Window | null>(uiEvent.view, event),
             })
           : null;
       const keyboard =
         event instanceof publication.constructors.KeyboardEvent
           ? Object.freeze({
-              key: event.key,
-              code: event.code,
-              location: event.location,
-              repeat: event.repeat,
-              isComposing: event.isComposing,
-              ctrlKey: event.ctrlKey,
-              shiftKey: event.shiftKey,
-              altKey: event.altKey,
-              metaKey: event.metaKey,
+              key: commentNavigationNativeValue<string>(keyboardEvent.key, event),
+              code: commentNavigationNativeValue<string>(keyboardEvent.code, event),
+              location: commentNavigationNativeValue<number>(
+                keyboardEvent.location,
+                event,
+              ),
+              repeat: commentNavigationNativeValue<boolean>(
+                keyboardEvent.repeat,
+                event,
+              ),
+              isComposing: commentNavigationNativeValue<boolean>(
+                keyboardEvent.isComposing,
+                event,
+              ),
+              ctrlKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.ctrlKey,
+                event,
+              ),
+              shiftKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.shiftKey,
+                event,
+              ),
+              altKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.altKey,
+                event,
+              ),
+              metaKey: commentNavigationNativeValue<boolean>(
+                keyboardEvent.metaKey,
+                event,
+              ),
               activeElement: publication.ownerDocument.activeElement,
             })
           : null;
@@ -7789,13 +8110,16 @@ function createCommentNavigationRender(
         control: resolved.control,
         target,
         path: Object.freeze([...path]),
-        type: event.type as CommentNavigationNativeType,
+        type: eventType as CommentNavigationNativeType,
         reactType: resolved.reactType,
         nextTab: resolved.nextTab,
-        bubbles: event.bubbles,
-        cancelable: event.cancelable,
-        composed: event.composed,
-        timeStamp: event.timeStamp,
+        bubbles: commentNavigationNativeValue<boolean>(eventGetters.bubbles, event),
+        cancelable: commentNavigationNativeValue<boolean>(
+          eventGetters.cancelable,
+          event,
+        ),
+        composed: commentNavigationNativeValue<boolean>(eventGetters.composed, event),
+        timeStamp: commentNavigationNativeValue<number>(eventGetters.timeStamp, event),
         mouse,
         focus,
         keyboard,
@@ -7828,8 +8152,12 @@ function createCommentNavigationRender(
       if (
         !delivery ||
         delivery.snapshot.publication !== publication ||
-        suggestionNativeCurrentTarget(event) !== publication.elements.panel ||
-        event.eventPhase !== publication.constructors.Event.BUBBLING_PHASE ||
+        commentNavigationNativeCurrentTarget(publication, event) !==
+          publication.elements.panel ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          event,
+        ) !== publication.constructors.Event.BUBBLING_PHASE ||
         !commentNavigationNativeSnapshotMatches(delivery)
       ) {
         return;
@@ -7869,10 +8197,14 @@ function createCommentNavigationRender(
         event.bubbles !== delivery.snapshot.bubbles ||
         event.cancelable !== delivery.snapshot.cancelable ||
         event.defaultPrevented ||
-        suggestionNativeTarget(nativeEvent) !== event.target ||
-        nativeEvent.eventPhase !== nativePhase ||
+        commentNavigationNativeTarget(publication, nativeEvent) !== event.target ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          nativeEvent,
+        ) !== nativePhase ||
         (delivery.delegationTarget !== null &&
-          suggestionNativeCurrentTarget(nativeEvent) !== delivery.delegationTarget) ||
+          commentNavigationNativeCurrentTarget(publication, nativeEvent) !==
+            delivery.delegationTarget) ||
         !commentNavigationNativeSnapshotMatches(delivery)
       ) {
         return null;
@@ -7910,7 +8242,10 @@ function createCommentNavigationRender(
         return;
       }
       delivery.captureRootEvent = event;
-      const delegationTarget = suggestionNativeCurrentTarget(delivery.snapshot.event);
+      const delegationTarget = commentNavigationNativeCurrentTarget(
+        publication,
+        delivery.snapshot.event,
+      );
       if (
         !delegationTarget ||
         delegationTarget === publication.elements.panel ||
@@ -8033,8 +8368,12 @@ function createCommentNavigationRender(
       if (
         !delivery ||
         delivery.snapshot.publication !== publication ||
-        suggestionNativeCurrentTarget(event) !== delivery.delegationTarget ||
-        event.eventPhase !== publication.constructors.Event.BUBBLING_PHASE
+        commentNavigationNativeCurrentTarget(publication, event) !==
+          delivery.delegationTarget ||
+        commentNavigationNativeValue<number>(
+          publication.eventIntrinsics.event.eventPhase,
+          event,
+        ) !== publication.constructors.Event.BUBBLING_PHASE
       ) {
         return;
       }
@@ -8121,6 +8460,7 @@ function createCommentNavigationRender(
         domGuard = createCommentNavigationDomGuard(
           publication.dom,
           publication.placement,
+          publication.mutationObserverIntrinsics,
           retireForMutation,
         );
         if (!domGuard) return false;
@@ -8344,7 +8684,22 @@ function createCommentNavigationRender(
       : null;
     const dom = elements ? snapshotCommentNavigationDom(elements) : null;
     const ownerWindow = elements?.panel.ownerDocument.defaultView;
-    if (!elements || !placement || !dom || !ownerWindow) return undefined;
+    const eventIntrinsics = ownerWindow
+      ? captureCommentNavigationEventIntrinsics(ownerWindow)
+      : null;
+    const mutationObserverIntrinsics = ownerWindow
+      ? captureCommentNavigationMutationObserverIntrinsics(ownerWindow)
+      : null;
+    if (
+      !elements ||
+      !placement ||
+      !dom ||
+      !ownerWindow ||
+      !eventIntrinsics ||
+      !mutationObserverIntrinsics
+    ) {
+      return undefined;
+    }
     const publication: CommentNavigationPublication = Object.freeze({
       identity: Symbol("comment-navigation-publication"),
       render,
@@ -8362,6 +8717,8 @@ function createCommentNavigationRender(
       focus: ownerWindow.HTMLElement.prototype.focus,
       windowAddEventListener: ownerWindow.addEventListener,
       windowRemoveEventListener: ownerWindow.removeEventListener,
+      eventIntrinsics,
+      mutationObserverIntrinsics,
       dom,
       placement,
     });

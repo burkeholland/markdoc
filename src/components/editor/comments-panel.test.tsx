@@ -1599,6 +1599,105 @@ describe("CommentsPanel", () => {
     expect(secondClose).not.toHaveBeenCalled();
   });
 
+  it("reads native key, modifiers, and button through captured owner-realm accessors", () => {
+    const fixture = reviewSession("comment-navigation-native-accessors");
+    session = fixture.session;
+    render(
+      <CommentsPanel
+        session={session}
+        onClose={() => {}}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const navigation = captureCommentNavigation();
+    const ownerWindow = navigation.open.element.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
+    navigation.open.element.focus();
+
+    const poisonedKey = new ownerWindow.KeyboardEvent("keydown", {
+      key: "x",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(poisonedKey, "key", {
+      configurable: true,
+      value: "ArrowRight",
+    });
+    act(() => navigation.open.element.dispatchEvent(poisonedKey));
+    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
+
+    const poisonedModifier = new ownerWindow.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(poisonedModifier, "ctrlKey", {
+      configurable: true,
+      value: false,
+    });
+    act(() => navigation.open.element.dispatchEvent(poisonedModifier));
+    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
+
+    const poisonedButton = new ownerWindow.MouseEvent("click", {
+      button: 2,
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(poisonedButton, "button", {
+      configurable: true,
+      value: 0,
+    });
+    act(() => navigation.resolved.element.dispatchEvent(poisonedButton));
+    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
+
+    act(() => dispatchReviewClick(navigation.resolved.element));
+    expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("uses captured observer drains when prototype methods are replaced", async () => {
+    const fixture = reviewSession("comment-navigation-observer-intrinsics");
+    session = fixture.session;
+    render(
+      <CommentsPanel
+        session={session}
+        onClose={() => {}}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const stale = captureCommentNavigation();
+    const ownerWindow = stale.panel.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
+    const prototype = ownerWindow.MutationObserver.prototype;
+    const takeRecords = Object.getOwnPropertyDescriptor(prototype, "takeRecords");
+    if (!takeRecords || typeof takeRecords.value !== "function") {
+      throw new Error("MutationObserver.takeRecords was not an own method");
+    }
+
+    Object.defineProperty(prototype, "takeRecords", {
+      ...takeRecords,
+      value: () => [],
+    });
+    try {
+      act(() => {
+        stale.resolved.element.setAttribute("aria-selected", "true");
+        stale.resolved.element.setAttribute("aria-selected", "false");
+        dispatchReviewClick(stale.resolved.element);
+      });
+      expect(stale.open.element).toHaveAttribute("aria-selected", "true");
+    } finally {
+      Object.defineProperty(prototype, "takeRecords", takeRecords);
+    }
+
+    await act(async () => {});
+    const recovered = captureCommentNavigation();
+    expect(recovered.resolved.click).not.toBe(stale.resolved.click);
+    act(() => dispatchReviewClick(recovered.resolved.element));
+    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
+  });
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({
