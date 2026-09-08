@@ -23,6 +23,15 @@ export { IMPORT_ACCEPT };
 /** The drop-zone toast when nothing importable was dropped: the server's 415 sentence with a capital. */
 const NOTHING_IMPORTABLE_MESSAGE = `${IMPORT_EXTENSIONS_LIST[0].toUpperCase()}${IMPORT_EXTENSIONS_LIST.slice(1)}.`;
 const MALFORMED_IMPORT_RESULT_MESSAGE = "Import returned an invalid result";
+const MAX_IMPORT_RESULT_WARNINGS = 1_000;
+const arrayIsArray = Array.isArray;
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const getPrototypeOf = Object.getPrototypeOf;
+const ownKeys = Reflect.ownKeys;
+const structuredCloneValue =
+  typeof globalThis.structuredClone === "function"
+    ? globalThis.structuredClone.bind(globalThis)
+    : null;
 
 /** Same predicate the server applies before it answers 415, so the client never disagrees with it. */
 export function isImportableFile(file: File): boolean {
@@ -176,29 +185,148 @@ function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocumen
   };
 }
 
-function validateImportBatchResult(
-  attempted: readonly File[],
-  created: readonly ImportedDocument[],
-  failed: readonly FailedImport[],
-): Map<number, FailedImport> {
-  if (created.length + failed.length !== attempted.length) {
-    throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
-  }
+interface NormalizedImportBatch {
+  readonly documents: ImportedDocument[];
+  readonly failed: FailedImport[];
+  readonly failedAt: ReadonlyMap<number, FailedImport>;
+}
 
-  const failedAt = new Map<number, FailedImport>();
-  for (const failure of failed) {
-    if (
-      !Number.isInteger(failure.index) ||
-      failure.index < 0 ||
-      failure.index >= attempted.length ||
-      failedAt.has(failure.index) ||
-      failure.name !== attempted[failure.index].name
-    ) {
-      throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
-    }
-    failedAt.set(failure.index, failure);
+function malformedImportResult(): never {
+  throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+}
+
+function readStableDataProperty(source: object, property: PropertyKey): unknown {
+  const first = getOwnPropertyDescriptor(source, property);
+  const second = getOwnPropertyDescriptor(source, property);
+  if (
+    !first ||
+    !second ||
+    !("value" in first) ||
+    !("value" in second) ||
+    !Object.is(first.value, second.value) ||
+    first.configurable !== second.configurable ||
+    first.enumerable !== second.enumerable ||
+    first.writable !== second.writable
+  ) {
+    malformedImportResult();
   }
-  return failedAt;
+  return first.value;
+}
+
+function requirePlainRecord(value: unknown): object {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) malformedImportResult();
+  const firstPrototype = getPrototypeOf(value);
+  const secondPrototype = getPrototypeOf(value);
+  if (
+    firstPrototype !== secondPrototype ||
+    (firstPrototype !== Object.prototype && firstPrototype !== null)
+  ) {
+    malformedImportResult();
+  }
+  return value;
+}
+
+function requireExactKeys(source: object, expected: readonly string[]) {
+  const first = ownKeys(source);
+  const second = ownKeys(source);
+  const matches = (keys: readonly PropertyKey[]) =>
+    keys.length === expected.length &&
+    keys.every((key) => typeof key === "string" && expected.includes(key));
+  if (
+    !matches(first) ||
+    !matches(second)
+  ) {
+    malformedImportResult();
+  }
+}
+
+function snapshotArray<T>(
+  value: unknown,
+  maximumLength: number,
+  snapshot: (entry: unknown) => T,
+): T[] {
+  if (!arrayIsArray(value)) malformedImportResult();
+  const rawLength = readStableDataProperty(value, "length");
+  if (
+    typeof rawLength !== "number" ||
+    !Number.isSafeInteger(rawLength) ||
+    rawLength < 0 ||
+    rawLength > maximumLength
+  ) {
+    malformedImportResult();
+  }
+  const expectedKeys = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < rawLength; index++) expectedKeys.add(String(index));
+  for (const keys of [ownKeys(value), ownKeys(value)]) {
+    if (keys.length !== expectedKeys.size || keys.some((key) => !expectedKeys.has(key))) {
+      malformedImportResult();
+    }
+  }
+  const entries: T[] = [];
+  for (let index = 0; index < rawLength; index++) {
+    entries.push(snapshot(readStableDataProperty(value, index)));
+  }
+  Object.freeze(entries);
+  return entries;
+}
+
+function snapshotString(value: unknown): string {
+  if (typeof value !== "string") malformedImportResult();
+  return value;
+}
+
+function normalizeImportBatchResult(raw: unknown, attempted: readonly File[]): NormalizedImportBatch {
+  try {
+    const result = requirePlainRecord(raw);
+    requireExactKeys(result, ["documents", "failed"]);
+    const documents = snapshotArray(
+      readStableDataProperty(result, "documents"),
+      attempted.length,
+      (entry): ImportedDocument => {
+        const document = requirePlainRecord(entry);
+        requireExactKeys(document, ["id", "title", "warnings"]);
+        const id = snapshotString(readStableDataProperty(document, "id"));
+        const title = snapshotString(readStableDataProperty(document, "title"));
+        const warnings = snapshotArray(
+          readStableDataProperty(document, "warnings"),
+          MAX_IMPORT_RESULT_WARNINGS,
+          snapshotString,
+        );
+        return Object.freeze({ id, title, warnings });
+      },
+    );
+    const failed = snapshotArray(
+      readStableDataProperty(result, "failed"),
+      attempted.length,
+      (entry): FailedImport => {
+        const failure = requirePlainRecord(entry);
+        requireExactKeys(failure, ["index", "name", "error"]);
+        const index = readStableDataProperty(failure, "index");
+        const name = snapshotString(readStableDataProperty(failure, "name"));
+        const error = snapshotString(readStableDataProperty(failure, "error"));
+        if (typeof index !== "number" || !Number.isSafeInteger(index)) malformedImportResult();
+        return Object.freeze({ index, name, error });
+      },
+    );
+    if (documents.length + failed.length !== attempted.length) malformedImportResult();
+
+    const failedAt = new Map<number, FailedImport>();
+    for (const failure of failed) {
+      if (
+        failure.index < 0 ||
+        failure.index >= attempted.length ||
+        failedAt.has(failure.index) ||
+        failure.name !== attempted[failure.index].name
+      ) {
+        malformedImportResult();
+      }
+      failedAt.set(failure.index, failure);
+    }
+    structuredCloneValue?.(raw);
+    return Object.freeze({ documents, failed, failedAt });
+  } catch {
+    malformedImportResult();
+  }
 }
 
 export interface ImportDialogProps {
@@ -1843,30 +1971,31 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       if (!ownsSettledUpload(ownership)) return;
       const onError = ownership.authority.onError;
       if (!ownsSettledUpload(ownership)) return;
+      const onDone = ownership.authority.onDone;
+      if (!ownsSettledUpload(ownership)) return;
+      let onErrorFailed = false;
       let onErrorFailure: unknown;
       try {
         onError?.(message);
       } catch (error) {
+        onErrorFailed = true;
         onErrorFailure = error;
       }
 
+      let onDoneFailed = false;
       let onDoneFailure: unknown;
-      if (ownsSettledUpload(ownership)) {
-        const onDone = ownership.authority.onDone;
-        if (ownsSettledUpload(ownership)) {
-          try {
-            onDone?.(documents, failed);
-          } catch (error) {
-            onDoneFailure = error;
-          }
-        }
+      try {
+        onDone?.(documents, failed);
+      } catch (error) {
+        onDoneFailed = true;
+        onDoneFailure = error;
       }
 
-      if (onErrorFailure !== undefined && onDoneFailure !== undefined) {
+      if (onErrorFailed && onDoneFailed) {
         throw new AggregateError([onErrorFailure, onDoneFailure], "Import callbacks failed");
       }
-      if (onErrorFailure !== undefined) throw onErrorFailure;
-      if (onDoneFailure !== undefined) throw onDoneFailure;
+      if (onErrorFailed) throw onErrorFailure;
+      if (onDoneFailed) throw onDoneFailure;
     },
     [ownsSettledUpload],
   );
@@ -1960,10 +2089,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
 
     let completedResult: ReturnType<typeof summarizeImportItems> | null = null;
     try {
-      const { documents: created, failed } = await uploadImportBatch(documents, ownership.images);
+      const rawResult: unknown = await uploadImportBatch(documents, ownership.images);
       if (!ownsUpload(ownership)) return;
 
-      const failedAt = validateImportBatchResult(documents, created, failed);
+      const { documents: created, failedAt } = normalizeImportBatchResult(rawResult, documents);
       const retained = new Map(retryOwnership.files);
       const outcomes = new Map<number, ImportItem>();
       let nextCreated = 0;
@@ -2085,10 +2214,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setOpen(true);
     let completedResult: { documents: ImportedDocument[]; failed: FailedImport[] } | null = null;
     try {
-      const { documents: created, failed } = await uploadImportBatch(documents, images);
+      const rawResult: unknown = await uploadImportBatch(documents, images);
       if (!ownsUpload(ownership)) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
-      const failedAt = validateImportBatchResult(documents, created, failed);
+      const { documents: created, failed, failedAt } = normalizeImportBatchResult(rawResult, documents);
       const retained = new Map<number, File>();
       let next = 0;
       const pendingItems = documents.map((f, i): ImportItem => {

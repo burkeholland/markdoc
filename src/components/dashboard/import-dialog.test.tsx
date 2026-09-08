@@ -412,6 +412,58 @@ function invokeAsyncRetry(retry: () => void): Promise<void> {
   return (retry as unknown as () => Promise<void>)();
 }
 
+async function rejectedValue(promise: Promise<void>): Promise<{ rejected: boolean; value?: unknown }> {
+  try {
+    await promise;
+    return { rejected: false };
+  } catch (value) {
+    return { rejected: true, value };
+  }
+}
+
+function importDocumentResult(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "doc-recovered",
+    title: "Recovered",
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function failureResultWithAccessor(property: "index" | "name" | "error") {
+  const failure: Record<string, unknown> = {
+    index: 0,
+    name: "failed.md",
+    error: "Still failed",
+  };
+  const values = { index: 0, name: "failed.md", error: "Still failed" };
+  Object.defineProperty(failure, property, {
+    configurable: true,
+    enumerable: true,
+    get: () => values[property],
+  });
+  return { documents: [], failed: [failure] };
+}
+
+function failureResultWithChangingDescriptor(property: "index" | "name" | "error") {
+  const failure: Record<string, unknown> = {
+    index: 0,
+    name: "failed.md",
+    error: "Still failed",
+  };
+  const changed = { index: 1, name: "other.md", error: "Changed failure" };
+  let reads = 0;
+  const proxy = new Proxy(failure, {
+    getOwnPropertyDescriptor(target, key) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+      if (!descriptor || key !== property || !("value" in descriptor)) return descriptor;
+      reads++;
+      return { ...descriptor, value: reads === 1 ? descriptor.value : changed[property] };
+    },
+  });
+  return { documents: [], failed: [proxy] };
+}
+
 function dropFiles(files: File[]) {
   fireEvent.drop(window, { dataTransfer: { types: ["Files"], files } });
 }
@@ -2058,6 +2110,164 @@ describe("useFileImport - retry ownership", () => {
     expect(unhandledRejections).toEqual([]);
   });
 
+  it.each(["start", "unmount"] as const)(
+    "finishes old failure callbacks when onError performs a reentrant %s",
+    async (reentry) => {
+      const failed = new File(["# Failed"], "failed.md", { type: "text/markdown" });
+      const fresh = new File(["# Fresh"], "fresh.md", { type: "text/markdown" });
+      const freshUpload = deferred<ImportBatch>();
+      const onDone = vi.fn();
+      let start!: ReturnType<typeof useFileImport>["start"];
+      let retry: (() => void) | undefined;
+      const onError = vi.fn((message: string) => {
+        if (message !== "Retry request failed") return;
+        if (reentry === "start") void start([fresh]);
+        else view.unmount();
+      });
+      uploadImportBatch
+        .mockResolvedValueOnce({
+          documents: [],
+          failed: [{ index: 0, name: failed.name, error: "Initial failure" }],
+        })
+        .mockRejectedValueOnce(new Error("Retry request failed"))
+        .mockReturnValueOnce(freshUpload.promise);
+
+      const view = render(
+        <StrictMode>
+          <Harness
+            batches={[[failed]]}
+            onError={onError}
+            onDone={onDone}
+            captureStart={(current) => {
+              start = current;
+            }}
+            captureRetry={(current) => {
+              retry = current;
+            }}
+          />
+        </StrictMode>,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+      await screen.findByRole("button", { name: "Retry failed.md" });
+      await act(async () => {});
+      onDone.mockClear();
+      const exactRetry = retry;
+      if (!exactRetry) throw new Error("The failed row did not publish a retry");
+
+      await act(async () => {
+        await invokeAsyncRetry(exactRetry);
+      });
+
+      expect(onError).toHaveBeenCalledExactlyOnceWith("Retry request failed");
+      expect(onDone).toHaveBeenCalledExactlyOnceWith(
+        [],
+        [{ index: 0, name: failed.name, error: "Retry request failed" }],
+      );
+      if (reentry === "unmount") {
+        expect(screen.queryByTestId("import-dialog")).toBeNull();
+        expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+        return;
+      }
+
+      expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+      expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [fresh], []);
+      expect(screen.getByTestId("import-item")).toHaveTextContent(fresh.name);
+      expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "uploading");
+      await act(async () => {
+        freshUpload.resolve({
+          documents: [{ id: "doc-fresh", title: "Fresh", warnings: [] }],
+          failed: [],
+        });
+      });
+      expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-fresh");
+      expect(onDone).toHaveBeenCalledTimes(2);
+      expect(onDone).toHaveBeenLastCalledWith(
+        [{ id: "doc-fresh", title: "Fresh", warnings: [] }],
+        [],
+      );
+    },
+  );
+
+  it.each(
+    ([
+      { label: "undefined", value: undefined },
+      { label: "null", value: null },
+      { label: "false", value: false },
+      { label: "Error", value: new Error("Callback failed") },
+    ] as const).flatMap(({ label, value }) =>
+      (["onError", "onDone", "both"] as const).map((callbacks) => ({
+        name: `${callbacks} throwing ${label}`,
+        callbacks,
+        value,
+      })),
+    ),
+  )("surfaces $name after preserving failed retry settlement", async ({ callbacks, value }) => {
+    const failed = new File(["# Failed"], "failed.md", { type: "text/markdown" });
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    let retry: (() => void) | undefined;
+    uploadImportBatch
+      .mockResolvedValueOnce({
+        documents: [],
+        failed: [{ index: 0, name: failed.name, error: "Initial failure" }],
+      })
+      .mockRejectedValueOnce(new Error("Retry request failed"));
+
+    render(
+      <StrictMode>
+        <Harness
+          batches={[[failed]]}
+          onError={onError}
+          onDone={onDone}
+          captureRetry={(current) => {
+            retry = current;
+          }}
+        />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    await screen.findByRole("button", { name: "Retry failed.md" });
+    await act(async () => {});
+    onDone.mockClear();
+    onError.mockClear();
+    if (callbacks === "onError" || callbacks === "both") {
+      onError.mockImplementation(() => {
+        throw value;
+      });
+    }
+    if (callbacks === "onDone" || callbacks === "both") {
+      onDone.mockImplementation(() => {
+        throw value;
+      });
+    }
+    const exactRetry = retry;
+    if (!exactRetry) throw new Error("The failed row did not publish a retry");
+
+    let rejection!: Awaited<ReturnType<typeof rejectedValue>>;
+    await act(async () => {
+      rejection = await rejectedValue(invokeAsyncRetry(exactRetry));
+    });
+
+    expect(rejection.rejected).toBe(true);
+    if (callbacks === "both") {
+      expect(rejection.value).toBeInstanceOf(AggregateError);
+      expect((rejection.value as AggregateError).errors).toHaveLength(2);
+      expect(Object.is((rejection.value as AggregateError).errors[0], value)).toBe(true);
+      expect(Object.is((rejection.value as AggregateError).errors[1], value)).toBe(true);
+    } else {
+      expect(Object.is(rejection.value, value)).toBe(true);
+    }
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Retry request failed");
+    expect(onDone).toHaveBeenCalledExactlyOnceWith(
+      [],
+      [{ index: 0, name: failed.name, error: "Retry request failed" }],
+    );
+    expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "error");
+    expect(screen.getByRole("button", { name: "Retry failed.md" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry failed" })).toBeEnabled();
+    expect(unhandledRejections).toEqual([]);
+  });
+
   it("freezes callback identity for a pending retry and uses the replacement only for fresh work", async () => {
     const failed = new File(["# Failed"], "failed.md", { type: "text/markdown" });
     const fresh = new File(["# Fresh"], "fresh.md", { type: "text/markdown" });
@@ -2263,6 +2473,164 @@ describe("useFileImport - retry ownership", () => {
     }
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onDone).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    {
+      name: "an array as the result record",
+      result: () => [importDocumentResult()],
+    },
+    {
+      name: "a non-array documents collection",
+      result: () => ({ documents: {}, failed: [] }),
+    },
+    {
+      name: "a non-array failures collection",
+      result: () => ({ documents: [importDocumentResult()], failed: {} }),
+    },
+    {
+      name: "an accessor-backed result collection",
+      result: () => {
+        const raw: Record<string, unknown> = { failed: [] };
+        Object.defineProperty(raw, "documents", {
+          configurable: true,
+          enumerable: true,
+          get: () => [importDocumentResult()],
+        });
+        return raw;
+      },
+    },
+    {
+      name: "a result proxy whose descriptor trap throws",
+      result: () =>
+        new Proxy(
+          { documents: [importDocumentResult()], failed: [] },
+          {
+            getOwnPropertyDescriptor() {
+              throw undefined;
+            },
+          },
+        ),
+    },
+    {
+      name: "a transparent result proxy",
+      result: () => new Proxy({ documents: [importDocumentResult()], failed: [] }, {}),
+    },
+    {
+      name: "a missing created document record",
+      result: () => ({ documents: [{}], failed: [] }),
+    },
+    {
+      name: "a non-string created document id",
+      result: () => ({ documents: [importDocumentResult({ id: 42 })], failed: [] }),
+    },
+    {
+      name: "a non-string created document title",
+      result: () => ({ documents: [importDocumentResult({ title: null })], failed: [] }),
+    },
+    {
+      name: "a non-array created document warning list",
+      result: () => ({ documents: [importDocumentResult({ warnings: "warning" })], failed: [] }),
+    },
+    {
+      name: "a non-string created document warning",
+      result: () => ({ documents: [importDocumentResult({ warnings: [false] })], failed: [] }),
+    },
+    {
+      name: "an oversized created document warning list",
+      result: () => ({
+        documents: [importDocumentResult({ warnings: Array.from({ length: 1_001 }, () => "warning") })],
+        failed: [],
+      }),
+    },
+    {
+      name: "an accessor-backed failure index",
+      result: () => failureResultWithAccessor("index"),
+    },
+    {
+      name: "an accessor-backed failure name",
+      result: () => failureResultWithAccessor("name"),
+    },
+    {
+      name: "an accessor-backed failure error",
+      result: () => failureResultWithAccessor("error"),
+    },
+    {
+      name: "a changing failure index descriptor",
+      result: () => failureResultWithChangingDescriptor("index"),
+    },
+    {
+      name: "a changing failure name descriptor",
+      result: () => failureResultWithChangingDescriptor("name"),
+    },
+    {
+      name: "a changing failure error descriptor",
+      result: () => failureResultWithChangingDescriptor("error"),
+    },
+    {
+      name: "a changing array length descriptor",
+      result: () => {
+        let reads = 0;
+        const documents = new Proxy([importDocumentResult()], {
+          getOwnPropertyDescriptor(target, key) {
+            const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+            if (!descriptor || key !== "length" || !("value" in descriptor)) return descriptor;
+            reads++;
+            return { ...descriptor, value: reads === 1 ? 1 : 0 };
+          },
+        });
+        return { documents, failed: [] };
+      },
+    },
+  ])("fails closed for $name and recovers with the same exact row", async ({ result }) => {
+    const failed = new File(["# Failed"], "failed.md", { type: "text/markdown" });
+    const image = new File(["image"], "diagram.png", { type: "image/png" });
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    uploadImportBatch
+      .mockResolvedValueOnce({
+        documents: [],
+        failed: [{ index: 0, name: failed.name, error: "Initial failure" }],
+      })
+      .mockResolvedValueOnce(result())
+      .mockResolvedValueOnce({
+        documents: [{ id: "doc-recovered", title: "Recovered", warnings: [] }],
+        failed: [],
+      });
+
+    render(
+      <StrictMode>
+        <Harness batches={[[failed, image]]} onError={onError} onDone={onDone} />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    await screen.findByRole("button", { name: "Retry failed.md" });
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed.md" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith("Import returned an invalid result"));
+
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [failed], [image]);
+    expect(screen.queryByTestId("import-open")).toBeNull();
+    expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "error");
+    expect(screen.getByTestId("import-item")).toHaveTextContent("Import returned an invalid result");
+    expect(screen.getByRole("button", { name: "Retry failed.md" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry failed" })).toBeEnabled();
+    expect(onDone).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry failed.md" }));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-recovered"));
+
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [failed], [image]);
+    expect(screen.getByTestId("import-item")).toHaveAttribute("data-status", "done");
+    expect(screen.queryByTestId("import-row-retry")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledTimes(3);
+    expect(onDone).toHaveBeenLastCalledWith(
+      [{ id: "doc-recovered", title: "Recovered", warnings: [] }],
+      [],
+    );
   });
 
   it.each(["resolve", "reject"] as const)(
