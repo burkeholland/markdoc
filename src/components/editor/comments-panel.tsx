@@ -173,6 +173,7 @@ function commentSuggestionTargets(threads: CommentThread[], text: string): Comme
 const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
 const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
 const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
+const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
 
 type SuggestionActionKind = "accept" | "reject";
 
@@ -201,7 +202,7 @@ interface SuggestionActionDefinition {
   readonly enabled: boolean;
   readonly callback: () => void | Promise<unknown>;
   readonly capture: (element: HTMLButtonElement | null) => void;
-  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onClickCapture: (event: MouseEvent<HTMLButtonElement>) => void;
 }
 
 interface SuggestionActionRender {
@@ -210,6 +211,7 @@ interface SuggestionActionRender {
   readonly accept: SuggestionActionDefinition | null;
   readonly reject: SuggestionActionDefinition | null;
   readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly onRootClickCapture: (event: MouseEvent<HTMLDivElement>) => void;
   readonly onRootClick: (event: MouseEvent<HTMLDivElement>) => void;
   readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
   readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
@@ -257,7 +259,6 @@ interface SuggestionActionCells {
   readonly claimedPublications: WeakSet<SuggestionActionPublication>;
   readonly claimedActions: WeakSet<SuggestionActionDefinition>;
   readonly claimedReactEvents: WeakSet<object>;
-  readonly claimedNativeEvents: WeakSet<globalThis.MouseEvent>;
 }
 
 interface SuggestionActionElementOwnerView {
@@ -320,7 +321,6 @@ interface SuggestionNativeDelivery {
 
 interface SuggestionReactDelivery {
   readonly publication: SuggestionActionPublication;
-  readonly action: SuggestionActionDefinition;
   readonly event: object;
   readonly native: SuggestionNativeDelivery;
   readonly target: EventTarget;
@@ -334,8 +334,9 @@ interface SuggestionReactDelivery {
 interface SuggestionActionPublicationRuntime {
   readonly publication: SuggestionActionPublication;
   readonly publish: (owners: readonly SuggestionActionElementOwnerView[]) => boolean;
-  readonly stageReactDelivery: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
-  readonly invokeFromRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly stageReactDelivery: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly invokeAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
+  readonly isolateFromRoot: (event: MouseEvent<HTMLDivElement>) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly retireForAction: () => void;
@@ -853,6 +854,7 @@ function createSuggestionActionRender(
     const nativeDelivery = (
       event: MouseEvent<HTMLElement>,
       currentTarget: HTMLElement,
+      requireRootCrossing: boolean,
     ): SuggestionNativeDelivery | null => {
       if (!event || typeof event !== "object") return null;
       const ownerWindow = publication.ownerDocument.defaultView;
@@ -861,7 +863,7 @@ function createSuggestionActionRender(
       const delivery = nativeDeliveries.get(nativeEvent);
       if (
         !delivery ||
-        !delivery.crossedRoot ||
+        (requireRootCrossing && !delivery.crossedRoot) ||
         delivery.snapshot.publication !== publication ||
         event.nativeEvent !== delivery.snapshot.event ||
         event.type !== "click" ||
@@ -878,22 +880,13 @@ function createSuggestionActionRender(
       return delivery;
     };
 
-    const stageReactDelivery = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
-      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
-      const delivery = button ? nativeDelivery(event, button) : null;
+    const stageReactDelivery = (event: MouseEvent<HTMLDivElement>) => {
+      const delivery = nativeDelivery(event, publication.elements.root, false);
       if (
-        !button ||
         !delivery ||
-        delivery.snapshot.action !== action ||
-        delivery.snapshot.button !== button ||
-        action.renderIdentity !== identity ||
-        (action.kind === "accept" ? render.accept : render.reject) !== action ||
-        !action.enabled ||
-        !suggestionActionControlIsEnabled(button) ||
         cells.claimedPublications.has(publication) ||
-        cells.claimedActions.has(action) ||
         cells.claimedReactEvents.has(event) ||
-        cells.claimedNativeEvents.has(delivery.snapshot.event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
         !publicationIsCurrent()
       ) {
         return;
@@ -902,7 +895,6 @@ function createSuggestionActionRender(
         event,
         Object.freeze({
           publication,
-          action,
           event,
           native: delivery,
           target: event.target,
@@ -915,17 +907,13 @@ function createSuggestionActionRender(
       );
     };
 
-    const invokeFromRoot = (event: MouseEvent<HTMLDivElement>) => {
-      const delivery = nativeDelivery(event, publication.elements.root);
+    const invokeAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      const delivery = button ? nativeDelivery(event, button, false) : null;
       if (!delivery || !publicationIsCurrent()) return;
       const pending = reactDeliveries.get(event);
-      if (!pending) {
-        event.stopPropagation();
-        return;
-      }
-      const { action } = pending;
-      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
       if (
+        !pending ||
         pending.publication !== publication ||
         pending.event !== event ||
         pending.native !== delivery ||
@@ -939,12 +927,14 @@ function createSuggestionActionRender(
         delivery.snapshot.button !== button ||
         !button ||
         !button.contains(delivery.snapshot.target) ||
+        action.renderIdentity !== identity ||
+        (action.kind === "accept" ? render.accept : render.reject) !== action ||
         !action.enabled ||
         !suggestionActionControlIsEnabled(button) ||
         cells.claimedPublications.has(publication) ||
         cells.claimedActions.has(action) ||
         cells.claimedReactEvents.has(event) ||
-        cells.claimedNativeEvents.has(delivery.snapshot.event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
         !publicationIsCurrent()
       ) {
         return;
@@ -953,11 +943,15 @@ function createSuggestionActionRender(
       cells.claimedPublications.add(publication);
       cells.claimedActions.add(action);
       cells.claimedReactEvents.add(event);
-      cells.claimedNativeEvents.add(delivery.snapshot.event);
+      claimedSuggestionNativeEvents.add(delivery.snapshot.event);
       reactDeliveries.delete(event);
       nativeDeliveries.delete(delivery.snapshot.event);
       event.stopPropagation();
       void action.callback();
+    };
+
+    const isolateFromRoot = (event: MouseEvent<HTMLDivElement>) => {
+      if (nativeDelivery(event, publication.elements.root, true) && publicationIsCurrent()) event.stopPropagation();
     };
 
     const runtime: SuggestionActionPublicationRuntime = Object.freeze({
@@ -985,7 +979,8 @@ function createSuggestionActionRender(
         return true;
       },
       stageReactDelivery,
-      invokeFromRoot,
+      invokeAction,
+      isolateFromRoot,
       retireForElement: () => {
         retire("element");
       },
@@ -1046,10 +1041,10 @@ function createSuggestionActionRender(
     return runtime;
   };
 
-  const stageAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+  const invokeAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
     const runtime = currentRuntime;
     if (!runtime || runtime.isRetired()) return;
-    runtime.stageReactDelivery(action, event);
+    runtime.invokeAction(action, event);
   };
 
   const action = (
@@ -1067,7 +1062,7 @@ function createSuggestionActionRender(
       enabled,
       callback,
       capture: owner.capture,
-      onClick: (event: MouseEvent<HTMLButtonElement>) => stageAction(definition, event),
+      onClickCapture: (event: MouseEvent<HTMLButtonElement>) => invokeAction(definition, event),
     });
     return Object.freeze(definition);
   };
@@ -1174,10 +1169,16 @@ function createSuggestionActionRender(
     return true;
   };
 
+  const onRootClickCapture = (event: MouseEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageReactDelivery(event);
+  };
+
   const onRootClick = (event: MouseEvent<HTMLDivElement>) => {
     const runtime = currentRuntime;
     if (!runtime || runtime.isRetired()) return;
-    runtime.invokeFromRoot(event);
+    runtime.isolateFromRoot(event);
   };
 
   Object.assign(render, {
@@ -1186,11 +1187,12 @@ function createSuggestionActionRender(
     accept,
     reject,
     captureRoot: rootOwner.capture,
+    onRootClickCapture,
     onRootClick,
     captureAccept: accept?.capture ?? null,
-    onAccept: accept?.onClick ?? null,
+    onAccept: accept?.onClickCapture ?? null,
     captureReject: reject?.capture ?? null,
-    onReject: reject?.onClick ?? null,
+    onReject: reject?.onClickCapture ?? null,
     establish,
     retire,
     isRetired: () => renderRetired,
@@ -1222,7 +1224,6 @@ function PublishedSuggestionActions({
     claimedPublications: new WeakSet<SuggestionActionPublication>(),
     claimedActions: new WeakSet<SuggestionActionDefinition>(),
     claimedReactEvents: new WeakSet<object>(),
-    claimedNativeEvents: new WeakSet<globalThis.MouseEvent>(),
   }));
   const replayCleanup = useRef(0);
   useLayoutEffect(() => {
@@ -1259,24 +1260,24 @@ function PublishedSuggestionActions({
   });
   const publication = createSuggestionActionRender(authority, cells, requestSuccessor);
   useLayoutEffect(() => publication.establish(), [publication]);
-  const { captureRoot, onRootClick, captureAccept, onAccept: onAcceptClick, captureReject, onReject: onRejectClick } = publication;
+  const { captureRoot, onRootClickCapture, onRootClick, captureAccept, onAccept: onAcceptClick, captureReject, onReject: onRejectClick } = publication;
 
   return (
-    <div ref={captureRoot} className={SUGGESTION_ACTIONS_CLASS} onClick={onRootClick} data-testid="suggestion-actions">
+    <div ref={captureRoot} className={SUGGESTION_ACTIONS_CLASS} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid="suggestion-actions">
       {canAccept && (
         <button
           ref={captureAccept}
           type="button"
           className={SUGGESTION_ACCEPT_CLASS}
           disabled={disabled || state === "outdated"}
-          onClick={onAcceptClick!}
+          onClickCapture={onAcceptClick!}
           data-testid="suggestion-accept-comment"
         >
           <Check size={13} /> Accept suggestion
         </button>
       )}
       {canReject && (
-        <button ref={captureReject} type="button" className={SUGGESTION_REJECT_CLASS} disabled={disabled} onClick={onRejectClick!} data-testid="suggestion-reject-comment">
+        <button ref={captureReject} type="button" className={SUGGESTION_REJECT_CLASS} disabled={disabled} onClickCapture={onRejectClick!} data-testid="suggestion-reject-comment">
           <X size={13} /> Reject
         </button>
       )}

@@ -134,27 +134,28 @@ function reactProperty<T>(element: HTMLElement, property: string): T {
 function interceptReviewClick(
   element: HTMLButtonElement,
   invoke: (original: ReviewMouseHandler, event: CapturedReviewMouseEvent) => void,
+  property = "onClick",
 ) {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached while intercepting onClick");
   const record = element as unknown as Record<string, Record<string, unknown>>;
   const props = record[propsKey];
-  const original = props.onClick;
-  if (typeof original !== "function") throw new Error("React did not publish onClick");
+  const original = props[property];
+  if (typeof original !== "function") throw new Error(`React did not publish ${property}`);
   record[propsKey] = {
     ...props,
-    onClick: (event: CapturedReviewMouseEvent) => invoke(original as ReviewMouseHandler, event),
+    [property]: (event: CapturedReviewMouseEvent) => invoke(original as ReviewMouseHandler, event),
   };
   return () => {
     record[propsKey] = props;
   };
 }
 
-function captureReviewControl(element: HTMLElement): CapturedReviewControl {
+function captureReviewControl(element: HTMLElement, clickProperty = "onClick"): CapturedReviewControl {
   if (!(element instanceof HTMLButtonElement)) throw new Error("The review control was not a button");
   return {
     element,
-    click: reactProperty<ReviewMouseHandler>(element, "onClick"),
+    click: reactProperty<ReviewMouseHandler>(element, clickProperty),
     ref: reactProperty<ReviewElementRef<HTMLButtonElement>>(element, "ref"),
   };
 }
@@ -195,8 +196,8 @@ interface CapturedSuggestionActions {
   reject: CapturedReviewControl | null;
 }
 
-function captureSuggestionActions(scope: ParentNode = document): CapturedSuggestionActions {
-  const root = scope.querySelector<HTMLElement>('[data-testid="suggestion-actions"]');
+function captureSuggestionActions(scope: ParentNode = document, index = 0): CapturedSuggestionActions {
+  const root = scope.querySelectorAll<HTMLElement>('[data-testid="suggestion-actions"]').item(index);
   if (!(root instanceof HTMLDivElement)) throw new Error("Suggestion actions were not rendered");
   const accept = root.querySelector<HTMLElement>('[data-testid="suggestion-accept-comment"]');
   const reject = root.querySelector<HTMLElement>('[data-testid="suggestion-reject-comment"]');
@@ -204,8 +205,8 @@ function captureSuggestionActions(scope: ParentNode = document): CapturedSuggest
     root,
     rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
     rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
-    accept: accept ? captureReviewControl(accept) : null,
-    reject: reject ? captureReviewControl(reject) : null,
+    accept: accept ? captureReviewControl(accept, "onClickCapture") : null,
+    reject: reject ? captureReviewControl(reject, "onClickCapture") : null,
   };
 }
 
@@ -720,7 +721,7 @@ describe("CommentsPanel", () => {
       const actions = captureSuggestionActions();
       const source = crossing === "accept-through-reject" ? actions.reject! : actions.accept!;
       const crossed = crossing === "accept-through-reject" ? actions.accept! : actions.reject!;
-      const restore = interceptReviewClick(source.element, (_original, event) => crossed.click(event));
+      const restore = interceptReviewClick(source.element, (_original, event) => crossed.click(event), "onClickCapture");
 
       act(() => dispatchReviewClick(source.element));
       restore();
@@ -729,6 +730,96 @@ describe("CommentsPanel", () => {
 
       act(() => dispatchReviewClick(source.element));
       expect(crossing === "accept-through-reject" ? reject : accept).toHaveBeenCalledOnce();
+    });
+
+    it("rejects a mutable wrapper carrying a live native click before a genuine wrapper acts", async () => {
+      const fixture = reviewSession("suggestion-live-native-forgery");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const actions = captureSuggestionActions();
+      const stopPropagation = vi.fn();
+      const restore = interceptReviewClick(
+        actions.accept!.element,
+        (original, event) => {
+          const delivered = event as CapturedReviewMouseEvent & {
+            button: number;
+            buttons: number;
+            bubbles: boolean;
+            cancelable: boolean;
+            defaultPrevented: boolean;
+          };
+          const forged: CapturedReviewMouseEvent & {
+            button: number;
+            buttons: number;
+            bubbles: boolean;
+            cancelable: boolean;
+            defaultPrevented: boolean;
+            stopPropagation: () => void;
+          } = {
+            type: delivered.type,
+            currentTarget: actions.accept!.element,
+            target: delivered.target,
+            nativeEvent: delivered.nativeEvent,
+            button: delivered.button,
+            buttons: delivered.buttons,
+            bubbles: delivered.bubbles,
+            cancelable: delivered.cancelable,
+            defaultPrevented: delivered.defaultPrevented,
+            stopPropagation,
+          };
+          original(forged);
+          forged.currentTarget = actions.root;
+          actions.rootClick(forged);
+        },
+        "onClickCapture",
+      );
+
+      act(() => dispatchReviewClick(actions.accept!.element));
+      restore();
+      expect(accept).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+
+      act(() => dispatchReviewClick(actions.accept!.element));
+      expect(accept).toHaveBeenCalledOnce();
+    });
+
+    it("uses each native click once across rows without poisoning a later valid delivery", async () => {
+      const fixture = reviewSession("suggestion-cross-row-native");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      addCommentSuggestion(session, fixture.user);
+      const reject = vi.spyOn(session.comments, "rejectSuggestion").mockReturnValue(true);
+      render(suggestionPanel(session));
+      await waitFor(() => expect(screen.getAllByTestId("suggestion-actions")).toHaveLength(2));
+      const first = captureSuggestionActions(document, 0);
+      const second = captureSuggestionActions(document, 1);
+      const firstThreadId = first.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
+      const secondThreadId = second.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
+      if (!firstThreadId || !secondThreadId) throw new Error("Suggestion rows did not retain their thread identities");
+      const reused = new MouseEvent("click", { bubbles: true, cancelable: true });
+      const restore = interceptReviewClick(
+        first.reject!.element,
+        (_original, event) => second.reject!.click(event),
+        "onClickCapture",
+      );
+
+      act(() => dispatchReviewClick(first.reject!.element, reused));
+      restore();
+      expect(reject).not.toHaveBeenCalled();
+
+      act(() => {
+        dispatchReviewClick(second.reject!.element, reused);
+        dispatchReviewClick(first.reject!.element, reused);
+      });
+      expect(reject).toHaveBeenCalledOnce();
+      expect(reject.mock.calls[0]?.[0]).toBe(secondThreadId);
+
+      act(() => dispatchReviewClick(first.reject!.element));
+      expect(reject).toHaveBeenCalledTimes(2);
+      expect(reject.mock.calls[1]?.[0]).toBe(firstThreadId);
     });
 
     it("claims the publication, action, React event, and native event before repeated or reentrant async work", async () => {
@@ -745,10 +836,14 @@ describe("CommentsPanel", () => {
       await screen.findByTestId("suggestion-accept-comment");
       const actions = captureSuggestionActions();
       captured.current = actions;
-      const restore = interceptReviewClick(actions.accept!.element, (original, event) => {
-        original(event);
-        original(event);
-      });
+      const restore = interceptReviewClick(
+        actions.accept!.element,
+        (original, event) => {
+          original(event);
+          original(event);
+        },
+        "onClickCapture",
+      );
 
       act(() => {
         actions.accept!.click(reviewMouseEvent(actions.accept!));
@@ -2307,7 +2402,7 @@ describe("CommentsPanel", () => {
       act(() => invokeReviewControl(toggleA, toggleB.element));
       expect(toggleB.element).toHaveAttribute("aria-expanded", "true");
 
-      const links = screen.getAllByTestId("review-thread-link").map(captureReviewControl);
+      const links = screen.getAllByTestId("review-thread-link").map((element) => captureReviewControl(element));
       const rows = screen.getAllByTestId("review-thread-row");
       const list = screen.getByTestId("review-threads");
       act(() => invokeReviewControl(links[0], links[1].element));
