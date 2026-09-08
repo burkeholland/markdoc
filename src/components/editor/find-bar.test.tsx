@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { StrictMode, useLayoutEffect, type ReactNode } from "react";
+import { StrictMode, useLayoutEffect, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type * as Y from "yjs";
 
@@ -671,6 +671,105 @@ describe("FindBar exact publication controls", () => {
     clickCurrentOnce("find-close");
     expect(callbacksB.onClose).toHaveBeenCalledOnce();
     await act(async () => {});
+  });
+
+  it("publishes current callback facts after Strict Mode overtakes replay authority", async () => {
+    const s = session("owner", "strict-callback-change");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const retiredReveal = vi.fn();
+    const currentReveal = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    function CallbackChange() {
+      const [onReveal, setOnReveal] = useState(() => retiredReveal);
+      useLayoutEffect(() => {
+        setOnReveal(() => currentReveal);
+      }, []);
+      return (
+        <FindBar
+          session={s}
+          replaceVisible={false}
+          onReplaceVisible={vi.fn()}
+          focusNonce={0}
+          onReveal={onReveal}
+          onClose={vi.fn()}
+        />
+      );
+    }
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <CallbackChange />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    await act(async () => {});
+    const next = host.querySelector('[data-testid="find-next"]');
+    if (!(next instanceof HTMLButtonElement)) throw new Error("Missing current Next control");
+    fireEvent.click(next);
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(retiredReveal).not.toHaveBeenCalled();
+    expect(currentReveal).toHaveBeenCalledOnce();
+  });
+
+  it("rejects Strict Mode replay after the committed bar is reparented", () => {
+    const s = session("owner", "strict-reparent");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    const host = document.createElement("div");
+    const foreign = document.createElement("div");
+    document.body.append(host, foreign);
+    const root = createRoot(host);
+    directRoots.add(root);
+    function ReparentOnLayout() {
+      useLayoutEffect(() => {
+        const bar =
+          host.querySelector('[data-testid="find-bar"]') ??
+          foreign.querySelector('[data-testid="find-bar"]');
+        if (!(bar instanceof HTMLDivElement)) throw new Error("Missing FindBar root");
+        if (bar.parentNode !== foreign) foreign.append(bar);
+      }, []);
+      return (
+        <section>
+          <FindBar
+            session={s}
+            replaceVisible={false}
+            onReplaceVisible={vi.fn()}
+            focusNonce={0}
+            onReveal={onReveal}
+            onClose={vi.fn()}
+          />
+        </section>
+      );
+    }
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <ReparentOnLayout />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    const bar = foreign.querySelector('[data-testid="find-bar"]');
+    const next = foreign.querySelector('[data-testid="find-next"]');
+    if (!(bar instanceof HTMLDivElement) || !(next instanceof HTMLButtonElement)) {
+      throw new Error("FindBar was not reparented");
+    }
+    reactHandler<ClickHandler>(next, "onClick")(clickActivation(next));
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+
+    const section = host.querySelector("section");
+    if (!(section instanceof HTMLElement)) throw new Error("Missing original FindBar parent");
+    section.append(bar);
+    foreign.remove();
   });
 
   it.each(CONTROL_CASES.flatMap(([testId, destination]) =>

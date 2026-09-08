@@ -214,6 +214,14 @@ interface FindBarDomSnapshot {
 interface FindBarReplay {
   readonly source: FindBarPublication;
   readonly dom: FindBarDomSnapshot;
+  readonly placement: FindBarPlacement;
+}
+
+interface FindBarPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
 }
 
 interface RefReplay {
@@ -238,6 +246,7 @@ interface FindBarPublicationRuntime {
   readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
   readonly snapshot: () => FindBarDomSnapshot | null;
+  readonly placement: () => FindBarPlacement | null;
 }
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -276,6 +285,29 @@ function findBarDomMatches(snapshot: FindBarDomSnapshot): boolean {
   return node.childNodes.length === snapshot.children.length &&
     snapshot.children.every((child, index) =>
       node.childNodes.item(index) === child.node && findBarDomMatches(child));
+}
+
+function captureFindBarPlacement(root: HTMLDivElement): FindBarPlacement | null {
+  const parent = root.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: root.ownerDocument,
+    parent,
+    previousSibling: root.previousSibling,
+    nextSibling: root.nextSibling,
+  });
+}
+
+function findBarPlacementMatches(
+  root: HTMLDivElement,
+  placement: FindBarPlacement,
+): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.parentNode === placement.parent &&
+    root.previousSibling === placement.previousSibling &&
+    root.nextSibling === placement.nextSibling
+  );
 }
 
 function authoritiesMatch(
@@ -378,9 +410,11 @@ function createFindBarPublication({
 
   const requestReplaySuccessor = (runtime: FindBarPublicationRuntime) => {
     const snapshot = runtime.snapshot();
+    const placement = runtime.placement();
     if (
       successorRequested ||
       !snapshot ||
+      !placement ||
       !cells.successorOf.current ||
       cells.successorOf.current !== runtime.publication ||
       !factsAreCurrent() ||
@@ -393,6 +427,7 @@ function createFindBarPublication({
     cells.replay.current = Object.freeze({
       source: runtime.publication,
       dom: snapshot,
+      placement,
     });
     requestSuccessor();
   };
@@ -802,6 +837,7 @@ function createFindBarPublication({
     let retirement: Retirement | null = null;
     let established = false;
     let domSnapshot: FindBarDomSnapshot | null = null;
+    let placementSnapshot: FindBarPlacement | null = null;
     let replayRefs: RefReplay[] = [];
     let invalidReplay = false;
     let layoutRetired = false;
@@ -830,9 +866,11 @@ function createFindBarPublication({
       const root = bar.element();
       return Boolean(
         domSnapshot &&
+        placementSnapshot &&
         root &&
         root === domSnapshot.node &&
         root.isConnected &&
+        findBarPlacementMatches(root, placementSnapshot) &&
         findBarDomMatches(domSnapshot)
       );
     };
@@ -857,6 +895,12 @@ function createFindBarPublication({
       ) => {
         established = true;
         domSnapshot = snapshot;
+        const root = bar.element();
+        if (!root) throw new Error("Cannot publish a FindBar without its root");
+        placementSnapshot = captureFindBarPlacement(root);
+        if (!placementSnapshot) {
+          throw new Error("Cannot publish a FindBar without a committed parent");
+        }
         replayRefs = owners.map((owner) => {
           const element = owner.element();
           if (!element) throw new Error("Cannot publish a FindBar without every committed ref");
@@ -923,6 +967,7 @@ function createFindBarPublication({
         (refsHaveNoReplay() || refsHaveExactReplay()) &&
         publishedDomMatches(),
       snapshot: () => domSnapshot,
+      placement: () => placementSnapshot,
     });
     return runtime;
   };
@@ -947,11 +992,17 @@ function createFindBarPublication({
         cells.successorOf.current !== replay.source ||
         !isExactReplaySuccessor(replay.source, authority) ||
         root !== replay.dom.node ||
+        !findBarPlacementMatches(root, replay.placement) ||
         !findBarDomMatches(replay.dom)
       )
     ) {
+      const exactDomStillCommitted =
+        root === replay.dom.node &&
+        findBarPlacementMatches(root, replay.placement) &&
+        findBarDomMatches(replay.dom);
       cells.replay.current = null;
       cells.successorOf.current = null;
+      if (exactDomStillCommitted) requestSuccessor();
       return undefined;
     }
     const runtime = createRuntime();
