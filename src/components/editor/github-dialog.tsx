@@ -1515,12 +1515,12 @@ function exactPickerSubmit(
     event.type === "submit" &&
     event.currentTarget === form &&
     event.target === form &&
-    !event.defaultPrevented &&
+    event.defaultPrevented &&
     nativeEvent instanceof ownerWindow.SubmitEvent &&
     nativeEvent.type === "submit" &&
     nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
     nativeEvent.target === form &&
-    !nativeEvent.defaultPrevented &&
+    nativeEvent.defaultPrevented &&
     (nativeEvent.submitter === null || nativeEvent.submitter === submit) &&
     form.isConnected &&
     submit.isConnected &&
@@ -3019,8 +3019,8 @@ function GitHubPickerVisit({
                   ref={elementRef(presentation, "pathForm")}
                   className="flex items-center gap-2"
                   onSubmit={(event) => {
-                    if (!claimSubmit(presentation, event)) return;
                     event.preventDefault();
+                    if (!claimSubmit(presentation, event)) return;
                     linkRepo(presentation, presentation.path.trim());
                   }}
                 >

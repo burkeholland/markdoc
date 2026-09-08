@@ -1178,6 +1178,79 @@ describe("GitHubPicker exact control publication", () => {
     }
   });
 
+  it("prevents a retired implicit repository submit before a fresh picker submits once", async () => {
+    const doc = documentDto();
+    const picker = (key: string) => (
+      <GitHubPicker
+        key={key}
+        mode="link"
+        doc={doc}
+        githubAvailable
+        githubConfigured
+      />
+    );
+    const view = await renderStrictPicker(picker("retired-form"));
+
+    try {
+      await selectStrictRepository(view.host);
+      const stalePath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
+      const staleForm = stalePath.form;
+      if (!staleForm) throw new Error("The retired repository path has no form");
+      fireEvent.change(stalePath, { target: { value: "docs/retired.md" } });
+      await act(async () => {});
+      stalePath.setAttribute("name", "transient");
+      stalePath.removeAttribute("name");
+
+      fireEvent.keyDown(stalePath, { key: "Enter", code: "Enter" });
+      const SubmitEventConstructor = staleForm.ownerDocument.defaultView?.SubmitEvent;
+      if (!SubmitEventConstructor) throw new Error("The retired form has no owner-document SubmitEvent");
+      const staleSubmit = new SubmitEventConstructor("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      });
+      const preventDefault = vi.spyOn(staleSubmit, "preventDefault");
+      let dispatched = true;
+      act(() => {
+        dispatched = staleForm.dispatchEvent(staleSubmit);
+      });
+
+      expect(dispatched).toBe(false);
+      expect(staleSubmit.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.root.render(<StrictMode>{picker("fresh-form")}</StrictMode>);
+      });
+      await selectStrictRepository(view.host);
+      const currentPath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
+      const currentForm = currentPath.form;
+      if (!currentForm) throw new Error("The fresh repository path has no form");
+      fireEvent.change(currentPath, { target: { value: "docs/current.md" } });
+      await act(async () => {});
+      const currentSubmit = new SubmitEventConstructor("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      });
+      act(() => {
+        currentForm.dispatchEvent(currentSubmit);
+      });
+
+      expect(currentSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
+        storage: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "main",
+        path: "docs/current.md",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
   it("rejects Strict Mode mutation, detach, stale crossing, repetition, and reentry without poisoning a remount", async () => {
     const onImported = vi.fn();
     const picker = (key: string) => (
