@@ -393,6 +393,98 @@ describe("CommitDialog visit authority", () => {
     }
   });
 
+  it("keeps Published and its timer for a skipped publish with a fresh equal document", async () => {
+    const publish = deferred<void>();
+    const current = actions();
+    const doc = repoDocument("doc-skipped-refresh", "docs/skipped-refresh.md");
+    const { host, root } = createHost();
+
+    current.onCommit.mockImplementationOnce(async () => {
+      await publish.promise;
+      root.render(
+        <StrictMode>
+          <CommitBoundary
+            visit="skipped"
+            doc={{ ...doc }}
+            actions={current}
+          />
+        </StrictMode>,
+      );
+    });
+
+    try {
+      await render(root, { visit: "initial", doc, actions: current });
+      fireEvent.change(message(), { target: { value: "  Already current  " } });
+      await submit();
+
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Already current");
+      await resolve(publish);
+      expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+
+      await advance(899);
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+      await advance(1);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("preserves a typed draft through a same-destination title refresh", async () => {
+    const pending = deferred<void>();
+    const current = actions(pending.promise);
+    const doc = repoDocument("doc-title-refresh", "docs/title-refresh.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "initial", doc, actions: current });
+      fireEvent.change(message(), { target: { value: "  Keep this draft  " } });
+      await render(root, {
+        visit: "remote-title",
+        doc: { ...doc, title: "Collaborator renamed this document" },
+        actions: current,
+      });
+
+      expect(message()).toHaveValue("  Keep this draft  ");
+      await submit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Keep this draft");
+      await resolve(pending);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("preserves a typed draft when repository publication metadata first appears", async () => {
+    const current = actions();
+    const doc = {
+      ...repoDocument(
+        "doc-publication-metadata",
+        "docs/publication-metadata.md",
+      ),
+      publishedAt: null,
+    };
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "initial", doc, actions: current });
+      fireEvent.change(message(), { target: { value: "  Keep unpublished draft  " } });
+      await render(root, {
+        visit: "published-remotely",
+        doc: { ...doc, publishedAt: "2026-09-08T10:30:00.000Z" },
+        actions: current,
+      });
+
+      expect(message()).toHaveValue("  Keep unpublished draft  ");
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("does not hand a pending operation to an unrelated metadata refresh", async () => {
     const stalePending = deferred<void>();
     const currentPending = deferred<void>();

@@ -3828,10 +3828,12 @@ function commitDocumentFactsAllowOperationHandoff(
   }
   let unpublishedTransition = false;
   let publicationClockChange = false;
+  let valueChanged = false;
   const exactResultShape = current.values.every(([name, value], index) => {
     const prior = previous.values[index];
     if (!prior || prior[0] !== name) return false;
     if (Object.is(prior[1], value)) return true;
+    valueChanged = true;
     if (name === "hasUnpublishedChanges") {
       unpublishedTransition = prior[1] === true && value === false;
       return unpublishedTransition;
@@ -3842,7 +3844,32 @@ function commitDocumentFactsAllowOperationHandoff(
     }
     return false;
   });
-  return exactResultShape && unpublishedTransition && publicationClockChange;
+  return (
+    exactResultShape &&
+    (!valueChanged || (unpublishedTransition && publicationClockChange))
+  );
+}
+
+function commitVisitsAllowMetadataHandoff(
+  previous: CommitDialogVisit,
+  current: CommitDialogVisit,
+) {
+  return (
+    previous !== current &&
+    previous.mount === current.mount &&
+    previous.destination === current.destination &&
+    previous.open === current.open &&
+    previous.onCommit === current.onCommit &&
+    previous.onOpenChange === current.onOpenChange &&
+    previous.isOwner === current.isOwner &&
+    previous.initialMessage === current.initialMessage &&
+    previous.title === current.title &&
+    previous.description === current.description &&
+    previous.label === current.label &&
+    previous.gistControlPresent === current.gistControlPresent &&
+    commitVisitFactsMatch(previous) &&
+    commitVisitFactsMatch(current)
+  );
 }
 
 function commitOperationAllowsVisitHandoff(
@@ -3854,6 +3881,7 @@ function commitOperationAllowsVisitHandoff(
     operation.currentVisit.get() === previous &&
     operation.visit === previous &&
     previous.mount === current.mount &&
+    previous.destination === current.destination &&
     previous.open === current.open &&
     previous.onCommit === current.onCommit &&
     previous.onOpenChange === current.onOpenChange &&
@@ -3862,6 +3890,7 @@ function commitOperationAllowsVisitHandoff(
     previous.title === current.title &&
     previous.description === current.description &&
     previous.label === current.label &&
+    previous.gistControlPresent === current.gistControlPresent &&
     operation.commit === current.onCommit &&
     commitDocumentFactsAllowOperationHandoff(
       previous.documentFacts,
@@ -3931,7 +3960,7 @@ function commitVisitFactsMatch(visit: CommitDialogVisit) {
         doc.gistFile,
         doc.githubUrl,
         doc.ownerId,
-        Boolean(doc.publishedAt),
+        doc.storage === "gist" ? Boolean(doc.publishedAt) : null,
       ]) &&
     visit.initialMessage === `Update ${doc.repoPath ?? doc.gistFile ?? "document"}` &&
     visit.title === (doc.storage === "gist" ? "Update gist" : "Commit to GitHub") &&
@@ -5902,7 +5931,7 @@ export const CommitDialog = memo(function CommitDialog({
     doc.gistFile,
     doc.githubUrl,
     doc.ownerId,
-    Boolean(doc.publishedAt),
+    doc.storage === "gist" ? Boolean(doc.publishedAt) : null,
   ]);
   const visit = useMemo(
     () =>
@@ -5966,6 +5995,16 @@ export const CommitDialog = memo(function CommitDialog({
       timer.currentVisit.get() === state.visit &&
       timer.onOpenChange === state.visit.onOpenChange &&
       timer.handle !== undefined;
+    const idleMetadataRefresh =
+      visit !== null &&
+      state !== null &&
+      operation === null &&
+      timer === null &&
+      state.operation === null &&
+      state.closeTimer === null &&
+      !state.busy &&
+      !state.done &&
+      commitVisitsAllowMetadataHandoff(state.visit, visit);
     if (
       visit &&
       state &&
@@ -5980,6 +6019,8 @@ export const CommitDialog = memo(function CommitDialog({
         operation,
         timer,
       });
+      state = Object.freeze({ ...state, visit });
+    } else if (idleMetadataRefresh && state && visit) {
       state = Object.freeze({ ...state, visit });
     } else {
       state = visit ? initialCommitDialogState(visit) : null;
