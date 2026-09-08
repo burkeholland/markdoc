@@ -1125,9 +1125,6 @@ function nativePanelEvent(
     isPropagationStopped?: unknown;
     persist?: unknown;
   };
-  const reactEventPrototype = Object.getPrototypeOf(event) as {
-    constructor?: { name?: unknown };
-  } | null;
   const expectedReactName =
     kind === "click"
       ? "onClick"
@@ -1150,9 +1147,10 @@ function nativePanelEvent(
     nativeEvent.eventPhase === ownerWindow.Event.NONE ||
     event.type !== expectedReactType ||
     reactEvent._reactName !== expectedReactName ||
-    reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
     typeof reactEvent.isDefaultPrevented !== "function" ||
+    reactEvent.isDefaultPrevented() ||
     typeof reactEvent.isPropagationStopped !== "function" ||
+    reactEvent.isPropagationStopped() ||
     typeof reactEvent.persist !== "function" ||
     event.defaultPrevented ||
     nativeEvent.defaultPrevented ||
@@ -1173,7 +1171,6 @@ function nativePanelEvent(
       nativeEvent.button !== 0 ||
       !nativeEvent.bubbles ||
       !event.bubbles ||
-      !(event instanceof Object) ||
       (event as MouseEvent<HTMLElement>).button !== 0 ||
       !source.contains(target)
     ) {
@@ -1190,9 +1187,10 @@ function nativePanelEvent(
       return null;
     }
   } else if (kind === "input-change") {
+    const InputEventConstructor = ownerWindow.InputEvent;
     const isInput =
-      typeof ownerWindow.InputEvent === "function" &&
-      nativeEvent instanceof ownerWindow.InputEvent &&
+      InputEventConstructor &&
+      nativeEvent instanceof InputEventConstructor &&
       nativeEvent.type === "input";
     if (
       target !== source ||

@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { StrictMode, useLayoutEffect, type ComponentProps } from "react";
+import {
+  StrictMode,
+  useLayoutEffect,
+  type ComponentProps,
+  type SyntheticEvent,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -121,6 +126,41 @@ function interceptEvent<T extends HTMLElement>(
   return () => {
     record[propsKey] = props;
   };
+}
+
+type ExactSyntheticEvent<T extends HTMLElement> = SyntheticEvent<T> & {
+  _reactName?: unknown;
+};
+
+const MangledSyntheticEvent = class a {};
+
+function cloneSyntheticEvent<T extends HTMLElement>(
+  event: CapturedEvent<T>,
+  overrides: Partial<ExactSyntheticEvent<T>> = {},
+  syntheticConstructor: new () => object = MangledSyntheticEvent,
+): CapturedEvent<T> {
+  const prototype = Object.create(Object.getPrototypeOf(event), {
+    constructor: { value: syntheticConstructor },
+  });
+  return Object.assign(
+    Object.create(prototype) as CapturedEvent<T>,
+    event,
+    overrides,
+  );
+}
+
+function interceptMangledEvent<T extends HTMLElement>(
+  element: T,
+  prop: CapturedEventProp,
+) {
+  return interceptEvent(element, prop, (original, event) => {
+    const mangled = cloneSyntheticEvent(event);
+    expect(Object.getPrototypeOf(mangled).constructor).toBe(
+      MangledSyntheticEvent,
+    );
+    expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+    original(mangled);
+  });
 }
 
 function capturedEvent<T extends HTMLElement>(currentTarget: T, key?: string): CapturedEvent<T> {
@@ -710,6 +750,210 @@ describe("VersionsPanel · exact panel publications", () => {
 });
 
 describe("VersionsPanel · direct-root Strict Mode authority", () => {
+  it("accepts every exact React event family with a production-mangled constructor", async () => {
+    const docId = "strict-minified-events";
+    const newer = {
+      ...named,
+      id: `${docId}-newer`,
+      number: 2,
+      title: "Minified newer",
+    };
+    const older = {
+      ...named,
+      id: `${docId}-older`,
+      number: 1,
+      title: "Minified older",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions.mockResolvedValue({ versions: [newer, older] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === newer.id ? newer : older),
+        content: `# ${versionId}`,
+      },
+    }));
+    renameVersion.mockResolvedValue({ ok: true });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(newer.title);
+
+      let checkbox = host.querySelector<HTMLInputElement>(
+        `[aria-label="Compare v${newer.number}"]`,
+      )!;
+      interceptMangledEvent(checkbox, "onChange");
+      await act(async () => checkbox.click());
+      expect(checkbox).toBeChecked();
+
+      const select = (await screen.findByText(newer.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      interceptMangledEvent(select, "onClick");
+      act(() => select.click());
+      await waitFor(() =>
+        expect(onPreview).toHaveBeenLastCalledWith({
+          version: newer,
+          content: `# ${newer.id}`,
+        }),
+      );
+
+      let rename = await screen.findByTestId<HTMLButtonElement>(
+        "version-rename",
+      );
+      interceptMangledEvent(rename, "onClick");
+      act(() => rename.click());
+
+      let input = screen.getByTestId<HTMLInputElement>(
+        "version-rename-input",
+      );
+      interceptMangledEvent(input, "onChange");
+      fireEvent.change(input, { target: { value: "Cancelled minified title" } });
+      expect(input).toHaveValue("Cancelled minified title");
+
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onKeyDown");
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(screen.queryByTestId("version-rename-input")).toBeNull();
+
+      rename = screen.getByTestId<HTMLButtonElement>("version-rename");
+      fireEvent.click(rename);
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onChange");
+      fireEvent.change(input, { target: { value: "Final minified title" } });
+
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onBlur");
+      fireEvent.blur(input);
+      await waitFor(() =>
+        expect(renameVersion).toHaveBeenCalledExactlyOnceWith(
+          docId,
+          newer.id,
+          "Final minified title",
+        ),
+      );
+
+      checkbox = host.querySelector<HTMLInputElement>(
+        `[aria-label="Compare v${newer.number}"]`,
+      )!;
+      expect(checkbox).toBeChecked();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects malformed React method fields without consuming the exact event", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("strict-malformed-event"),
+        onClose,
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      const close = host.querySelector<HTMLButtonElement>(
+        '[aria-label="Close version history"]',
+      )!;
+      for (const field of [
+        "isDefaultPrevented",
+        "isPropagationStopped",
+        "persist",
+      ] as const) {
+        const restore = interceptClick(close, (original, event) => {
+          const overrides: Partial<
+            ExactSyntheticEvent<HTMLButtonElement>
+          > = {};
+          overrides[field] = undefined;
+          original(cloneSyntheticEvent(event, overrides));
+        });
+        act(() => close.click());
+        restore();
+        expect(onClose).not.toHaveBeenCalled();
+      }
+
+      act(() => close.click());
+      expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects crossed native linkage without consuming the exact current action", async () => {
+    const docId = "strict-crossed-native-event";
+    const first = {
+      ...named,
+      id: `${docId}-first`,
+      number: 2,
+      title: "Crossed first",
+    };
+    const second = {
+      ...named,
+      id: `${docId}-second`,
+      number: 1,
+      title: "Crossed second",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions.mockResolvedValue({ versions: [first, second] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === first.id ? first : second),
+        content: `# ${versionId}`,
+      },
+    }));
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      const firstControl = (await screen.findByText(first.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      const secondControl = (await screen.findByText(second.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      const firstHandler = capturedProps(firstControl).onClick!;
+      const restore = interceptClick(secondControl, (_original, event) => {
+        firstHandler(
+          cloneSyntheticEvent(event, {
+            currentTarget: firstControl,
+            target: firstControl,
+          }),
+        );
+      });
+
+      act(() => secondControl.click());
+      restore();
+      expect(version).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+
+      act(() => firstControl.click());
+      await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+      expect(version).toHaveBeenCalledExactlyOnceWith(docId, first.id);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("keeps Retry exact and one-use after a Strict Mode remount", async () => {
     const docId = "strict-retry";
     const host = document.createElement("div");
