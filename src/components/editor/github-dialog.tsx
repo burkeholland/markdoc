@@ -3435,11 +3435,39 @@ interface CommitDomGuard {
   readonly release: () => void;
 }
 
+interface CommitEventSuppressionAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly EventConstructor: typeof Event;
+  readonly CustomEventConstructor: typeof CustomEvent;
+  readonly eventPrototype: Event;
+  readonly reflectObject: typeof Reflect;
+  readonly objectConstructor: ObjectConstructor;
+  readonly apply: typeof Reflect.apply;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly preventDefault: Event["preventDefault"];
+  readonly stopPropagation: Event["stopPropagation"];
+  readonly defaultPrevented: () => boolean;
+  readonly cancelBubble: () => boolean;
+  readonly descriptors: Readonly<{
+    eventConstructor: PropertyDescriptor;
+    customEventConstructor: PropertyDescriptor;
+    eventPrototype: PropertyDescriptor;
+    reflectApply: PropertyDescriptor;
+    objectGetOwnPropertyDescriptor: PropertyDescriptor;
+    preventDefault: PropertyDescriptor;
+    stopPropagation: PropertyDescriptor;
+    defaultPrevented: PropertyDescriptor;
+    cancelBubble: PropertyDescriptor;
+  }>;
+}
+
 interface CommitDialogPublication {
   readonly identity: symbol;
   readonly presentation: CommitDialogRender;
   readonly authority: CommitDialogAuthority;
   readonly ownerDocument: Document;
+  readonly eventSuppression: CommitEventSuppressionAuthority;
   readonly bridge: HTMLDivElement;
   readonly overlay: HTMLDivElement;
   readonly content: HTMLDivElement;
@@ -3561,16 +3589,256 @@ class CommitElementOwner<T extends Element> implements CommitElementOwnerView {
   };
 }
 
+function commitDescriptor(
+  authority: Pick<
+    CommitEventSuppressionAuthority,
+    "apply" | "getOwnPropertyDescriptor" | "objectConstructor"
+  >,
+  target: object,
+  property: PropertyKey,
+) {
+  return authority.apply(
+    authority.getOwnPropertyDescriptor,
+    authority.objectConstructor,
+    [target, property],
+  );
+}
+
+function freezeCommitDescriptor(descriptor: PropertyDescriptor) {
+  return Object.freeze({ ...descriptor });
+}
+
+function commitDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.writable === expected.writable &&
+      current.value === expected.value &&
+      current.get === expected.get &&
+      current.set === expected.set,
+  );
+}
+
+function captureCommitEventSuppressionAuthority(
+  ownerDocument: Document,
+): CommitEventSuppressionAuthority | null {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return null;
+  const EventConstructor = ownerWindow.Event;
+  const CustomEventConstructor = ownerWindow.CustomEvent;
+  const eventPrototype = EventConstructor.prototype;
+  const reflectObject = ownerWindow.Reflect;
+  const objectConstructor = ownerWindow.Object;
+  const apply = reflectObject.apply;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  if (
+    typeof apply !== "function" ||
+    typeof getOwnPropertyDescriptor !== "function"
+  ) {
+    return null;
+  }
+  const descriptorAuthority = {
+    apply,
+    getOwnPropertyDescriptor,
+    objectConstructor,
+  };
+  const eventConstructorDescriptor = commitDescriptor(
+    descriptorAuthority,
+    ownerWindow,
+    "Event",
+  );
+  const customEventConstructorDescriptor = commitDescriptor(
+    descriptorAuthority,
+    ownerWindow,
+    "CustomEvent",
+  );
+  const eventPrototypeDescriptor = commitDescriptor(
+    descriptorAuthority,
+    EventConstructor,
+    "prototype",
+  );
+  const reflectApplyDescriptor = commitDescriptor(
+    descriptorAuthority,
+    reflectObject,
+    "apply",
+  );
+  const objectGetOwnPropertyDescriptor = commitDescriptor(
+    descriptorAuthority,
+    objectConstructor,
+    "getOwnPropertyDescriptor",
+  );
+  const preventDefaultDescriptor = commitDescriptor(
+    descriptorAuthority,
+    eventPrototype,
+    "preventDefault",
+  );
+  const stopPropagationDescriptor = commitDescriptor(
+    descriptorAuthority,
+    eventPrototype,
+    "stopPropagation",
+  );
+  const defaultPreventedDescriptor = commitDescriptor(
+    descriptorAuthority,
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubbleDescriptor = commitDescriptor(
+    descriptorAuthority,
+    eventPrototype,
+    "cancelBubble",
+  );
+  if (
+    !eventConstructorDescriptor ||
+    !customEventConstructorDescriptor ||
+    eventPrototypeDescriptor?.value !== eventPrototype ||
+    reflectApplyDescriptor?.value !== apply ||
+    objectGetOwnPropertyDescriptor?.value !== getOwnPropertyDescriptor ||
+    typeof preventDefaultDescriptor?.value !== "function" ||
+    typeof stopPropagationDescriptor?.value !== "function" ||
+    typeof defaultPreventedDescriptor?.get !== "function" ||
+    typeof cancelBubbleDescriptor?.get !== "function"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    EventConstructor,
+    CustomEventConstructor,
+    eventPrototype,
+    reflectObject,
+    objectConstructor,
+    apply,
+    getOwnPropertyDescriptor,
+    preventDefault: preventDefaultDescriptor.value as Event["preventDefault"],
+    stopPropagation: stopPropagationDescriptor.value as Event["stopPropagation"],
+    defaultPrevented: defaultPreventedDescriptor.get as () => boolean,
+    cancelBubble: cancelBubbleDescriptor.get as () => boolean,
+    descriptors: Object.freeze({
+      eventConstructor: freezeCommitDescriptor(eventConstructorDescriptor),
+      customEventConstructor: freezeCommitDescriptor(
+        customEventConstructorDescriptor,
+      ),
+      eventPrototype: freezeCommitDescriptor(eventPrototypeDescriptor),
+      reflectApply: freezeCommitDescriptor(reflectApplyDescriptor),
+      objectGetOwnPropertyDescriptor: freezeCommitDescriptor(
+        objectGetOwnPropertyDescriptor,
+      ),
+      preventDefault: freezeCommitDescriptor(preventDefaultDescriptor),
+      stopPropagation: freezeCommitDescriptor(stopPropagationDescriptor),
+      defaultPrevented: freezeCommitDescriptor(defaultPreventedDescriptor),
+      cancelBubble: freezeCommitDescriptor(cancelBubbleDescriptor),
+    }),
+  });
+}
+
+function commitEventSuppressionAuthorityMatches(
+  authority: CommitEventSuppressionAuthority,
+) {
+  const descriptors = authority.descriptors;
+  return (
+    authority.ownerDocument.defaultView === authority.ownerWindow &&
+    commitDescriptorsMatch(
+      commitDescriptor(authority, authority.ownerWindow, "Event"),
+      descriptors.eventConstructor,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(authority, authority.ownerWindow, "CustomEvent"),
+      descriptors.customEventConstructor,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(authority, authority.EventConstructor, "prototype"),
+      descriptors.eventPrototype,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(authority, authority.reflectObject, "apply"),
+      descriptors.reflectApply,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(
+        authority,
+        authority.objectConstructor,
+        "getOwnPropertyDescriptor",
+      ),
+      descriptors.objectGetOwnPropertyDescriptor,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(
+        authority,
+        authority.eventPrototype,
+        "preventDefault",
+      ),
+      descriptors.preventDefault,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(
+        authority,
+        authority.eventPrototype,
+        "stopPropagation",
+      ),
+      descriptors.stopPropagation,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(
+        authority,
+        authority.eventPrototype,
+        "defaultPrevented",
+      ),
+      descriptors.defaultPrevented,
+    ) &&
+    commitDescriptorsMatch(
+      commitDescriptor(authority, authority.eventPrototype, "cancelBubble"),
+      descriptors.cancelBubble,
+    )
+  );
+}
+
+function suppressCommitPointerDownOutside(
+  authority: CommitEventSuppressionAuthority,
+  event: Event,
+) {
+  let preventDefaultApplied = false;
+  let stopPropagationApplied = false;
+  try {
+    authority.apply(authority.preventDefault, event, []);
+    preventDefaultApplied = true;
+  } catch {
+    preventDefaultApplied = false;
+  }
+  try {
+    authority.apply(authority.stopPropagation, event, []);
+    stopPropagationApplied = true;
+  } catch {
+    stopPropagationApplied = false;
+  }
+  if (!preventDefaultApplied || !stopPropagationApplied) return false;
+  try {
+    return (
+      authority.apply(authority.defaultPrevented, event, []) === true &&
+      authority.apply(authority.cancelBubble, event, []) === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 class CommitPublicationCoordinator {
   private activePublication: CommitDialogPublication | null = null;
   private successor: CommitDialogPublication | null = null;
   private replayValue: CommitPublicationReplay | null = null;
+  private eventSuppressionAuthority: CommitEventSuppressionAuthority | null =
+    null;
   private readonly retired = new WeakSet<CommitDialogPublication>();
   private readonly terminalPublications = new WeakSet<CommitDialogPublication>();
   private readonly actions = new WeakSet<object>();
   private readonly events = new WeakSet<object>();
   private readonly deliveredReactEvents = new WeakSet<object>();
   private readonly deliveredNativeEvents = new WeakSet<Event>();
+  private readonly rejectedOutsidePointerDowns = new WeakSet<Event>();
   private readonly preparedSubmits = new WeakSet<Event>();
   private readonly forms = new WeakSet<HTMLFormElement>();
   private readonly operations = new WeakSet<CommitDialogOperation>();
@@ -3585,6 +3853,21 @@ class CommitPublicationCoordinator {
 
   replay() {
     return this.replayValue;
+  }
+
+  prepareEventSuppression(ownerDocument: Document) {
+    if (this.eventSuppressionAuthority?.ownerDocument === ownerDocument) {
+      return this.eventSuppressionAuthority;
+    }
+    this.eventSuppressionAuthority =
+      captureCommitEventSuppressionAuthority(ownerDocument);
+    return this.eventSuppressionAuthority;
+  }
+
+  eventSuppression(ownerDocument: Document) {
+    return this.eventSuppressionAuthority?.ownerDocument === ownerDocument
+      ? this.eventSuppressionAuthority
+      : null;
   }
 
   publish(publication: CommitDialogPublication) {
@@ -3645,6 +3928,14 @@ class CommitPublicationCoordinator {
 
   nativeEventWasDelivered(event: Event) {
     return this.deliveredNativeEvents.has(event);
+  }
+
+  rejectOutsidePointerDown(event: Event) {
+    this.rejectedOutsidePointerDowns.add(event);
+  }
+
+  outsidePointerDownWasRejected(event: Event) {
+    return this.rejectedOutsidePointerDowns.has(event);
   }
 
   noteReactEvent(event: object) {
@@ -4774,27 +5065,17 @@ function exactCommitPointerDownOutsideNomination(
     readonly click: Event | null;
   },
 ) {
+  const originalEvent = commitPointerDownOutsideNominationOrigin(
+    event,
+    publication,
+  );
   const ownerDocument = publication.ownerDocument;
   const ownerWindow = ownerDocument.defaultView;
   const click = proof.click;
-  const detail = (event as CustomEvent<unknown>).detail;
-  const originalEvent =
-    detail !== null && typeof detail === "object" && "originalEvent" in detail
-      ? detail.originalEvent
-      : null;
   return (
     !!ownerWindow &&
-    event instanceof ownerWindow.CustomEvent &&
-    event.constructor === ownerWindow.CustomEvent &&
-    event.type === COMMIT_POINTER_DOWN_OUTSIDE &&
-    !event.bubbles &&
-    event.cancelable &&
-    !event.composed &&
-    !event.defaultPrevented &&
-    event.eventPhase === ownerWindow.Event.CAPTURING_PHASE &&
-    event.currentTarget === ownerDocument &&
+    originalEvent !== null &&
     event.target === proof.target &&
-    commitEventPath(event, proof.target, ownerDocument, [proof.target]) &&
     originalEvent === proof.events[0] &&
     proof.events.length === 3 &&
     proof.events[1] === proof.pointerUp &&
@@ -4805,6 +5086,38 @@ function exactCommitPointerDownOutsideNomination(
     click.target === proof.target &&
     !click.defaultPrevented
   );
+}
+
+function commitPointerDownOutsideNominationOrigin(
+  event: Event,
+  publication: CommitDialogPublication,
+) {
+  const ownerDocument = publication.ownerDocument;
+  const suppression = publication.eventSuppression;
+  const ownerWindow = suppression.ownerWindow;
+  const target = event.target;
+  const detail = (event as CustomEvent<unknown>).detail;
+  const originalEvent =
+    detail !== null && typeof detail === "object" && "originalEvent" in detail
+      ? detail.originalEvent
+      : null;
+  return ownerDocument.defaultView === ownerWindow &&
+    event instanceof suppression.CustomEventConstructor &&
+    event.constructor === suppression.CustomEventConstructor &&
+    event.type === COMMIT_POINTER_DOWN_OUTSIDE &&
+    !event.bubbles &&
+    event.cancelable &&
+    !event.composed &&
+    !event.defaultPrevented &&
+    event.eventPhase === ownerWindow.Event.CAPTURING_PHASE &&
+    event.currentTarget === ownerDocument &&
+    target instanceof ownerWindow.Node &&
+    target.ownerDocument === ownerDocument &&
+    !publication.content.contains(target) &&
+    commitEventPath(event, target, ownerDocument, [target]) &&
+    originalEvent instanceof suppression.EventConstructor
+    ? originalEvent
+    : null;
 }
 
 function createCommitPublicationRuntime(
@@ -4821,6 +5134,14 @@ function createCommitPublicationRuntime(
 ): CommitPublicationRuntime {
   const placement = captureCommitPlacement(dom.bridge, dom.overlay, dom.content);
   if (!placement) throw new Error("Cannot publish commit controls without a committed portal");
+  const eventSuppression =
+    coordinator.eventSuppression(placement.document) ??
+    coordinator.prepareEventSuppression(placement.document);
+  if (!eventSuppression) {
+    throw new Error(
+      "Cannot publish commit controls without owner-document Event suppression authority",
+    );
+  }
   const bridgeDom = commitSnapshotDom(dom.bridge, dom.content, dom.overlay, dom.gistSlot);
   const overlayDom = commitSnapshotDom(dom.overlay, dom.content, dom.overlay, dom.gistSlot);
   const contentDom = commitSnapshotDom(dom.content, dom.content, dom.overlay, dom.gistSlot);
@@ -4855,6 +5176,7 @@ function createCommitPublicationRuntime(
     presentation,
     authority: presentation.authority,
     ownerDocument: placement.document,
+    eventSuppression,
     bridge: dom.bridge,
     overlay: dom.overlay,
     content: dom.content,
@@ -5031,6 +5353,13 @@ function createCommitDialogRender(
       );
     }
     dismissal = null;
+  };
+  const rejectDismissal = () => {
+    if (dismissal?.kind === "pointer") {
+      const pointerDown = dismissal.events[0];
+      if (pointerDown) coordinator.rejectOutsidePointerDown(pointerDown);
+    }
+    clearDismissal();
   };
   const pendingReactDeliveries = new WeakMap<
     Event,
@@ -5270,7 +5599,7 @@ function createCommitDialogRender(
     if (element === null || (element !== null && last !== null && element !== last)) {
       currentRuntime?.retireForElement();
       currentRuntime = null;
-      clearDismissal();
+      rejectDismissal();
     }
     if (owner === bridgeOwner && element) prepareDismissalCapture(element.ownerDocument);
     const form = formOwner.element();
@@ -5480,10 +5809,18 @@ function createCommitDialogRender(
     }
     return { bridge, gistSlot, form, label, message, staticText, error, cancel, submit, content, overlay, close };
   };
-  const invalidate = (runtime: CommitPublicationRuntime) => {
+  const invalidate = (
+    runtime: CommitPublicationRuntime,
+    requireFreshSuccessor = false,
+  ) => {
     runtime.retireOrdinary();
     coordinator.abandonReplay(runtime.publication);
-    if (successorRequested || closedVisits.has(authority.visit)) return;
+    if (
+      (!requireFreshSuccessor && successorRequested) ||
+      closedVisits.has(authority.visit)
+    ) {
+      return;
+    }
     successorRequested = true;
     requestSuccessor();
   };
@@ -5567,7 +5904,7 @@ function createCommitDialogRender(
       expectedOwners(),
       dom,
       () => {
-        clearDismissal();
+        rejectDismissal();
       },
     );
     currentRuntime = runtime;
@@ -5583,7 +5920,7 @@ function createCommitDialogRender(
     publication: CommitDialogPublication,
     event: Event,
   ) => {
-    clearDismissal();
+    rejectDismissal();
     if (!owns(publication)) return;
     const proof = {
       kind: "instant" as const,
@@ -5601,7 +5938,7 @@ function createCommitDialogRender(
     event: PointerEvent,
     target: Node,
   ) => {
-    clearDismissal();
+    rejectDismissal();
     if (!owns(publication)) return;
     dismissal = {
       kind: "pointer",
@@ -5636,7 +5973,7 @@ function createCommitDialogRender(
           exact.target,
         );
       } else {
-        clearDismissal();
+        rejectDismissal();
       }
       return;
     }
@@ -5646,23 +5983,23 @@ function createCommitDialogRender(
         proof.publication !== publication ||
         !exactCommitPointerContinuation(event, publication, proof)
       ) {
-        clearDismissal();
+        rejectDismissal();
         return;
       }
       if (event.type === "pointercancel") {
-        clearDismissal();
+        rejectDismissal();
         return;
       }
       if (event.type === "pointerup") {
         if (proof.pointerUp) {
-          clearDismissal();
+          rejectDismissal();
           return;
         }
         proof.pointerUp = event;
         proof.events.push(event);
         proof.expiration = publication.ownerDocument.defaultView?.setTimeout(
           () => {
-            if (dismissal === proof) clearDismissal();
+            if (dismissal === proof) rejectDismissal();
           },
           0,
         ) ?? null;
@@ -5670,7 +6007,7 @@ function createCommitDialogRender(
       }
       if (event.type === "click") {
         if (!proof.pointerUp || proof.click) {
-          clearDismissal();
+          rejectDismissal();
           return;
         }
         if (proof.expiration !== null) {
@@ -5683,7 +6020,7 @@ function createCommitDialogRender(
           if (dismissal !== proof || proof.expiration !== null) return;
           proof.expiration =
             publication.ownerDocument.defaultView?.setTimeout(() => {
-              if (dismissal === proof) clearDismissal();
+              if (dismissal === proof) rejectDismissal();
             }, 0) ?? null;
         });
       }
@@ -5701,14 +6038,58 @@ function createCommitDialogRender(
     event: Event,
   ) => {
     const proof = dismissal;
+    const originalEvent = commitPointerDownOutsideNominationOrigin(
+      event,
+      publication,
+    );
+    const rejectedOrigin = Boolean(
+      originalEvent &&
+        coordinator.outsidePointerDownWasRejected(originalEvent),
+    );
+    const currentOrigin = Boolean(
+      originalEvent &&
+        proof?.kind === "pointer" &&
+        proof.publication === publication &&
+        proof.events[0] === originalEvent,
+    );
+    const linkedOrigin = rejectedOrigin || currentOrigin;
+    const suppressionAuthorityMatches =
+      commitEventSuppressionAuthorityMatches(publication.eventSuppression);
     if (
       publication.authority !== authority ||
       proof?.kind !== "pointer" ||
       proof.publication !== publication ||
+      !originalEvent ||
+      coordinator.outsidePointerDownWasRejected(originalEvent) ||
+      !suppressionAuthorityMatches ||
       !owns(publication) ||
       !exactCommitPointerDownOutsideNomination(event, publication, proof)
     ) {
-      clearDismissal();
+      const suppressionSucceeded = linkedOrigin
+        ? suppressCommitPointerDownOutside(publication.eventSuppression, event)
+        : true;
+      const runtime =
+        currentRuntime?.publication === publication
+          ? currentRuntime
+          : lastRuntime?.publication === publication
+            ? lastRuntime
+            : null;
+      const preservesCurrentProof =
+        rejectedOrigin &&
+        !currentOrigin &&
+        proof?.kind === "pointer" &&
+        proof.publication === publication &&
+        suppressionAuthorityMatches &&
+        suppressionSucceeded;
+      if (!preservesCurrentProof) rejectDismissal();
+      if (
+        linkedOrigin &&
+        (!suppressionAuthorityMatches || !suppressionSucceeded) &&
+        runtime &&
+        coordinator.isCurrent(publication)
+      ) {
+        invalidate(runtime, true);
+      }
       return;
     }
     proof.events.push(event);
@@ -5727,7 +6108,7 @@ function createCommitDialogRender(
         proof.kind === "pointer" ? "outside-pointer" : "instant",
       )
     ) {
-      clearDismissal();
+      rejectDismissal();
       return;
     }
     clearDismissal();
@@ -6304,6 +6685,7 @@ export const CommitDialog = memo(function CommitDialog({
   );
   const prepareDismissalCapture = useCallback(
     (ownerDocument: Document) => {
+      if (!coordinator.prepareEventSuppression(ownerDocument)) return;
       const previous = dismissalCapture.get();
       if (previous?.ownerDocument === ownerDocument) {
         dismissalCapture.set({ ...previous });

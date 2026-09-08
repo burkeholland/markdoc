@@ -1445,6 +1445,725 @@ describe("VersionsPanel · direct-root Strict Mode authority", () => {
   });
 });
 
+describe("VersionsPanel · manual refresh authority", () => {
+  it("keeps cached rows visible, coalesces activation, and replaces the list once", async () => {
+    const docId = "manual-refresh-success";
+    const current = {
+      ...named,
+      id: `${docId}-current`,
+      title: "Current cached version",
+    };
+    const older = {
+      ...named,
+      id: `${docId}-older`,
+      number: 0,
+      title: "Older cached version",
+    };
+    const refreshed = {
+      ...named,
+      id: `${docId}-refreshed`,
+      number: 2,
+      title: "Fresh version",
+    };
+    const request = deferred<{ versions: VersionSummary[] }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    versions
+      .mockReset()
+      .mockResolvedValueOnce({ versions: [current, older] })
+      .mockReturnValueOnce(request.promise);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(current.title);
+      const refresh = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Refresh versions",
+      });
+      const restore = interceptClick(refresh, (original, event) => {
+        original(event);
+        original(event);
+      });
+
+      act(() => refresh.click());
+      restore();
+      act(() => refresh.click());
+
+      expect(versions).toHaveBeenCalledTimes(2);
+      expect(refresh).toBeDisabled();
+      expect(refresh).toHaveAttribute("aria-busy", "true");
+      expect(screen.getAllByTestId("version-item")).toHaveLength(2);
+      expect(screen.getByText(current.title)).toBeInTheDocument();
+      expect(screen.getByText(older.title)).toBeInTheDocument();
+
+      request.resolve({ versions: [refreshed] });
+      expect(await screen.findByText(refreshed.title)).toBeInTheDocument();
+      expect(screen.queryByText(current.title)).toBeNull();
+      expect(screen.queryByText(older.title)).toBeNull();
+      expect(screen.getAllByTestId("version-item")).toHaveLength(1);
+      expect(refresh).toBeEnabled();
+      expect(refresh).not.toHaveAttribute("aria-busy");
+      expect(versions).toHaveBeenCalledTimes(2);
+      expect(versions).toHaveBeenNthCalledWith(2, docId);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retains rows and interaction state on failure, then recovers through Retry", async () => {
+    const docId = "manual-refresh-retry";
+    const current = {
+      ...named,
+      id: `${docId}-current`,
+      title: "Refresh retry current",
+    };
+    const older = {
+      ...named,
+      id: `${docId}-older`,
+      number: 0,
+      title: "Refresh retry older",
+    };
+    const failed = deferred<{ versions: VersionSummary[] }>();
+    const retryRequest = deferred<{ versions: VersionSummary[] }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions
+      .mockReset()
+      .mockResolvedValueOnce({ versions: [current, older] })
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retryRequest.promise);
+    version.mockResolvedValue({
+      version: { ...current, content: "# Refresh retry" },
+    });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      fireEvent.click(await screen.findByText(current.title));
+      await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+      fireEvent.click(
+        screen.getByRole("checkbox", { name: `Compare v${current.number}` }),
+      );
+      await waitFor(() => expect(onPreview).toHaveBeenCalledTimes(2));
+      onPreview.mockClear();
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh versions" }),
+      );
+      failed.reject(new Error("manual refresh unavailable"));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "manual refresh unavailable",
+      );
+      expect(screen.getAllByTestId("version-item")).toHaveLength(2);
+      expect(screen.getByText(current.title)).toBeInTheDocument();
+      expect(screen.getByText(older.title)).toBeInTheDocument();
+      expect(
+        screen.getByRole("checkbox", {
+          name: `Compare v${current.number}`,
+        }),
+      ).toBeChecked();
+      expect(screen.getByTestId("version-restore")).toBeInTheDocument();
+      expect(onPreview).not.toHaveBeenCalled();
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        ).toBeEnabled(),
+      );
+
+      const retry = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Retry",
+      });
+      fireEvent.click(retry);
+      fireEvent.click(retry);
+      await waitFor(() => expect(versions).toHaveBeenCalledTimes(3));
+      expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+      expect(screen.getAllByTestId("version-item")).toHaveLength(2);
+
+      retryRequest.resolve({ versions: [current, older] });
+      await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+      expect(
+        screen.getByRole("checkbox", {
+          name: `Compare v${current.number}`,
+        }),
+      ).toBeChecked();
+      expect(screen.getByTestId("version-restore")).toBeInTheDocument();
+      expect(onPreview).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "lets an external refresh retire a pending manual refresh before its late %s",
+    async (settlement) => {
+      const docId = `manual-refresh-external-${settlement}`;
+      const initial = {
+        ...named,
+        id: `${docId}-initial`,
+        title: `External initial ${settlement}`,
+      };
+      const stale = {
+        ...named,
+        id: `${docId}-stale`,
+        title: `External stale ${settlement}`,
+      };
+      const current = {
+        ...named,
+        id: `${docId}-current`,
+        title: `External current ${settlement}`,
+      };
+      const manual = deferred<{ versions: VersionSummary[] }>();
+      const external = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const props = {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+      };
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [initial] })
+        .mockReturnValueOnce(manual.promise)
+        .mockReturnValueOnce(external.promise);
+
+      try {
+        await renderStrictVersions(root, { ...props, refreshKey: 0 });
+        await screen.findByText(initial.title);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        await renderStrictVersions(root, { ...props, refreshKey: 1 });
+        await waitFor(() => expect(versions).toHaveBeenCalledTimes(3));
+
+        external.resolve({ versions: [current] });
+        expect(await screen.findByText(current.title)).toBeInTheDocument();
+        await act(async () => {
+          if (settlement === "resolve") {
+            manual.resolve({ versions: [stale] });
+          } else {
+            manual.reject(new Error("obsolete manual failure"));
+          }
+          await Promise.resolve();
+        });
+
+        expect(screen.getByText(current.title)).toBeInTheDocument();
+        expect(screen.queryByText(stale.title)).toBeNull();
+        expect(screen.queryByText("obsolete manual failure")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(props.onPreview).not.toHaveBeenCalled();
+        expect(props.onClose).not.toHaveBeenCalled();
+        expect(versions).toHaveBeenCalledTimes(3);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "lets a mutation reload retire a pending manual refresh before its late %s",
+    async (settlement) => {
+      const docId = `manual-refresh-mutation-${settlement}`;
+      const initial = {
+        ...named,
+        id: `${docId}-initial`,
+        title: `Mutation initial ${settlement}`,
+      };
+      const renamed = {
+        ...initial,
+        title: `Mutation renamed ${settlement}`,
+      };
+      const stale = {
+        ...initial,
+        title: `Mutation stale ${settlement}`,
+      };
+      const manual = deferred<{ versions: VersionSummary[] }>();
+      const reload = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onPreview = vi.fn();
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [initial] })
+        .mockReturnValueOnce(manual.promise)
+        .mockReturnValueOnce(reload.promise);
+      renameVersion.mockResolvedValueOnce({ ok: true });
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(docId),
+          onClose: vi.fn(),
+          onPreview,
+          refreshKey: 0,
+        });
+        fireEvent.click(await screen.findByText(initial.title));
+        await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+        onPreview.mockClear();
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        fireEvent.click(screen.getByTestId("version-rename"));
+        fireEvent.change(screen.getByTestId("version-rename-input"), {
+          target: { value: renamed.title },
+        });
+        fireEvent.keyDown(screen.getByTestId("version-rename-input"), {
+          key: "Enter",
+        });
+        await waitFor(() => expect(versions).toHaveBeenCalledTimes(3));
+
+        reload.resolve({ versions: [renamed] });
+        expect(await screen.findByText(renamed.title)).toBeInTheDocument();
+        await act(async () => {
+          if (settlement === "resolve") {
+            manual.resolve({ versions: [stale] });
+          } else {
+            manual.reject(new Error("obsolete mutation refresh"));
+          }
+          await Promise.resolve();
+        });
+
+        expect(screen.getByText(renamed.title)).toBeInTheDocument();
+        expect(screen.queryByText(stale.title)).toBeNull();
+        expect(screen.queryByText("obsolete mutation refresh")).toBeNull();
+        expect(onPreview).not.toHaveBeenCalled();
+        expect(renameVersion).toHaveBeenCalledExactlyOnceWith(
+          docId,
+          initial.id,
+          renamed.title,
+        );
+        expect(versions).toHaveBeenCalledTimes(3);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["session", "callbacks"] as const)(
+    "retires a manual refresh after same-document %s identity drift",
+    async (replacement) => {
+      const docId = `manual-refresh-${replacement}-drift`;
+      const initial = {
+        ...named,
+        id: `${docId}-initial`,
+        title: `${replacement} drift initial`,
+      };
+      const stale = {
+        ...named,
+        id: `${docId}-stale`,
+        title: `${replacement} drift stale`,
+      };
+      const current = {
+        ...named,
+        id: `${docId}-current`,
+        title: `${replacement} drift current`,
+      };
+      const staleRequest = deferred<{ versions: VersionSummary[] }>();
+      const currentRequest = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const firstSession = session(docId);
+      const nextSession =
+        replacement === "session" ? session(docId) : firstSession;
+      const firstClose = vi.fn();
+      const firstPreview = vi.fn();
+      const nextClose = replacement === "callbacks" ? vi.fn() : firstClose;
+      const nextPreview =
+        replacement === "callbacks" ? vi.fn() : firstPreview;
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [initial] })
+        .mockReturnValueOnce(staleRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise);
+
+      try {
+        await renderStrictVersions(root, {
+          session: firstSession,
+          onClose: firstClose,
+          onPreview: firstPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText(initial.title);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        await renderStrictVersions(root, {
+          session: nextSession,
+          onClose: nextClose,
+          onPreview: nextPreview,
+          refreshKey: 0,
+        });
+
+        staleRequest.resolve({ versions: [stale] });
+        await act(async () => {});
+        expect(screen.getByText(initial.title)).toBeInTheDocument();
+        expect(screen.queryByText(stale.title)).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        expect(versions).toHaveBeenCalledTimes(3);
+        currentRequest.resolve({ versions: [current] });
+        expect(await screen.findByText(current.title)).toBeInTheDocument();
+        expect(firstClose).not.toHaveBeenCalled();
+        expect(firstPreview).not.toHaveBeenCalled();
+        expect(nextClose).not.toHaveBeenCalled();
+        expect(nextPreview).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "isolates a replaced document from an old manual refresh %s",
+    async (settlement) => {
+      const oldDocId = `manual-refresh-old-document-${settlement}`;
+      const newDocId = `manual-refresh-new-document-${settlement}`;
+      const oldVersion = {
+        ...named,
+        id: `${oldDocId}-version`,
+        title: `Old document ${settlement}`,
+      };
+      const staleVersion = {
+        ...named,
+        id: `${oldDocId}-stale`,
+        title: `Stale document ${settlement}`,
+      };
+      const newVersion = {
+        ...named,
+        id: `${newDocId}-version`,
+        title: `New document ${settlement}`,
+      };
+      const staleRequest = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [oldVersion] })
+        .mockReturnValueOnce(staleRequest.promise)
+        .mockResolvedValueOnce({ versions: [newVersion] });
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(oldDocId),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText(oldVersion.title);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        await renderStrictVersions(root, {
+          session: session(newDocId),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        expect(await screen.findByText(newVersion.title)).toBeInTheDocument();
+
+        await act(async () => {
+          if (settlement === "resolve") {
+            staleRequest.resolve({ versions: [staleVersion] });
+          } else {
+            staleRequest.reject(new Error("obsolete document refresh"));
+          }
+          await Promise.resolve();
+        });
+        expect(screen.getByText(newVersion.title)).toBeInTheDocument();
+        expect(screen.queryByText(staleVersion.title)).toBeNull();
+        expect(screen.queryByText("obsolete document refresh")).toBeNull();
+        expect(onClose).not.toHaveBeenCalled();
+        expect(onPreview).not.toHaveBeenCalled();
+        expect(versions).toHaveBeenNthCalledWith(3, newDocId);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "keeps a replacement mount independent of an old manual refresh %s",
+    async (settlement) => {
+      const docId = `manual-refresh-mount-${settlement}`;
+      const initial = {
+        ...named,
+        id: `${docId}-initial`,
+        title: `Mount initial ${settlement}`,
+      };
+      const stale = {
+        ...named,
+        id: `${docId}-stale`,
+        title: `Mount stale ${settlement}`,
+      };
+      const current = {
+        ...named,
+        id: `${docId}-current`,
+        title: `Mount current ${settlement}`,
+      };
+      const staleRequest = deferred<{ versions: VersionSummary[] }>();
+      const currentRequest = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      const props = {
+        session: session(docId),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      };
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [initial] })
+        .mockReturnValueOnce(staleRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise);
+
+      try {
+        await renderStrictVersions(root, props, "A");
+        await screen.findByText(initial.title);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Refresh versions" }),
+        );
+        await renderStrictVersions(root, props, "B");
+        await waitFor(() => expect(versions).toHaveBeenCalledTimes(3));
+
+        currentRequest.resolve({ versions: [current] });
+        expect(await screen.findByText(current.title)).toBeInTheDocument();
+        await act(async () => {
+          if (settlement === "resolve") {
+            staleRequest.resolve({ versions: [stale] });
+          } else {
+            staleRequest.reject(new Error("obsolete mount refresh"));
+          }
+          await Promise.resolve();
+        });
+        expect(screen.getByText(current.title)).toBeInTheDocument();
+        expect(screen.queryByText(stale.title)).toBeNull();
+        expect(screen.queryByText("obsolete mount refresh")).toBeNull();
+        expect(onClose).not.toHaveBeenCalled();
+        expect(onPreview).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "drops a late manual refresh %s after cleanup",
+    async (settlement) => {
+      const docId = `manual-refresh-cleanup-${settlement}`;
+      const initial = {
+        ...named,
+        id: `${docId}-initial`,
+        title: `Cleanup initial ${settlement}`,
+      };
+      const request = deferred<{ versions: VersionSummary[] }>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      versions
+        .mockReset()
+        .mockResolvedValueOnce({ versions: [initial] })
+        .mockReturnValueOnce(request.promise);
+
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(initial.title);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh versions" }),
+      );
+      await act(async () => root.unmount());
+      await act(async () => {
+        if (settlement === "resolve") {
+          request.resolve({
+            versions: [{ ...initial, title: "Too late after cleanup" }],
+          });
+        } else {
+          request.reject(new Error("too late after cleanup"));
+        }
+        await Promise.resolve();
+      });
+
+      expect(host).toBeEmptyDOMElement();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+      expect(versions).toHaveBeenCalledTimes(2);
+      host.remove();
+    },
+  );
+
+  it("rejects stale and forged Refresh events without consuming the exact current control", async () => {
+    const docId = "manual-refresh-exact-event";
+    const current = {
+      ...named,
+      id: `${docId}-current`,
+      title: "Exact refresh event",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session(docId),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+    versions.mockResolvedValue({ versions: [current] });
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      await screen.findByText(current.title);
+      const staleButton = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Refresh versions",
+      });
+      const staleRefresh = capturedProps(staleButton).onClick;
+      await renderStrictVersions(root, props, "B");
+      const currentRefresh = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Refresh versions",
+      });
+      const close = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Close version history",
+      });
+      const callsBefore = versions.mock.calls.length;
+      const restoreClose = interceptClick(close, (_original, event) => {
+        staleRefresh?.(
+          cloneSyntheticEvent(event, {
+            currentTarget: currentRefresh,
+            target: currentRefresh,
+          }),
+        );
+      });
+
+      act(() => close.click());
+      restoreClose();
+      expect(versions).toHaveBeenCalledTimes(callsBefore);
+      expect(props.onClose).not.toHaveBeenCalled();
+
+      const restoreRefresh = interceptClick(
+        currentRefresh,
+        (original, event) => {
+          staleRefresh?.(event);
+          original(event);
+          original(event);
+        },
+      );
+      act(() => currentRefresh.click());
+      restoreRefresh();
+      await waitFor(() =>
+        expect(versions).toHaveBeenCalledTimes(callsBefore + 1),
+      );
+      expect(props.onClose).not.toHaveBeenCalled();
+      expect(props.onPreview).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["attribute", "detach", "order", "replace"] as const)(
+    "permanently retires Refresh after restored %s DOM custody",
+    async (tamper) => {
+      const docId = `manual-refresh-dom-${tamper}`;
+      const current = {
+        ...named,
+        id: `${docId}-current`,
+        title: `Refresh DOM ${tamper}`,
+      };
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const props = {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      };
+      versions.mockResolvedValue({ versions: [current] });
+
+      try {
+        await renderStrictVersions(root, props, "A");
+        await screen.findByText(current.title);
+        const refresh = screen.getByRole<HTMLButtonElement>("button", {
+          name: "Refresh versions",
+        });
+        const close = screen.getByRole<HTMLButtonElement>("button", {
+          name: "Close version history",
+        });
+        const controls = refresh.parentElement!;
+        const callsBefore = versions.mock.calls.length;
+
+        if (tamper === "attribute") {
+          refresh.setAttribute("aria-label", "Altered refresh");
+          refresh.setAttribute("aria-label", "Refresh versions");
+        } else if (tamper === "detach") {
+          refresh.remove();
+          controls.insertBefore(refresh, close);
+        } else if (tamper === "order") {
+          controls.insertBefore(close, refresh);
+          controls.append(close);
+        } else {
+          const replacement = refresh.cloneNode(true);
+          controls.replaceChild(replacement, refresh);
+          controls.replaceChild(refresh, replacement);
+        }
+
+        act(() => refresh.click());
+        expect(versions).toHaveBeenCalledTimes(callsBefore);
+        expect(props.onClose).not.toHaveBeenCalled();
+        expect(props.onPreview).not.toHaveBeenCalled();
+
+        await renderStrictVersions(root, props, "B");
+        const currentRefresh = screen.getByRole<HTMLButtonElement>("button", {
+          name: "Refresh versions",
+        });
+        act(() => currentRefresh.click());
+        await waitFor(() =>
+          expect(versions).toHaveBeenCalledTimes(callsBefore + 2),
+        );
+        expect(props.onClose).not.toHaveBeenCalled();
+        expect(props.onPreview).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+});
+
 describe("VersionsPanel · rename a version", () => {
   it("shows the server's validation reason, not the bare 'Invalid request', when the title is rejected", async () => {
     renameVersion.mockRejectedValueOnce(new ApiError(400, "Invalid request", [{ path: ["title"], message: "Title must be 1–200 characters" }]));
