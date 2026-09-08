@@ -14,6 +14,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError } from "@/lib/api";
@@ -2117,5 +2118,621 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     setReactProp(currentPreview, "onError", currentError);
     fireEvent.error(currentPreview);
     expect(currentPreview.style.display).toBe("none");
+  });
+
+  it.each([
+    "url",
+    "alt",
+    "upload",
+    "file",
+    "preview",
+    "cancel",
+    "close",
+    "escape",
+  ] as const)(
+    "rejects a current %s event whose native provenance mutates restored DOM",
+    async (kind) => {
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const onUpload = vi.fn(() =>
+        Promise.resolve({ url: "/api/assets/untrusted" }),
+      );
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      if (kind === "preview") {
+        fireEvent.change(screen.getByTestId("image-url"), {
+          target: { value: "https://example.com/preview.png" },
+        });
+        await act(async () => {});
+      }
+      const content = dialogContent();
+      const dirty = vi.fn(() => {
+        const className = content.className;
+        content.className = "mutated-during-native-provenance";
+        content.className = className;
+      });
+      let event: Event;
+      let target: HTMLElement;
+      let uploadClick: ReturnType<typeof vi.spyOn> | null = null;
+      if (kind === "url" || kind === "alt") {
+        target = screen.getByTestId(
+          kind === "url" ? "image-url" : "image-alt",
+        );
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        setter?.call(
+          target,
+          kind === "url"
+            ? "https://example.com/untrusted.png"
+            : "Untrusted Alt",
+        );
+        event = new Event("change", { bubbles: true, cancelable: true });
+      } else if (kind === "file") {
+        target = screen.getByTestId("image-file");
+        Object.defineProperty(target, "files", {
+          configurable: true,
+          value: [
+            new File(["untrusted"], "untrusted.png", { type: "image/png" }),
+          ],
+        });
+        event = new Event("change", { bubbles: true, cancelable: true });
+      } else if (kind === "preview") {
+        const preview = imageForm().querySelector("img");
+        if (!(preview instanceof HTMLImageElement)) {
+          throw new Error("Image preview was not rendered");
+        }
+        target = preview;
+        event = new Event("error");
+      } else if (kind === "escape") {
+        target = content;
+        event = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Escape",
+        });
+      } else {
+        target = screen.getByRole("button", {
+          name:
+            kind === "close"
+                ? "Close"
+                : "Cancel",
+        });
+        if (kind === "upload") {
+          target = screen.getByTestId("image-upload");
+          uploadClick = vi.spyOn(
+            screen.getByTestId("image-file") as HTMLInputElement,
+            "click",
+          );
+        }
+        event = new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        });
+      }
+      const composedPath = event.composedPath.bind(event);
+      Object.defineProperty(event, "composedPath", {
+        configurable: true,
+        value: () => {
+          dirty();
+          return composedPath();
+        },
+      });
+
+      act(() => target.dispatchEvent(event));
+      expect(dirty).toHaveBeenCalled();
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(onUpload).not.toHaveBeenCalled();
+      if (uploadClick) expect(uploadClick).not.toHaveBeenCalled();
+      if (kind === "preview") {
+        expect(target.style.display).toBe("");
+      }
+
+      await act(async () => {});
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["url", "alt"] as const)(
+    "rejects a %s change when final validation reentrantly replays its ref",
+    async (kind) => {
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={vi.fn()}
+        />,
+      );
+      const input = screen.getByTestId(
+        kind === "url" ? "image-url" : "image-alt",
+      ) as HTMLInputElement;
+      const ref = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+      const file = screen.getByTestId("image-file") as HTMLInputElement;
+      const replay = vi.fn(() => {
+        ref(null);
+        ref(input);
+      });
+      armDirtyFileTypeRead(file, replay);
+
+      fireEvent.change(input, {
+        target: {
+          value:
+            kind === "url"
+              ? "https://example.com/untrusted.png"
+              : "Untrusted Alt",
+        },
+      });
+      expect(replay).toHaveBeenCalledOnce();
+      await act(async () => {});
+      expect(input).toHaveValue("");
+
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={vi.fn()}
+        />,
+      );
+      fireEvent.change(input, {
+        target: {
+          value:
+            kind === "url"
+              ? "https://example.com/recovered.png"
+              : "Recovered Alt",
+        },
+      });
+      expect(input).toHaveValue(
+        kind === "url"
+          ? "https://example.com/recovered.png"
+          : "Recovered Alt",
+      );
+    },
+  );
+
+  it.each(["result", "error", "reset"] as const)(
+    "abandons a current upload when %s validation reentrantly replays a ref",
+    async (kind) => {
+      const failed = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const onUpload = vi
+        .fn()
+        .mockReturnValueOnce(failed.promise)
+        .mockReturnValueOnce(retry.promise);
+      await renderStrictRoot(<Harness onUpload={onUpload} />);
+      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const input = screen.getByTestId("image-file") as HTMLInputElement;
+      const ref = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+      const replay = vi.fn(() => {
+        ref(null);
+        ref(input);
+      });
+
+      if (kind === "reset") {
+        Object.defineProperty(input, "value", {
+          configurable: true,
+          get: () => "failed-selection",
+          set() {
+            armDirtyFileTypeRead(input, replay);
+          },
+        });
+      }
+      await act(async () => {
+        if (kind === "error") {
+          const error = new Error();
+          Object.defineProperty(error, "message", {
+            get() {
+              armDirtyFileTypeRead(input, replay);
+              return "Untrusted failure";
+            },
+          });
+          failed.reject(error);
+          await failed.promise.catch(() => undefined);
+        } else {
+          const result = {
+            url: "/api/assets/untrusted",
+            alt: "Untrusted Alt",
+          } as UploadResult;
+          if (kind === "result") {
+            Object.defineProperty(result, "url", {
+              get() {
+                armDirtyFileTypeRead(input, replay);
+                return "/api/assets/untrusted";
+              },
+            });
+          }
+          failed.resolve(result);
+          await failed.promise;
+        }
+      });
+
+      expect(replay).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(screen.getByTestId("image-upload")).toBeEnabled(),
+      );
+      expect(screen.getByTestId("image-url")).toHaveValue("");
+      expect(screen.getByTestId("image-alt")).toHaveValue("");
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      delete (input as unknown as { value?: string }).value;
+      const retryFile = new File(["retry"], "retry.png", {
+        type: "image/png",
+      });
+      choose(retryFile);
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      await act(async () => {
+        retry.resolve({ url: "/api/assets/retry" });
+        await retry.promise;
+      });
+      expect(screen.getByTestId("image-url")).toHaveValue(
+        "/api/assets/retry",
+      );
+    },
+  );
+
+  it.each(["ancestor", "files"] as const)(
+    "keeps the replay guard alive while reading successor %s",
+    async (kind) => {
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const onUpload = vi.fn();
+      const dirty = vi.fn(() => {
+        const content = document.querySelector('[role="dialog"]');
+        if (!(content instanceof HTMLDivElement)) return;
+        const className = content.className;
+        content.className = "mutated-during-successor-construction";
+        content.className = className;
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const renderNode = async (node: ReactNode) => {
+        await act(async () => {
+          root.render(<StrictMode>{node}</StrictMode>);
+        });
+      };
+      const view = { host, root, render: renderNode };
+      directViews.push(view);
+      let reads = 0;
+      const filesDescriptor = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "files",
+      );
+      const parent = host.parentNode;
+      if (!filesDescriptor?.get || !parent) {
+        throw new Error("DOM accessors were not available");
+      }
+      if (kind === "files") {
+        Object.defineProperty(HTMLInputElement.prototype, "files", {
+          ...filesDescriptor,
+          get() {
+            reads += 1;
+            if (reads === 4) dirty();
+            return filesDescriptor.get?.call(this);
+          },
+        });
+      } else {
+        Object.defineProperty(host, "parentNode", {
+          configurable: true,
+          get() {
+            reads += 1;
+            if (reads === 5) dirty();
+            return parent;
+          },
+        });
+      }
+      try {
+        await renderNode(
+          <ImageDialog
+            open
+            onOpenChange={staleClose}
+            onSubmit={vi.fn()}
+            onUpload={onUpload}
+          />,
+        );
+      } finally {
+        Object.defineProperty(
+          HTMLInputElement.prototype,
+          "files",
+          filesDescriptor,
+        );
+        Reflect.deleteProperty(host, "parentNode");
+      }
+      expect(dirty).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["mutation", "unexpected-ref"] as const)(
+    "abandons a deferred outcome when partial recovery aborts for %s",
+    async (kind) => {
+      const failed = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const readUrl = vi.fn(() => "/api/assets/untrusted");
+      const result = {} as UploadResult;
+      Object.defineProperty(result, "url", { get: readUrl });
+      const onUpload = vi
+        .fn()
+        .mockReturnValueOnce(failed.promise)
+        .mockReturnValueOnce(retry.promise);
+      const view = await renderStrictRoot(<Harness onUpload={onUpload} />);
+      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const url = screen.getByTestId("image-url") as HTMLInputElement;
+      const urlRef = reactProp<RefCallback<HTMLInputElement>>(url, "ref");
+      const content = dialogContent();
+      const foreign = document.createElement("input");
+      document.body.append(foreign);
+
+      try {
+        failed.resolve(result);
+        urlRef(null);
+        urlRef(url);
+        if (kind === "mutation") {
+          const className = content.className;
+          content.className = "mutated-before-partial-recovery";
+          content.className = className;
+        } else {
+          const alt = screen.getByTestId("image-alt") as HTMLInputElement;
+          const altRef = reactProp<RefCallback<HTMLInputElement>>(alt, "ref");
+          altRef(null);
+          altRef(foreign);
+        }
+        await act(async () => {
+          await failed.promise;
+          await Promise.resolve();
+        });
+
+        expect(readUrl).not.toHaveBeenCalled();
+        expect(screen.getByTestId("image-upload")).toBeEnabled();
+        expect(screen.getByTestId("image-url")).toHaveValue("");
+
+        await view.render(
+          <Harness onUpload={onUpload} onSubmit={vi.fn()} />,
+        );
+        const retryFile = new File(["retry"], "retry.png", {
+          type: "image/png",
+        });
+        choose(retryFile);
+        expect(onUpload).toHaveBeenCalledTimes(2);
+        expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+        await act(async () => {
+          retry.resolve({ url: "/api/assets/retry" });
+          await retry.promise;
+        });
+        expect(screen.getByTestId("image-url")).toHaveValue(
+          "/api/assets/retry",
+        );
+      } finally {
+        foreign.remove();
+      }
+    },
+  );
+
+  it("suppresses a genuine form while full DOM eligibility stays null", async () => {
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={staleSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    const file = screen.getByTestId("image-file") as HTMLInputElement;
+    const type = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "type",
+    );
+    Object.defineProperty(file, "type", {
+      configurable: true,
+      get: () => "text",
+      set: type?.set,
+    });
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={staleSubmit}
+        onUpload={onUpload}
+      />,
+    );
+
+    const submit = submitEvent();
+    act(() => imageForm().dispatchEvent(submit));
+    expect(submit.defaultPrevented).toBe(true);
+    expect(staleSubmit).not.toHaveBeenCalled();
+    const form = imageForm();
+    const handler = reactProp<FormEventHandler<HTMLFormElement>>(
+      form,
+      "onSubmit",
+    );
+    const preventDefault = vi.fn();
+    handler({
+      currentTarget: form,
+      target: form,
+      nativeEvent: new Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }),
+      preventDefault,
+    } as unknown as FormEvent<HTMLFormElement>);
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    Reflect.deleteProperty(file, "type");
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(currentClose).toHaveBeenCalledOnce();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("revalidates form suppression after native submit provenance", async () => {
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={staleSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/untrusted.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const ref = reactProp<RefCallback<HTMLFormElement>>(form, "ref");
+    const submit = submitEvent();
+    const composedPath = submit.composedPath.bind(submit);
+    Object.defineProperty(submit, "composedPath", {
+      configurable: true,
+      value: () => {
+        ref(null);
+        ref(form);
+        return composedPath();
+      },
+    });
+
+    act(() => form.dispatchEvent(submit));
+    expect(submit.defaultPrevented).toBe(false);
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(currentClose).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks deferred ownership after replay history getters publish a successor", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const readUrl = vi.fn(() => "/api/assets/untrusted");
+    const result = {} as UploadResult;
+    Object.defineProperty(result, "url", { get: readUrl });
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    const onSubmit = vi.fn();
+    const nextClose = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    const url = screen.getByTestId("image-url") as HTMLInputElement;
+    const ref = reactProp<RefCallback<HTMLInputElement>>(url, "ref");
+    const file = screen.getByTestId("image-file") as HTMLInputElement;
+    const type = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "type",
+    );
+    if (!type?.get || !type.set) {
+      throw new Error("HTMLInputElement.type accessors are unavailable");
+    }
+
+    failed.resolve(result);
+    ref(null);
+    ref(url);
+    file.setAttribute("name", "");
+    file.setAttribute("type", "file");
+    file.removeAttribute("name");
+    Object.defineProperty(file, "type", {
+      configurable: true,
+      get() {
+        Reflect.deleteProperty(file, "type");
+        flushSync(() => {
+          view.root.render(
+            <StrictMode>
+              <ImageDialog
+                open
+                onOpenChange={nextClose}
+                onSubmit={onSubmit}
+                onUpload={onUpload}
+              />
+            </StrictMode>,
+          );
+        });
+        return type.get?.call(file);
+      },
+      set(value: string) {
+        type.set?.call(file, value);
+      },
+    });
+    await act(async () => {
+      await failed.promise;
+      await Promise.resolve();
+    });
+
+    expect(readUrl).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByTestId("image-upload")).toBeEnabled(),
+    );
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
   });
 });

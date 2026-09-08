@@ -815,7 +815,7 @@ interface ImagePublicationReplay {
 
 interface ImagePublicationRuntime {
   readonly publication: ImagePublication;
-  readonly publish: () => boolean;
+  readonly publish: (beforePublish?: () => void) => boolean;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly finishCommit: () => void;
@@ -864,8 +864,17 @@ interface ImageDeferredUploadOutcome {
 interface ImageSubmitProvenance {
   readonly authority: ImageAuthority;
   readonly ownerDocument: Document;
-  readonly dom: ImageDom;
+  readonly form: HTMLFormElement;
+  readonly insert: HTMLButtonElement;
+  readonly content: HTMLDivElement;
   readonly contentTree: ImageDomSnapshot;
+  readonly revision: number;
+}
+
+interface ImageReplayValidation {
+  readonly complete: () => boolean;
+  readonly release: () => void;
+  readonly reject: () => void;
 }
 
 interface ImageControlPresentation<T extends HTMLElement> {
@@ -1015,6 +1024,7 @@ class ImagePublicationCoordinator {
   #active: ImagePublication | null = null;
   #successorOf: ImagePublication | null = null;
   #replay: ImagePublicationReplay | null = null;
+  #rejectedReplayAuthority: ImageAuthority | null = null;
   readonly #retired = new WeakSet<ImagePublication>();
   readonly #claimedPublications = new WeakSet<ImagePublication>();
   readonly #claimedControls = new WeakSet<object>();
@@ -1053,6 +1063,19 @@ class ImagePublicationCoordinator {
   abandonReplay(publication: ImagePublication) {
     if (this.#replay?.source === publication) this.#replay = null;
     if (this.#successorOf === publication) this.#successorOf = null;
+  }
+
+  rejectReplay(publication: ImagePublication) {
+    this.#rejectedReplayAuthority = publication.authority;
+    this.abandonReplay(publication);
+  }
+
+  acceptsAuthority(authority: ImageAuthority) {
+    const rejected = this.#rejectedReplayAuthority;
+    if (!rejected) return true;
+    if (imageAuthoritiesMatch(rejected, authority, false)) return false;
+    this.#rejectedReplayAuthority = null;
+    return true;
   }
 
   publish(publication: ImagePublication) {
@@ -2175,7 +2198,7 @@ function imageExactNativeSubmit(
   event: React.FormEvent<HTMLFormElement>,
   provenance: ImageSubmitProvenance,
 ) {
-  const { form, url, alt, file, insert, content } = provenance.dom;
+  const { form, insert, content } = provenance;
   const nativeEvent = imageReactEnvelope(
     event,
     "onSubmit",
@@ -2193,10 +2216,7 @@ function imageExactNativeSubmit(
     !nativeEvent.cancelable ||
     !form.isConnected ||
     form.ownerDocument !== provenance.ownerDocument ||
-    url.form !== form ||
-    alt.form !== form ||
     insert.form !== form ||
-    (file !== null && file.form !== form) ||
     !imageSnapshotContains(provenance.contentTree, form)
   ) {
     return null;
@@ -2211,6 +2231,38 @@ function imageExactNativeSubmit(
     return null;
   }
   return nativeEvent;
+}
+
+function imageSubmitProvenance(
+  authority: ImageAuthority,
+  controls: ImageControls,
+  revision: number,
+): ImageSubmitProvenance | null {
+  const form = controls.form.owner.element();
+  const insert = controls.insert.owner.element();
+  const content = form?.parentElement;
+  const ownerWindow = content?.ownerDocument.defaultView;
+  if (
+    !authority.open ||
+    !ownerWindow ||
+    !(form instanceof ownerWindow.HTMLFormElement) ||
+    !(insert instanceof ownerWindow.HTMLButtonElement) ||
+    !(content instanceof ownerWindow.HTMLDivElement) ||
+    !form.isConnected ||
+    form.parentElement !== content ||
+    !form.contains(insert)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    authority,
+    ownerDocument: content.ownerDocument,
+    form,
+    insert,
+    content,
+    contentTree: imageSnapshotDom(content),
+    revision,
+  });
 }
 
 function imageExactNativeDismissal(
@@ -2330,10 +2382,22 @@ function createImagePublicationRuntime(
   const currentDomMatches = (
     changing: "url" | "alt" | "file" | null = null,
   ) => {
+    if (
+      !guard?.isClean(changing) ||
+      !committedDomMatches(changing) ||
+      !guard.isClean(changing)
+    ) {
+      return false;
+    }
+    const refsAreCurrent = replayRefs.every(
+      (entry) =>
+        entry.owner.element() === entry.element && entry.element.isConnected,
+    );
     return (
-      Boolean(guard?.isClean(changing)) &&
-      committedDomMatches(changing) &&
-      Boolean(guard?.isClean(changing))
+      refsAreCurrent &&
+      (retired
+        ? coordinator.acceptsSuccessorOf(publication)
+        : coordinator.isCurrent(publication))
     );
   };
   const committedDomMatches = (
@@ -2406,7 +2470,7 @@ function createImagePublicationRuntime(
     currentDomMatches();
   return Object.freeze({
     publication,
-    publish: () => {
+    publish: (beforePublish = () => {}) => {
       established = true;
       replayRefs = owners.map((owner) => {
         const element = owner.element();
@@ -2425,7 +2489,9 @@ function createImagePublicationRuntime(
           retire("element");
         },
       );
-      if (!guard || !coordinator.publish(publication)) {
+      if (!guard) return false;
+      beforePublish();
+      if (!coordinator.publish(publication)) {
         guard?.release();
         return false;
       }
@@ -2492,38 +2558,72 @@ function createImagePublicationRuntime(
   });
 }
 
-function imageReplayAllowsPublication(
+function imageReplayValidation(
   coordinator: ImagePublicationCoordinator,
   authority: ImageAuthority,
   dom: ImageDom,
-) {
+): ImageReplayValidation | null {
   const replay = coordinator.replay();
-  if (!replay) return true;
+  if (!replay) {
+    return Object.freeze({
+      complete: () => true,
+      release: () => {},
+      reject: () => {},
+    });
+  }
   const sameAuthority = imageAuthoritiesMatch(
     replay.source.authority,
     authority,
     false,
   );
-  const exactReplay =
-    sameAuthority &&
-    coordinator.acceptsSuccessorOf(replay.source) &&
-    replay.proofIsCurrent() &&
-    replay.historyIsClean() &&
-    replay.source.dom.bridge === dom.bridge &&
-    replay.source.dom.overlay === dom.overlay &&
-    replay.source.dom.content === dom.content &&
-    imagePlacementMatches(
-      dom.bridge,
-      dom.overlay,
-      dom.content,
-      replay.placement,
-    ) &&
-    imageDomMatches(replay.bridgeTree) &&
-    imageDomMatches(replay.contentTree) &&
-    imageDomMatches(replay.overlayTree);
-  coordinator.abandonReplay(replay.source);
-  replay.release();
-  return !sameAuthority || exactReplay;
+  const exactReplay = () => {
+    const exactShape =
+      replay.source.dom.bridge === dom.bridge &&
+      replay.source.dom.overlay === dom.overlay &&
+      replay.source.dom.content === dom.content &&
+      imagePlacementMatches(
+        dom.bridge,
+        dom.overlay,
+        dom.content,
+        replay.placement,
+      ) &&
+      imageDomMatches(replay.bridgeTree) &&
+      imageDomMatches(replay.contentTree) &&
+      imageDomMatches(replay.overlayTree);
+    return (
+      exactShape &&
+      replay.historyIsClean() &&
+      coordinator.acceptsSuccessorOf(replay.source) &&
+      replay.proofIsCurrent()
+    );
+  };
+  if (sameAuthority && !exactReplay()) {
+    coordinator.rejectReplay(replay.source);
+    replay.release();
+    return null;
+  }
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    coordinator.abandonReplay(replay.source);
+    replay.release();
+  };
+  const reject = () => {
+    if (released) return;
+    released = true;
+    coordinator.rejectReplay(replay.source);
+    replay.release();
+  };
+  return Object.freeze({
+    complete: () => {
+      const accepted = !sameAuthority || exactReplay();
+      if (!accepted) reject();
+      return accepted;
+    },
+    release,
+    reject,
+  });
 }
 
 function ImagePublicationBoundary({
@@ -2563,13 +2663,14 @@ function createImagePresentation(
     fallbackAlt: string,
   ) => void,
   resumeUploadSettlement: () => void,
-  abandonDeferredUpload: () => void,
+  abandonDeferredUpload: () => boolean,
   afterClose: ImageAfterCloseAuthority,
   completeClose: (closer: object) => void,
 ): ImagePresentation {
   let currentRuntime: ImagePublicationRuntime | null = null;
   let lastRuntime: ImagePublicationRuntime | null = null;
   let submitProvenance: ImageSubmitProvenance | null = null;
+  let submitRevision = 0;
   let successorRequested = false;
   let partialRecoveryQueued = false;
   let portalSettlement = 0;
@@ -2615,6 +2716,12 @@ function createImagePresentation(
     previous: Element | null,
     last: Element | null,
   ) => {
+    if (
+      (owner === form.owner || owner === insert.owner) &&
+      (element === null || (last !== null && element !== last))
+    ) {
+      submitRevision += 1;
+    }
     const runtime = currentRuntime ?? lastRuntime;
     runtime?.noteRef(owner, element, previous);
     if (
@@ -2647,8 +2754,14 @@ function createImagePresentation(
           !coordinator.acceptsSuccessorOf(runtime.publication) ||
           !factsAreCurrent()
         ) {
+          const successorWasRequested = successorRequested;
           coordinator.abandonReplay(runtime.publication);
           replay.release();
+          successorRequested = true;
+          const abandoned = abandonDeferredUpload();
+          if (!abandoned && !successorWasRequested) {
+            requestSuccessor();
+          }
           return;
         }
         scheduleCommitFinish(runtime);
@@ -2748,14 +2861,23 @@ function createImagePresentation(
   const owns = (
     publication: ImagePublication,
     changing: "url" | "alt" | "file" | null = null,
-  ) =>
-    Boolean(
+  ) => {
+    if (
+      !factsAreCurrent() ||
+      publication.authority !== authority ||
+      !coordinator.isCurrent(publication) ||
+      publication.isRetired() ||
+      !publication.publishedDomMatches(changing)
+    ) {
+      return false;
+    }
+    return (
       factsAreCurrent() &&
-        publication.authority === authority &&
-        coordinator.isCurrent(publication) &&
-        !publication.isRetired() &&
-        publication.publishedDomMatches(changing),
+      publication.authority === authority &&
+      coordinator.isCurrent(publication) &&
+      !publication.isRetired()
     );
+  };
   const requestReplaySuccessor = (runtime: ImagePublicationRuntime) => {
     const replay = runtime.replay();
     if (
@@ -2814,7 +2936,8 @@ function createImagePresentation(
     ) {
       if (
         pointer?.publication === publication &&
-        imageExactNativeOutsideClick(pointer, event, publication)
+        imageExactNativeOutsideClick(pointer, event, publication) &&
+        owns(publication)
       ) {
         stageDismissal(publication, {
           control: publication.dom.overlay,
@@ -2825,7 +2948,10 @@ function createImagePresentation(
       return;
     }
     if (event instanceof ownerWindow.KeyboardEvent) {
-      if (imageExactNativeDismissal(event, publication)) {
+      if (
+        imageExactNativeDismissal(event, publication) &&
+        owns(publication)
+      ) {
         stageDismissal(publication, {
           control: publication.dom.content,
           reactEvent: event,
@@ -2837,7 +2963,8 @@ function createImagePresentation(
     if (
       !PointerEventConstructor ||
       !(event instanceof PointerEventConstructor) ||
-      !imageExactNativeDismissal(event, publication)
+      !imageExactNativeDismissal(event, publication) ||
+      !owns(publication)
     ) {
       return;
     }
@@ -2859,18 +2986,21 @@ function createImagePresentation(
       }
       return undefined;
     }
+    if (!coordinator.acceptsAuthority(authority)) return undefined;
+    submitProvenance =
+      imageSubmitProvenance(authority, controls, submitRevision) ??
+      submitProvenance;
     const dom = exactDom();
     if (!factsAreCurrent() || !dom || replayRejected) {
       if (coordinator.replay()) abandonDeferredUpload();
       return undefined;
     }
-    submitProvenance = Object.freeze({
+    const replayValidation = imageReplayValidation(
+      coordinator,
       authority,
-      ownerDocument: dom.content.ownerDocument,
       dom,
-      contentTree: imageSnapshotDom(dom.content),
-    });
-    if (!imageReplayAllowsPublication(coordinator, authority, dom)) {
+    );
+    if (!replayValidation) {
       replayRejected = true;
       abandonDeferredUpload();
       return undefined;
@@ -2887,14 +3017,24 @@ function createImagePresentation(
       },
     );
     if (!runtime) {
+      replayValidation.release();
+      replayRejected = true;
+      abandonDeferredUpload();
+      return undefined;
+    }
+    submitProvenance =
+      imageSubmitProvenance(authority, controls, submitRevision) ??
+      submitProvenance;
+    if (!replayValidation.complete()) {
+      runtime.retireForElement();
       replayRejected = true;
       abandonDeferredUpload();
       return undefined;
     }
     currentRuntime = runtime;
     lastRuntime = runtime;
-    submitProvenance = runtime.publication;
-    if (!runtime.publish()) {
+    if (!runtime.publish(replayValidation.release)) {
+      replayValidation.release();
       runtime.retireForElement();
       currentRuntime = null;
       abandonDeferredUpload();
@@ -2908,6 +3048,36 @@ function createImagePresentation(
   ) => {
     const publication = coordinator.active();
     return publication && owns(publication, changing) ? publication : null;
+  };
+  const submitSuppressionIsCurrent = (
+    provenance: ImageSubmitProvenance,
+  ) => {
+    if (
+      submitProvenance !== provenance ||
+      provenance.authority !== authority ||
+      provenance.revision !== submitRevision ||
+      !factsAreCurrent() ||
+      form.owner.element() !== provenance.form ||
+      insert.owner.element() !== provenance.insert
+    ) {
+      return false;
+    }
+    const { form: ownedForm, insert: ownedInsert, content } = provenance;
+    const structurallyCurrent =
+      ownedForm.isConnected &&
+      ownedForm.ownerDocument === provenance.ownerDocument &&
+      ownedForm.parentElement === content &&
+      ownedInsert.form === ownedForm &&
+      ownedForm.contains(ownedInsert) &&
+      imageSnapshotContains(provenance.contentTree, ownedForm);
+    return (
+      structurallyCurrent &&
+      submitProvenance === provenance &&
+      provenance.revision === submitRevision &&
+      factsAreCurrent() &&
+      form.owner.element() === ownedForm &&
+      insert.owner.element() === ownedInsert
+    );
   };
   const claim = (
     publication: ImagePublication,
@@ -2937,6 +3107,7 @@ function createImagePresentation(
     const nativeEvent = imageExactNativeInput(event, input, publication);
     if (
       !nativeEvent ||
+      !owns(publication, "url") ||
       !claim(publication, url, url.action, event, nativeEvent)
     ) {
       return;
@@ -2975,6 +3146,7 @@ function createImagePresentation(
     const nativeEvent = imageExactNativeInput(event, input, publication);
     if (
       !nativeEvent ||
+      !owns(publication, "alt") ||
       !claim(publication, alt, alt.action, event, nativeEvent)
     ) {
       return;
@@ -3024,6 +3196,11 @@ function createImagePresentation(
     );
     if (
       !nativeEvent ||
+      !owns(publication) ||
+      publication.dom.upload !== upload.owner.element() ||
+      publication.dom.file !== file.owner.element() ||
+      authority.uploading ||
+      activeUpload() !== null ||
       !claim(
         publication,
         upload,
@@ -3051,6 +3228,8 @@ function createImagePresentation(
     const nativeEvent = imageExactNativeInput(event, input, publication);
     if (
       !nativeEvent ||
+      !owns(publication, "file") ||
+      publication.dom.file !== file.owner.element() ||
       !authority.onUpload ||
       authority.uploading ||
       activeUpload() !== null ||
@@ -3105,6 +3284,8 @@ function createImagePresentation(
     const nativeEvent = imageExactNativeError(event, image, publication);
     if (
       !nativeEvent ||
+      !owns(publication) ||
+      publication.dom.preview !== preview.owner.element() ||
       !claim(
         publication,
         preview,
@@ -3155,6 +3336,8 @@ function createImagePresentation(
     );
     if (
       !nativeEvent ||
+      !owns(publication) ||
+      publication.dom.cancel !== cancel.owner.element() ||
       !claim(
         publication,
         cancel,
@@ -3175,13 +3358,13 @@ function createImagePresentation(
       !provenance ||
       !ownedForm ||
       provenance.authority !== authority ||
-      provenance.dom.form !== ownedForm ||
+      provenance.form !== ownedForm ||
       event.currentTarget !== ownedForm
     ) {
       return;
     }
     const nativeEvent = imageExactNativeSubmit(event, provenance);
-    if (!nativeEvent) return;
+    if (!nativeEvent || !submitSuppressionIsCurrent(provenance)) return;
     event.preventDefault();
     if (!event.defaultPrevented || !nativeEvent.defaultPrevented) return;
     const publication = currentPublication(
@@ -3236,7 +3419,7 @@ function createImagePresentation(
       publication.dom.close,
       publication,
     );
-    if (nativeEvent) {
+    if (nativeEvent && owns(publication)) {
       stageDismissal(publication, {
         control: publication.dom.close,
         reactEvent: event,
@@ -3380,8 +3563,14 @@ export const ImageDialog = memo(function ImageDialog({
   const abandonUploadOwner = useCallback(
     (owner: ImageUploadOwner, publication: ImagePublication | null = null) => {
       const deferred = deferredUploadOutcome.get();
-      if (deferred?.owner === owner) deferredUploadOutcome.set(null);
-      if (activeUpload.get() !== owner) return;
+      const deferredMatches = deferred?.owner === owner;
+      if (deferredMatches) deferredUploadOutcome.set(null);
+      if (activeUpload.get() !== owner) {
+        if (!deferredMatches) return false;
+        publication?.retire();
+        requestSuccessor();
+        return true;
+      }
       activeUpload.set(null);
       setDraft((current) =>
         current.visit === owner.visit &&
@@ -3400,6 +3589,7 @@ export const ImageDialog = memo(function ImageDialog({
         publication?.retire();
       }
       requestSuccessor();
+      return true;
     },
     [
       activeUpload,
@@ -3410,7 +3600,7 @@ export const ImageDialog = memo(function ImageDialog({
   );
   const abandonDeferredUpload = useCallback(() => {
     const deferred = deferredUploadOutcome.get();
-    if (deferred) abandonUploadOwner(deferred.owner);
+    return deferred ? abandonUploadOwner(deferred.owner) : false;
   }, [abandonUploadOwner, deferredUploadOutcome]);
   const leaseUpload = useCallback(
     (owner: ImageUploadOwner): ImageUploadLease | null => {
@@ -3424,7 +3614,15 @@ export const ImageDialog = memo(function ImageDialog({
         publication.isRetired() ||
         !coordinator.isCurrent(publication) ||
         !publication.publishedDomMatches("file") ||
-        (publication === owner.origin
+        activeUpload.get() !== owner ||
+        latestAuthority.get() !== authority ||
+        publication.isRetired() ||
+        !coordinator.isCurrent(publication)
+      ) {
+        return null;
+      }
+      if (
+        publication === owner.origin
           ? authority !== owner.authority ||
             !coordinator.wasClaimed(publication)
           : !imageUploadMatchesAuthority(owner, authority) ||
@@ -3434,7 +3632,7 @@ export const ImageDialog = memo(function ImageDialog({
               publication.fileControl,
               owner.settlementAction,
               owner,
-            ))
+            )
       ) {
         return null;
       }
@@ -3446,18 +3644,27 @@ export const ImageDialog = memo(function ImageDialog({
     (lease: ImageUploadLease) => {
       const publication = coordinator.active();
       const authority = publication?.authority;
-      return Boolean(
-        publication &&
-          authority &&
-          activeUpload.get() === lease.owner &&
-          latestAuthority.get() === authority &&
-          coordinator.isCurrent(publication) &&
-          !publication.isRetired() &&
-          publication === lease.publication &&
-          publication.publishedDomMatches("file") &&
-          (publication === lease.owner.origin
-            ? authority === lease.owner.authority
-            : imageUploadMatchesAuthority(lease.owner, authority)),
+      if (
+        !publication ||
+        !authority ||
+        activeUpload.get() !== lease.owner ||
+        latestAuthority.get() !== authority ||
+        !coordinator.isCurrent(publication) ||
+        publication.isRetired() ||
+        publication !== lease.publication ||
+        !publication.publishedDomMatches("file")
+      ) {
+        return false;
+      }
+      return (
+        activeUpload.get() === lease.owner &&
+        latestAuthority.get() === authority &&
+        coordinator.isCurrent(publication) &&
+        !publication.isRetired() &&
+        publication === lease.publication &&
+        (publication === lease.owner.origin
+          ? authority === lease.owner.authority
+          : imageUploadMatchesAuthority(lease.owner, authority))
       );
     },
     [activeUpload, coordinator, latestAuthority],
@@ -3476,17 +3683,21 @@ export const ImageDialog = memo(function ImageDialog({
       const lease = leaseUpload(owner);
       if (!lease) {
         const replay = coordinator.replay();
-        if (
+        const replayOwnsDeferredOutcome = () =>
           coordinator.active() === null &&
-          replay &&
+          coordinator.replay() === replay &&
+          replay !== null &&
           activeUpload.get() === owner &&
           deferredUploadOutcome.get() === null &&
           latestAuthority.get() === replay.source.authority &&
           coordinator.acceptsSuccessorOf(replay.source) &&
           imageUploadMatchesAuthority(owner, replay.source.authority) &&
           replay.source.dom.file === owner.fileInput &&
-          replay.proofIsCurrent() &&
-          replay.historyIsClean()
+          replay.proofIsCurrent();
+        if (
+          replayOwnsDeferredOutcome() &&
+          replay?.historyIsClean() &&
+          replayOwnsDeferredOutcome()
         ) {
           deferredUploadOutcome.set(
             Object.freeze({ owner, outcome, source: replay.source }),
