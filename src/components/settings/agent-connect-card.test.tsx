@@ -11,12 +11,17 @@ import {
   TOKEN_PLACEHOLDER,
   type AgentConnectCardProps,
 } from "./agent-connect-card";
-import { MCP_PATH } from "@/lib/mcp";
+import { CopilotPermissionsHint } from "./copilot-permissions-hint";
+import { copilotAllowToolLine, MCP_PATH, type TokenScopeName } from "@/lib/mcp";
 
 const copyText = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/clipboard", async (original) => ({ ...await original<typeof import("@/lib/clipboard")>(), copyText }));
+const selectContents = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clipboard", async (original) => ({ ...await original<typeof import("@/lib/clipboard")>(), copyText, selectContents }));
 
-beforeEach(() => { copyText.mockReset().mockResolvedValue(true); });
+beforeEach(() => {
+  copyText.mockReset().mockResolvedValue(true);
+  selectContents.mockReset();
+});
 
 interface DirectView {
   host: HTMLDivElement;
@@ -34,6 +39,7 @@ afterEach(() => {
   }
   for (const observer of mutationObservers.splice(0)) observer.disconnect();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function renderDirect(node: ReactNode): DirectView {
@@ -63,6 +69,69 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 
 type ClickHandler = (event: { currentTarget: HTMLButtonElement }) => void;
 type KeyHandler = (event: { key: string; currentTarget: HTMLButtonElement; preventDefault: () => void }) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+
+interface PermissionHintProps {
+  testIdPrefix: string;
+  className?: string;
+  scope?: TokenScopeName | null;
+}
+
+interface CapturedPermissionHint {
+  root: HTMLDivElement;
+  pre: HTMLPreElement;
+  button: HTMLButtonElement;
+  click: ClickHandler;
+  rootRef: ElementRef<HTMLDivElement>;
+  preRef: ElementRef<HTMLPreElement>;
+  buttonRef: ElementRef<HTMLButtonElement>;
+}
+
+interface PermissionEvent {
+  currentTarget: HTMLButtonElement;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function permissionEvent(currentTarget: HTMLButtonElement): PermissionEvent {
+  return { currentTarget, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+}
+
+function expectEventUntouched(event: PermissionEvent) {
+  expect(event.preventDefault).not.toHaveBeenCalled();
+  expect(event.stopPropagation).not.toHaveBeenCalled();
+}
+
+function capturePermissionHint(prefix: string): CapturedPermissionHint {
+  const root = screen.getByTestId(`${prefix}-permissions`) as HTMLDivElement;
+  const pre = screen.getByTestId(`${prefix}-allow-line`) as HTMLPreElement;
+  const button = screen.getByTestId(`${prefix}-allow-copy`) as HTMLButtonElement;
+  return {
+    root,
+    pre,
+    button,
+    click: reactHandler<ClickHandler>(button, "onClick"),
+    rootRef: reactHandler<ElementRef<HTMLDivElement>>(root, "ref"),
+    preRef: reactHandler<ElementRef<HTMLPreElement>>(pre, "ref"),
+    buttonRef: reactHandler<ElementRef<HTMLButtonElement>>(button, "ref"),
+  };
+}
 
 interface CapturedActions {
   clickElement: HTMLButtonElement;
@@ -145,6 +214,39 @@ function CardBoundary({
   return mount === "initial" ? <InitialCard {...card} /> : <ReplacementCard {...card} />;
 }
 
+function InitialPermissionHint(props: PermissionHintProps) {
+  return <CopilotPermissionsHint {...props} />;
+}
+
+function ReplacementPermissionHint(props: PermissionHintProps) {
+  return <CopilotPermissionsHint {...props} />;
+}
+
+function PermissionHintBoundary({
+  hint,
+  mount = "initial",
+  present = true,
+  passiveVisit = 0,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  hint: PermissionHintProps;
+  mount?: "initial" | "replacement";
+  present?: boolean;
+  passiveVisit?: number;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup, passiveVisit]);
+  if (!present) return null;
+  return mount === "initial" ? <InitialPermissionHint {...hint} /> : <ReplacementPermissionHint {...hint} />;
+}
+
 describe("MCP setup disclosure", () => {
   it("uses the existing endpoint and placeholder in both supported HTTP configuration shapes", () => {
     const origin = "https://markdoc.example.test";
@@ -210,6 +312,416 @@ describe("MCP setup disclosure", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Other MCP clients" }));
     expect(screen.queryByTestId("agent-connect-allow-line")).toBeNull();
     expect(screen.getByTestId("agent-connect-config")).toHaveTextContent("MARKDOC_TOKEN");
+  });
+});
+
+describe("Copilot permission exact copy control", () => {
+  it("preserves the rendered hint and claims an exact event only once", async () => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const line = copilotAllowToolLine(undefined, "comment");
+    const view = renderDirect(<CopilotPermissionsHint testIdPrefix="direct-hint" className="extra-class" scope="comment" />);
+    const hint = capturePermissionHint("direct-hint");
+    const event = permissionEvent(hint.button);
+    const observer = observeMutations(view.host);
+
+    expect(hint.root).toHaveClass("extra-class");
+    expect(hint.pre).toHaveTextContent(line);
+    expect(hint.button).toHaveAccessibleName("Copy the Copilot CLI allow-tool line");
+    expect(hint.button).toHaveTextContent("Copy");
+    expect(screen.getByTestId("direct-hint-scope-chip")).toHaveTextContent("comment");
+
+    observer.takeRecords();
+    act(() => {
+      hint.click(event);
+      hint.click(event);
+    });
+
+    expect(copyText).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledWith(line);
+    expect(selectContents).not.toHaveBeenCalled();
+    expectEventUntouched(event);
+    expect(observer.takeRecords()).toHaveLength(0);
+
+    await act(async () => {
+      settlement.resolve(true);
+      await settlement.promise;
+    });
+    expect(screen.getByTestId("direct-hint-allow-copy")).toHaveTextContent("Copied");
+  });
+
+  it("rejects sibling, foreign, detached, disabled, and replacement sources without observable work", () => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const firstView = renderDirect(<CopilotPermissionsHint testIdPrefix="first-hint" scope="read" />);
+    renderDirect(<CopilotPermissionsHint testIdPrefix="sibling-hint" scope="comment" />);
+    const first = capturePermissionHint("first-hint");
+    const sibling = capturePermissionHint("sibling-hint");
+    const foreign = document.createElement("button");
+    const detached = document.createElement("button");
+    document.body.append(foreign);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const observer = observeMutations(firstView.host);
+
+    const expectInert = (source: HTMLButtonElement) => {
+      const event = permissionEvent(source);
+      const markup = firstView.host.innerHTML;
+      observer.takeRecords();
+      focus.mockClear();
+      act(() => first.click(event));
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectEventUntouched(event);
+      expect(focus).not.toHaveBeenCalled();
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(firstView.host.innerHTML).toBe(markup);
+      return event;
+    };
+
+    expectInert(sibling.button);
+    expectInert(foreign);
+    expectInert(detached);
+    first.button.disabled = true;
+    expectInert(first.button);
+    first.button.disabled = false;
+
+    const replacement = first.button.cloneNode(true) as HTMLButtonElement;
+    first.button.replaceWith(replacement);
+    observer.takeRecords();
+    expectInert(replacement);
+    expectInert(first.button);
+
+    foreign.remove();
+  });
+
+  it.each([
+    [
+      "test ID prefix",
+      { testIdPrefix: "props-a", className: "class-a", scope: "read" as const },
+      { testIdPrefix: "props-b", className: "class-a", scope: "read" as const },
+    ],
+    [
+      "class name",
+      { testIdPrefix: "props", className: "class-a", scope: "read" as const },
+      { testIdPrefix: "props", className: "class-b", scope: "read" as const },
+    ],
+    [
+      "scope and allow line",
+      { testIdPrefix: "props", className: "class-a", scope: "read" as const },
+      { testIdPrefix: "props", className: "class-a", scope: "comment" as const },
+    ],
+    [
+      "scope with an equal allow line",
+      { testIdPrefix: "props", className: "class-a" },
+      { testIdPrefix: "props", className: "class-a", scope: "full" as const },
+    ],
+  ])("retires the prior publication at the parent layout boundary for a %s change", (_name, hintA, hintB) => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    let passiveCleanups = 0;
+    const view = renderDirect(
+      <PermissionHintBoundary hint={hintA} onPassiveCleanup={() => passiveCleanups++} />,
+    );
+    const stale = capturePermissionHint(hintA.testIdPrefix);
+    const observer = observeMutations(view.host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let currentAtBoundary!: CapturedPermissionHint;
+    let staleEvent!: PermissionEvent;
+
+    act(() => {
+      view.root.render(
+        <PermissionHintBoundary
+          hint={hintB}
+          passiveVisit={1}
+          boundary={1}
+          onPassiveCleanup={() => passiveCleanups++}
+          onBoundary={() => {
+            expect(passiveCleanups).toBe(0);
+            currentAtBoundary = capturePermissionHint(hintB.testIdPrefix);
+            expect(currentAtBoundary.root).toBe(stale.root);
+            expect(currentAtBoundary.pre).toBe(stale.pre);
+            expect(currentAtBoundary.button).toBe(stale.button);
+            observer.takeRecords();
+            focus.mockClear();
+            staleEvent = permissionEvent(currentAtBoundary.button);
+            stale.click(staleEvent);
+            expect(observer.takeRecords()).toHaveLength(0);
+          }}
+        />,
+      );
+    });
+
+    expect(passiveCleanups).toBe(1);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expectEventUntouched(staleEvent);
+    expect(focus).not.toHaveBeenCalled();
+
+    const current = capturePermissionHint(hintB.testIdPrefix);
+    expect(current.click).toBe(currentAtBoundary.click);
+    const currentEvent = permissionEvent(current.button);
+    act(() => current.click(currentEvent));
+    expect(copyText).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledWith(copilotAllowToolLine(undefined, hintB.scope ?? "full"));
+    expectEventUntouched(currentEvent);
+  });
+
+  it("retires methods and labels across controlled rejection and timer settlements", async () => {
+    vi.useFakeTimers();
+    const attempts = [deferred<boolean>(), deferred<boolean>(), deferred<boolean>(), deferred<boolean>()];
+    copyText.mockImplementation(() => attempts[copyText.mock.calls.length - 1]!.promise);
+    renderDirect(<CopilotPermissionsHint testIdPrefix="settlement-hint" scope="comment" />);
+    const expectedLine = copilotAllowToolLine(undefined, "comment");
+    const initial = capturePermissionHint("settlement-hint");
+    const initialEvent = permissionEvent(initial.button);
+
+    act(() => initial.click(initialEvent));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    expect(copyText).toHaveBeenLastCalledWith(expectedLine);
+
+    await act(async () => {
+      attempts[0].reject(new Error("clipboard rejected"));
+      await Promise.resolve();
+    });
+    expect(selectContents).toHaveBeenCalledOnce();
+    expect(selectContents).toHaveBeenLastCalledWith(initial.pre);
+    expect(screen.getByTestId("settlement-hint-allow-copy")).toHaveTextContent("Select & press Ctrl+C");
+    expect(vi.getTimerCount()).toBe(1);
+
+    const firstFallback = capturePermissionHint("settlement-hint");
+    const staleFallbackEvent = permissionEvent(firstFallback.button);
+    act(() => initial.click(staleFallbackEvent));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    expectEventUntouched(staleFallbackEvent);
+
+    act(() => firstFallback.click(permissionEvent(firstFallback.button)));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(expectedLine);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => {
+      attempts[1].reject(new Error("clipboard rejected again"));
+      await Promise.resolve();
+    });
+    expect(selectContents).toHaveBeenCalledTimes(2);
+    expect(selectContents).toHaveBeenLastCalledWith(firstFallback.pre);
+    expect(vi.getTimerCount()).toBe(1);
+
+    const secondFallback = capturePermissionHint("settlement-hint");
+    act(() => secondFallback.click(permissionEvent(secondFallback.button)));
+    expect(copyText).toHaveBeenCalledTimes(3);
+    expect(copyText).toHaveBeenLastCalledWith(expectedLine);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => {
+      attempts[2].resolve(true);
+      await attempts[2].promise;
+    });
+    expect(selectContents).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("settlement-hint-allow-copy")).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    const copied = capturePermissionHint("settlement-hint");
+    act(() => secondFallback.click(permissionEvent(copied.button)));
+    expect(copyText).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.getByTestId("settlement-hint-allow-copy")).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+
+    const idle = capturePermissionHint("settlement-hint");
+    act(() => idle.click(permissionEvent(idle.button)));
+    expect(copyText).toHaveBeenCalledTimes(4);
+    expect(copyText).toHaveBeenLastCalledWith(expectedLine);
+  });
+
+  it.each(["root", "pre", "button"] as const)("retires the exact hierarchy when its %s ref is replaced", (role) => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const view = renderDirect(<CopilotPermissionsHint testIdPrefix={`replace-${role}`} scope="read" />);
+    const hint = capturePermissionHint(`replace-${role}`);
+    const replacement = hint[role].cloneNode(true) as HTMLElement;
+    view.host.append(replacement);
+    const observer = observeMutations(view.host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+    observer.takeRecords();
+    act(() => {
+      if (role === "root") hint.rootRef(replacement as HTMLDivElement);
+      else if (role === "pre") hint.preRef(replacement as HTMLPreElement);
+      else hint.buttonRef(replacement as HTMLButtonElement);
+    });
+    observer.takeRecords();
+    const exactEvent = permissionEvent(hint.button);
+    const replacementEvent = permissionEvent(role === "button" ? replacement as HTMLButtonElement : hint.button);
+    act(() => {
+      hint.click(exactEvent);
+      hint.click(replacementEvent);
+    });
+
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expectEventUntouched(exactEvent);
+    expectEventUntouched(replacementEvent);
+    expect(focus).not.toHaveBeenCalled();
+    expect(observer.takeRecords()).toHaveLength(0);
+    replacement.remove();
+  });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "isolates an equal-looking remount in %s order and retires it before removal",
+    async (order) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      const hint = { testIdPrefix: "remount-hint", className: "same-class", scope: "comment" as const };
+      let passiveCleanups = 0;
+      const view = renderDirect(
+        <PermissionHintBoundary hint={hint} onPassiveCleanup={() => passiveCleanups++} />,
+      );
+      const stale = capturePermissionHint("remount-hint");
+      const observer = observeMutations(view.host);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      let currentAtBoundary!: CapturedPermissionHint;
+
+      act(() => {
+        view.root.render(
+          <PermissionHintBoundary
+            hint={hint}
+            mount="replacement"
+            passiveVisit={1}
+            boundary={1}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              currentAtBoundary = capturePermissionHint("remount-hint");
+              expect(currentAtBoundary.root).not.toBe(stale.root);
+              expect(currentAtBoundary.pre).not.toBe(stale.pre);
+              expect(currentAtBoundary.button).not.toBe(stale.button);
+              expect(stale.root.isConnected).toBe(false);
+              observer.takeRecords();
+            }}
+          />,
+        );
+      });
+
+      expect(passiveCleanups).toBe(1);
+      const current = capturePermissionHint("remount-hint");
+      expect(current.click).toBe(currentAtBoundary.click);
+      const staleWithCurrent = permissionEvent(current.button);
+      const currentWithStale = permissionEvent(stale.button);
+      const accepted = permissionEvent(current.button);
+      observer.takeRecords();
+      focus.mockClear();
+      act(() => {
+        if (order === "stale-before-current") {
+          stale.click(staleWithCurrent);
+          current.click(currentWithStale);
+          current.click(accepted);
+        } else {
+          current.click(accepted);
+          current.click(currentWithStale);
+          stale.click(staleWithCurrent);
+        }
+      });
+
+      expect(copyText).toHaveBeenCalledOnce();
+      expect(copyText).toHaveBeenCalledWith(copilotAllowToolLine(undefined, "comment"));
+      expect(selectContents).not.toHaveBeenCalled();
+      expectEventUntouched(staleWithCurrent);
+      expectEventUntouched(currentWithStale);
+      expectEventUntouched(accepted);
+      expect(focus).not.toHaveBeenCalled();
+      expect(observer.takeRecords()).toHaveLength(0);
+
+      let removalEvent!: PermissionEvent;
+      act(() => {
+        view.root.render(
+          <PermissionHintBoundary
+            hint={hint}
+            mount="replacement"
+            present={false}
+            passiveVisit={2}
+            boundary={2}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(current.root.isConnected).toBe(false);
+              observer.takeRecords();
+              removalEvent = permissionEvent(current.button);
+              current.click(removalEvent);
+              expect(observer.takeRecords()).toHaveLength(0);
+            }}
+          />,
+        );
+      });
+      act(() => current.click(removalEvent));
+      expect(copyText).toHaveBeenCalledOnce();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectEventUntouched(removalEvent);
+
+      await act(async () => {
+        settlement.reject(new Error("late rejection"));
+        await Promise.resolve();
+      });
+      expect(selectContents).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps a reused current hierarchy after late old-ref attach and detach callbacks", async () => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const hint = { testIdPrefix: "reused-hint", className: "same-class", scope: "comment" as const };
+    let passiveCleanups = 0;
+    const view = renderDirect(
+      <PermissionHintBoundary hint={hint} onPassiveCleanup={() => passiveCleanups++} />,
+    );
+    const stale = capturePermissionHint("reused-hint");
+    let currentAtBoundary!: CapturedPermissionHint;
+    let staleEvent!: PermissionEvent;
+
+    act(() => {
+      view.root.render(
+        <PermissionHintBoundary
+          hint={hint}
+          passiveVisit={1}
+          boundary={1}
+          onPassiveCleanup={() => passiveCleanups++}
+          onBoundary={() => {
+            currentAtBoundary = capturePermissionHint("reused-hint");
+            expect(currentAtBoundary.root).toBe(stale.root);
+            expect(currentAtBoundary.pre).toBe(stale.pre);
+            expect(currentAtBoundary.button).toBe(stale.button);
+            stale.rootRef(currentAtBoundary.root);
+            stale.preRef(currentAtBoundary.pre);
+            stale.buttonRef(currentAtBoundary.button);
+            stale.rootRef(null);
+            stale.preRef(null);
+            stale.buttonRef(null);
+            staleEvent = permissionEvent(currentAtBoundary.button);
+            stale.click(staleEvent);
+          }}
+        />,
+      );
+    });
+
+    expect(passiveCleanups).toBe(1);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expectEventUntouched(staleEvent);
+
+    const current = capturePermissionHint("reused-hint");
+    const accepted = permissionEvent(current.button);
+    act(() => current.click(accepted));
+    expect(copyText).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledWith(copilotAllowToolLine(undefined, "comment"));
+
+    await act(async () => {
+      settlement.reject(new Error("clipboard rejected"));
+      await Promise.resolve();
+    });
+    expect(selectContents).toHaveBeenCalledOnce();
+    expect(selectContents).toHaveBeenCalledWith(current.pre);
   });
 });
 
