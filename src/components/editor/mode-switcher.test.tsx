@@ -183,6 +183,36 @@ async function waitForOutsideListener() {
   });
 }
 
+function dispatchTrustedEscapeOutsideAct(target: HTMLElement) {
+  const escape = captureEscape();
+  const close = captureOpenChange();
+  const event = new KeyboardEvent("keydown", { bubbles: true, key: "Escape" });
+  document.addEventListener("keydown", (nativeEvent) => {
+    nativeEvent.stopImmediatePropagation();
+    escape(nativeEvent);
+    close(false);
+  }, { capture: true, once: true });
+  target.dispatchEvent(event);
+  return event;
+}
+
+function dispatchTrustedModeSelectionOutsideAct(
+  name: "Editing" | "Suggesting" | "Viewing",
+  value: EditMode,
+) {
+  const row = radio(name);
+  const select = captureRowSelect(name);
+  const change = captureModeChange();
+  const event = new CustomEvent("menu.itemSelect", { cancelable: true });
+  row.addEventListener("menu.itemSelect", (nativeEvent) => {
+    nativeEvent.stopImmediatePropagation();
+    select(nativeEvent);
+    change(value);
+  }, { once: true });
+  row.dispatchEvent(event);
+  return event;
+}
+
 function captureOpenChange(): OpenHandler {
   return nearestHandler(trigger(), "onOpenChange");
 }
@@ -857,6 +887,85 @@ describe("ModeSwitcher current behavior", () => {
 
     expect(window.open).toHaveBeenCalledExactlyOnceWith("/p/reader-current", "_blank", "noopener");
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("returns focus once after a trusted Escape close commits beyond the event microtask", async () => {
+    const session = new ModeSession("escape-focus-order", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    const viewing = radio("Viewing");
+    viewing.focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    dispatchTrustedEscapeOutsideAct(viewing);
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+  });
+
+  it("returns focus once when the trusted current trigger toggles the menu closed", async () => {
+    const session = new ModeSession("trigger-close-focus", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    menu().focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    pointerDown(modeTrigger);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(modeTrigger).toHaveFocus();
+  });
+
+  it.each(["replaced", "mutated"] as const)(
+    "does not focus a %s stale trigger after a trusted Escape close",
+    async (change) => {
+      const session = new ModeSession(`stale-focus-${change}`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      openMenu();
+      const viewing = radio("Viewing");
+      viewing.focus();
+      const staleFocus = vi.spyOn(modeTrigger, "focus");
+      const replacement = modeTrigger.cloneNode(true) as HTMLButtonElement;
+      const replacementFocus = vi.spyOn(replacement, "focus");
+      const ref = fiberFor(modeTrigger).ref;
+      if (typeof ref !== "function") throw new Error("Mode trigger callback ref was not attached");
+
+      dispatchTrustedEscapeOutsideAct(viewing);
+      if (change === "replaced") {
+        ref(null);
+        ref(replacement);
+      } else {
+        modeTrigger.setAttribute("aria-label", "stale mode trigger");
+      }
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      expect(staleFocus).not.toHaveBeenCalled();
+      expect(replacementFocus).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not focus a mode-changing trigger with an unrelated pending mutation", async () => {
+    const session = new ModeSession("mode-change-stale-focus", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    openMenu();
+    radio("Viewing").focus();
+    const focus = vi.spyOn(modeTrigger, "focus");
+
+    dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+    modeTrigger.setAttribute("aria-label", "mutated while close was pending");
+    await Promise.resolve();
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+    expect(session.setMode).toHaveBeenCalledExactlyOnceWith("viewing");
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("preserves keyboard selection, Escape and outside close, and trigger focus return", async () => {

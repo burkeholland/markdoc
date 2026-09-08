@@ -1495,6 +1495,13 @@ interface ModeSwitcherFocusIntent {
   readonly source: ModeSwitcherPublication;
   readonly visit: ModeSwitcherVisit;
   readonly target: HTMLButtonElement;
+  readonly modes: readonly EditMode[];
+  readonly guard: ModeSwitcherFocusGuard;
+}
+
+interface ModeSwitcherFocusGuard {
+  readonly isExact: (publication: ModeSwitcherPublication) => boolean;
+  readonly dispose: () => void;
 }
 
 interface ModeSwitcherRowPublication extends ModeSwitcherRowFacts {
@@ -1544,18 +1551,14 @@ class ModeSwitcherPublicationCoordinator {
     this.#active = publication;
     this.#successorOf = null;
     this.#unpublishedChangeRequested = false;
-    if (previous && previous !== publication) previous.dispose();
     const focus = this.#focusIntent;
-    if (
-      focus
-      && (
-        publication.render.open
-        || publication.render.visit !== focus.visit
-        || publication.dom.trigger !== focus.target
-      )
-    ) {
-      this.#focusIntent = null;
-    }
+    const returnFocus = Boolean(
+      focus && modeSwitcherFocusSuccessorIsExact(focus, publication),
+    );
+    const focusTarget = returnFocus ? focus?.target : null;
+    if (focus) this.#clearFocus(focus);
+    if (previous && previous !== publication) previous.dispose();
+    focusTarget?.focus();
   }
 
   retire(publication: ModeSwitcherPublication) {
@@ -1585,6 +1588,10 @@ class ModeSwitcherPublicationCoordinator {
     element: HTMLElement | null,
     previous: HTMLElement | null,
   ) {
+    const focus = this.#focusIntent;
+    if (focus && previous === focus.target && element !== focus.target) {
+      this.#clearFocus(focus);
+    }
     const publication = this.#active;
     if (!publication) {
       if (!this.#unpublishedChangeRequested) {
@@ -1675,29 +1682,39 @@ class ModeSwitcherPublicationCoordinator {
     return intent.row;
   }
 
-  scheduleFocus(source: ModeSwitcherPublication, target: HTMLButtonElement) {
+  scheduleFocus(
+    source: ModeSwitcherPublication,
+    target: HTMLButtonElement,
+    mode: EditMode = source.render.mode,
+  ) {
+    const previous = this.#focusIntent;
+    if (previous) this.#clearFocus(previous);
+    let pendingIntent: ModeSwitcherFocusIntent | null = null;
+    const guard = createModeSwitcherFocusGuard(
+      target,
+      mode !== source.render.mode,
+      () => {
+        if (pendingIntent) this.#clearFocus(pendingIntent);
+      },
+    );
+    const modes = mode === source.render.mode
+      ? Object.freeze([mode])
+      : Object.freeze([source.render.mode, mode]);
     const intent: ModeSwitcherFocusIntent = Object.freeze({
       source,
       visit: source.render.visit,
       target,
+      modes,
+      guard,
     });
+    pendingIntent = intent;
     this.#focusIntent = intent;
-    queueMicrotask(() => {
-      if (this.#focusIntent !== intent) return;
-      this.#focusIntent = null;
-      const current = this.#active;
-      if (
-        !current
-        || current.render.open
-        || current.render.visit !== intent.visit
-        || current.dom.trigger !== target
-        || target.ownerDocument !== current.document
-        || !current.isExact()
-      ) {
-        return;
-      }
-      target.focus();
-    });
+  }
+
+  #clearFocus(intent: ModeSwitcherFocusIntent) {
+    if (this.#focusIntent !== intent) return;
+    this.#focusIntent = null;
+    intent.guard.dispose();
   }
 }
 
@@ -1788,6 +1805,218 @@ const MODE_SWITCHER_DYNAMIC_ATTRIBUTES = new Set([
   "style",
   "tabindex",
 ]);
+
+const MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES = new Set([
+  ...MODE_SWITCHER_DYNAMIC_ATTRIBUTES,
+  "aria-controls",
+  "aria-expanded",
+  "data-state",
+]);
+
+function createModeSwitcherFocusGuard(
+  target: HTMLButtonElement,
+  allowModeChange: boolean,
+  onInvalidated: () => void,
+): ModeSwitcherFocusGuard {
+  const placements = new Map<Node, Node | null>();
+  for (let node: Node | null = target; node; node = node.parentNode) {
+    placements.set(node, node.parentNode);
+  }
+  const MutationObserverConstructor = target.ownerDocument.defaultView?.MutationObserver;
+  const originalIcon = target.firstElementChild;
+  const originalLabel = target.children.item(1);
+  const modeChangeRecords: MutationRecord[] = [];
+  let observer: MutationObserver | null = null;
+  let invalid = false;
+  const inspect = (records: readonly MutationRecord[]) => {
+    if (invalid) return;
+    if (allowModeChange) {
+      modeChangeRecords.push(...records);
+      return;
+    }
+    invalid = records.some((record) => {
+      if (record.target === target || target.contains(record.target)) {
+        return !(
+          record.type === "attributes"
+          && record.attributeName
+          && MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES.has(record.attributeName)
+        );
+      }
+      if (record.type !== "childList") return false;
+      return [...record.addedNodes, ...record.removedNodes].some((node) =>
+        placements.has(node) || node.contains(target));
+    });
+    if (invalid) onInvalidated();
+  };
+  if (MutationObserverConstructor) {
+    observer = new MutationObserverConstructor(inspect);
+    observer.observe(target, {
+      attributeOldValue: true,
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    for (let ancestor = target.parentNode; ancestor; ancestor = ancestor.parentNode) {
+      observer.observe(ancestor, { childList: true });
+    }
+  }
+  return Object.freeze({
+    isExact: (publication: ModeSwitcherPublication) => {
+      if (observer) inspect(observer.takeRecords());
+      if (
+        allowModeChange
+        && !modeChangeRecords.every((record) => modeSwitcherModeChangeMutationIsExpected(
+          record,
+          target,
+          originalIcon,
+          originalLabel,
+          placements,
+        ))
+      ) {
+        invalid = true;
+      }
+      return Boolean(
+        !invalid
+        && target.isConnected
+        && [...placements].every(([node, parent]) => node.parentNode === parent)
+        && modeSwitcherFocusTriggerIsExact(publication)
+      );
+    },
+    dispose: () => {
+      observer?.disconnect();
+      observer = null;
+    },
+  });
+}
+
+function modeSwitcherModeChangeMutationIsExpected(
+  record: MutationRecord,
+  trigger: HTMLButtonElement,
+  originalIcon: Element | null,
+  originalLabel: Element | null,
+  placements: ReadonlyMap<Node, Node | null>,
+) {
+  const currentIcon = trigger.firstElementChild;
+  const currentLabel = trigger.children.item(1);
+  if (record.target !== trigger && !trigger.contains(record.target)) {
+    return record.type === "childList"
+      && [...record.addedNodes, ...record.removedNodes].every(
+        (node) => !placements.has(node) && !node.contains(trigger),
+      );
+  }
+  if (record.type === "attributes") {
+    if (record.target === trigger) {
+      return Boolean(
+        record.attributeName
+        && (
+          MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES.has(record.attributeName)
+          || record.attributeName === "class"
+        )
+      );
+    }
+    return Boolean(
+      (originalIcon && originalIcon.contains(record.target))
+      || (currentIcon && currentIcon.contains(record.target))
+    );
+  }
+  if (record.target === trigger) {
+    return record.type === "childList"
+      && [...record.addedNodes, ...record.removedNodes].every(
+        (node) => node === originalIcon || node === currentIcon,
+      );
+  }
+  const inIcon = Boolean(
+    (originalIcon && (record.target === originalIcon || originalIcon.contains(record.target)))
+    || (currentIcon && (record.target === currentIcon || currentIcon.contains(record.target)))
+  );
+  if (inIcon) return true;
+  const inLabel = Boolean(
+    (originalLabel && (record.target === originalLabel || originalLabel.contains(record.target)))
+    || (currentLabel && (record.target === currentLabel || currentLabel.contains(record.target)))
+  );
+  return inLabel && (record.type === "characterData" || record.type === "childList");
+}
+
+function modeSwitcherFocusTriggerIsExact(publication: ModeSwitcherPublication) {
+  const { trigger } = publication.dom;
+  const label = publication.render.rows.find((row) => row.value === publication.render.mode)?.label;
+  const expectedIconClass: Record<EditMode, string> = {
+    editing: "lucide-pen-line",
+    suggesting: "lucide-message-square-plus",
+    viewing: "lucide-eye",
+  };
+  const semanticAttributes = Array.from(trigger.attributes).filter(
+    (attribute) => !MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(attribute.name),
+  );
+  const allowedAttributes = new Set([
+    "aria-expanded",
+    "aria-haspopup",
+    "class",
+    "data-state",
+    "data-testid",
+    "id",
+    "type",
+  ]);
+  const icon = trigger.children.item(0);
+  const labelElement = trigger.children.item(1);
+  const chevron = trigger.children.item(2);
+  return Boolean(
+    label
+    && semanticAttributes.every((attribute) => allowedAttributes.has(attribute.name))
+    && trigger.getAttribute("aria-haspopup") === "menu"
+    && trigger.getAttribute("aria-expanded") === "false"
+    && trigger.getAttribute("data-state") === "closed"
+    && trigger.getAttribute("aria-controls") === null
+    && trigger.children.length === 3
+    && icon?.tagName.toLowerCase() === "svg"
+    && icon.classList.contains(expectedIconClass[publication.render.mode])
+    && labelElement?.tagName === "SPAN"
+    && labelElement.attributes.length === 0
+    && labelElement.textContent === label
+    && chevron?.tagName.toLowerCase() === "svg"
+    && chevron.classList.contains("lucide-chevron-down")
+  );
+}
+
+function modeSwitcherFocusSuccessorIsExact(
+  intent: ModeSwitcherFocusIntent,
+  publication: ModeSwitcherPublication,
+) {
+  const before = intent.source.render;
+  const after = publication.render;
+  return (
+    before.open
+    && !after.open
+    && after.visit === intent.visit
+    && after.session === before.session
+    && after.docId === before.docId
+    && after.role === before.role
+    && after.editable === before.editable
+    && intent.modes.includes(after.mode)
+    && after.setMode === before.setMode
+    && after.reader.url === before.reader.url
+    && after.reader.target === before.reader.target
+    && after.reader.features === before.reader.features
+    && after.rows.length === before.rows.length
+    && after.rows.every((row, index) => {
+      const previous = before.rows[index];
+      return Boolean(
+        previous
+        && row.index === previous.index
+        && row.value === previous.value
+        && row.label === previous.label
+        && row.description === previous.description
+        && row.eligible === previous.eligible
+      );
+    })
+    && publication.document === intent.source.document
+    && publication.dom.trigger === intent.target
+    && intent.target.ownerDocument === publication.document
+    && intent.guard.isExact(publication)
+    && publication.isExact()
+  );
+}
 
 function snapshotModeSwitcherDom(node: Node): ModeSwitcherDomSnapshot {
   const ElementConstructor = node.ownerDocument?.defaultView?.Element;
@@ -2226,7 +2455,11 @@ function createModeSwitcherPresentation({
       ? publication
       : null;
   };
-  const close = (publication: ModeSwitcherPublication, returnFocus = true) => {
+  const close = (
+    publication: ModeSwitcherPublication,
+    returnFocus = true,
+    mode: EditMode = publication.render.mode,
+  ) => {
     if (
       !render.open
       || coordinator.active() !== publication
@@ -2235,7 +2468,7 @@ function createModeSwitcherPresentation({
     ) {
       return false;
     }
-    if (returnFocus) coordinator.scheduleFocus(publication, publication.dom.trigger);
+    if (returnFocus) coordinator.scheduleFocus(publication, publication.dom.trigger, mode);
     commitOpen(Object.freeze({ visit: render.visit, open: false }));
     return true;
   };
@@ -2351,7 +2584,7 @@ function createModeSwitcherPresentation({
     const publication = currentPublication();
     if (!publication) return;
     const row = coordinator.consumeSelection(publication, value);
-    if (!row || !close(publication)) return;
+    if (!row || !close(publication, true, row.value)) return;
     render.setMode.call(render.session, row.value);
   };
   const onReaderSelect = (event: Event) => {
