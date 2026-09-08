@@ -143,6 +143,17 @@ function controls(host: ParentNode = document) {
   return { pill, button, dismissButton };
 }
 
+function failureControls(host: ParentNode = document) {
+  const pill = host.querySelector<HTMLDivElement>(
+    '[data-testid="reader-update-error"]',
+  );
+  const button = pill?.querySelector<HTMLButtonElement>("button");
+  if (!pill || !button) {
+    throw new Error("The complete reader update failure control was not rendered");
+  }
+  return { pill, button };
+}
+
 function trackVisibilityListeners() {
   const active = new Set<EventListenerOrEventListenerObject>();
   const add = document.addEventListener.bind(document);
@@ -214,6 +225,30 @@ describe("UpdatePill polling", () => {
   const mount = () => render(<UpdatePill docId={DOC_ID} initialHash={INITIAL_HASH} pollMs={POLL_MS} />);
 
   const requestSignal = (index: number) => fetchMock.mock.calls[index]?.[1]?.signal as AbortSignal;
+
+  const mountDirectStrict = async (
+    props: {
+      docId?: string;
+      initialHash?: string;
+      pollMs?: number;
+    } = {},
+  ) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <UpdatePill
+            docId={props.docId ?? DOC_ID}
+            initialHash={props.initialHash ?? INITIAL_HASH}
+            pollMs={props.pollMs ?? POLL_MS}
+          />
+        </StrictMode>,
+      );
+    });
+    return { host, root };
+  };
 
   it("checks immediately on a visible mount, then keeps the configured interval cadence", async () => {
     mount();
@@ -463,6 +498,458 @@ describe("UpdatePill polling", () => {
     await advance(0);
     await advance(POLL_MS);
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    {
+      name: "a rejected request",
+      arrange: () => fetchMock.mockRejectedValue(new TypeError("offline")),
+    },
+    {
+      name: "a non-OK response",
+      arrange: () => fetchMock.mockResolvedValue(response(INITIAL_HASH, false)),
+    },
+    {
+      name: "a malformed response",
+      arrange: () =>
+        fetchMock.mockResolvedValue({
+          ok: true,
+          json: vi.fn().mockResolvedValue({ contentHash: "" }),
+        } as unknown as Response),
+    },
+  ])("publishes one current failure for $name and retains one cadence", async ({ arrange }) => {
+    arrange();
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const baseline = fetchMock.mock.calls.length;
+      const failure = failureControls(host);
+
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      expect(failure.pill).toHaveTextContent("Couldn't check for updates.");
+      expect(failure.button).toHaveAccessibleName("Retry now");
+      expect(failure.button).toBeEnabled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      await advance(POLL_MS);
+      await advance(0);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      expect(failureControls(host).button).toBeEnabled();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("publishes an interval failure without replacing the current cadence", async () => {
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const baseline = fetchMock.mock.calls.length;
+      expect(host.querySelector('[data-testid="reader-update-error"]')).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+
+      fetchMock.mockRejectedValue(new TypeError("interval offline"));
+      await advance(POLL_MS);
+      await advance(0);
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(failureControls(host).button).toBeEnabled();
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    { remoteHash: INITIAL_HASH, result: "clear" as const },
+    { remoteHash: "hash-after-retry", result: "refresh" as const },
+  ])("runs one immediate retry and accepts a $result success", async ({ remoteHash, result }) => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const request = deferred<Response>();
+      fetchMock.mockReturnValueOnce(request.promise);
+      const baseline = fetchMock.mock.calls.length;
+      const timers = vi.getTimerCount();
+      const retry = failureControls(host).button;
+
+      fireEvent.click(retry);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(failureControls(host).button).toBeDisabled();
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(timers);
+
+      fireEvent.click(failureControls(host).button);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+
+      request.resolve(response(remoteHash));
+      await advance(0);
+      expect(host.querySelector('[data-testid="reader-update-error"]')).toBeNull();
+      if (result === "refresh") {
+        expect(host.querySelectorAll('[data-testid="reader-updated"]')).toHaveLength(1);
+      } else {
+        expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+        expect(vi.getTimerCount()).toBe(1);
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves one enabled Retry available after an accepted retry failure", async () => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const retryFailure = deferred<Response>();
+      fetchMock.mockReturnValueOnce(retryFailure.promise);
+      const baseline = fetchMock.mock.calls.length;
+
+      fireEvent.click(failureControls(host).button);
+      expect(failureControls(host).button).toBeDisabled();
+      retryFailure.reject(new TypeError("still offline"));
+      await advance(0);
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      expect(failureControls(host).button).toBeEnabled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      const nextRetry = deferred<Response>();
+      fetchMock.mockReturnValueOnce(nextRetry.promise);
+      fireEvent.click(failureControls(host).button);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 2);
+      expect(failureControls(host).button).toBeDisabled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects crossed, fabricated, prevented, stopped, and replayed Retry events", async () => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    const sibling = document.createElement("button");
+    const iframe = document.createElement("iframe");
+    document.body.append(sibling, iframe);
+    try {
+      await advance(0);
+      const { pill, button } = failureControls(host);
+      const retry = captureClick(button);
+      const foreignWindow = iframe.contentWindow;
+      if (!foreignWindow) throw new Error("The foreign event window was not created");
+      const foreignGlobal = foreignWindow as Window & typeof globalThis;
+      const foreignEvent = new foreignGlobal.MouseEvent("click", {
+        bubbles: true,
+        button: 0,
+      });
+      Object.defineProperty(foreignEvent, "target", {
+        configurable: true,
+        value: button,
+      });
+      const malformedNative = clickEvent(button, {
+        nativeEvent: new Event("click", { bubbles: true }),
+      });
+      const prevented = clickEvent(button);
+      Object.defineProperty(prevented, "defaultPrevented", {
+        configurable: true,
+        value: true,
+      });
+      const nativePrevented = clickEvent(button);
+      nativePrevented.nativeEvent.preventDefault();
+      const stopped = clickEvent(button);
+      Object.defineProperty(stopped, "isPropagationStopped", {
+        configurable: true,
+        value: () => true,
+      });
+      const before = pill.outerHTML;
+      const baseline = fetchMock.mock.calls.length;
+      const timers = vi.getTimerCount();
+
+      act(() => {
+        retry(clickEvent(sibling));
+        retry(clickEvent(button, { button: 1 }));
+        retry(clickEvent(button, { target: sibling, nativeTarget: sibling }));
+        retry(clickEvent(button, { nativeEvent: foreignEvent }));
+        retry(malformedNative);
+        retry(prevented);
+        retry(nativePrevented);
+        retry(stopped);
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline);
+      expect(pill.outerHTML).toBe(before);
+      expect(vi.getTimerCount()).toBe(timers);
+      expect(prevented.preventDefault).not.toHaveBeenCalled();
+      expect(stopped.stopPropagation).not.toHaveBeenCalled();
+
+      const pending = deferred<Response>();
+      fetchMock.mockReturnValueOnce(pending.promise);
+      const activation = clickEvent(button);
+      act(() => {
+        retry(activation);
+        retry(activation);
+        retry(clickEvent(button));
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(failureControls(host).button).toBeDisabled();
+      expect(activation.preventDefault).not.toHaveBeenCalled();
+      expect(activation.stopPropagation).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      iframe.remove();
+      sibling.remove();
+      host.remove();
+    }
+  });
+
+  it("rejects a mutation-tainted Retry click and accepts a clean successor", async () => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const stale = failureControls(host);
+      const staleRetry = captureClick(stale.button);
+      const baseline = fetchMock.mock.calls.length;
+      const markup = stale.pill.outerHTML;
+
+      stale.button.setAttribute("data-transient", "true");
+      stale.button.removeAttribute("data-transient");
+      staleRetry(clickEvent(stale.button));
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline);
+      expect(stale.pill.outerHTML).toBe(markup);
+
+      await advance(POLL_MS);
+      await advance(0);
+      const current = failureControls(host);
+      const currentRetry = captureClick(current.button);
+      const pending = deferred<Response>();
+      fetchMock.mockReturnValueOnce(pending.promise);
+      act(() => currentRetry(clickEvent(current.button)));
+
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 2);
+      expect(failureControls(host).button).toBeDisabled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    {
+      name: "descendant mutation and restoration",
+      alter: ({ button }: ReturnType<typeof failureControls>) => {
+        button.setAttribute("data-transient", "true");
+        button.removeAttribute("data-transient");
+      },
+    },
+    {
+      name: "pill detachment and restoration",
+      alter: ({ pill }: ReturnType<typeof failureControls>) => {
+        const parent = pill.parentNode;
+        if (!parent) throw new Error("Failure pill has no parent");
+        const nextSibling = pill.nextSibling;
+        pill.remove();
+        parent.insertBefore(pill, nextSibling);
+      },
+    },
+    {
+      name: "button replacement and restoration",
+      alter: ({ pill, button }: ReturnType<typeof failureControls>) => {
+        const notice = button.parentElement;
+        if (!notice) throw new Error("Retry button has no notice");
+        const replacement = button.cloneNode(true);
+        notice.replaceChild(replacement, button);
+        notice.replaceChild(button, replacement);
+        expect(pill.contains(button)).toBe(true);
+      },
+    },
+    {
+      name: "control reordering and restoration",
+      alter: ({ button }: ReturnType<typeof failureControls>) => {
+        const notice = button.parentElement;
+        const message = notice?.firstChild;
+        if (!notice || !message) throw new Error("Failure notice is incomplete");
+        notice.insertBefore(button, message);
+        notice.append(button);
+      },
+    },
+    {
+      name: "callback-ref detachment and restoration",
+      alter: ({ button }: ReturnType<typeof failureControls>) => {
+        const retryRef = captureRef(button);
+        retryRef(null);
+        retryRef(button);
+      },
+    },
+  ])("rejects a Retry settlement after $name and lets a clean successor recover", async ({ alter }) => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const staleRequest = deferred<Response>();
+      fetchMock.mockReturnValueOnce(staleRequest.promise);
+      const baseline = fetchMock.mock.calls.length;
+
+      fireEvent.click(failureControls(host).button);
+      const pendingControl = failureControls(host);
+      expect(pendingControl.button).toBeDisabled();
+      act(() => alter(pendingControl));
+
+      staleRequest.resolve(response("stale-changed-hash"));
+      await advance(0);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 1);
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+
+      const recovery = deferred<Response>();
+      fetchMock.mockReturnValueOnce(recovery.promise);
+      await advance(POLL_MS);
+      recovery.reject(new TypeError("current failure"));
+      await advance(0);
+
+      const recovered = failureControls(host);
+      expect(recovered.button).toBeEnabled();
+      expect(host.querySelectorAll('[data-testid="reader-update-error"]')).toHaveLength(1);
+      const nextRequest = deferred<Response>();
+      fetchMock.mockReturnValueOnce(nextRequest.promise);
+      fireEvent.click(recovered.button);
+      expect(fetchMock).toHaveBeenCalledTimes(baseline + 3);
+      expect(failureControls(host).button).toBeDisabled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a hidden Retry and an aborted hidden settlement before fresh visible recovery", async () => {
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    try {
+      await advance(0);
+      const stale = failureControls(host);
+      const staleRetry = captureClick(stale.button);
+      const beforeHide = fetchMock.mock.calls.length;
+
+      setVisibility("hidden");
+      staleRetry(clickEvent(stale.button));
+      expect(fetchMock).toHaveBeenCalledTimes(beforeHide);
+      expect(stale.button).toBeEnabled();
+
+      const visibleRequest = deferred<Response>();
+      fetchMock.mockReturnValueOnce(visibleRequest.promise);
+      setVisibility("visible");
+      expect(fetchMock).toHaveBeenCalledTimes(beforeHide + 1);
+      expect(failureControls(host).button).toBeDisabled();
+      const signal = requestSignal(beforeHide);
+
+      setVisibility("hidden");
+      expect(signal.aborted).toBe(true);
+      visibleRequest.resolve(response("hidden-changed-hash"));
+      await advance(0);
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+
+      const recovery = deferred<Response>();
+      fetchMock.mockReturnValueOnce(recovery.promise);
+      setVisibility("visible");
+      expect(fetchMock).toHaveBeenCalledTimes(beforeHide + 2);
+      recovery.resolve(response(INITIAL_HASH));
+      await advance(0);
+      expect(host.querySelector('[data-testid="reader-update-error"]')).toBeNull();
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["document", "key"] as const)(
+    "retires the previous failure, Retry, and settlement after a %s replacement",
+    async (replacement) => {
+      fetchMock.mockRejectedValue(new TypeError("offline"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const stale = failureControls(host);
+        const staleRetry = captureClick(stale.button);
+        const staleRequest = deferred<Response>();
+        fetchMock.mockReturnValueOnce(staleRequest.promise);
+        fireEvent.click(stale.button);
+        const staleRequestIndex = fetchMock.mock.calls.length - 1;
+        const staleSignal = requestSignal(staleRequestIndex);
+
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <UpdatePill
+                key={replacement === "key" ? "replacement" : "initial"}
+                docId={REPLACEMENT_DOC_ID}
+                initialHash={REPLACEMENT_HASH}
+                pollMs={POLL_MS}
+              />
+            </StrictMode>,
+          );
+        });
+        await advance(0);
+        expect(staleSignal.aborted).toBe(true);
+
+        staleRequest.resolve(response("changed-after-replacement"));
+        await advance(0);
+        expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+        const current = failureControls(host);
+        const currentRetry = captureClick(current.button);
+        const replacementFetches = fetchMock.mock.calls.length;
+
+        act(() => {
+          staleRetry(clickEvent(stale.button));
+          staleRetry(clickEvent(current.button));
+          currentRetry(clickEvent(stale.button));
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(replacementFetches);
+
+        const currentRequest = deferred<Response>();
+        fetchMock.mockReturnValueOnce(currentRequest.promise);
+        act(() => {
+          currentRetry(clickEvent(current.button));
+          currentRetry(clickEvent(current.button));
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(replacementFetches + 1);
+        expect(failureControls(host).button).toBeDisabled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("releases the failure authority, request, timer, and listener on cleanup", async () => {
+    const activeListeners = trackVisibilityListeners();
+    fetchMock.mockRejectedValue(new TypeError("offline"));
+    const { host, root } = await mountDirectStrict();
+    await advance(0);
+    const stale = failureControls(host);
+    const staleRetry = captureClick(stale.button);
+    const before = fetchMock.mock.calls.length;
+
+    await act(async () => root.unmount());
+    expect(activeListeners.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(host.innerHTML).toBe("");
+
+    staleRetry(clickEvent(stale.button));
+    await advance(POLL_MS * 4);
+    expect(fetchMock).toHaveBeenCalledTimes(before);
+    expect(host.innerHTML).toBe("");
+    host.remove();
   });
 
   it("shows the refresh action and stops polling after detecting a changed hash", async () => {

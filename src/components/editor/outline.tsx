@@ -77,6 +77,7 @@ interface OutlinePresentationRuntime {
   list: HTMLUListElement | null;
   rows: OutlineRowElements[];
   proof: OutlineDomProof | null;
+  guard: OutlineDomGuard | null;
 }
 
 interface OutlineDomNodeProof {
@@ -90,6 +91,11 @@ interface OutlineDomNodeProof {
 interface OutlineDomProof {
   readonly root: HTMLElement;
   readonly nodes: readonly OutlineDomNodeProof[];
+}
+
+interface OutlineDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
 }
 
 interface OutlineAuthority {
@@ -221,6 +227,43 @@ function sameDomProof(a: OutlineDomProof, b: OutlineDomProof): boolean {
   return true;
 }
 
+function createOutlineDomGuard(proof: OutlineDomProof): OutlineDomGuard | null {
+  const root = proof.root;
+  const parent = root.parentNode;
+  const MutationObserverConstructor = root.ownerDocument.defaultView?.MutationObserver;
+  if (!parent || !MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList" || record.target !== parent) return false;
+      if (record.previousSibling === root || record.nextSibling === root) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(
+        (node) => node === root || (node.nodeType === 1 && (node as Element).contains(root)),
+      );
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
 function sameRuntimeElements(a: OutlinePresentationRuntime, b: OutlinePresentationRuntime): boolean {
   return (
     a.root === b.root &&
@@ -292,10 +335,26 @@ function nativeKeyFor(
   const target = event.target;
   if (
     !ownerWindow ||
+    event.type !== "keydown" ||
     !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
     nativeEvent.type !== "keydown" ||
     nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    !nativeEvent.bubbles ||
+    !nativeEvent.cancelable ||
     nativeEvent.key !== event.key ||
+    nativeEvent.altKey !== event.altKey ||
+    nativeEvent.ctrlKey !== event.ctrlKey ||
+    nativeEvent.metaKey !== event.metaKey ||
+    nativeEvent.shiftKey !== event.shiftKey ||
+    nativeEvent.repeat !== event.repeat ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    event.repeat ||
+    nativeEvent.isComposing ||
+    event.defaultPrevented ||
+    nativeEvent.defaultPrevented ||
     event.currentTarget !== list ||
     target !== nativeEvent.target ||
     !(target instanceof ownerWindow.Node) ||
@@ -326,7 +385,7 @@ export function activeHeadingIndex(headings: HeadingInfo[], cursor: number | nul
 
 /** Index the arrow/Home/End keys should focus next, or -1 if the key is not a navigation key. */
 export function nextOutlineIndex(key: string, current: number, count: number): number {
-  return rovingIndex(key, current, count, { orientation: "vertical", wrap: false });
+  return rovingIndex(key, current, count, { orientation: "vertical", wrap: true });
 }
 
 export function OutlinePanel({ session, open, onToggle, onSelect, className }: OutlineProps) {
@@ -385,6 +444,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
         list: null,
         rows: candidate.rows.map(() => ({ item: null, button: null })),
         proof: null,
+        guard: null,
       };
       runtimes.set(candidate, runtime);
     }
@@ -392,6 +452,8 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   }, []);
 
   const retireRuntime = useCallback((runtime: OutlinePresentationRuntime) => {
+    runtime.guard?.release();
+    runtime.guard = null;
     runtime.active = false;
     runtime.retired = true;
     const authority = activeAuthorityRef.current;
@@ -523,6 +585,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
         !authority.retired &&
         !runtime.retired &&
         runtime.active &&
+        runtime.guard?.isClean() === true &&
         presentationRuntimesRef.current.get(candidate) === runtime &&
         presentationDomIsValid(candidate, runtime, true)
       );
@@ -573,6 +636,13 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
       }
 
       runtime.proof = proof;
+      runtime.guard = createOutlineDomGuard(proof);
+      if (!runtime.guard) {
+        retireRuntime(runtime);
+        disqualifiedPresentationsRef.current.add(candidate);
+        callbackReplayWindowRef.current = null;
+        return;
+      }
       runtime.active = true;
       const authority: OutlineAuthority = {
         presentation: candidate,
@@ -814,6 +884,13 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
     }
 
     runtime.proof = proof;
+    runtime.guard = createOutlineDomGuard(proof);
+    if (!runtime.guard) {
+      retireRuntime(runtime);
+      disqualifiedPresentationsRef.current.add(presentation);
+      lastCommittedAuthorityRef.current = null;
+      return () => retirePresentation(presentation);
+    }
     const authority: OutlineAuthority = {
       presentation,
       runtime,
@@ -988,7 +1065,7 @@ const OutlineList = memo(function OutlineList({
     if (!destination) return;
     republish();
     event.preventDefault();
-    destination.focus();
+    destination.focus({ preventScroll: true });
   };
 
   return (
