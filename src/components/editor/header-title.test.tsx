@@ -560,6 +560,18 @@ describe("TitleEditor exact presentation", () => {
     b.button.append(inserted);
     act(() => directClick(b, { target: inserted }));
     inserted.remove();
+
+    const titleReplacement = b.title.cloneNode(true);
+    b.button.replaceChild(titleReplacement, b.title);
+    act(() => directClick(b));
+    b.button.replaceChild(b.title, titleReplacement);
+
+    if (!b.icon) throw new Error("Expected the editable title Pencil");
+    const iconReplacement = b.icon.cloneNode(true);
+    b.button.replaceChild(iconReplacement, b.icon);
+    act(() => directClick(b));
+    b.button.replaceChild(b.icon, iconReplacement);
+
     parent.replaceChild(replacement, b.button);
     act(() => {
       directClick(b);
