@@ -13,7 +13,7 @@ import {
   type MouseEvent,
 } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, GitCommit, History, Loader2, MoveVertical, Pencil, RotateCcw, Tag, Upload, X, Download } from "lucide-react";
+import { ArrowLeftRight, ChevronDown, ChevronUp, Clock, Copy, Download, GitCommit, History, Loader2, MoveVertical, Pencil, RefreshCw, RotateCcw, Tag, Upload, X } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { api, apiErrorText, type VersionSummary } from "@/lib/api";
 import { collapseSegment, detectMoves, diffStats, hunkCounter, hunks, wordDiff, type Collapsed, type DiffSegment } from "@/editor/diff";
@@ -78,11 +78,14 @@ function KindIcon({ kind }: { kind: VersionSummary["kind"] }) {
  * first open usually finds it warm too (task #487).
  */
 const listCache = new Map<string, VersionSummary[]>();
-const inflight = new Map<string, { owner: symbol; promise: Promise<VersionSummary[]> }>();
+const inflight = new Map<
+  string,
+  { owner: symbol; promise: Promise<VersionSummary[]>; shareable: boolean }
+>();
 
 function fetchVersions(docId: string, options?: { fresh?: boolean; canCommit?: () => boolean }): Promise<VersionSummary[]> {
   const pending = inflight.get(docId);
-  if (pending && !options?.fresh) return pending.promise;
+  if (pending?.shareable && !options?.fresh) return pending.promise;
 
   const owner = Symbol(docId);
   const promise = api.documents
@@ -94,7 +97,11 @@ function fetchVersions(docId: string, options?: { fresh?: boolean; canCommit?: (
     .finally(() => {
       if (inflight.get(docId)?.owner === owner) inflight.delete(docId);
     });
-  inflight.set(docId, { owner, promise });
+  inflight.set(docId, {
+    owner,
+    promise,
+    shareable: !options?.fresh,
+  });
   return promise;
 }
 
@@ -168,10 +175,11 @@ type VersionMutationOwner = VersionMutationIntent & {
 
 interface ListOperation {
   operationId: number;
+  activation: PanelRenderPublication;
   authority: PanelAuthority;
   root: HTMLElement;
   refreshKey: number;
-  retry: boolean;
+  intent: "initial" | "external" | "manual" | "retry" | "mutation";
   mutation: VersionMutationOwner | null;
 }
 
@@ -185,6 +193,7 @@ interface PanelRenderPublication {
   readonly error: string | null;
   readonly listError: string | null;
   readonly retry: ListOperation | null;
+  readonly refresh: ListOperation | null;
   readonly selected: string | null;
   readonly compare: readonly string[];
   readonly compareValues: readonly string[];
@@ -207,7 +216,7 @@ interface VersionRowElements {
   copy: HTMLButtonElement | null;
 }
 
-type PanelControl = "close" | "retry" | "clear";
+type PanelControl = "close" | "refresh" | "retry" | "clear";
 type RowControl = Exclude<keyof VersionRowElements, "item">;
 type PanelEventKind = "click" | "checkbox-change" | "input-change" | "blur" | "keydown";
 type PanelReactEvent =
@@ -255,6 +264,7 @@ interface PanelPublicationRuntime {
   readonly renderIdentity: symbol;
   readonly root: HTMLElement;
   readonly close: HTMLButtonElement;
+  readonly refresh: HTMLButtonElement;
   readonly retry: HTMLButtonElement | null;
   readonly clear: HTMLButtonElement | null;
   readonly groupLists: readonly HTMLUListElement[];
@@ -481,7 +491,29 @@ function previewMatchesPresentation(owner: PreviewOperation, publication: PanelR
 }
 
 function retryMatchesPresentation(owner: ListOperation, publication: PanelRenderPublication): boolean {
-  return publication.authority === owner.authority && publication.refreshKey === owner.refreshKey && owner.retry;
+  return (
+    owner.intent === "retry" &&
+    publication.authority === owner.authority &&
+    publication.refreshKey === owner.refreshKey &&
+    sameVersionPresentation(
+      owner.activation.versions,
+      owner.activation.rows,
+      publication,
+    )
+  );
+}
+
+function refreshMatchesPresentation(owner: ListOperation, publication: PanelRenderPublication): boolean {
+  return (
+    owner.intent === "manual" &&
+    publication.authority === owner.authority &&
+    publication.refreshKey === owner.refreshKey &&
+    sameVersionPresentation(
+      owner.activation.versions,
+      owner.activation.rows,
+      publication,
+    )
+  );
 }
 
 function snapshotPanelAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -776,6 +808,7 @@ function panelFactsAreCurrent(publication: PanelRenderPublication): boolean {
     preview,
     mutation,
     retry,
+    refresh,
   } = publication;
   if (
     publication.mount !== authority.mount ||
@@ -806,6 +839,8 @@ function panelFactsAreCurrent(publication: PanelRenderPublication): boolean {
       groupPublishedVersions([...rows]),
     ) ||
     (retry !== null && !retryMatchesPresentation(retry, publication)) ||
+    (refresh !== null &&
+      !refreshMatchesPresentation(refresh, publication)) ||
     (preview !== null && !previewMatchesPresentation(preview, publication)) ||
     (mutation !== null && !mutationMatchesPresentation(mutation, publication)) ||
     (mutation === null && publication.mutationPhase !== null)
@@ -837,6 +872,7 @@ function panelPublicationsMatch(
     previous.error === current.error &&
     previous.listError === current.listError &&
     previous.retry === current.retry &&
+    previous.refresh === current.refresh &&
     previous.selected === current.selected &&
     previous.compare === current.compare &&
     previous.compareValues.length === current.compareValues.length &&
@@ -862,6 +898,7 @@ function panelExactDomIsCurrent(
   const {
     root,
     close,
+    refresh,
     retry,
     clear,
     groupLists,
@@ -892,13 +929,33 @@ function panelExactDomIsCurrent(
     header?.parentElement !== root ||
     body?.parentElement !== root ||
     header.children.length !== 2 ||
-    header.lastElementChild !== close ||
-    close.parentElement !== header
+    !refresh.isConnected ||
+    refresh.ownerDocument !== ownerDocument ||
+    refresh.tagName !== "BUTTON" ||
+    refresh.type !== "button" ||
+    refresh.getAttribute("aria-label") !== "Refresh versions" ||
+    refresh.disabled !== (publication.refresh !== null) ||
+    (publication.refresh === null && !panelControlIsEnabled(refresh))
   ) {
     return false;
   }
 
-  const expected = new Set<HTMLButtonElement | HTMLInputElement>([close]);
+  const headerControls = header.lastElementChild;
+  if (
+    headerControls?.parentElement !== header ||
+    headerControls.children.length !== 2 ||
+    headerControls.children.item(0) !== refresh ||
+    headerControls.children.item(1) !== close ||
+    refresh.parentElement !== headerControls ||
+    close.parentElement !== headerControls
+  ) {
+    return false;
+  }
+
+  const expected = new Set<HTMLButtonElement | HTMLInputElement>([
+    refresh,
+    close,
+  ]);
   if (publication.listError) {
     const alert = retry?.parentElement;
     if (
@@ -1287,6 +1344,7 @@ function createPanelPublicationSet(
   const rootOwner = new PanelElementOwner<HTMLElement>(onElementChange);
   const panelOwners = {
     close: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    refresh: new PanelElementOwner<HTMLButtonElement>(onElementChange),
     retry: new PanelElementOwner<HTMLButtonElement>(onElementChange),
     clear: new PanelElementOwner<HTMLButtonElement>(onElementChange),
   };
@@ -1323,6 +1381,7 @@ function createPanelPublicationSet(
     });
   const panelActions = {
     close: action("close", null),
+    refresh: action("refresh", null),
     retry: publication.listError ? action("retry", null) : null,
     clear: publication.compare.length > 0 ? action("clear", null) : null,
   };
@@ -1352,6 +1411,7 @@ function createPanelPublicationSet(
   const expectedOwners = (): readonly PanelElementOwnerView[] => [
     rootOwner,
     panelOwners.close,
+    panelOwners.refresh,
     ...(publication.listError ? [panelOwners.retry] : []),
     ...(publication.compare.length > 0 ? [panelOwners.clear] : []),
     ...groupOwners,
@@ -1374,6 +1434,7 @@ function createPanelPublicationSet(
   const committedElements = () => {
     const root = rootOwner.element();
     const close = panelOwners.close.element();
+    const refresh = panelOwners.refresh.element();
     const retry = panelOwners.retry.element();
     const clear = panelOwners.clear.element();
     const groupLists = groupOwners.map((owner) => owner.element());
@@ -1393,6 +1454,7 @@ function createPanelPublicationSet(
     if (
       !root ||
       !close ||
+      !refresh ||
       Boolean(publication.listError) !== Boolean(retry) ||
       (publication.compare.length > 0) !== Boolean(clear) ||
       groupLists.some((list) => !list) ||
@@ -1415,6 +1477,7 @@ function createPanelPublicationSet(
     return {
       root,
       close,
+      refresh,
       retry,
       clear,
       groupLists: groupLists as HTMLUListElement[],
@@ -1785,6 +1848,7 @@ function createPanelPublicationSet(
     captureRoot: rootOwner.capture,
     capturePanel: Object.freeze({
       close: panelOwners.close.capture,
+      refresh: panelOwners.refresh.capture,
       retry: panelOwners.retry.capture,
       clear: panelOwners.clear.capture,
     }),
@@ -1820,6 +1884,8 @@ function createPanelPublicationSet(
       const expected =
         control === "close"
           ? runtime?.close
+          : control === "refresh"
+            ? runtime?.refresh
           : control === "retry"
             ? runtime?.retry
             : runtime?.clear;
@@ -1846,6 +1912,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const [error, setError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<ListOperation | null>(null);
+  const [refreshState, setRefreshState] = useState<ListOperation | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [compare, setCompare] = useState<string[]>([]);
   const [previewState, setPreviewState] = useState<PreviewOperation | null>(null);
@@ -1922,6 +1989,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       error,
       listError,
       retry: null,
+      refresh: null,
       selected,
       compare,
       compareValues: compare,
@@ -1947,6 +2015,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       error,
       listError,
       retry: null,
+      refresh: null,
       selected,
       compare,
       compareValues: compare,
@@ -1972,6 +2041,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       error,
       listError,
       retry: retryState,
+      refresh: null,
       selected,
       compare,
       compareValues: compare,
@@ -1985,9 +2055,36 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     })
       ? retryState
       : null;
+  const currentRefresh =
+    refreshState &&
+    refreshMatchesPresentation(refreshState, {
+      mount,
+      authority,
+      refreshKey,
+      versions,
+      rows,
+      groups: [],
+      error,
+      listError,
+      retry: currentRetry,
+      refresh: refreshState,
+      selected,
+      compare,
+      compareValues: compare,
+      preview: currentPreview,
+      mutation: currentMutation,
+      mutationPhase: currentMutation?.phase ?? null,
+      renaming,
+      draft,
+      canEdit,
+      revision: publicationRevision,
+    })
+      ? refreshState
+      : null;
   const mutationBusy = currentMutation !== null;
   const previewBusy = currentPreview?.busyVersionId ?? null;
   const retrying = currentRetry !== null;
+  const refreshing = currentRefresh !== null;
   const publication: PanelRenderPublication = Object.freeze({
     mount,
     authority,
@@ -1998,6 +2095,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     error,
     listError,
     retry: currentRetry,
+    refresh: currentRefresh,
     selected,
     compare,
     compareValues: Object.freeze([...compare]),
@@ -2068,10 +2166,19 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
 
   const ownsListOperation = useCallback(
     (operation: ListOperation) => {
+      const current = currentPublicationFor(
+        operation.authority,
+        operation.root,
+      );
       if (
         listOperation.current !== operation ||
         operation.refreshKey !== refreshKey ||
-        !currentPublicationFor(operation.authority, operation.root)
+        !current ||
+        !sameVersionPresentation(
+          operation.activation.versions,
+          operation.activation.rows,
+          current,
+        )
       ) {
         return false;
       }
@@ -2083,34 +2190,52 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const load = useCallback(async (
     loadAuthority: PanelAuthority,
     loadRefreshKey: number,
-    options?: { retry?: boolean; mutation?: VersionMutationOwner },
+    options?: {
+      intent?: "initial" | "external" | "manual" | "retry";
+      mutation?: VersionMutationOwner;
+    },
   ) => {
     const runtime = publicationCells.active.value;
     const current = runtime?.publication;
+    const intent = options?.mutation
+      ? "mutation"
+      : options?.intent ?? "initial";
     if (
       !current ||
       current.authority !== loadAuthority ||
       !runtime?.root ||
       !publicationDomIsCurrent(current, true) ||
-      (!options?.mutation && !options?.retry && mutationOwner.current !== null) ||
+      (!options?.mutation &&
+        intent !== "retry" &&
+        mutationOwner.current !== null) ||
       (options?.mutation && !ownsMutation(options.mutation))
+    ) {
+      return false;
+    }
+    const pending = listOperation.current;
+    if (
+      intent === "manual" &&
+      pending?.intent === "manual" &&
+      ownsListOperation(pending)
     ) {
       return false;
     }
     const operation: ListOperation = {
       operationId: ++listSequence.current,
+      activation: current,
       authority: loadAuthority,
       root: runtime.root,
       refreshKey: loadRefreshKey,
-      retry: options?.retry === true,
+      intent,
       mutation: options?.mutation ?? null,
     };
     listOperation.current = operation;
-    if (operation.retry) setRetryState(operation);
+    setRetryState(intent === "retry" ? operation : null);
+    setRefreshState(intent === "manual" ? operation : null);
     const ownsRequest = () => ownsListOperation(operation);
     try {
       const list = await fetchVersions(loadAuthority.documentId, {
-        fresh: Boolean(operation.mutation),
+        fresh: operation.intent !== "initial",
         canCommit: ownsRequest,
       });
       if (!ownsRequest()) return false;
@@ -2133,7 +2258,12 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     } finally {
       if (listOperation.current === operation && ownsListOperation(operation)) {
         listOperation.current = null;
-        if (operation.retry) setRetryState((candidate) => (candidate === operation ? null : candidate));
+        setRetryState((candidate) =>
+          candidate === operation ? null : candidate,
+        );
+        setRefreshState((candidate) =>
+          candidate === operation ? null : candidate,
+        );
       }
     }
   }, [ownsListOperation, ownsMutation, publicationCells, publicationDomIsCurrent]);
@@ -2148,7 +2278,9 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       previous.authority !== authority &&
       versions === null;
     if (firstLoad || refreshChanged || emptyAuthorityReplacement) {
-      void load(authority, refreshKey);
+      void load(authority, refreshKey, {
+        intent: firstLoad ? "initial" : "external",
+      });
     }
   }, [authority, load, refreshKey, versions]);
 
@@ -2431,6 +2563,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     publicationSet.retire();
     listOperation.current = null;
     setRetryState(null);
+    setRefreshState(null);
     invalidatePreview();
     invalidateMutation();
     candidate.authority.onPreview(null);
@@ -2440,7 +2573,16 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const retry = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
     if (!claimPanelControl(candidate, "retry", event)) return;
     setPublicationRevision((current) => current + 1);
-    void load(candidate.authority, candidate.refreshKey, { retry: true });
+    void load(candidate.authority, candidate.refreshKey, { intent: "retry" });
+  };
+
+  const refreshList = (
+    candidate: PanelRenderPublication,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (!claimPanelControl(candidate, "refresh", event)) return;
+    setPublicationRevision((current) => current + 1);
+    void load(candidate.authority, candidate.refreshKey, { intent: "manual" });
   };
 
   const clearComparison = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
@@ -2529,6 +2671,9 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       previewOperation.current = null;
       mutationOwner.current = null;
       if (retryState?.authority !== publication.authority) setRetryState(null);
+      if (refreshState?.authority !== publication.authority) {
+        setRefreshState(null);
+      }
       if (previewState?.authority !== publication.authority) setPreviewState(null);
       if (mutationState?.authority !== publication.authority) setMutationState(null);
     } else {
@@ -2536,6 +2681,9 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       if (pendingList && (pendingList.refreshKey !== publication.refreshKey || rootChanged)) {
         listOperation.current = null;
         setRetryState((candidate) => (candidate === pendingList ? null : candidate));
+        setRefreshState((candidate) =>
+          candidate === pendingList ? null : candidate,
+        );
       }
       const pendingPreview = previewOperation.current;
       if (
@@ -2565,6 +2713,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     previewState?.authority,
     publication,
     publicationSet,
+    refreshState?.authority,
     retryState?.authority,
   ]);
   useLayoutEffect(() => publicationSet.establish(), [publicationSet]);
@@ -2572,6 +2721,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const { captureRoot, capturePanel, captureGroups, captureRows } = publicationSet;
   const {
     close: captureClose,
+    refresh: captureRefresh,
     retry: captureRetry,
     clear: captureClear,
   } = capturePanel;
@@ -2590,15 +2740,32 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     >
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Version history</span>
-        <button
-          ref={captureClose}
-          type="button"
-          className="icon-btn h-8 w-8"
-          onClick={(event) => close(publication, event)}
-          aria-label="Close version history"
-        >
-          <X size={16} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            ref={captureRefresh}
+            type="button"
+            className="icon-btn h-8 w-8"
+            onClick={(event) => refreshList(publication, event)}
+            disabled={refreshing}
+            aria-label="Refresh versions"
+            aria-busy={refreshing || undefined}
+            title="Refresh versions"
+          >
+            <RefreshCw
+              size={15}
+              className={refreshing ? "animate-spin" : undefined}
+            />
+          </button>
+          <button
+            ref={captureClose}
+            type="button"
+            className="icon-btn h-8 w-8"
+            onClick={(event) => close(publication, event)}
+            aria-label="Close version history"
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
         {listError && (
