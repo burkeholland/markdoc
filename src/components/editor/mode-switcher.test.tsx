@@ -968,6 +968,40 @@ describe("ModeSwitcher current behavior", () => {
     expect(focus).not.toHaveBeenCalled();
   });
 
+  it.each(["style", "tabindex", "svg", "label"] as const)(
+    "rejects a pending trusted focus after a transient %s mutation",
+    async (mutation) => {
+      const session = new ModeSession(`pending-focus-${mutation}`, "owner", "editing");
+      render(<ModeSwitcher session={session.asCollabSession()} />);
+      const modeTrigger = trigger();
+      openMenu();
+      radio("Viewing").focus();
+      const focus = vi.spyOn(modeTrigger, "focus");
+
+      if (mutation === "style" || mutation === "tabindex") {
+        dispatchTrustedEscapeOutsideAct(radio("Viewing"));
+        if (mutation === "style") {
+          modeTrigger.style.visibility = "hidden";
+        } else {
+          modeTrigger.tabIndex = -1;
+        }
+      } else {
+        dispatchTrustedModeSelectionOutsideAct("Viewing", "viewing");
+        if (mutation === "svg") {
+          modeTrigger.querySelector("svg")?.setAttribute("stroke", "tomato");
+        } else {
+          const label = modeTrigger.children.item(1);
+          if (!label) throw new Error("Mode trigger label was not rendered");
+          label.textContent = "Corrupted";
+        }
+      }
+      await Promise.resolve();
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
   it("preserves keyboard selection, Escape and outside close, and trigger focus return", async () => {
     const session = new ModeSession("keyboard-current", "editor", "editing");
     render(

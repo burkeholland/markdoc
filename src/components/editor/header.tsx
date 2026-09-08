@@ -1691,8 +1691,9 @@ class ModeSwitcherPublicationCoordinator {
     if (previous) this.#clearFocus(previous);
     let pendingIntent: ModeSwitcherFocusIntent | null = null;
     const guard = createModeSwitcherFocusGuard(
+      source,
       target,
-      mode !== source.render.mode,
+      mode,
       () => {
         if (pendingIntent) this.#clearFocus(pendingIntent);
       },
@@ -1806,16 +1807,10 @@ const MODE_SWITCHER_DYNAMIC_ATTRIBUTES = new Set([
   "tabindex",
 ]);
 
-const MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES = new Set([
-  ...MODE_SWITCHER_DYNAMIC_ATTRIBUTES,
-  "aria-controls",
-  "aria-expanded",
-  "data-state",
-]);
-
 function createModeSwitcherFocusGuard(
+  source: ModeSwitcherPublication,
   target: HTMLButtonElement,
-  allowModeChange: boolean,
+  mode: EditMode,
   onInvalidated: () => void,
 ): ModeSwitcherFocusGuard {
   const placements = new Map<Node, Node | null>();
@@ -1823,36 +1818,24 @@ function createModeSwitcherFocusGuard(
     placements.set(node, node.parentNode);
   }
   const MutationObserverConstructor = target.ownerDocument.defaultView?.MutationObserver;
+  const initialDynamicAttributes = new Map(
+    [...MODE_SWITCHER_DYNAMIC_ATTRIBUTES].map((name) => [name, target.getAttribute(name)]),
+  );
   const originalIcon = target.firstElementChild;
   const originalLabel = target.children.item(1);
-  const modeChangeRecords: MutationRecord[] = [];
+  const records: MutationRecord[] = [];
   let observer: MutationObserver | null = null;
   let invalid = false;
-  const inspect = (records: readonly MutationRecord[]) => {
+  const inspect = (pending: readonly MutationRecord[]) => {
     if (invalid) return;
-    if (allowModeChange) {
-      modeChangeRecords.push(...records);
-      return;
-    }
-    invalid = records.some((record) => {
-      if (record.target === target || target.contains(record.target)) {
-        return !(
-          record.type === "attributes"
-          && record.attributeName
-          && MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES.has(record.attributeName)
-        );
-      }
-      if (record.type !== "childList") return false;
-      return [...record.addedNodes, ...record.removedNodes].some((node) =>
-        placements.has(node) || node.contains(target));
-    });
-    if (invalid) onInvalidated();
+    records.push(...pending);
   };
   if (MutationObserverConstructor) {
     observer = new MutationObserverConstructor(inspect);
     observer.observe(target, {
       attributeOldValue: true,
       attributes: true,
+      characterDataOldValue: true,
       characterData: true,
       childList: true,
       subtree: true,
@@ -1864,23 +1847,26 @@ function createModeSwitcherFocusGuard(
   return Object.freeze({
     isExact: (publication: ModeSwitcherPublication) => {
       if (observer) inspect(observer.takeRecords());
-      if (
-        allowModeChange
-        && !modeChangeRecords.every((record) => modeSwitcherModeChangeMutationIsExpected(
+      if (!records.every((record) =>
+        modeSwitcherFocusMutationIsExpected(
           record,
+          source,
+          publication,
           target,
           originalIcon,
           originalLabel,
           placements,
-        ))
-      ) {
+          mode,
+        )
+      )) {
         invalid = true;
+        onInvalidated();
       }
       return Boolean(
         !invalid
         && target.isConnected
         && [...placements].every(([node, parent]) => node.parentNode === parent)
-        && modeSwitcherFocusTriggerIsExact(publication)
+        && modeSwitcherFocusTriggerIsExact(publication, initialDynamicAttributes)
       );
     },
     dispose: () => {
@@ -1890,65 +1876,202 @@ function createModeSwitcherFocusGuard(
   });
 }
 
-function modeSwitcherModeChangeMutationIsExpected(
+function modeSwitcherFocusMutationIsExpected(
   record: MutationRecord,
+  source: ModeSwitcherPublication,
+  successor: ModeSwitcherPublication,
   trigger: HTMLButtonElement,
   originalIcon: Element | null,
   originalLabel: Element | null,
   placements: ReadonlyMap<Node, Node | null>,
+  mode: EditMode,
 ) {
-  const currentIcon = trigger.firstElementChild;
-  const currentLabel = trigger.children.item(1);
   if (record.target !== trigger && !trigger.contains(record.target)) {
     return record.type === "childList"
       && [...record.addedNodes, ...record.removedNodes].every(
         (node) => !placements.has(node) && !node.contains(trigger),
       );
   }
-  if (record.type === "attributes") {
-    if (record.target === trigger) {
+  if (record.type === "attributes" && record.target === trigger) {
+    if (record.attributeName === "aria-expanded") {
+      return record.oldValue === "true" && trigger.getAttribute("aria-expanded") === "false";
+    }
+    if (record.attributeName === "aria-controls") {
       return Boolean(
-        record.attributeName
-        && (
-          MODE_SWITCHER_FOCUS_COMMIT_ATTRIBUTES.has(record.attributeName)
-          || record.attributeName === "class"
-        )
+        source.dom.content?.id
+        && record.oldValue === source.dom.content.id
+        && trigger.getAttribute("aria-controls") === null
       );
     }
+    if (record.attributeName === "data-state") {
+      return record.oldValue === "open" && trigger.getAttribute("data-state") === "closed";
+    }
+    if (record.attributeName === "class" && mode !== source.render.mode) {
+      return (
+        record.oldValue === source.render.triggerClassName
+        && trigger.className === successor.render.triggerClassName
+      );
+    }
+    return false;
+  }
+  if (mode === source.render.mode) return false;
+  const currentIcon = trigger.firstElementChild;
+  if (record.type === "childList" && record.target === trigger) {
     return Boolean(
-      (originalIcon && originalIcon.contains(record.target))
-      || (currentIcon && currentIcon.contains(record.target))
+      originalIcon
+      && currentIcon
+      && record.previousSibling === null
+      && record.nextSibling === originalLabel
+      && (
+        (
+          record.removedNodes.length === 1
+          && record.removedNodes.item(0) === originalIcon
+          && record.addedNodes.length === 0
+        )
+        || (
+          record.removedNodes.length === 0
+          && record.addedNodes.length === 1
+          && record.addedNodes.item(0) === currentIcon
+        )
+      )
     );
   }
-  if (record.target === trigger) {
-    return record.type === "childList"
-      && [...record.addedNodes, ...record.removedNodes].every(
-        (node) => node === originalIcon || node === currentIcon,
-      );
-  }
-  const inIcon = Boolean(
-    (originalIcon && (record.target === originalIcon || originalIcon.contains(record.target)))
-    || (currentIcon && (record.target === currentIcon || currentIcon.contains(record.target)))
+  const currentLabel = trigger.children.item(1);
+  return Boolean(
+    record.type === "characterData"
+    && originalLabel
+    && currentLabel === originalLabel
+    && originalLabel.contains(record.target)
+    && record.oldValue === source.render.rows.find(
+      (row) => row.value === source.render.mode,
+    )?.label
+    && record.target.nodeValue === successor.render.rows.find(
+      (row) => row.value === mode,
+    )?.label
   );
-  if (inIcon) return true;
-  const inLabel = Boolean(
-    (originalLabel && (record.target === originalLabel || originalLabel.contains(record.target)))
-    || (currentLabel && (record.target === currentLabel || currentLabel.contains(record.target)))
-  );
-  return inLabel && (record.type === "characterData" || record.type === "childList");
 }
 
-function modeSwitcherFocusTriggerIsExact(publication: ModeSwitcherPublication) {
+const MODE_SWITCHER_ICON_NODES: Readonly<Record<
+  EditMode,
+  readonly Readonly<{ tag: string; attributes: Readonly<Record<string, string>> }>[]
+>> = Object.freeze({
+  editing: Object.freeze([
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M13 21h8" }) }),
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
+      }),
+    }),
+  ]),
+  suggesting: Object.freeze([
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z",
+      }),
+    }),
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M12 8v6" }) }),
+    Object.freeze({ tag: "path", attributes: Object.freeze({ d: "M9 11h6" }) }),
+  ]),
+  viewing: Object.freeze([
+    Object.freeze({
+      tag: "path",
+      attributes: Object.freeze({
+        d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
+      }),
+    }),
+    Object.freeze({
+      tag: "circle",
+      attributes: Object.freeze({ cx: "12", cy: "12", r: "3" }),
+    }),
+  ]),
+});
+
+function modeSwitcherElementAttributesAreExact(
+  element: Element,
+  expected: Readonly<Record<string, string>>,
+) {
+  const entries = Object.entries(expected);
+  return (
+    element.attributes.length === entries.length
+    && entries.every(([name, value]) => element.getAttribute(name) === value)
+  );
+}
+
+function modeSwitcherIconIsExact(
+  element: Element | null,
+  mode: EditMode,
+  size: number,
+  className: string,
+) {
+  if (
+    !element
+    || element.tagName.toLowerCase() !== "svg"
+    || !modeSwitcherElementAttributesAreExact(element, {
+      "aria-hidden": "true",
+      class: className,
+      fill: "none",
+      height: String(size),
+      stroke: "currentColor",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "stroke-width": "2",
+      viewBox: "0 0 24 24",
+      width: String(size),
+      xmlns: "http://www.w3.org/2000/svg",
+    })
+  ) {
+    return false;
+  }
+  const expectedNodes = MODE_SWITCHER_ICON_NODES[mode];
+  return (
+    element.children.length === expectedNodes.length
+    && expectedNodes.every((expected, index) => {
+      const child = element.children.item(index);
+      return Boolean(
+        child
+        && child.tagName.toLowerCase() === expected.tag
+        && child.children.length === 0
+        && child.textContent === ""
+        && modeSwitcherElementAttributesAreExact(child, expected.attributes)
+      );
+    })
+  );
+}
+
+function modeSwitcherChevronIsExact(element: Element | null) {
+  const path = element?.children.item(0);
+  return Boolean(
+    element
+    && element.tagName.toLowerCase() === "svg"
+    && modeSwitcherElementAttributesAreExact(element, {
+      "aria-hidden": "true",
+      class: "lucide lucide-chevron-down text-ink-4",
+      fill: "none",
+      height: "14",
+      stroke: "currentColor",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "stroke-width": "2",
+      viewBox: "0 0 24 24",
+      width: "14",
+      xmlns: "http://www.w3.org/2000/svg",
+    })
+    && element.children.length === 1
+    && path?.tagName.toLowerCase() === "path"
+    && path.children.length === 0
+    && path.textContent === ""
+    && modeSwitcherElementAttributesAreExact(path, { d: "m6 9 6 6 6-6" })
+  );
+}
+
+function modeSwitcherFocusTriggerIsExact(
+  publication: ModeSwitcherPublication,
+  initialDynamicAttributes: ReadonlyMap<string, string | null>,
+) {
   const { trigger } = publication.dom;
   const label = publication.render.rows.find((row) => row.value === publication.render.mode)?.label;
-  const expectedIconClass: Record<EditMode, string> = {
-    editing: "lucide-pen-line",
-    suggesting: "lucide-message-square-plus",
-    viewing: "lucide-eye",
-  };
-  const semanticAttributes = Array.from(trigger.attributes).filter(
-    (attribute) => !MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(attribute.name),
-  );
   const allowedAttributes = new Set([
     "aria-expanded",
     "aria-haspopup",
@@ -1958,24 +2081,40 @@ function modeSwitcherFocusTriggerIsExact(publication: ModeSwitcherPublication) {
     "id",
     "type",
   ]);
+  const initialDynamicCount = [...initialDynamicAttributes.values()].filter(
+    (value) => value !== null,
+  ).length;
   const icon = trigger.children.item(0);
   const labelElement = trigger.children.item(1);
   const chevron = trigger.children.item(2);
   return Boolean(
     label
-    && semanticAttributes.every((attribute) => allowedAttributes.has(attribute.name))
+    && trigger.attributes.length === allowedAttributes.size + initialDynamicCount
+    && Array.from(trigger.attributes).every((attribute) => (
+      allowedAttributes.has(attribute.name)
+      || initialDynamicAttributes.get(attribute.name) === attribute.value
+    ))
+    && [...initialDynamicAttributes].every(
+      ([name, value]) => trigger.getAttribute(name) === value,
+    )
+    && Boolean(trigger.id)
     && trigger.getAttribute("aria-haspopup") === "menu"
     && trigger.getAttribute("aria-expanded") === "false"
     && trigger.getAttribute("data-state") === "closed"
     && trigger.getAttribute("aria-controls") === null
+    && trigger.className === publication.render.triggerClassName
     && trigger.children.length === 3
-    && icon?.tagName.toLowerCase() === "svg"
-    && icon.classList.contains(expectedIconClass[publication.render.mode])
+    && modeSwitcherIconIsExact(
+      icon,
+      publication.render.mode,
+      15,
+      `lucide lucide-${publication.render.mode === "editing" ? "pen-line" : publication.render.mode === "suggesting" ? "message-square-plus" : "eye"}`,
+    )
     && labelElement?.tagName === "SPAN"
     && labelElement.attributes.length === 0
+    && labelElement.children.length === 0
     && labelElement.textContent === label
-    && chevron?.tagName.toLowerCase() === "svg"
-    && chevron.classList.contains("lucide-chevron-down")
+    && modeSwitcherChevronIsExact(chevron)
   );
 }
 
