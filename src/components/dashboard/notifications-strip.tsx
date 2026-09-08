@@ -687,10 +687,12 @@ const NOTIFICATION_EVENT_TARGET = captureStableGetter<EventTarget | null>(
   NOTIFICATION_EVENT_PROTOTYPE,
   "target",
 );
-const NOTIFICATION_EVENT_INSTANCE = (() => {
-  if (!NOTIFICATION_EVENT_CONSTRUCTOR) return null;
+const NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR =
+  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent;
+const NOTIFICATION_KEYBOARD_EVENT_INSTANCE = (() => {
+  if (!NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR) return null;
   try {
-    return new NOTIFICATION_EVENT_CONSTRUCTOR(
+    return new NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR(
       "notification-keyboard-intrinsic",
     );
   } catch {
@@ -698,7 +700,7 @@ const NOTIFICATION_EVENT_INSTANCE = (() => {
   }
 })();
 const NOTIFICATION_EVENT_TRUSTED = captureUnforgeableGetter<boolean>(
-  NOTIFICATION_EVENT_INSTANCE,
+  NOTIFICATION_KEYBOARD_EVENT_INSTANCE,
   "isTrusted",
 );
 const NOTIFICATION_EVENT_COMPOSED_PATH = captureStableMethod<
@@ -777,6 +779,7 @@ function captureNotificationKeyboardIntrinsics(
 ): NotificationKeyboardIntrinsics | null {
   if (
     NOTIFICATION_EVENT_CONSTRUCTOR !== ownerWindow.Event ||
+    NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR !== ownerWindow.KeyboardEvent ||
     NOTIFICATION_EVENT_PROTOTYPE !== ownerWindow.Event.prototype ||
     NOTIFICATION_UI_EVENT_PROTOTYPE !== ownerWindow.UIEvent.prototype ||
     NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE !==
@@ -816,6 +819,7 @@ function captureNotificationKeyboardIntrinsics(
   }
   const ownerRealmIsCurrent = () =>
     NOTIFICATION_EVENT_CONSTRUCTOR === ownerWindow.Event &&
+    NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR === ownerWindow.KeyboardEvent &&
     NOTIFICATION_EVENT_PROTOTYPE === ownerWindow.Event.prototype &&
     NOTIFICATION_UI_EVENT_PROTOTYPE === ownerWindow.UIEvent.prototype &&
     NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ===

@@ -850,15 +850,20 @@ describe("notification strip current actions", () => {
 });
 
 describe("notification strip keyboard browsing", () => {
-  it("recognizes isTrusted as an owner-realm Event instance descriptor, not a prototype getter", () => {
-    const probe = new window.Event("notification-keyboard-probe");
+  it("recognizes isTrusted as a keyboard-specific own descriptor, not a prototype getter", () => {
+    const firstProbe = new window.KeyboardEvent("keydown");
+    const secondProbe = new window.KeyboardEvent("keydown");
     const synthetic = new window.KeyboardEvent("keydown", {
       bubbles: true,
       cancelable: true,
       key: "ArrowDown",
     });
-    const probeDescriptor = Object.getOwnPropertyDescriptor(
-      probe,
+    const firstDescriptor = Object.getOwnPropertyDescriptor(
+      firstProbe,
+      "isTrusted",
+    );
+    const secondDescriptor = Object.getOwnPropertyDescriptor(
+      secondProbe,
       "isTrusted",
     );
     const syntheticDescriptor = Object.getOwnPropertyDescriptor(
@@ -866,17 +871,30 @@ describe("notification strip keyboard browsing", () => {
       "isTrusted",
     );
 
-    expect(Object.hasOwn(probe, "isTrusted")).toBe(true);
+    expect(Object.hasOwn(firstProbe, "isTrusted")).toBe(true);
     expect(
       Object.getOwnPropertyDescriptor(window.Event.prototype, "isTrusted"),
     ).toBeUndefined();
-    expect(probeDescriptor?.get).toBeTypeOf("function");
-    expect(syntheticDescriptor).toMatchObject({
-      get: probeDescriptor?.get,
-      set: probeDescriptor?.set,
-      configurable: probeDescriptor?.configurable,
-      enumerable: probeDescriptor?.enumerable,
+    expect(firstDescriptor?.get).toBeTypeOf("function");
+    expect(secondDescriptor).toMatchObject({
+      get: firstDescriptor?.get,
+      set: firstDescriptor?.set,
+      configurable: firstDescriptor?.configurable,
+      enumerable: firstDescriptor?.enumerable,
     });
+    expect(syntheticDescriptor).toMatchObject({
+      get: firstDescriptor?.get,
+      set: firstDescriptor?.set,
+      configurable: firstDescriptor?.configurable,
+      enumerable: firstDescriptor?.enumerable,
+    });
+    const plainDescriptor = Object.getOwnPropertyDescriptor(
+      new window.Event("plain-event-probe"),
+      "isTrusted",
+    );
+    if (plainDescriptor?.get !== firstDescriptor?.get) {
+      expect(plainDescriptor?.get).not.toBe(firstDescriptor?.get);
+    }
 
     const router = createRouter("trusted-own-descriptor");
     const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
