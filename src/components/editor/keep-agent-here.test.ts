@@ -617,6 +617,33 @@ describe("KeepAgentHerePanel exact control publications", () => {
     await resolve(retry, tokenResponse(1));
   });
 
+  it("claims before reentrant Back and Copy producers can invoke their retained handlers", async () => {
+    const currentRef: { value: CapturedPanel | null } = { value: null };
+    const currentPanel = () => {
+      if (!currentRef.value) throw new Error("The current panel is not captured");
+      return currentRef.value;
+    };
+    const onBack = vi.fn(() => {
+      const current = currentPanel();
+      current.back!.click(capturedClick(current.back!));
+    });
+    copyText.mockImplementation(() => {
+      const current = currentPanel();
+      current.copy.click(capturedClick(current.copy));
+      return Promise.resolve(true);
+    });
+    const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC, onBack }));
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const current = capturePanel(view.host);
+    currentRef.value = current;
+
+    fireEvent.click(current.back!.element);
+    fireEvent.click(current.copy.element);
+
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+  });
+
   it("keeps exact actions available through Strict Mode's ref and layout replays", async () => {
     const onBack = vi.fn();
     const view = renderDirect(
@@ -631,6 +658,83 @@ describe("KeepAgentHerePanel exact control publications", () => {
     expect(onBack).toHaveBeenCalledOnce();
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
     expect(listTokens).toHaveBeenCalledOnce();
+  });
+
+  it("retires pending and setup publications when token settlement changes the same DOM", async () => {
+    const initial = deferred<TokenListResponse>();
+    const onBack = vi.fn();
+    listTokens.mockReset().mockReturnValueOnce(initial.promise);
+    const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC, onBack }));
+    const pending = capturePanel(view.host);
+
+    await resolve(initial, tokenResponse(0));
+
+    const setup = capturePanel(view.host);
+    expect(within(view.host).getByTestId("agent-connect-card")).toBeInTheDocument();
+    act(() => {
+      invoke(pending.back!, setup.back!.element);
+      invoke(pending.copy, setup.copy.element);
+    });
+    expect(onBack).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+
+    fireEvent.click(setup.back!.element);
+    fireEvent.click(setup.copy.element);
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+  });
+
+  it("retires error and pending Retry publications while preserving the current error visit", async () => {
+    const retry = deferred<TokenListResponse>();
+    const onBack = vi.fn();
+    listTokens
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(503, "First failure."))
+      .mockReturnValueOnce(retry.promise)
+      .mockResolvedValueOnce(tokenResponse(1));
+    const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC, onBack }));
+    await waitFor(() => expect(within(view.host).getByRole("alert")).toHaveTextContent("First failure."));
+    const failed = capturePanel(view.host);
+
+    fireEvent.click(failed.retry!.element);
+
+    const pending = capturePanel(view.host);
+    expect(pending.retry!.element).toBeDisabled();
+    act(() => {
+      invoke(failed.back!, pending.back!.element);
+      invoke(failed.copy, pending.copy.element);
+      invoke(pending.retry!);
+    });
+    expect(onBack).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+    expect(listTokens).toHaveBeenCalledTimes(2);
+
+    await reject(retry, new ApiError(503, "Current failure."));
+
+    const current = capturePanel(view.host);
+    expect(within(view.host).getByRole("alert")).toHaveTextContent("Current failure.");
+    fireEvent.click(current.retry!.element);
+    expect(listTokens).toHaveBeenCalledTimes(3);
+  });
+
+  it("retires the idle Copy publication on feedback replacement and keeps the current Copy usable", async () => {
+    const firstCopy = deferred<boolean>();
+    copyText.mockReset().mockReturnValueOnce(firstCopy.promise).mockResolvedValueOnce(true);
+    const view = renderDirect(createElement(KeepAgentHerePanel, { doc: DOC }));
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const idle = capturePanel(view.host);
+
+    fireEvent.click(idle.copy.element);
+    await resolve(firstCopy, true);
+
+    const copied = capturePanel(view.host);
+    expect(copied.copy.element).toHaveTextContent("Copied");
+    act(() => idle.copy.click(capturedClick(copied.copy)));
+    expect(copyText).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(copied.copy.element);
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(keepAgentPrompt(DOC));
   });
 
   it("rejects non-native, mismatched, foreign, detached, disabled, replaced, and late-injected sources without consuming current actions", async () => {
@@ -737,6 +841,38 @@ describe("KeepAgentHerePanel exact control publications", () => {
     expect(onBackB).not.toHaveBeenCalled();
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(docB));
   });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "keeps an equal-looking remount's current control usable in %s order",
+    async (order) => {
+      const props = { doc: DOC, onBack: vi.fn() };
+      const view = renderDirect(createElement(PanelBoundary, { panel: props }));
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const stale = capturePanel(view.host);
+      act(() => {
+        view.root.render(createElement(PanelBoundary, { panel: props, mount: "replacement" }));
+      });
+      const current = capturePanel(view.host);
+      const rejectStale = () => {
+        invoke(stale.back!, current.back!.element);
+        invoke(stale.copy, current.copy.element);
+        invoke(current.back!, stale.back!.element);
+        invoke(current.copy, stale.copy.element);
+      };
+      const acceptCurrent = () => fireEvent.click(current.copy.element);
+
+      if (order === "stale-before-current") {
+        act(rejectStale);
+        acceptCurrent();
+      } else {
+        acceptCurrent();
+        act(rejectStale);
+      }
+
+      expect(props.onBack).not.toHaveBeenCalled();
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+    },
+  );
 
   it.each(["stale-before-current", "current-before-stale"] as const)(
     "retires same-DOM document and callback publications before the parent layout boundary in %s order",
