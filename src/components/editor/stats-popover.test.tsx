@@ -17,6 +17,19 @@ interface StatsContentCallbacks {
   ) => void;
 }
 
+class StatsPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: PointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
+}
+
 const capturedPopoverOpenChanges = vi.hoisted(() => [] as PopoverOpenChange[]);
 const capturedStatsContentCallbacks = vi.hoisted(
   () => [] as StatsContentCallbacks[],
@@ -418,6 +431,23 @@ function makeClickEvent(target: Node) {
   return event;
 }
 
+function statsPointerEvent(
+  type: "pointerdown" | "pointerup" | "click",
+  init: PointerEventInit = {},
+) {
+  return new StatsPointerEvent(type, {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+    composed: true,
+    detail: type === "click" ? 1 : 0,
+    isPrimary: type !== "click",
+    pointerId: 7,
+    pointerType: "mouse",
+    ...init,
+  });
+}
+
 function directClear(
   action: GoalActions,
   {
@@ -525,6 +555,9 @@ function dispatchStatsOutside(
   target: HTMLElement,
   callbacks: readonly StatsContentCallbacks[],
   openChanges: readonly PopoverOpenChange[],
+  pointerDelayMs = 0,
+  pointerEvents?: readonly Event[],
+  pointerOriginal?: Event,
 ) {
   const pending: VoidFunction[] = [];
   const queued = vi
@@ -539,44 +572,50 @@ function dispatchStatsOutside(
   const consumeType = source === "pointer" ? "click" : "focusin";
   const original =
     source === "pointer"
-      ? new MouseEvent("pointerdown", {
-          bubbles: true,
-          button: 0,
-          cancelable: true,
-          composed: true,
-        })
+      ? (pointerOriginal ?? statsPointerEvent("pointerdown"))
       : new FocusEvent("focusin", {
           bubbles: true,
           cancelable: true,
           composed: true,
         });
+  let pointerCallbackScheduled = false;
   const consume = (event: Event) => {
     if (source === "focus" && event !== original) return;
-    const custom = new CustomEvent(customType, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      detail: { originalEvent: original },
-    });
-    for (const callbacksForPublication of callbacks) {
-      const callback = callbacksForPublication[callbackName];
-      if (!callback) continue;
-      target.addEventListener(
-        customType,
-        (value) =>
-          callback(
-            value as CustomEvent<{
-              originalEvent: PointerEvent & FocusEvent;
-            }>,
-          ),
-        { once: true },
-      );
+    const deliver = () => {
+      const custom = new CustomEvent(customType, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        detail: { originalEvent: original },
+      });
+      for (const callbacksForPublication of callbacks) {
+        const callback = callbacksForPublication[callbackName];
+        if (!callback) continue;
+        target.addEventListener(
+          customType,
+          (value) =>
+            callback(
+              value as CustomEvent<{
+                originalEvent: PointerEvent & FocusEvent;
+              }>,
+            ),
+          { once: true },
+        );
+      }
+      target.dispatchEvent(custom);
+      for (const openChange of openChanges) {
+        queueMicrotask(() => openChange(false));
+      }
+      while (pending.length) pending.shift()!();
+    };
+    if (source === "pointer") {
+      if (!pointerCallbackScheduled) {
+        pointerCallbackScheduled = true;
+        setTimeout(deliver, pointerDelayMs);
+      }
+    } else {
+      deliver();
     }
-    target.dispatchEvent(custom);
-    for (const openChange of openChanges) {
-      queueMicrotask(() => openChange(false));
-    }
-    while (pending.length) pending.shift()!();
     event.stopPropagation();
   };
   target.addEventListener(consumeType, consume);
@@ -584,22 +623,14 @@ function dispatchStatsOutside(
     act(() => {
       if (source === "pointer") {
         target.dispatchEvent(original);
-        target.dispatchEvent(
-          new MouseEvent("pointerup", {
-            bubbles: true,
-            button: 0,
-            cancelable: true,
-            composed: true,
-          }),
-        );
-        target.dispatchEvent(
-          new MouseEvent("click", {
-            bubbles: true,
-            button: 0,
-            cancelable: true,
-            composed: true,
-          }),
-        );
+        for (
+          const pointerEvent of pointerEvents ?? [
+            statsPointerEvent("pointerup"),
+            statsPointerEvent("click"),
+          ]
+        ) {
+          target.dispatchEvent(pointerEvent);
+        }
       } else {
         target.dispatchEvent(original);
       }
@@ -649,6 +680,10 @@ async function updateSharedGoal(session: CollabSession, next: WritingGoal | null
 }
 
 beforeEach(() => {
+  Object.defineProperty(window, "PointerEvent", {
+    configurable: true,
+    value: StatsPointerEvent,
+  });
   capturedPopoverOpenChanges.length = 0;
   capturedStatsContentCallbacks.length = 0;
   publishedPopoverOpenChanges.length = 0;
@@ -1538,7 +1573,7 @@ describe("StatsPopover disclosure visit authority", () => {
     }
   });
 
-  it("accepts one genuine pointer-outside dismissal after direct-root Strict Mode replay", async () => {
+  it("retains one exact pointer-outside dismissal through the deferred Radix callback", async () => {
     vi.useFakeTimers();
     const outside = document.createElement("button");
     document.body.append(outside);
@@ -1582,6 +1617,167 @@ describe("StatsPopover disclosure visit authority", () => {
         screen.getByTestId("stats-button"),
       );
       expect(focusTrigger).not.toHaveBeenCalled();
+    } finally {
+      act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
+
+  it.each([
+    "duplicate pointerup",
+    "duplicate click",
+    "moved path",
+    "MouseEvent-named pointer chain",
+  ] as const)("rejects a %s before the deferred outside callback", async (variant) => {
+    vi.useFakeTimers();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession(`strict-pointer-outside-${variant}`),
+      () => {},
+    );
+    try {
+      openPopover();
+      let original: Event | undefined;
+      let pointerEvents: readonly Event[];
+      if (variant === "duplicate pointerup") {
+        pointerEvents = [
+          statsPointerEvent("pointerup"),
+          statsPointerEvent("pointerup"),
+          statsPointerEvent("click"),
+        ];
+      } else if (variant === "duplicate click") {
+        pointerEvents = [
+          statsPointerEvent("pointerup"),
+          statsPointerEvent("click"),
+          statsPointerEvent("click"),
+        ];
+      } else if (variant === "moved path") {
+        const movedClick = statsPointerEvent("click");
+        Object.defineProperty(movedClick, "composedPath", {
+          configurable: true,
+          value: () => [outside, document, window],
+        });
+        pointerEvents = [
+          statsPointerEvent("pointerup"),
+          movedClick,
+        ];
+      } else {
+        original = new MouseEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          cancelable: true,
+          composed: true,
+        });
+        pointerEvents = [
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+            composed: true,
+          }),
+          new MouseEvent("click", {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+            composed: true,
+            detail: 1,
+          }),
+        ];
+      }
+
+      dispatchStatsOutside(
+        "pointer",
+        outside,
+        [capturedStatsContentCallbacks.at(-1)!],
+        [capturedPopoverOpenChanges.at(-1)!],
+        0,
+        pointerEvents,
+        original,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(0));
+
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+    } finally {
+      act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
+
+  it("does not renew a timer-starved completed proof from a second click", async () => {
+    vi.useFakeTimers();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession("strict-pointer-outside-renewal"),
+      () => {},
+    );
+    let now = window.performance.now();
+    const clock = vi
+      .spyOn(window.performance, "now")
+      .mockImplementation(() => now);
+    outside.addEventListener("click", () => {
+      now += 1_001;
+    }, { once: true });
+    try {
+      openPopover();
+      dispatchStatsOutside(
+        "pointer",
+        outside,
+        [capturedStatsContentCallbacks.at(-1)!],
+        [capturedPopoverOpenChanges.at(-1)!],
+        0,
+        [
+          statsPointerEvent("pointerup"),
+          statsPointerEvent("click"),
+          statsPointerEvent("click"),
+        ],
+      );
+      await act(() => vi.advanceTimersByTimeAsync(0));
+
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+    } finally {
+      clock.mockRestore();
+      act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects a deferred pointer-outside dismissal after its exact click lease expires", async () => {
+    vi.useFakeTimers();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession("strict-pointer-outside-expired"),
+      () => {},
+    );
+    try {
+      openPopover();
+      dispatchStatsOutside(
+        "pointer",
+        outside,
+        [capturedStatsContentCallbacks.at(-1)!],
+        [capturedPopoverOpenChanges.at(-1)!],
+        1_001,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(1_001));
+
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
     } finally {
       act(() => mounted.root.unmount());
       vi.clearAllTimers();
