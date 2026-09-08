@@ -85,6 +85,52 @@ test.describe("find & replace", () => {
     await user.context.close();
   });
 
+  test("trusted F3 advances while synthetic F3 is rejected", async ({ browser }) => {
+    const user = await signIn(browser, "f3-trust");
+    const id = await createDocument(user.page, SAMPLE);
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await openFromCodePane(page);
+    const input = page.getByTestId("find-input");
+    await page.keyboard.type("cat");
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    const syntheticPrevented = await input.evaluate((element) => {
+      const observations: boolean[] = [];
+      Reflect.set(window, "__markdocF3Trust", observations);
+      element.addEventListener("keydown", (event) => {
+        const keyboardEvent = event as KeyboardEvent;
+        if (keyboardEvent.key === "F3") {
+          observations.push(keyboardEvent.isTrusted);
+        }
+      }, { capture: true });
+      const synthetic = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "F3",
+        code: "F3",
+        view: window,
+      });
+      element.dispatchEvent(synthetic);
+      return synthetic.defaultPrevented;
+    });
+    expect(syntheticPrevented).toBe(false);
+    expect(await page.evaluate(() =>
+      Reflect.get(window, "__markdocF3Trust"))).toEqual([false]);
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+
+    await page.keyboard.press("F3");
+    await expect.poll(() => page.evaluate(() =>
+      Reflect.get(window, "__markdocF3Trust"))).toEqual([false, true]);
+    await expect(page.getByTestId("find-count")).toHaveText("2 of 3");
+    await expect(input).toBeFocused();
+
+    await page.keyboard.press("Shift+F3");
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    await expect(input).toBeFocused();
+    await user.context.close();
+  });
+
   test("Replace and Replace all rewrite the source", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, SAMPLE);

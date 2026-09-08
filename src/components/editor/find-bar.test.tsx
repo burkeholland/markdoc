@@ -27,6 +27,25 @@ vi.mock("@hocuspocus/provider", async () => {
   return { HocuspocusProvider };
 });
 
+vi.mock("./find-keyboard-trust", async (importOriginal) => {
+  const trust = await importOriginal<typeof import("./find-keyboard-trust")>();
+  return {
+    ...trust,
+    readFindKeyboardFacts: (
+      ...args: Parameters<typeof trust.readFindKeyboardFacts>
+    ) => {
+      const facts = trust.readFindKeyboardFacts(...args);
+      const marker = Object.getOwnPropertyDescriptor(
+        args[1],
+        Symbol.for("markdoc.unit-trusted-find-key"),
+      );
+      return facts && marker?.value === true
+        ? Object.freeze({ ...facts, isTrusted: true })
+        : facts;
+    },
+  };
+});
+
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { TooltipProvider } from "@/components/ui/primitives";
@@ -227,7 +246,7 @@ function keyboardEventView(ownerWindow: Window) {
 function findKey(target: HTMLElement, init: KeyboardEventInit = {}) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The Find control has no owner window");
-  return new ownerWindow.KeyboardEvent("keydown", {
+  const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
     key: "F3",
@@ -235,6 +254,10 @@ function findKey(target: HTMLElement, init: KeyboardEventInit = {}) {
     view: keyboardEventView(ownerWindow),
     ...init,
   });
+  Object.defineProperty(event, Symbol.for("markdoc.unit-trusted-find-key"), {
+    value: true,
+  });
+  return event;
 }
 
 function dispatchFindKey(target: HTMLElement, init: KeyboardEventInit = {}) {
@@ -1656,7 +1679,7 @@ describe("FindBar F3 navigation", () => {
       cancelable: true,
       key: "F3",
       code: "F3",
-      view: keyboardEventView(foreignWindow),
+      view: keyboardEventView(ownerWindow),
     });
     Object.setPrototypeOf(event, ownerWindow.KeyboardEvent.prototype);
 
@@ -1734,6 +1757,34 @@ describe("FindBar F3 navigation", () => {
     expect(fresh.defaultPrevented).toBe(true);
     expect(freshStep).toHaveBeenCalledOnce();
     expect(freshReveal).toHaveBeenCalledOnce();
+  });
+
+  it("rejects authority changed between native capture and React delivery, then admits a fresh publication", async () => {
+    const s = session("owner", "f3-capture-delivery-drift");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+    input.addEventListener("keydown", () => {
+      s.setFind("mat");
+    }, { capture: true, once: true });
+
+    const stale = dispatchFindKey(input);
+
+    expect(stale.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(input).toHaveValue("mat"));
+    const fresh = dispatchFindKey(input);
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(onReveal).toHaveBeenCalledOnce();
   });
 
   it("uses captured keyboard getters and composedPath when public fields throw or deceive", async () => {
