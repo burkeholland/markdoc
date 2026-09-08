@@ -642,6 +642,86 @@ describe("PanelResizeHandle", () => {
     expect(document.body.style.userSelect).toBe("text");
   });
 
+  it.each([
+    {
+      changed: "cursor",
+      mutate: () => {
+        document.body.style.cursor = "wait";
+      },
+      afterRetire: ["wait", "text"],
+    },
+    {
+      changed: "userSelect",
+      mutate: () => {
+        document.body.style.userSelect = "contain";
+      },
+      afterRetire: ["help", "contain"],
+    },
+  ] as const)(
+    "preserves external $changed ownership while restoring the other body style",
+    async ({ mutate, afterRetire }) => {
+      const oldResize = vi.fn();
+      const currentResize = vi.fn();
+      document.body.style.cursor = "help";
+      document.body.style.userSelect = "text";
+      const view = strictView({ instance: "a", onResize: oldResize });
+      const oldHandle = currentHandle(view.host);
+      const stale = handlers(oldHandle);
+      pointerDown(oldHandle, 29, 800);
+
+      mutate();
+      await flushMutations();
+      expect(releasePointerCapture).toHaveBeenCalledExactlyOnceWith(29);
+      expect(releasePointerCapture.mock.contexts[0]).toBe(oldHandle);
+      expect(document.body.style.cursor).toBe(afterRetire[0]);
+      expect(document.body.style.userSelect).toBe(afterRetire[1]);
+      expect(oldHandle).not.toHaveAttribute("data-dragging");
+
+      renderStrict(view.root, {
+        instance: "b",
+        width: 500,
+        onResize: currentResize,
+      });
+      const current = currentHandle(view.host);
+      pointerDown(current, 29, 800, "touch");
+      const stopMove = intercept<HandlePointer>(
+        current,
+        "onPointerMove",
+        (move, event) => {
+          stale.pointerMove(event as ReactPointerEvent<HTMLDivElement>);
+          move(event as ReactPointerEvent<HTMLDivElement>);
+        },
+      );
+      pointerMove(current, 29, 760, "touch");
+      stopMove();
+      expect(oldResize).not.toHaveBeenCalled();
+      expect(currentResize).toHaveBeenCalledExactlyOnceWith(540);
+      expect(current).toHaveAttribute("data-dragging", "true");
+      expect(document.body.style.cursor).toBe("col-resize");
+      expect(document.body.style.userSelect).toBe("none");
+
+      const stopEnd = intercept<HandlePointer>(
+        current,
+        "onPointerUp",
+        (end, event) => {
+          stale.pointerUp(event as ReactPointerEvent<HTMLDivElement>);
+          stale.pointerCancel(event as ReactPointerEvent<HTMLDivElement>);
+          stale.lostPointerCapture(event as ReactPointerEvent<HTMLDivElement>);
+          expect(current).toHaveAttribute("data-dragging", "true");
+          expect(document.body.style.cursor).toBe("col-resize");
+          expect(document.body.style.userSelect).toBe("none");
+          end(event as ReactPointerEvent<HTMLDivElement>);
+        },
+      );
+      pointerUp(current, 29, "touch");
+      stopEnd();
+      expect(releasePointerCapture).toHaveBeenCalledTimes(2);
+      expect(releasePointerCapture.mock.contexts[1]).toBe(current);
+      expect(document.body.style.cursor).toBe(afterRetire[0]);
+      expect(document.body.style.userSelect).toBe(afterRetire[1]);
+    },
+  );
+
   it("restores exact body styles when capture and release throw", () => {
     document.body.style.cursor = "crosshair";
     document.body.style.userSelect = "all";

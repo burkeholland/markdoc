@@ -623,14 +623,12 @@ function restoreBodyStyles(owner: DragOwner) {
   }
   owner.ownsBodyStyles = false;
   bodyStyleOwners.delete(owner.body);
-  if (
-    owner.body.style.cursor !== "col-resize" ||
-    owner.body.style.userSelect !== "none"
-  ) {
-    return;
+  if (owner.body.style.cursor === "col-resize") {
+    writeBodyStyle(owner, "cursor", owner.bodyCursor);
   }
-  writeBodyStyle(owner, "cursor", owner.bodyCursor);
-  writeBodyStyle(owner, "userSelect", owner.bodyUserSelect);
+  if (owner.body.style.userSelect === "none") {
+    writeBodyStyle(owner, "userSelect", owner.bodyUserSelect);
+  }
 }
 
 function createHandlePublication(
