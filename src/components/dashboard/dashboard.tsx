@@ -1218,6 +1218,12 @@ function createTemplateGridPublication(
     let nativeBoundaryClick: TemplateGridNativeClickProof | null = null;
     const terminalClickBarriers =
       new Set<TemplateGridTerminalClickBarrier>();
+    const terminalBarrierRejects = (event: Event) => {
+      for (const barrier of terminalClickBarriers) {
+        if (barrier.event !== event) return true;
+      }
+      return false;
+    };
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -1298,11 +1304,7 @@ function createTemplateGridPublication(
         : null;
     };
     const onNativeClickCapture = (event: MouseEvent) => {
-      if (
-        Array.from(terminalClickBarriers).some(
-          (barrier) => barrier.event !== event,
-        )
-      ) {
+      if (terminalBarrierRejects(event)) {
         TRUSTED_PREVENT_DEFAULT(event);
         TRUSTED_STOP_IMMEDIATE_PROPAGATION(event);
         return;
@@ -1747,11 +1749,12 @@ function createTemplateGridPublication(
             })
           : null,
       captureReactClick: (event: ReactMouseEvent<HTMLUListElement>) => {
+        const nativeEvent = event.nativeEvent;
+        if (terminalBarrierRejects(nativeEvent)) return;
         reactGridClick = null;
         reactCardClick = null;
         reactButtonClick = null;
         reactBubbleClick = null;
-        const nativeEvent = event.nativeEvent;
         const atOwnerDocument =
           nativeEvent instanceof ownerWindow.MouseEvent &&
           nativeCurrentTarget(nativeEvent) === ownerDocument &&
@@ -1798,6 +1801,7 @@ function createTemplateGridPublication(
         entryAuthority: TemplateGridEntryPublication,
         event: ReactMouseEvent<HTMLLIElement>,
       ) => {
+        if (terminalBarrierRejects(event.nativeEvent)) return;
         reactCardClick = null;
         const entry = publication.entries[entryAuthority.index];
         const gridProof = reactGridClick;
@@ -1844,6 +1848,7 @@ function createTemplateGridPublication(
         entryAuthority: TemplateGridEntryPublication,
         event: ReactMouseEvent<HTMLButtonElement>,
       ) => {
+        if (terminalBarrierRejects(event.nativeEvent)) return;
         reactButtonClick = null;
         const entry = publication.entries[entryAuthority.index];
         const cardProof = reactCardClick;
@@ -1867,6 +1872,7 @@ function createTemplateGridPublication(
         entryAuthority: TemplateGridEntryPublication,
         event: ReactMouseEvent<HTMLButtonElement>,
       ) => {
+        if (terminalBarrierRejects(event.nativeEvent)) return false;
         const entry = publication.entries[entryAuthority.index];
         reactBubbleClick = entry ? exactReactBubbleProof(event, entry) : null;
         return reactBubbleClick !== null;

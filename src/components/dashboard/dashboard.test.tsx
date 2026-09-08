@@ -1776,6 +1776,107 @@ describe("TemplateGrid publication ownership", () => {
     },
   );
 
+  it.each(["container", "document"] as const)(
+    "preserves the pending %s-root attempt when a fresh same-stack event is rejected",
+    async (rootKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test frame has no window");
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const first = PICKER_TEMPLATES[0];
+      const second = PICKER_TEMPLATES[1];
+      const renderGrid = (key: string) =>
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid key={key} onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid key={key} onPick={onPick} busy={null} />
+          </StrictMode>
+        );
+
+      try {
+        await act(async () => {
+          root.render(renderGrid("pending"));
+        });
+        const firstButton =
+          ownerDocument.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${first.id}"]`,
+          );
+        const secondButton =
+          ownerDocument.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${second.id}"]`,
+          );
+        if (!firstButton || !secondButton) {
+          throw new Error("The pending-attempt buttons were not rendered");
+        }
+        const repeatedEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        const freshSameStackEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        let freshDispatched = true;
+        await act(async () => {
+          firstButton.dispatchEvent(repeatedEvent);
+          firstButton.dispatchEvent(repeatedEvent);
+          freshDispatched = secondButton.dispatchEvent(freshSameStackEvent);
+        });
+        expect(freshDispatched).toBe(false);
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(first);
+
+        await act(async () => {
+          root.render(renderGrid("recovery"));
+        });
+        await act(async () => {
+          const recoveryButton =
+            ownerDocument.querySelector<HTMLButtonElement>(
+              `[data-testid="template-${second.id}"]`,
+            );
+          if (!recoveryButton) {
+            throw new Error("The recovery button was not rendered");
+          }
+          recoveryButton.click();
+        });
+        expect(onPick).toHaveBeenCalledTimes(2);
+        expect(onPick).toHaveBeenLastCalledWith(second);
+      } finally {
+        await act(async () => root.unmount());
+        frame.remove();
+      }
+    },
+  );
+
   it.each([
     ["container", "owner window"],
     ["container", "disconnected node"],
