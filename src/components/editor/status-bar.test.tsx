@@ -87,6 +87,19 @@ interface CapturedDisclosure {
   element: HTMLElement;
 }
 
+class StatusBarPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: PointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
+}
+
 const ISSUE_A: LintIssue = {
   line: 3,
   column: 5,
@@ -332,22 +345,30 @@ async function outsidePointerClick(
   pointerDownTarget: HTMLElement,
   releaseTarget = pointerDownTarget,
 ) {
-  fireEvent.pointerDown(pointerDownTarget, {
-    button: 0,
-    pointerId: 7,
-    pointerType: "mouse",
-    isPrimary: true,
-  });
+  fireEvent(pointerDownTarget, pointerEvent("pointerdown", 7));
   await nextTask();
-  fireEvent.pointerUp(releaseTarget, {
-    button: 0,
-    pointerId: 7,
-    pointerType: "mouse",
-    isPrimary: true,
-  });
-  fireEvent.click(releaseTarget, { button: 0 });
+  fireEvent(releaseTarget, pointerEvent("pointerup", 7));
+  fireEvent(releaseTarget, pointerEvent("click", 7));
   await act(async () => {
     await Promise.resolve();
+  });
+}
+
+function pointerEvent(
+  type: "pointerdown" | "pointerup" | "pointercancel" | "click",
+  pointerId = 1,
+  overrides: PointerEventInit = {},
+) {
+  return new StatusBarPointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button: type === "pointercancel" ? -1 : 0,
+    detail: type === "click" ? 1 : 0,
+    pointerId,
+    pointerType: "mouse",
+    isPrimary: true,
+    ...overrides,
   });
 }
 
@@ -494,6 +515,10 @@ function LayoutReplayProbe({ inspect }: { inspect: () => void }) {
 }
 
 beforeEach(() => {
+  Object.defineProperty(window, "PointerEvent", {
+    configurable: true,
+    value: StatusBarPointerEvent,
+  });
   controlled.hydrated = true;
   controlled.issues = [ISSUE_A];
   controlled.lint.mockReset();
@@ -514,6 +539,7 @@ afterEach(async () => {
   }
   while (fakeSessionDisposals.length) fakeSessionDisposals.pop()!();
   document.body.replaceChildren();
+  Reflect.deleteProperty(window, "PointerEvent");
 });
 
 describe("status bar Strict Mode controls", () => {
@@ -642,24 +668,238 @@ describe("status bar Strict Mode controls", () => {
 });
 
 describe("status bar nested StatsPopover reconciliation", () => {
-  it("keeps current controls usable after the real statistics disclosure opens and closes", async () => {
+  it("keeps current controls usable after an Escape statistics close", async () => {
     const current = callbacks();
     await renderStatus(statusProps(current));
     const stats = screen.getByTestId("stats-button");
 
     expect(screen.getByTestId("word-count")).toHaveTextContent("2 words");
     fireEvent.click(stats);
-    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
-    fireEvent.keyDown(window, {
-      code: "KeyC",
-      ctrlKey: true,
-      shiftKey: true,
+    const content = screen.getByTestId("stats-popover");
+    expect(content).toBeInTheDocument();
+    fireEvent.keyDown(content, {
+      code: "Escape",
+      key: "Escape",
     });
     await act(async () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("stats-popover")).toBeNull();
 
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("preserves outer controls through local statistics form updates", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const stats = screen.getByTestId("stats-button");
+    fireEvent.click(stats);
+    const content = screen.getByTestId("stats-popover");
+
+    fireEvent.input(screen.getByTestId("goal-value"), {
+      target: { value: "250" },
+    });
+    expect(screen.getByTestId("goal-set")).toBeEnabled();
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles an already-open placement transition after an outer replay", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const openContent = screen.getByTestId("stats-popover");
+    expect(openContent).toBeInTheDocument();
+    act(() => openContent.setAttribute("data-side", "top"));
+
+    await rerenderStatus(view, {
+      ...props,
+      doc: {
+        ...props.doc,
+        title: "Updated while statistics stay open",
+      },
+    });
+    act(() => {
+      screen.getByTestId("stats-button").setAttribute(
+        "data-radix-popper-side",
+        "top",
+      );
+    });
+    await act(async () => Promise.resolve());
+    const content = screen.getByTestId("stats-popover");
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the split Escape close emitted by the browser", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const trigger = screen.getByTestId("stats-button");
+    fireEvent.click(trigger);
+    const content = screen.getByTestId("stats-popover");
+    const portal = content.parentElement;
+    if (!portal) throw new Error("Statistics portal wrapper missing");
+
+    const splitClose = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopImmediatePropagation();
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.removeAttribute("aria-controls");
+      trigger.setAttribute("data-state", "closed");
+      trigger.dispatchEvent(new FocusEvent("focusin", {
+        bubbles: true,
+        composed: true,
+      }));
+      trigger.removeAttribute("data-radix-popper-side");
+      trigger.removeAttribute("data-radix-popper-align");
+      portal.remove();
+    };
+    window.addEventListener("keydown", splitClose, { capture: true, once: true });
+
+    fireEvent.keyDown(content, { code: "Escape", key: "Escape" });
+    await act(async () => Promise.resolve());
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    try {
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).toHaveBeenCalledOnce();
+    } finally {
+      if (!portal.isConnected) document.body.append(portal);
+    }
+  });
+
+  it("keeps current controls usable after an asynchronous statistics placement flip", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const trigger = screen.getByTestId("stats-button");
+    fireEvent.click(trigger);
+    const content = screen.getByTestId("stats-popover");
+    await act(async () => Promise.resolve());
+
+    act(() => {
+      content.setAttribute("data-side", "top");
+      trigger.setAttribute("data-radix-popper-side", "top");
+    });
+    await act(async () => Promise.resolve());
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("expires an unpaired statistics content placement synchronously", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    fireEvent.click(screen.getByTestId("stats-button"));
+    const content = screen.getByTestId("stats-popover");
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+
+    try {
+      act(() => content.setAttribute("data-side", "top"));
+      await act(async () => Promise.resolve());
+      now += 1_001;
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+
+    await rerenderStatus(view, props, "fresh-after-unpaired-placement");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("rejects fake Radix-shaped content inserted during a genuine statistics lease", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const attackerContainer = document.createElement("div");
+    document.body.prepend(attackerContainer);
+    const view = await renderStatus(props);
+    const trigger = screen.getByTestId("stats-button");
+    trigger.addEventListener("click", () => {
+      const fakePortal = document.createElement("div");
+      const fakeContent = document.createElement("div");
+      fakePortal.setAttribute("data-radix-popper-content-wrapper", "");
+      fakeContent.id = "fake-stats-content";
+      fakeContent.setAttribute("data-testid", "stats-popover");
+      fakeContent.setAttribute("data-state", "open");
+      fakeContent.setAttribute("role", "dialog");
+      fakeContent.setAttribute("data-side", "bottom");
+      fakeContent.setAttribute("data-align", "start");
+      fakePortal.append(fakeContent);
+      attackerContainer.append(fakePortal);
+    }, { capture: true, once: true });
+
+    fireEvent.click(trigger);
+    expect(screen.getAllByTestId("stats-popover")).toHaveLength(2);
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).not.toHaveBeenCalled();
+
+    await rerenderStatus(view, props, "fresh-after-fake-stats");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("accepts an immediate secondary-pointer disclosure close once", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    const trigger = openIssues();
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 31, { button: 2 }));
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("does not lease a statistics close rejected for a secondary pointer", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    fireEvent.click(screen.getByTestId("stats-button"));
+    await nextTask();
+
+    fireEvent(outside, pointerEvent("pointerdown", 32, { button: 2 }));
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("expires a statistics lease synchronously when its timer is starved", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const trigger = screen.getByTestId("stats-button");
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+    trigger.addEventListener("click", () => {
+      now += 1_001;
+    }, { capture: true, once: true });
+
+    try {
+      fireEvent.click(trigger);
+      fireEvent.click(screen.getByTestId("storage-indicator"));
+      expect(current.storage).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+
+    await rerenderStatus(view, props, "fresh-after-expired-stats");
     fireEvent.click(screen.getByTestId("storage-indicator"));
     expect(current.storage).toHaveBeenCalledOnce();
   });
@@ -956,19 +1196,9 @@ describe("status bar event and replacement claims", () => {
     await nextTask();
     const stopClick = (event: Event) => event.stopImmediatePropagation();
     document.addEventListener("click", stopClick);
-    fireEvent.pointerDown(outside, {
-      button: 0,
-      pointerId: 11,
-      pointerType: "mouse",
-      isPrimary: true,
-    });
-    fireEvent.pointerUp(outside, {
-      button: 0,
-      pointerId: 11,
-      pointerType: "mouse",
-      isPrimary: true,
-    });
-    fireEvent.click(outside, { button: 0 });
+    fireEvent(outside, pointerEvent("pointerdown", 11));
+    fireEvent(outside, pointerEvent("pointerup", 11));
+    fireEvent(outside, pointerEvent("click", 11));
     expect(screen.getByTestId("issues-button")).toHaveAttribute(
       "aria-expanded",
       "true",
@@ -984,40 +1214,20 @@ describe("status bar event and replacement claims", () => {
     await nextTask();
     vi.useFakeTimers();
     try {
-      fireEvent.pointerDown(outside, {
-        button: 0,
-        pointerId: 12,
-        pointerType: "mouse",
-        isPrimary: true,
-      });
+      fireEvent(outside, pointerEvent("pointerdown", 12));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(60_000);
       });
-      fireEvent.pointerUp(outside, {
-        button: 0,
-        pointerId: 12,
-        pointerType: "mouse",
-        isPrimary: true,
-      });
-      fireEvent.click(outside, { button: 0 });
+      fireEvent(outside, pointerEvent("pointerup", 12));
+      fireEvent(outside, pointerEvent("click", 12));
       expect(screen.getByTestId("issues-button")).toHaveAttribute(
         "aria-expanded",
         "true",
       );
 
-      fireEvent.pointerDown(outside, {
-        button: 0,
-        pointerId: 13,
-        pointerType: "mouse",
-        isPrimary: true,
-      });
-      fireEvent.pointerUp(outside, {
-        button: 0,
-        pointerId: 13,
-        pointerType: "mouse",
-        isPrimary: true,
-      });
-      fireEvent.click(outside, { button: 0 });
+      fireEvent(outside, pointerEvent("pointerdown", 13));
+      fireEvent(outside, pointerEvent("pointerup", 13));
+      fireEvent(outside, pointerEvent("click", 13));
       expect(screen.getByTestId("issues-button")).toHaveAttribute(
         "aria-expanded",
         "false",
@@ -1025,6 +1235,116 @@ describe("status bar event and replacement claims", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rejects named MouseEvents, cancelled pointers, and mixed final clicks", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+
+    fireEvent(outside, new MouseEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+    }));
+    fireEvent(outside, new MouseEvent("pointerup", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+    }));
+    fireEvent(outside, new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+      detail: 1,
+    }));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent(outside, pointerEvent("pointerdown", 41));
+    fireEvent(outside, pointerEvent("pointercancel", 41));
+    fireEvent(outside, pointerEvent("pointerup", 41));
+    fireEvent(outside, pointerEvent("click", 41));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent(outside, pointerEvent("pointerdown", 42));
+    fireEvent(outside, pointerEvent("pointerup", 42));
+    fireEvent(outside, new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+      cancelable: true,
+      composed: true,
+      detail: 1,
+    }));
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+    closeIssues();
+    openIssues();
+    await nextTask();
+    await outsidePointerClick(outside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("enforces monotonic gesture and callback deadlines with starved timers", async () => {
+    const current = callbacks();
+    const outside = document.createElement("button");
+    document.body.prepend(outside);
+    await renderStatus(statusProps(current));
+    openIssues();
+    await nextTask();
+    let now = window.performance.now();
+    const clock = vi.spyOn(window.performance, "now").mockImplementation(() => now);
+    const stopClick = (event: Event) => event.stopImmediatePropagation();
+
+    try {
+      fireEvent(outside, pointerEvent("pointerdown", 51));
+      now += 5_001;
+      fireEvent(outside, pointerEvent("pointerup", 51));
+      fireEvent(outside, pointerEvent("click", 51));
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+
+      document.addEventListener("click", stopClick);
+      fireEvent(outside, pointerEvent("pointerdown", 52));
+      fireEvent(outside, pointerEvent("pointerup", 52));
+      fireEvent(outside, pointerEvent("click", 52));
+      now += 1_001;
+      await nextTask();
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
+    } finally {
+      document.removeEventListener("click", stopClick);
+      clock.mockRestore();
+    }
+
+    await outsidePointerClick(outside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("retires callback A before the same DOM publishes callback B", async () => {

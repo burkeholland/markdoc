@@ -141,6 +141,7 @@ interface StatusBarNativeEventPublication {
   pointerId: number | undefined;
   pointerType: string | undefined;
   isPrimary: boolean | undefined;
+  detail: number | undefined;
   extended: boolean;
   claimed: boolean;
   expired: boolean;
@@ -188,12 +189,15 @@ interface StatusBarRelationSeal {
 
 interface StatusBarObserverPublication {
   observer: MutationObserver;
+  target: Node;
+  statsPortal: boolean;
 }
 
 interface StatusBarOutsidePointerChain {
   pointerDown: StatusBarNativeEventPublication;
   pointerUp: StatusBarNativeEventPublication | null;
   click: StatusBarNativeEventPublication | null;
+  expiresAt: number;
   cancelExpiry: () => void;
 }
 
@@ -204,6 +208,18 @@ interface StatusBarStatsMutationLease {
   align: string | null;
   nativeEvents: readonly StatusBarNativeEventPublication[];
   reactEvent: StatusBarReactEventPublication | null;
+  portalObserver: MutationObserver;
+  portalRecords: MutationRecord[];
+  subtreeRecords: MutationRecord[];
+  triggerRecords: MutationRecord[];
+  expiresAt: number;
+  cancelExpiry: () => void;
+}
+
+interface StatusBarStatsPlacementLease {
+  side: string;
+  align: string;
+  expiresAt: number;
   cancelExpiry: () => void;
 }
 
@@ -220,7 +236,12 @@ interface StatusBarGeneration {
   pendingIntents: Set<StatusBarEventIntent>;
   outsidePointerChain: StatusBarOutsidePointerChain | null;
   statsTrigger: HTMLButtonElement;
+  statsContent: HTMLElement | null;
+  statsPortalRoot: HTMLElement | null;
+  statsSide: string | null;
+  statsAlign: string | null;
   statsMutationLease: StatusBarStatsMutationLease | null;
+  statsPlacementLease: StatusBarStatsPlacementLease | null;
   nodeSeals: StatusBarNodeSeal[];
   relationSeals: StatusBarRelationSeal[];
   observers: StatusBarObserverPublication[];
@@ -262,12 +283,24 @@ const STATUS_BAR_NATIVE_EVENTS = [
   "keydown",
   "pointerdown",
   "pointerup",
+  "pointercancel",
   "focusin",
   "focusout",
   "menu.itemSelect",
   "dismissableLayer.pointerDownOutside",
   "dismissableLayer.focusOutside",
 ] as const;
+
+const StatusBarStatsPopover = memo(
+  StatsPopover,
+  (previous, next) => (
+    previous.session === next.session
+    && previous.source === next.source
+    && previous.hydrated === next.hydrated
+    && previous.selection?.from === next.selection?.from
+    && previous.selection?.to === next.selection?.to
+  ),
+);
 
 function createPublicationManager(): StatusBarPublicationManager {
   return {
@@ -368,7 +401,9 @@ function stableAttributes(element: Element) {
   const menuItem = element.getAttribute("role")?.startsWith("menuitem") ?? false;
   const placed = element.hasAttribute("data-radix-popper-content-wrapper")
     || element.hasAttribute("data-testid")
-      && ["status-menu-content", "status-issues-content"].includes(element.getAttribute("data-testid") ?? "");
+      && ["status-menu-content", "status-issues-content", "stats-popover"].includes(
+        element.getAttribute("data-testid") ?? "",
+      );
   return [...element.attributes]
     .filter((attribute) => {
       if (menuItem && ["data-highlighted", "tabindex"].includes(attribute.name)) return false;
@@ -387,17 +422,24 @@ function sealSubtree(
 ) {
   if (seen.has(root)) return;
   seen.add(root);
-  const element = root instanceof Element ? root : null;
-  const data = root instanceof CharacterData ? root.data : null;
+  sealNode(root, seals);
+  root.childNodes.forEach((child) => sealSubtree(child, seals, seen));
+}
+
+function sealNode(
+  node: Node,
+  seals: StatusBarNodeSeal[],
+) {
+  const element = node instanceof Element ? node : null;
+  const data = node instanceof CharacterData ? node.data : null;
   seals.push({
-    node: root,
-    children: Object.freeze([...root.childNodes]),
+    node,
+    children: Object.freeze([...node.childNodes]),
     attributes: element ? Object.freeze(stableAttributes(element)) : null,
     data,
     name: element?.tagName ?? null,
     namespace: element?.namespaceURI ?? null,
   });
-  root.childNodes.forEach((child) => sealSubtree(child, seals, seen));
 }
 
 function sealRelations(
@@ -450,17 +492,27 @@ function nodeSealIsExact(seal: StatusBarNodeSeal, ignoreAttributes = false) {
   );
 }
 
-function refreshStatsNodeSeals(generation: StatusBarGeneration) {
-  generation.nodeSeals = generation.nodeSeals.filter((seal) => (
-    seal.node !== generation.statsTrigger
-    && !generation.statsTrigger.contains(seal.node)
-  ));
-  const seen = new Set(generation.nodeSeals.map((seal) => seal.node));
-  sealSubtree(generation.statsTrigger, generation.nodeSeals, seen);
+function refreshNodeSeals(generation: StatusBarGeneration) {
+  generation.nodeSeals.length = 0;
+  const seen = new Set<Node>();
+  sealSubtree(generation.root, generation.nodeSeals, seen);
+  for (const slot of ["menu-content", "issues-content"]) {
+    const content = generation.controls.get(slot)?.control;
+    if (!content) continue;
+    let top: Node = content;
+    while (top.parentNode && top.parentNode !== generation.ownerDocument.body)
+      top = top.parentNode;
+    sealSubtree(top, generation.nodeSeals, seen);
+  }
+  if (generation.statsPortalRoot)
+    sealNode(generation.statsPortalRoot, generation.nodeSeals);
 }
 
 function validateGeneration(generation: StatusBarGeneration, drain = true): boolean {
   if (generation.retired) return false;
+  const placementLease = generation.statsPlacementLease;
+  if (placementLease && !statsPlacementLeaseIsCurrent(generation, placementLease))
+    return false;
   if (!authorityIsExact(generation.authority)) {
     retireGeneration(generation);
     return false;
@@ -468,12 +520,30 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
-      if (!mutationsAreOwned(generation, records)) {
+      const lease = generation.statsMutationLease;
+      const deferredStatsClose = Boolean(
+        records.length > 0
+        && publication.statsPortal
+        && lease
+        && !lease.expectedOpen
+        && lease.triggerRecords.length > 0,
+      );
+      if (deferredStatsClose && lease) {
+        lease.subtreeRecords.push(...records);
+      } else if (!mutationsAreOwned(generation, records)) {
         retireGeneration(generation);
         return false;
       }
       if (records.some((record) => record.type === "childList"))
         refreshRelationSeals(generation);
+    }
+    const lease = generation.statsMutationLease;
+    if (lease && statsMutationLeaseIsCurrent(generation, lease)) {
+      lease.portalRecords.push(...lease.portalObserver.takeRecords());
+      if (lease.portalRecords.length > 0 && lease.triggerRecords.length === 0) {
+        retireGeneration(generation);
+        return false;
+      }
     }
   }
   if (
@@ -484,8 +554,26 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
     retireGeneration(generation);
     return false;
   }
+  const currentPlacementLease = generation.statsPlacementLease;
+  if (
+    currentPlacementLease
+    && !statsPendingPlacementIsExact(generation, currentPlacementLease)
+  ) {
+    retireGeneration(generation);
+    return false;
+  }
+  const statsTransition = generation.statsMutationLease?.triggerRecords.length
+    ? generation.statsMutationLease
+    : null;
   for (const seal of generation.nodeSeals) {
-    if (!nodeSealIsExact(seal)) {
+    const transitionAttribute = Boolean(
+      statsTransition
+      && (
+        seal.node === generation.statsTrigger
+        || generation.statsPortalRoot?.contains(seal.node)
+      ),
+    );
+    if (!nodeSealIsExact(seal, transitionAttribute)) {
       retireGeneration(generation);
       return false;
     }
@@ -499,15 +587,34 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   return relationsAreExact;
 }
 
-function mutationIsRadixOwned(record: MutationRecord) {
+function isStatusBarFocusGuard(node: Node) {
+  return (
+    node instanceof HTMLElement
+    && node.tagName === "SPAN"
+    && node.hasAttribute("data-radix-focus-guard")
+  );
+}
+
+function mutationIsRadixOwned(
+  generation: StatusBarGeneration,
+  record: MutationRecord,
+) {
   if (record.type === "childList") {
     const changed = [...record.addedNodes, ...record.removedNodes];
+    if (
+      generation.statsMutationLease
+      && changed.length > 0
+      && changed.every((node) => (
+        isStatusBarFocusGuard(node)
+        || node instanceof HTMLElement
+          && node.hasAttribute("data-radix-popper-content-wrapper")
+      ))
+    )
+      return true;
     return changed.length > 0 && changed.every((node) => (
-      node instanceof HTMLElement
-      && (
-        node.tagName === "SPAN" && node.hasAttribute("data-radix-focus-guard")
-        || node.hasAttribute("data-radix-popper-content-wrapper")
-      )
+      isStatusBarFocusGuard(node)
+      || node instanceof HTMLElement
+        && node.hasAttribute("data-radix-popper-content-wrapper")
     ));
   }
   if (record.type !== "attributes" || !(record.target instanceof Element) || !record.attributeName)
@@ -525,22 +632,196 @@ function mutationIsRadixOwned(record: MutationRecord) {
     && ["style", "data-side", "data-align"].includes(record.attributeName)
   )
     return true;
-  if (["data-radix-popper-side", "data-radix-popper-align"].includes(record.attributeName))
+  if (
+    record.target === generation.statsPortalRoot
+    && record.attributeName === "style"
+  )
     return true;
+  if (
+    record.target === generation.statsContent
+    && record.attributeName === "style"
+    && statsBoundContentIsExact(generation)
+  )
+    return true;
+  if (["data-radix-popper-side", "data-radix-popper-align"].includes(record.attributeName)) {
+    return true;
+  }
   return false;
 }
 
-function statsContentIsExact(
-  generation: StatusBarGeneration,
-  controlsId: string,
-) {
-  const content = generation.ownerDocument.getElementById(controlsId);
+function statsBoundContentIsExact(generation: StatusBarGeneration) {
+  const { statsContent: content, statsPortalRoot: portal } = generation;
+  const controlsId = generation.statsTrigger.getAttribute("aria-controls");
   return (
-    content instanceof HTMLElement
+    content !== null
+    && portal !== null
+    && controlsId !== null
+    && generation.ownerDocument.getElementById(controlsId) === content
+    && [...generation.ownerDocument.querySelectorAll<HTMLElement>("[id]")]
+      .filter((element) => element.id === controlsId).length === 1
     && content.getAttribute("data-testid") === "stats-popover"
     && content.getAttribute("role") === "dialog"
     && content.getAttribute("data-state") === "open"
     && content.isConnected
+    && content.ownerDocument === generation.ownerDocument
+    && content.parentElement === portal
+    && portal.parentElement === generation.ownerDocument.body
+    && portal.hasAttribute("data-radix-popper-content-wrapper")
+    && portal.isConnected
+  );
+}
+
+function findStatsPortalBoundary(
+  generation: StatusBarGeneration,
+  controlsId: string,
+) {
+  const content = generation.ownerDocument.getElementById(controlsId);
+  const portal = content?.parentElement;
+  return (
+    content instanceof HTMLElement
+    && portal instanceof HTMLElement
+    && content.getAttribute("data-testid") === "stats-popover"
+    && content.getAttribute("role") === "dialog"
+    && content.getAttribute("data-state") === "open"
+    && content.ownerDocument === generation.ownerDocument
+    && content.isConnected
+    && portal.parentElement === generation.ownerDocument.body
+    && portal.hasAttribute("data-radix-popper-content-wrapper")
+    && portal.ownerDocument === generation.ownerDocument
+    && portal.isConnected
+    && [...generation.ownerDocument.querySelectorAll<HTMLElement>("[id]")]
+      .filter((element) => element.id === controlsId).length === 1
+      ? { content, portal }
+      : null
+  );
+}
+
+function clearStatsPlacementLease(generation: StatusBarGeneration) {
+  const lease = generation.statsPlacementLease;
+  if (!lease) return;
+  lease.cancelExpiry();
+  generation.statsPlacementLease = null;
+}
+
+function statsPlacementLeaseIsCurrent(
+  generation: StatusBarGeneration,
+  lease: StatusBarStatsPlacementLease,
+) {
+  if (
+    generation.statsPlacementLease !== lease
+    || statusBarNow(generation) >= lease.expiresAt
+  ) {
+    if (generation.statsPlacementLease === lease)
+      retireGeneration(generation);
+    return false;
+  }
+  return true;
+}
+
+function statsPendingPlacementIsExact(
+  generation: StatusBarGeneration,
+  lease: StatusBarStatsPlacementLease,
+) {
+  const triggerSide = generation.statsTrigger.getAttribute("data-radix-popper-side");
+  const triggerAlign = generation.statsTrigger.getAttribute("data-radix-popper-align");
+  return (
+    statsBoundContentIsExact(generation)
+    && generation.statsContent?.getAttribute("data-side") === lease.side
+    && generation.statsContent.getAttribute("data-align") === lease.align
+    && (
+      triggerSide === generation.statsSide
+      || triggerSide === lease.side
+    )
+    && (
+      triggerAlign === generation.statsAlign
+      || triggerAlign === lease.align
+    )
+  );
+}
+
+function beginStatsPlacementLease(
+  generation: StatusBarGeneration,
+  side: string,
+  align: string,
+) {
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (
+    !ownerWindow
+    || generation.statsPlacementLease
+    || generation.statsMutationLease
+  )
+    return false;
+  const lease: StatusBarStatsPlacementLease = {
+    side,
+    align,
+    expiresAt: statusBarNow(generation) + STATS_MUTATION_LEASE_MS,
+    cancelExpiry: () => {},
+  };
+  generation.statsPlacementLease = lease;
+  const timer = ownerWindow.setTimeout(() => {
+    if (generation.statsPlacementLease === lease)
+      retireGeneration(generation);
+  }, STATS_MUTATION_LEASE_MS);
+  lease.cancelExpiry = () => ownerWindow.clearTimeout(timer);
+  return true;
+}
+
+function statsContentPlacementMutationIsExact(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  const names = records.map((record) => record.attributeName);
+  const side = generation.statsContent?.getAttribute("data-side");
+  const align = generation.statsContent?.getAttribute("data-align");
+  const triggerSide = generation.statsTrigger.getAttribute("data-radix-popper-side");
+  const triggerAlign = generation.statsTrigger.getAttribute("data-radix-popper-align");
+  if (
+    generation.statsPlacementLease
+    || generation.statsMutationLease
+    || !statsBoundContentIsExact(generation)
+    || !side
+    || !align
+    || side === generation.statsSide && align === generation.statsAlign
+    || records.length < 1
+    || records.length > 2
+    || new Set(names).size !== records.length
+    || records.some((record) => (
+      record.type !== "attributes"
+      || record.target !== generation.statsContent
+      || record.attributeNamespace !== null
+      || !["data-side", "data-align"].includes(record.attributeName ?? "")
+      || record.oldValue !== (
+        record.attributeName === "data-side"
+          ? generation.statsSide
+          : generation.statsAlign
+      )
+    ))
+    || (!names.includes("data-side") && side !== generation.statsSide)
+    || (!names.includes("data-align") && align !== generation.statsAlign)
+    || ![generation.statsSide, side].includes(triggerSide)
+    || ![generation.statsAlign, align].includes(triggerAlign)
+  )
+    return false;
+  return beginStatsPlacementLease(generation, side, align);
+}
+
+function drainStatsContentPlacementRecords(generation: StatusBarGeneration) {
+  const publication = generation.observers.find((candidate) => (
+    candidate.statsPortal
+    && candidate.target === generation.statsContent
+  ));
+  if (!publication) return true;
+  const records = publication.observer.takeRecords();
+  const placementRecords = records.filter((record) => (
+    ["data-side", "data-align"].includes(record.attributeName ?? "")
+  ));
+  const otherRecords = records.filter((record) => !placementRecords.includes(record));
+  return (
+    otherRecords.every((record) => mutationIsRadixOwned(generation, record))
+    && (
+      placementRecords.length === 0
+      || statsContentPlacementMutationIsExact(generation, placementRecords)
+    )
   );
 }
 
@@ -549,9 +830,6 @@ function statsTriggerStateIsExact(generation: StatusBarGeneration, open: boolean
   const controlsId = trigger.getAttribute("aria-controls");
   const side = trigger.getAttribute("data-radix-popper-side");
   const align = trigger.getAttribute("data-radix-popper-align");
-  const content = controlsId
-    ? generation.ownerDocument.getElementById(controlsId)
-    : null;
   return (
     trigger.ownerDocument === generation.ownerDocument
     && trigger.parentElement === generation.root
@@ -567,11 +845,19 @@ function statsTriggerStateIsExact(generation: StatusBarGeneration, open: boolean
         controlsId
         && side
         && align
-        && statsContentIsExact(generation, controlsId)
-        && content?.getAttribute("data-side") === side
-        && content.getAttribute("data-align") === align,
+        && statsBoundContentIsExact(generation)
+        && generation.statsContent?.getAttribute("data-side") === side
+        && generation.statsContent.getAttribute("data-align") === align
+        && generation.statsSide === side
+        && generation.statsAlign === align,
       )
-      : controlsId === null && side === null && align === null)
+      : controlsId === null
+        && side === null
+        && align === null
+        && generation.statsContent === null
+        && generation.statsPortalRoot === null
+        && generation.statsSide === null
+        && generation.statsAlign === null)
   );
 }
 
@@ -579,6 +865,8 @@ function clearStatsMutationLease(generation: StatusBarGeneration, claim: boolean
   const lease = generation.statsMutationLease;
   if (!lease) return;
   lease.cancelExpiry();
+  lease.portalObserver.takeRecords();
+  lease.portalObserver.disconnect();
   generation.statsMutationLease = null;
   lease.nativeEvents.forEach((event) => {
     event.extended = false;
@@ -601,37 +889,225 @@ function clearStatsMutationLease(generation: StatusBarGeneration, claim: boolean
   }
 }
 
+function expireStatsMutationLease(
+  generation: StatusBarGeneration,
+  lease: StatusBarStatsMutationLease,
+) {
+  lease.portalRecords.push(...lease.portalObserver.takeRecords());
+  const mutated = (
+    lease.triggerRecords.length > 0
+    || lease.subtreeRecords.length > 0
+    || lease.portalRecords.length > 0
+  );
+  clearStatsMutationLease(generation, false);
+  if (mutated) retireGeneration(generation);
+}
+
+function statusBarNow(generation: StatusBarGeneration) {
+  return generation.ownerDocument.defaultView?.performance.now()
+    ?? Number.POSITIVE_INFINITY;
+}
+
+function statsMutationLeaseIsCurrent(
+  generation: StatusBarGeneration,
+  lease: StatusBarStatsMutationLease,
+) {
+  if (
+    generation.statsMutationLease !== lease
+    || statusBarNow(generation) >= lease.expiresAt
+  ) {
+    if (generation.statsMutationLease === lease)
+      expireStatsMutationLease(generation, lease);
+    return false;
+  }
+  return true;
+}
+
+function takeStatsPortalMutationRecords(lease: StatusBarStatsMutationLease) {
+  lease.portalRecords.push(...lease.portalObserver.takeRecords());
+  return lease.portalRecords.splice(0);
+}
+
+function drainStatsAncestorRecords(generation: StatusBarGeneration) {
+  for (const publication of generation.observers) {
+    if (publication.target === generation.ownerDocument.body)
+      publication.observer.takeRecords();
+  }
+}
+
+function statsOpeningPortalIsExact(
+  generation: StatusBarGeneration,
+  controlsId: string,
+  records: readonly MutationRecord[],
+) {
+  const body = generation.ownerDocument.body;
+  const topAdditions = records.flatMap((record) => (
+    record.type === "childList" && record.target === body
+      ? [...record.addedNodes].filter((node) => !isStatusBarFocusGuard(node))
+      : []
+  ));
+  const changed = records.flatMap((record) => (
+    record.type === "childList"
+      ? [...record.addedNodes, ...record.removedNodes]
+      : []
+  ));
+  const portal = topAdditions.length === 1
+    && topAdditions[0] instanceof HTMLElement
+    && topAdditions[0].hasAttribute("data-radix-popper-content-wrapper")
+      ? topAdditions[0]
+      : null;
+  const boundary = findStatsPortalBoundary(generation, controlsId);
+  const content = boundary?.content ?? null;
+  return (
+    records.length > 0
+    && records.every((record) => record.type === "childList")
+    && portal !== null
+    && boundary?.portal === portal
+    && records.every((record) => (
+      [...record.removedNodes].every(isStatusBarFocusGuard)
+      && [...record.addedNodes].every((node) => (
+        isStatusBarFocusGuard(node)
+        || node === portal
+        || portal.contains(node)
+      ))
+    ))
+    && changed.some((node) => node === portal)
+      ? { content, portal }
+      : null
+  );
+}
+
+function statsClosingPortalIsExact(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  const portal = generation.statsPortalRoot;
+  if (!portal || !generation.statsContent || records.length === 0) return false;
+  const body = generation.ownerDocument.body;
+  const topRemovals = records.flatMap((record) => (
+    record.type === "childList" && record.target === body
+      ? [...record.removedNodes].filter((node) => !isStatusBarFocusGuard(node))
+      : []
+  ));
+  return (
+    topRemovals.length === 1
+    && topRemovals[0] === portal
+    && records.every((record) => (
+      record.type === "childList"
+      && [...record.addedNodes].every(isStatusBarFocusGuard)
+      && [...record.removedNodes].every((node) => (
+        isStatusBarFocusGuard(node)
+        || node === portal
+        || portal.contains(node)
+      ))
+    ))
+    && !portal.isConnected
+    && !generation.statsContent.isConnected
+  );
+}
+
+function statsClosingSubtreeRecordsAreExact(
+  generation: StatusBarGeneration,
+  deferredRecords: readonly MutationRecord[],
+) {
+  const records = [
+    ...deferredRecords,
+    ...generation.observers
+      .filter(({ statsPortal }) => statsPortal)
+      .flatMap(({ observer }) => observer.takeRecords()),
+  ];
+  return records.every((record) => (
+    record.type === "attributes"
+    && record.attributeNamespace === null
+    && (
+      record.target === generation.statsContent
+        && (
+          record.attributeName === "data-state"
+            ? record.oldValue === "open"
+              && generation.statsContent?.getAttribute("data-state") === "closed"
+          : ["style", "data-side", "data-align"].includes(record.attributeName ?? "")
+        )
+      || record.target === generation.statsPortalRoot
+        && ["style", "data-side", "data-align"].includes(record.attributeName ?? "")
+    )
+  ));
+}
+
+function statsPlacementMutationIsExact(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  if (!drainStatsContentPlacementRecords(generation)) return false;
+  const lease = generation.statsPlacementLease;
+  const oldSide = generation.statsSide;
+  const oldAlign = generation.statsAlign;
+  const side = generation.statsTrigger.getAttribute("data-radix-popper-side");
+  const align = generation.statsTrigger.getAttribute("data-radix-popper-align");
+  if (!(
+    !generation.statsMutationLease
+    && lease
+    && statsPlacementLeaseIsCurrent(generation, lease)
+    && statsBoundContentIsExact(generation)
+    && side
+    && align
+    && generation.statsContent?.getAttribute("data-side") === side
+    && generation.statsContent.getAttribute("data-align") === align
+    && records.length >= 1
+    && records.length <= 2
+    && new Set(records.map((record) => record.attributeName)).size === records.length
+    && records.every((record) => (
+      record.type !== "attributes"
+        ? false
+        : record.target === generation.statsTrigger
+          && record.attributeNamespace === null
+          && ["data-radix-popper-side", "data-radix-popper-align"].includes(
+        record.attributeName ?? "",
+      )
+          && record.oldValue === (
+            record.attributeName === "data-radix-popper-side"
+              ? oldSide
+              : oldAlign
+          )
+    ))
+  )) {
+    return false;
+  }
+  clearStatsPlacementLease(generation);
+  generation.statsSide = side;
+  generation.statsAlign = align;
+  return true;
+}
+
 function statsMutationIsExact(
   generation: StatusBarGeneration,
   records: readonly MutationRecord[],
 ) {
   const lease = generation.statsMutationLease;
   const triggerSeal = generation.nodeSeals.find((seal) => seal.node === generation.statsTrigger);
+  const expectedNames = [
+    "aria-expanded",
+    "aria-controls",
+    "data-state",
+    "data-radix-popper-side",
+    "data-radix-popper-align",
+  ];
   if (
     !lease
+    || !statsMutationLeaseIsCurrent(generation, lease)
     || !triggerSeal?.attributes
-    || records.length !== 5
+    || records.length === 0
     || records.some((record) => (
       record.type !== "attributes"
       || record.target !== generation.statsTrigger
       || record.attributeNamespace !== null
     ))
-    || !arraysAreIdentical(
-      records.map((record) => record.attributeName),
-      [
-        "aria-expanded",
-        "aria-controls",
-        "data-state",
-        "data-radix-popper-side",
-        "data-radix-popper-align",
-      ],
-    )
     || !lease.nativeEvents.every((event) => (
       (event.phase === Event.CAPTURING_PHASE || event.phase === Event.AT_TARGET)
       && nativeEventIsExact(
         event,
         event.phase,
-        event.type === "keydown" && event.code === "KeyC",
+        event.type === "keydown"
+          && (event.code === "KeyC" || event.key === "Escape"),
       )
     ))
     || Boolean(lease.reactEvent && !reactEventIsExact(lease.reactEvent))
@@ -642,6 +1118,15 @@ function statsMutationIsExact(
   ) {
     return false;
   }
+  const triggerRecords = [...lease.triggerRecords, ...records];
+  if (
+    triggerRecords.length > expectedNames.length
+    || !arraysAreIdentical(
+      triggerRecords.map((record) => record.attributeName),
+      expectedNames.slice(0, triggerRecords.length),
+    )
+  )
+    return false;
   const oldOpen = !lease.expectedOpen;
   const oldValues = [
     String(oldOpen),
@@ -650,21 +1135,24 @@ function statsMutationIsExact(
     oldOpen ? lease.side : null,
     oldOpen ? lease.align : null,
   ];
-  if (!arraysAreIdentical(records.map((record) => record.oldValue), oldValues))
+  if (!arraysAreIdentical(
+    triggerRecords.map((record) => record.oldValue),
+    oldValues.slice(0, triggerRecords.length),
+  ))
     return false;
+  lease.triggerRecords.push(...records);
   const currentControlsId = generation.statsTrigger.getAttribute("aria-controls");
-  if (
-    !statsTriggerStateIsExact(generation, lease.expectedOpen)
-    || (lease.expectedOpen ? !currentControlsId : currentControlsId !== null)
-  )
-    return false;
   const expectedAttributes = new Map(triggerSeal.attributes);
-  expectedAttributes.set("aria-expanded", String(lease.expectedOpen));
-  expectedAttributes.set("data-state", lease.expectedOpen ? "open" : "closed");
-  if (lease.expectedOpen && currentControlsId)
-    expectedAttributes.set("aria-controls", currentControlsId);
-  else
-    expectedAttributes.delete("aria-controls");
+  if (triggerRecords.length >= 1)
+    expectedAttributes.set("aria-expanded", String(lease.expectedOpen));
+  if (triggerRecords.length >= 2) {
+    if (lease.expectedOpen && currentControlsId)
+      expectedAttributes.set("aria-controls", currentControlsId);
+    else
+      expectedAttributes.delete("aria-controls");
+  }
+  if (triggerRecords.length >= 3)
+    expectedAttributes.set("data-state", lease.expectedOpen ? "open" : "closed");
   const expected = [...expectedAttributes]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, value]) => `${name}\u0000${value}`);
@@ -673,8 +1161,35 @@ function statsMutationIsExact(
     expected,
   ))
     return false;
+  if (triggerRecords.length < expectedNames.length) return true;
+  const portalRecords = takeStatsPortalMutationRecords(lease);
+  const openingPortal = lease.expectedOpen && currentControlsId
+    ? statsOpeningPortalIsExact(generation, currentControlsId, portalRecords)
+    : null;
+  if (
+    (lease.expectedOpen ? !currentControlsId : currentControlsId !== null)
+    || (
+      lease.expectedOpen
+        ? !openingPortal
+        : !statsClosingPortalIsExact(generation, portalRecords)
+          || !statsClosingSubtreeRecordsAreExact(generation, lease.subtreeRecords)
+    )
+  )
+    return false;
+  drainStatsAncestorRecords(generation);
   clearStatsMutationLease(generation, true);
-  refreshStatsNodeSeals(generation);
+  generation.statsContent = openingPortal?.content ?? null;
+  generation.statsPortalRoot = openingPortal?.portal ?? null;
+  generation.statsSide = lease.expectedOpen
+    ? generation.statsTrigger.getAttribute("data-radix-popper-side")
+    : null;
+  generation.statsAlign = lease.expectedOpen
+    ? generation.statsTrigger.getAttribute("data-radix-popper-align")
+    : null;
+  syncStatsPortalObserver(generation);
+  if (!statsTriggerStateIsExact(generation, lease.expectedOpen)) return false;
+  refreshNodeSeals(generation);
+  refreshRelationSeals(generation);
   return true;
 }
 
@@ -687,10 +1202,28 @@ function mutationsAreOwned(
     record.target === generation.statsTrigger
     || generation.statsTrigger.contains(record.target)
   ));
-  const otherRecords = records.filter((record) => !statsRecords.includes(record));
-  if (otherRecords.some((record) => !mutationIsRadixOwned(record)))
+  const statsContentPlacementRecords = records.filter((record) => (
+    record.target === generation.statsContent
+    && ["data-side", "data-align"].includes(record.attributeName ?? "")
+  ));
+  const otherRecords = records.filter((record) => (
+    !statsRecords.includes(record)
+    && !statsContentPlacementRecords.includes(record)
+  ));
+  if (otherRecords.some((record) => !mutationIsRadixOwned(generation, record)))
     return false;
-  return statsRecords.length === 0 || statsMutationIsExact(generation, statsRecords);
+  if (
+    statsContentPlacementRecords.length > 0
+    && !statsContentPlacementMutationIsExact(
+      generation,
+      statsContentPlacementRecords,
+    )
+  )
+    return false;
+  if (statsRecords.length === 0) return true;
+  return generation.statsMutationLease
+    ? statsMutationIsExact(generation, statsRecords)
+    : statsPlacementMutationIsExact(generation, statsRecords);
 }
 
 function refreshRelationSeals(generation: StatusBarGeneration) {
@@ -709,6 +1242,14 @@ function refreshRelationSeals(generation: StatusBarGeneration) {
     while (top.parentNode && top.parentNode !== generation.ownerDocument.body) top = top.parentNode;
     sealRelations(top, generation.ownerDocument, generation.relationSeals, seen);
   }
+  if (generation.statsPortalRoot) {
+    sealRelations(
+      generation.statsPortalRoot,
+      generation.ownerDocument,
+      generation.relationSeals,
+      seen,
+    );
+  }
 }
 
 function retireGeneration(generation: StatusBarGeneration) {
@@ -719,6 +1260,7 @@ function retireGeneration(generation: StatusBarGeneration) {
   });
   generation.pendingIntents.clear();
   clearStatsMutationLease(generation, false);
+  clearStatsPlacementLease(generation);
   retireOutsidePointerChain(generation);
   generation.removeEventListeners.forEach((remove) => remove());
   generation.removeEventListeners.length = 0;
@@ -746,18 +1288,64 @@ function retireManagerGeneration(
   manager.epoch += 1;
 }
 
+function observeGenerationTarget(
+  generation: StatusBarGeneration,
+  target: Node,
+  options: MutationObserverInit,
+  statsPortal = false,
+) {
+  const observer = new MutationObserver((records) => {
+    const lease = generation.statsMutationLease;
+    if (
+      records.length > 0
+      && statsPortal
+      && lease
+      && !lease.expectedOpen
+      && lease.triggerRecords.length > 0
+    ) {
+      lease.subtreeRecords.push(...records);
+    } else if (!mutationsAreOwned(generation, records)) {
+      retireGeneration(generation);
+    } else if (records.some((record) => record.type === "childList")) {
+      refreshRelationSeals(generation);
+    }
+  });
+  observer.observe(target, options);
+  generation.observers.push({ observer, target, statsPortal });
+}
+
+function syncStatsPortalObserver(generation: StatusBarGeneration) {
+  const current = generation.observers.filter(({ statsPortal }) => statsPortal);
+  const targets = new Set(current.map(({ target }) => target));
+  if (
+    current.length === 2
+    && generation.statsPortalRoot
+    && generation.statsContent
+    && targets.has(generation.statsPortalRoot)
+    && targets.has(generation.statsContent)
+  )
+    return;
+  current.forEach((publication) => {
+    const { observer } = publication;
+    observer.takeRecords();
+    observer.disconnect();
+    generation.observers.splice(generation.observers.indexOf(publication), 1);
+  });
+  if (!generation.statsPortalRoot || !generation.statsContent) return;
+  observeGenerationTarget(generation, generation.statsPortalRoot, {
+    attributes: true,
+    attributeOldValue: true,
+    childList: true,
+  }, true);
+  observeGenerationTarget(generation, generation.statsContent, {
+    attributes: true,
+    attributeOldValue: true,
+  }, true);
+}
+
 function observeGeneration(generation: StatusBarGeneration) {
-  const observe = (target: Node, options: MutationObserverInit) => {
-    const observer = new MutationObserver((records) => {
-      if (!mutationsAreOwned(generation, records)) {
-        retireGeneration(generation);
-      } else if (records.some((record) => record.type === "childList")) {
-        refreshRelationSeals(generation);
-      }
-    });
-    observer.observe(target, options);
-    generation.observers.push({ observer });
-  };
+  const observe = (target: Node, options: MutationObserverInit) =>
+    observeGenerationTarget(generation, target, options);
   const subtreeRoots = [generation.root];
   for (const slot of ["menu-content", "issues-content"]) {
     const content = generation.controls.get(slot)?.control;
@@ -802,6 +1390,7 @@ function replaceOutsidePointerExpiry(
   const ownerWindow = generation.ownerDocument.defaultView;
   if (!ownerWindow) return false;
   chain.cancelExpiry();
+  chain.expiresAt = statusBarNow(generation) + delay;
   const timer = ownerWindow.setTimeout(() => {
     if (generation.outsidePointerChain === chain)
       retireOutsidePointerChain(generation);
@@ -810,26 +1399,46 @@ function replaceOutsidePointerExpiry(
   return true;
 }
 
+function outsidePointerChainIsCurrent(
+  generation: StatusBarGeneration,
+  chain: StatusBarOutsidePointerChain,
+) {
+  if (
+    generation.outsidePointerChain !== chain
+    || statusBarNow(generation) >= chain.expiresAt
+  ) {
+    retireOutsidePointerChain(generation);
+    return false;
+  }
+  return true;
+}
+
 function pointerChainEventIsExact(
+  generation: StatusBarGeneration,
   pointerDown: StatusBarNativeEventPublication,
   next: StatusBarNativeEventPublication,
 ) {
+  const PointerEventConstructor =
+    generation.ownerDocument.defaultView?.PointerEvent;
+  if (!PointerEventConstructor) return false;
   return (
-    next.target === pointerDown.target
+    pointerDown.event instanceof PointerEventConstructor
+    && next.event instanceof PointerEventConstructor
+    && pointerDown.phase === Event.CAPTURING_PHASE
+    && next.phase === Event.CAPTURING_PHASE
+    && pointerDown.type === "pointerdown"
+    && (next.type === "pointerup" || next.type === "click")
+    && next.target === pointerDown.target
     && arraysAreIdentical(next.path, pointerDown.path)
     && next.button === pointerDown.button
     && next.ctrlKey === pointerDown.ctrlKey
     && next.altKey === pointerDown.altKey
     && next.metaKey === pointerDown.metaKey
     && next.shiftKey === pointerDown.shiftKey
-    && (
-      next.type !== "pointerup"
-      || (
-        next.pointerId === pointerDown.pointerId
-        && next.pointerType === pointerDown.pointerType
-        && next.isPrimary === pointerDown.isPrimary
-      )
-    )
+    && next.pointerId === pointerDown.pointerId
+    && next.pointerType === pointerDown.pointerType
+    && next.isPrimary === pointerDown.isPrimary
+    && (next.type !== "click" || typeof next.detail === "number" && next.detail > 0)
   );
 }
 
@@ -842,6 +1451,8 @@ function beginStatsMutationLease(
   const currentOpen = !expectedOpen;
   const controlsId = generation.statsTrigger.getAttribute("aria-controls");
   if (
+    generation.statsPlacementLease
+    ||
     !statsTriggerStateIsExact(generation, currentOpen)
     || nativeEvents.length === 0
     || nativeEvents.some((event) => (
@@ -863,6 +1474,11 @@ function beginStatsMutationLease(
   clearStatsMutationLease(generation, false);
   const ownerWindow = generation.ownerDocument.defaultView;
   if (!ownerWindow) return;
+  const portalRecords: MutationRecord[] = [];
+  const portalObserver = new MutationObserver((records) => {
+    if (generation.statsMutationLease === lease)
+      portalRecords.push(...records);
+  });
   const lease: StatusBarStatsMutationLease = {
     expectedOpen,
     controlsId,
@@ -870,8 +1486,17 @@ function beginStatsMutationLease(
     align: generation.statsTrigger.getAttribute("data-radix-popper-align"),
     nativeEvents: Object.freeze([...nativeEvents]),
     reactEvent,
+    portalObserver,
+    portalRecords,
+    subtreeRecords: [],
+    triggerRecords: [],
+    expiresAt: statusBarNow(generation) + STATS_MUTATION_LEASE_MS,
     cancelExpiry: () => {},
   };
+  portalObserver.observe(generation.ownerDocument.body, {
+    childList: true,
+    subtree: true,
+  });
   nativeEvents.forEach((event) => {
     event.extended = true;
     event.expired = false;
@@ -879,7 +1504,7 @@ function beginStatsMutationLease(
   generation.statsMutationLease = lease;
   const timer = ownerWindow.setTimeout(() => {
     if (generation.statsMutationLease === lease)
-      clearStatsMutationLease(generation, false);
+      expireStatsMutationLease(generation, lease);
   }, STATS_MUTATION_LEASE_MS);
   lease.cancelExpiry = () => ownerWindow.clearTimeout(timer);
 }
@@ -907,6 +1532,9 @@ function armStatsMutationFromNative(
   generation: StatusBarGeneration,
   publication: StatusBarNativeEventPublication,
 ) {
+  const activeLease = generation.statsMutationLease;
+  if (activeLease && !statsMutationLeaseIsCurrent(generation, activeLease))
+    return;
   const expanded = generation.statsTrigger.getAttribute("aria-expanded");
   if (expanded !== "true" && expanded !== "false") return;
   const open = expanded === "true";
@@ -920,13 +1548,11 @@ function armStatsMutationFromNative(
     beginStatsMutationLease(generation, !open, [publication], null);
     return;
   }
-  const controlsId = generation.statsTrigger.getAttribute("aria-controls");
-  if (!controlsId) return;
-  const content = generation.ownerDocument.getElementById(controlsId);
+  const content = generation.statsContent;
   if (
     !open
     || !(content instanceof HTMLElement)
-    || !statsContentIsExact(generation, controlsId)
+    || !statsBoundContentIsExact(generation)
   )
     return;
   if (
@@ -957,11 +1583,23 @@ function armStatsMutationFromNative(
     return;
   const nativeEvents = [publication, original];
   if (publication.type === "dismissableLayer.pointerDownOutside") {
+    const ownerWindow = generation.ownerDocument.defaultView;
+    const PointerEventConstructor = ownerWindow?.PointerEvent;
+    if (
+      !PointerEventConstructor
+      || !(original.event instanceof PointerEventConstructor)
+      || original.type !== "pointerdown"
+      || original.phase !== Event.CAPTURING_PHASE
+      || original.isPrimary !== true
+    )
+      return;
+    if (original.button !== 0) {
+      return;
+    }
     const chain = generation.outsidePointerChain;
     if (
-      original.type !== "pointerdown"
-      || original.button !== 0
-      || chain?.pointerDown !== original
+      chain?.pointerDown !== original
+      || !outsidePointerChainIsCurrent(generation, chain)
       || !chain.pointerUp
       || !chain.click
       || !nativeEventIsExact(chain.pointerUp, chain.pointerUp.phase)
@@ -1000,18 +1638,32 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
     pointerId: "pointerId" in event && typeof event.pointerId === "number" ? event.pointerId : undefined,
     pointerType: "pointerType" in event && typeof event.pointerType === "string" ? event.pointerType : undefined,
     isPrimary: "isPrimary" in event && typeof event.isPrimary === "boolean" ? event.isPrimary : undefined,
+    detail: "detail" in event && typeof event.detail === "number" ? event.detail : undefined,
     extended: false,
     claimed: false,
     expired: false,
   };
   generation.nativeEvents.set(event, publication);
   let preserveForOutside = false;
-  if (publication.type === "pointerdown" && publication.button === 0) {
+  const ownerWindow = generation.ownerDocument.defaultView;
+  const PointerEventConstructor = ownerWindow?.PointerEvent;
+  const genuinePointer = Boolean(
+    PointerEventConstructor
+    && event instanceof PointerEventConstructor
+    && publication.phase === Event.CAPTURING_PHASE,
+  );
+  if (
+    publication.type === "pointerdown"
+    && genuinePointer
+    && publication.button === 0
+    && publication.isPrimary === true
+  ) {
     retireOutsidePointerChain(generation);
     const chain: StatusBarOutsidePointerChain = {
       pointerDown: publication,
       pointerUp: null,
       click: null,
+      expiresAt: 0,
       cancelExpiry: () => {},
     };
     generation.outsidePointerChain = chain;
@@ -1019,14 +1671,17 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
       preserveForOutside = true;
     else
       retireOutsidePointerChain(generation);
+  } else if (publication.type === "pointercancel") {
+    retireOutsidePointerChain(generation);
   } else if (publication.type === "pointerup") {
     const chain = generation.outsidePointerChain;
     if (
       chain
+      && outsidePointerChainIsCurrent(generation, chain)
       && !chain.pointerUp
       && !chain.click
       && publication.timeStamp >= chain.pointerDown.timeStamp
-      && pointerChainEventIsExact(chain.pointerDown, publication)
+      && pointerChainEventIsExact(generation, chain.pointerDown, publication)
     ) {
       chain.pointerUp = publication;
       preserveForOutside = true;
@@ -1037,9 +1692,10 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
     const chain = generation.outsidePointerChain;
     if (
       chain?.pointerUp
+      && outsidePointerChainIsCurrent(generation, chain)
       && !chain.click
       && publication.timeStamp >= chain.pointerUp.timeStamp
-      && pointerChainEventIsExact(chain.pointerDown, publication)
+      && pointerChainEventIsExact(generation, chain.pointerDown, publication)
     ) {
       chain.click = publication;
       preserveForOutside = replaceOutsidePointerExpiry(
@@ -1116,23 +1772,67 @@ function activateGeneration(
     pendingIntents: new Set(),
     outsidePointerChain: null,
     statsTrigger,
+    statsContent: null,
+    statsPortalRoot: null,
+    statsSide: null,
+    statsAlign: null,
     statsMutationLease: null,
+    statsPlacementLease: null,
     nodeSeals: [],
     relationSeals: [],
     observers: [],
     removeEventListeners: [],
     retired: false,
   };
-  const seenNodes = new Set<Node>();
+  const expanded = statsTrigger.getAttribute("aria-expanded");
+  if (expanded === "true") {
+    const controlsId = statsTrigger.getAttribute("aria-controls");
+    const side = statsTrigger.getAttribute("data-radix-popper-side");
+    const align = statsTrigger.getAttribute("data-radix-popper-align");
+    const boundary = controlsId
+      ? findStatsPortalBoundary(generation, controlsId)
+      : null;
+    if (!boundary) return;
+    generation.statsContent = boundary.content;
+    generation.statsPortalRoot = boundary.portal;
+    generation.statsSide = side;
+    generation.statsAlign = align;
+    const contentSide = boundary.content.getAttribute("data-side");
+    const contentAlign = boundary.content.getAttribute("data-align");
+    if (
+      !contentSide
+      || !contentAlign
+      || (
+        (contentSide !== side || contentAlign !== align)
+        && !beginStatsPlacementLease(generation, contentSide, contentAlign)
+      )
+    )
+      return;
+  }
+  if (
+    generation.statsPlacementLease
+      ? !statsPendingPlacementIsExact(generation, generation.statsPlacementLease)
+      : !statsTriggerStateIsExact(generation, expanded === "true")
+  )
+    return;
   const relationNodes = new Set<Node>();
-  sealSubtree(root, generation.nodeSeals, seenNodes);
+  sealSubtree(root, generation.nodeSeals, new Set());
   sealRelations(root, ownerDocument, generation.relationSeals, relationNodes);
   portalContents.forEach((content) => {
     let top: Node = content;
     while (top.parentNode && top.parentNode !== ownerDocument.body) top = top.parentNode;
-    sealSubtree(top, generation.nodeSeals, seenNodes);
+    sealSubtree(top, generation.nodeSeals, new Set(generation.nodeSeals.map((seal) => seal.node)));
     sealRelations(top, ownerDocument, generation.relationSeals, relationNodes);
   });
+  if (generation.statsPortalRoot) {
+    sealNode(generation.statsPortalRoot, generation.nodeSeals);
+    sealRelations(
+      generation.statsPortalRoot,
+      ownerDocument,
+      generation.relationSeals,
+      relationNodes,
+    );
+  }
   manager.active = generation;
   STATUS_BAR_NATIVE_EVENTS.forEach((type) => {
     const listener = (event: Event) => recordNativeEvent(generation, event);
@@ -1146,6 +1846,7 @@ function activateGeneration(
     generation.removeEventListeners.push(() => ownerWindow.removeEventListener("keydown", listener, true));
   }
   observeGeneration(generation);
+  syncStatsPortalObserver(generation);
 }
 
 function registerControl<T extends HTMLElement>(
@@ -1220,6 +1921,11 @@ function nativeEventIsExact(
     && (!("pointerId" in event) || event.pointerId === publication.pointerId)
     && (!("pointerType" in event) || event.pointerType === publication.pointerType)
     && (!("isPrimary" in event) || event.isPrimary === publication.isPrimary)
+    && (
+      !("detail" in event)
+      || typeof event.detail !== "number"
+      || event.detail === publication.detail
+    )
   );
 }
 
@@ -1242,7 +1948,16 @@ function rememberReactEvent(
   event: StatusBarReactEvent,
 ) {
   const generation = manager.active;
-  const native = generation?.nativeEvents.get(event.nativeEvent);
+  let native = generation?.nativeEvents.get(event.nativeEvent);
+  if (
+    generation
+    && !native
+    && event.eventPhase === Event.CAPTURING_PHASE
+    && event.nativeEvent.eventPhase === Event.CAPTURING_PHASE
+  ) {
+    recordNativeEvent(generation, event.nativeEvent);
+    native = generation.nativeEvents.get(event.nativeEvent);
+  }
   if (
     !generation
     || !native
@@ -1400,9 +2115,18 @@ function useStatusBarControl<T extends HTMLElement>(
 
 function claimIntent(intent: StatusBarEventIntent, action: string) {
   const { generation, publication } = intent;
+  const pointerChain = generation.outsidePointerChain;
+  if (
+    pointerChain
+    && intent.nativeEvents.includes(pointerChain.pointerDown)
+    && !outsidePointerChainIsCurrent(generation, pointerChain)
+  )
+    return false;
   if (
     intent.requiresReact
     || generation.retired
+    || generation.statsMutationLease
+    || generation.statsPlacementLease
     || generation.controls.get(publication.slot) !== publication
     || !validateGeneration(generation)
     || intent.nativeEvents.some((event) => (
@@ -1890,10 +2614,34 @@ function createContentNativeIntent(
     )
       return null;
     nativeEvents.push(original);
-    if (native.type === "dismissableLayer.pointerDownOutside" && original.button === 0) {
+    if (native.type === "dismissableLayer.pointerDownOutside") {
+      const ownerWindow = generation.ownerDocument.defaultView;
+      const PointerEventConstructor = ownerWindow?.PointerEvent;
       if (
-        original.type !== "pointerdown"
-        || pointerChain?.pointerDown !== original
+        !PointerEventConstructor
+        || !(original.event instanceof PointerEventConstructor)
+        || original.type !== "pointerdown"
+        || original.phase !== Event.CAPTURING_PHASE
+        || original.isPrimary !== true
+        || typeof original.button !== "number"
+        || original.button < 0
+      )
+        return null;
+      if (original.button !== 0) {
+        return {
+          generation,
+          publication,
+          nativeEvents,
+          reactEvents: [],
+          claimedPublication: false,
+          claims: new Set<string>(),
+          pending: null,
+          requiresReact: false,
+        };
+      }
+      if (
+        pointerChain?.pointerDown !== original
+        || !outsidePointerChainIsCurrent(generation, pointerChain)
         || !pointerChain.pointerUp
         || !pointerChain.click
         || !nativeEventIsExact(pointerChain.pointerUp)
@@ -2268,7 +3016,12 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
       onKeyDownCapture={(event) => rememberReactEvent(manager, event)}
       onClickCapture={(event) => rememberReactEvent(manager, event)}
     >
-      <StatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
+      <StatusBarStatsPopover
+        session={session}
+        source={source}
+        selection={selection}
+        hydrated={hydrated}
+      />
       <div className="flex-1" />
 
       {/* One trigger for both layouts: `compact` is false on the server and during hydration, so the phone
