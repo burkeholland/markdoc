@@ -1739,8 +1739,49 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     content.className = className;
     await act(async () => {});
 
+    const form = imageForm();
+    const poison = vi.fn((event: Event) => {
+      Object.defineProperties(event, {
+        bubbles: { configurable: true, value: false },
+        cancelable: { configurable: true, value: false },
+        composedPath: {
+          configurable: true,
+          value: () => {
+            throw new Error("Shadowed composedPath must not run");
+          },
+        },
+        defaultPrevented: { configurable: true, value: true },
+        eventPhase: { configurable: true, value: Event.NONE },
+        preventDefault: {
+          configurable: true,
+          value: () => {
+            throw new Error("Shadowed preventDefault must not run");
+          },
+        },
+        submitter: {
+          configurable: true,
+          get: () => {
+            throw new Error("Shadowed submitter must not run");
+          },
+        },
+        target: {
+          configurable: true,
+          get: () => {
+            throw new Error("Shadowed target must not run");
+          },
+        },
+        type: { configurable: true, value: "click" },
+      });
+    });
+    form.addEventListener("submit", poison, { capture: true, once: true });
     const submit = submitEvent();
-    act(() => imageForm().dispatchEvent(submit));
+    let dispatched = true;
+    act(() => {
+      dispatched = form.dispatchEvent(submit);
+    });
+    expect(poison).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    Reflect.deleteProperty(submit, "defaultPrevented");
     expect(submit.defaultPrevented).toBe(true);
     fireEvent.click(originalCancel);
     expect(staleClose).not.toHaveBeenCalled();

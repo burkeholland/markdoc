@@ -647,6 +647,21 @@ const IMAGE_RADIX_SETTLING_ATTRIBUTES = new Set([
   "aria-labelledby",
   "style",
 ]);
+const IMAGE_APPLY = Reflect.apply;
+const IMAGE_HAS_INSTANCE = Function.prototype[Symbol.hasInstance];
+const IMAGE_ARRAY_INCLUDES = Array.prototype.includes;
+const IMAGE_HAS_OWN = Object.prototype.hasOwnProperty;
+const IMAGE_NATIVE_EVENT_MEMBERS = Object.freeze([
+  "bubbles",
+  "cancelable",
+  "composedPath",
+  "defaultPrevented",
+  "eventPhase",
+  "preventDefault",
+  "submitter",
+  "target",
+  "type",
+] as const);
 
 function imageUploadErrorText(error: unknown) {
   try {
@@ -869,6 +884,23 @@ interface ImageSubmitProvenance {
   readonly content: HTMLDivElement;
   readonly contentTree: ImageDomSnapshot;
   readonly revision: number;
+  readonly nativeEvent: ImageNativeSubmitIntrinsics;
+}
+
+interface ImageNativeSubmitIntrinsics {
+  readonly isEvent: (value: unknown) => value is Event;
+  readonly isSubmitEvent: (value: Event) => boolean;
+  readonly type: (event: Event) => string;
+  readonly target: (event: Event) => EventTarget | null;
+  readonly eventPhase: (event: Event) => number;
+  readonly defaultPrevented: (event: Event) => boolean;
+  readonly bubbles: (event: Event) => boolean;
+  readonly cancelable: (event: Event) => boolean;
+  readonly composedPath: (event: Event) => EventTarget[];
+  readonly submitter: (event: Event) => HTMLElement | null;
+  readonly preventDefault: (event: Event) => boolean;
+  readonly hasPublicShadow: (event: Event) => boolean;
+  readonly stopPropagation: (event: Event) => void;
 }
 
 interface ImageReplayValidation {
@@ -929,6 +961,9 @@ interface ImagePresentation {
   ) => void;
   readonly onCancelClick: (
     event: React.MouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onFormSubmitCapture: (
+    event: React.FormEvent<HTMLFormElement>,
   ) => void;
   readonly onFormSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   readonly onClosed: () => void;
@@ -1181,6 +1216,9 @@ class ImageDismissalListener {
   #bridge: HTMLDivElement | null = null;
   #document: Document | null = null;
   #listener: ((event: Event) => void) | null = null;
+  #submitForm: HTMLFormElement | null = null;
+  #submitListener: ((event: Event) => void) | null = null;
+  #submitProvenance: ImageSubmitProvenance | null = null;
 
   constructor(private readonly coordinator: ImagePublicationCoordinator) {}
 
@@ -1212,10 +1250,42 @@ class ImageDismissalListener {
     ownerDocument.addEventListener("click", listener, true);
   }
 
+  attachSubmit(provenance: ImageSubmitProvenance) {
+    const form = provenance.form;
+    this.#submitProvenance = provenance;
+    if (this.#submitForm === form && this.#submitListener) return;
+    this.releaseSubmit();
+    this.#submitProvenance = provenance;
+    const listener = (event: Event) => {
+      const current = this.#submitProvenance;
+      if (
+        !current ||
+        current.form !== form ||
+        !current.nativeEvent.isEvent(event) ||
+        !current.nativeEvent.hasPublicShadow(event)
+      ) {
+        return;
+      }
+      current.nativeEvent.stopPropagation(event);
+    };
+    this.#submitForm = form;
+    this.#submitListener = listener;
+    form.addEventListener("submit", listener);
+  }
+
   releaseWhenDetached(bridge: HTMLDivElement) {
     queueMicrotask(() => {
       if (this.#bridge === bridge && !bridge.isConnected) this.release();
     });
+  }
+
+  private releaseSubmit() {
+    const form = this.#submitForm;
+    const listener = this.#submitListener;
+    this.#submitForm = null;
+    this.#submitListener = null;
+    this.#submitProvenance = null;
+    if (form && listener) form.removeEventListener("submit", listener);
   }
 
   private release() {
@@ -1224,6 +1294,7 @@ class ImageDismissalListener {
     this.#bridge = null;
     this.#document = null;
     this.#listener = null;
+    this.releaseSubmit();
     if (!ownerDocument || !listener) return;
     ownerDocument.removeEventListener("keydown", listener, true);
     ownerDocument.removeEventListener("pointerdown", listener, true);
@@ -2086,6 +2157,85 @@ function resolveImageDom(
   };
 }
 
+function captureImageNativeSubmitIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): ImageNativeSubmitIntrinsics | null {
+  const EventConstructor = ownerWindow.Event;
+  const SubmitEventConstructor = ownerWindow.SubmitEvent;
+  const eventPrototype = EventConstructor.prototype;
+  const getter = <T,>(property: keyof Event) => {
+    const value = Object.getOwnPropertyDescriptor(eventPrototype, property)?.get;
+    return typeof value === "function"
+      ? (event: Event) => IMAGE_APPLY(value, event, []) as T
+      : null;
+  };
+  const type = getter<string>("type");
+  const target = getter<EventTarget | null>("target");
+  const eventPhase = getter<number>("eventPhase");
+  const defaultPrevented = getter<boolean>("defaultPrevented");
+  const bubbles = getter<boolean>("bubbles");
+  const cancelable = getter<boolean>("cancelable");
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const stopPropagation = eventPrototype.stopPropagation;
+  const submitter =
+    typeof SubmitEventConstructor === "function"
+      ? Object.getOwnPropertyDescriptor(
+          SubmitEventConstructor.prototype,
+          "submitter",
+        )?.get
+      : null;
+  if (
+    !type ||
+    !target ||
+    !eventPhase ||
+    !defaultPrevented ||
+    !bubbles ||
+    !cancelable ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof stopPropagation !== "function" ||
+    (typeof SubmitEventConstructor === "function" &&
+      typeof submitter !== "function")
+  ) {
+    return null;
+  }
+  const isEvent = (value: unknown): value is Event =>
+    typeof value === "object" &&
+    value !== null &&
+    IMAGE_APPLY(IMAGE_HAS_INSTANCE, EventConstructor, [value]);
+  const isSubmitEvent = (value: Event) =>
+    typeof SubmitEventConstructor === "function" &&
+    IMAGE_APPLY(IMAGE_HAS_INSTANCE, SubmitEventConstructor, [value]);
+  return Object.freeze({
+    isEvent,
+    isSubmitEvent,
+    type,
+    target,
+    eventPhase,
+    defaultPrevented,
+    bubbles,
+    cancelable,
+    composedPath: (event: Event) =>
+      IMAGE_APPLY(composedPath, event, []) as EventTarget[],
+    submitter: (event: Event) =>
+      isSubmitEvent(event) && submitter
+        ? (IMAGE_APPLY(submitter, event, []) as HTMLElement | null)
+        : null,
+    preventDefault: (event: Event) => {
+      IMAGE_APPLY(preventDefault, event, []);
+      return defaultPrevented(event);
+    },
+    hasPublicShadow: (event: Event) =>
+      IMAGE_NATIVE_EVENT_MEMBERS.some((member) =>
+        IMAGE_APPLY(IMAGE_HAS_OWN, event, [member]),
+      ),
+    stopPropagation: (event: Event) => {
+      IMAGE_APPLY(stopPropagation, event, []);
+    },
+  });
+}
+
 function imageReactEnvelope(
   event: React.SyntheticEvent,
   reactName: string,
@@ -2211,23 +2361,34 @@ function imageExactNativeError(
 function imageExactNativeSubmit(
   event: React.FormEvent<HTMLFormElement>,
   provenance: ImageSubmitProvenance,
+  expectedDefaultPrevented: boolean,
 ) {
   const { form, insert, content } = provenance;
-  const nativeEvent = imageReactEnvelope(
-    event,
-    "onSubmit",
-    "submit",
-    form,
-    content,
-  );
-  const ownerWindow = provenance.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const intrinsics = provenance.nativeEvent;
+  const wrapper = event as React.FormEvent<HTMLFormElement> & {
+    readonly _reactName?: unknown;
+    readonly isDefaultPrevented?: unknown;
+    readonly isPropagationStopped?: unknown;
+    readonly persist?: unknown;
+  };
+  if (!intrinsics.isEvent(nativeEvent)) return null;
+  const path = intrinsics.composedPath(nativeEvent);
   if (
-    !nativeEvent ||
-    !ownerWindow ||
-    nativeEvent.type !== "submit" ||
-    event.target !== form ||
-    nativeEvent.target !== form ||
-    !nativeEvent.cancelable ||
+    intrinsics.eventPhase(nativeEvent) === 0 ||
+    intrinsics.type(nativeEvent) !== "submit" ||
+    intrinsics.defaultPrevented(nativeEvent) !== expectedDefaultPrevented ||
+    !intrinsics.bubbles(nativeEvent) ||
+    !intrinsics.cancelable(nativeEvent) ||
+    intrinsics.target(nativeEvent) !== form ||
+    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [form]) ||
+    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [content]) ||
+    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [provenance.ownerDocument]) ||
+    event.currentTarget !== form ||
+    wrapper._reactName !== "onSubmit" ||
+    typeof wrapper.isDefaultPrevented !== "function" ||
+    typeof wrapper.isPropagationStopped !== "function" ||
+    typeof wrapper.persist !== "function" ||
     !form.isConnected ||
     form.ownerDocument !== provenance.ownerDocument ||
     insert.form !== form ||
@@ -2235,12 +2396,11 @@ function imageExactNativeSubmit(
   ) {
     return null;
   }
-  const SubmitEventConstructor = ownerWindow.SubmitEvent;
+  const submitter = intrinsics.submitter(nativeEvent);
   if (
-    SubmitEventConstructor &&
-    nativeEvent instanceof SubmitEventConstructor &&
-    nativeEvent.submitter !== null &&
-    nativeEvent.submitter !== insert
+    intrinsics.isSubmitEvent(nativeEvent) &&
+    submitter !== null &&
+    submitter !== insert
   ) {
     return null;
   }
@@ -2256,9 +2416,13 @@ function imageSubmitProvenance(
   const insert = controls.insert.owner.element();
   const content = form?.parentElement;
   const ownerWindow = content?.ownerDocument.defaultView;
+  const nativeEvent = ownerWindow
+    ? captureImageNativeSubmitIntrinsics(ownerWindow)
+    : null;
   if (
     !authority.open ||
     !ownerWindow ||
+    !nativeEvent ||
     !(form instanceof ownerWindow.HTMLFormElement) ||
     !(insert instanceof ownerWindow.HTMLButtonElement) ||
     !(content instanceof ownerWindow.HTMLDivElement) ||
@@ -2276,6 +2440,7 @@ function imageSubmitProvenance(
     content,
     contentTree: imageSnapshotDom(content),
     revision,
+    nativeEvent,
   });
 }
 
@@ -2714,6 +2879,12 @@ function createImagePresentation(
   let currentRuntime: ImagePublicationRuntime | null = null;
   let lastRuntime: ImagePublicationRuntime | null = null;
   let submitProvenance: ImageSubmitProvenance | null = null;
+  let capturedSubmit:
+    | {
+        readonly nativeEvent: Event;
+        readonly provenance: ImageSubmitProvenance;
+      }
+    | null = null;
   let submitRevision = 0;
   let successorRequested = false;
   let partialRecoveryQueued = false;
@@ -3030,9 +3201,15 @@ function createImagePresentation(
       }
       return undefined;
     }
-    submitProvenance =
-      imageSubmitProvenance(authority, controls, submitRevision) ??
-      submitProvenance;
+    const nextSubmitProvenance = imageSubmitProvenance(
+      authority,
+      controls,
+      submitRevision,
+    );
+    if (nextSubmitProvenance) {
+      submitProvenance = nextSubmitProvenance;
+      dismissalListener.attachSubmit(nextSubmitProvenance);
+    }
     if (!coordinator.acceptsAuthority(authority)) return undefined;
     const dom = exactDom();
     if (!factsAreCurrent() || !dom || replayRejected) {
@@ -3067,9 +3244,15 @@ function createImagePresentation(
       abandonDeferredUpload();
       return undefined;
     }
-    submitProvenance =
-      imageSubmitProvenance(authority, controls, submitRevision) ??
-      submitProvenance;
+    const replacementSubmitProvenance = imageSubmitProvenance(
+      authority,
+      controls,
+      submitRevision,
+    );
+    if (replacementSubmitProvenance) {
+      submitProvenance = replacementSubmitProvenance;
+      dismissalListener.attachSubmit(replacementSubmitProvenance);
+    }
     if (!replayValidation.complete()) {
       runtime.retireForElement();
       replayRejected = true;
@@ -3395,8 +3578,10 @@ function createImagePresentation(
     }
     closeCurrent(publication, false);
   };
-  const onFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    const committed = lastRuntime?.publication ?? null;
+  const onFormSubmitCapture = (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    capturedSubmit = null;
     const provenance = submitProvenance;
     const ownedForm = form.owner.element();
     if (
@@ -3408,10 +3593,39 @@ function createImagePresentation(
     ) {
       return;
     }
-    const nativeEvent = imageExactNativeSubmit(event, provenance);
-    if (!nativeEvent) return;
-    event.preventDefault();
-    if (!event.defaultPrevented || !nativeEvent.defaultPrevented) return;
+    const nativeEvent = imageExactNativeSubmit(event, provenance, false);
+    if (!nativeEvent || !provenance.nativeEvent.preventDefault(nativeEvent)) {
+      return;
+    }
+    if (!provenance.nativeEvent.hasPublicShadow(nativeEvent)) {
+      capturedSubmit = { nativeEvent, provenance };
+    }
+  };
+  const onFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    const captured = capturedSubmit;
+    capturedSubmit = null;
+    const committed = lastRuntime?.publication ?? null;
+    const provenance = submitProvenance;
+    const ownedForm = form.owner.element();
+    if (
+      !captured ||
+      !provenance ||
+      !ownedForm ||
+      captured.provenance !== provenance ||
+      provenance.authority !== authority ||
+      provenance.form !== ownedForm ||
+      event.currentTarget !== ownedForm
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeSubmit(event, provenance, true);
+    if (
+      !nativeEvent ||
+      captured.nativeEvent !== nativeEvent ||
+      provenance.nativeEvent.hasPublicShadow(nativeEvent)
+    ) {
+      return;
+    }
     if (!submitSuppressionIsCurrent(provenance)) return;
     const publication = currentPublication(
       authority.uploading ? "file" : null,
@@ -3557,6 +3771,7 @@ function createImagePresentation(
     onFileChange,
     onPreviewError,
     onCancelClick,
+    onFormSubmitCapture,
     onFormSubmit,
     onClosed: () => completeClose(closeToken),
   });
@@ -4095,6 +4310,7 @@ export const ImageDialog = memo(function ImageDialog({
     onFileChange,
     onPreviewError,
     onCancelClick,
+    onFormSubmitCapture,
     onFormSubmit,
     onClosed,
   } = presentation;
@@ -4113,6 +4329,7 @@ export const ImageDialog = memo(function ImageDialog({
             <form
               ref={captureForm}
               className={IMAGE_FORM_CLASS}
+              onSubmitCapture={onFormSubmitCapture}
               onSubmit={onFormSubmit}
             >
               <label
