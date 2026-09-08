@@ -2,7 +2,6 @@
 import "./import.css";
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -23,6 +22,16 @@ export { IMPORT_ACCEPT };
 
 /** The drop-zone toast when nothing importable was dropped: the server's 415 sentence with a capital. */
 const NOTHING_IMPORTABLE_MESSAGE = `${IMPORT_EXTENSIONS_LIST[0].toUpperCase()}${IMPORT_EXTENSIONS_LIST.slice(1)}.`;
+const MALFORMED_IMPORT_RESULT_MESSAGE = "Import returned an invalid result";
+const MAX_IMPORT_RESULT_WARNINGS = 1_000;
+const arrayIsArray = Array.isArray;
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const getPrototypeOf = Object.getPrototypeOf;
+const ownKeys = Reflect.ownKeys;
+const structuredCloneValue =
+  typeof globalThis.structuredClone === "function"
+    ? globalThis.structuredClone.bind(globalThis)
+    : null;
 
 /** Same predicate the server applies before it answers 415, so the client never disagrees with it. */
 export function isImportableFile(file: File): boolean {
@@ -56,19 +65,24 @@ export interface ImportItem {
   title?: string;
   warnings: string[];
   error?: string;
-  /** Internal action shared by the failed rows in the current in-memory batch. */
+  /** Internal action for this exact failed row in the current in-memory batch. */
   retry?: () => void;
+  /** Internal action shared by all failed rows in the current in-memory batch. */
+  retryAll?: () => void;
 }
 
 interface RetryOwnership {
   authority: HookAuthority;
   generation: number;
-  files: Map<number, File>;
+  files: ReadonlyMap<number, File>;
   images: File[];
+  retryAll: () => void;
 }
 
 interface HookAuthority {
   readonly token: symbol;
+  readonly onDone: UseFileImportOptions["onDone"];
+  readonly onError: UseFileImportOptions["onError"];
 }
 
 type StartFileImport = (files: Iterable<File>) => Promise<void>;
@@ -107,6 +121,55 @@ interface RetryBatchOwnership {
 
 type UploadOwnership = InitialBatchOwnership | RetryBatchOwnership;
 
+type RetryRequest = (
+  ownership: RetryOwnership,
+  rowIndex: number | null,
+  action: () => void,
+) => Promise<void> | void;
+
+function createRetryOwnership(
+  authority: HookAuthority,
+  generation: number,
+  files: ReadonlyMap<number, File>,
+  images: File[],
+  request: RetryRequest,
+): RetryOwnership {
+  const ownedFiles = new Map(files);
+  const retryAll = () => request(ownership, null, retryAll);
+  const ownership: RetryOwnership = Object.freeze({
+    authority,
+    generation,
+    files: ownedFiles,
+    images,
+    retryAll,
+  });
+  return ownership;
+}
+
+function publishRetryItems(
+  items: ImportItem[],
+  ownership: RetryOwnership | null,
+  request: RetryRequest,
+): ImportItem[] {
+  return items.map((item, index) => {
+    const file = ownership?.files.get(index);
+    if (!ownership || !file) {
+      if (!item.retry && !item.retryAll) return item;
+      const settled = { ...item };
+      delete settled.retry;
+      delete settled.retryAll;
+      return settled;
+    }
+
+    const retry = () => request(ownership, index, retry);
+    return { ...item, retry, retryAll: ownership.retryAll };
+  });
+}
+
+function retryAllFrom(items: readonly Pick<ImportItem, "retry" | "retryAll">[]): (() => void) | undefined {
+  return items.find((item) => item.retryAll)?.retryAll ?? items.find((item) => item.retry)?.retry;
+}
+
 function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocument[]; failed: FailedImport[] } {
   return {
     documents: items.flatMap((item) =>
@@ -120,6 +183,150 @@ function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocumen
         : [],
     ),
   };
+}
+
+interface NormalizedImportBatch {
+  readonly documents: ImportedDocument[];
+  readonly failed: FailedImport[];
+  readonly failedAt: ReadonlyMap<number, FailedImport>;
+}
+
+function malformedImportResult(): never {
+  throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+}
+
+function readStableDataProperty(source: object, property: PropertyKey): unknown {
+  const first = getOwnPropertyDescriptor(source, property);
+  const second = getOwnPropertyDescriptor(source, property);
+  if (
+    !first ||
+    !second ||
+    !("value" in first) ||
+    !("value" in second) ||
+    !Object.is(first.value, second.value) ||
+    first.configurable !== second.configurable ||
+    first.enumerable !== second.enumerable ||
+    first.writable !== second.writable
+  ) {
+    malformedImportResult();
+  }
+  return first.value;
+}
+
+function requirePlainRecord(value: unknown): object {
+  if (value === null || typeof value !== "object" || arrayIsArray(value)) malformedImportResult();
+  const firstPrototype = getPrototypeOf(value);
+  const secondPrototype = getPrototypeOf(value);
+  if (
+    firstPrototype !== secondPrototype ||
+    (firstPrototype !== Object.prototype && firstPrototype !== null)
+  ) {
+    malformedImportResult();
+  }
+  return value;
+}
+
+function requireExactKeys(source: object, expected: readonly string[]) {
+  const first = ownKeys(source);
+  const second = ownKeys(source);
+  const matches = (keys: readonly PropertyKey[]) =>
+    keys.length === expected.length &&
+    keys.every((key) => typeof key === "string" && expected.includes(key));
+  if (
+    !matches(first) ||
+    !matches(second)
+  ) {
+    malformedImportResult();
+  }
+}
+
+function snapshotArray<T>(
+  value: unknown,
+  maximumLength: number,
+  snapshot: (entry: unknown) => T,
+): T[] {
+  if (!arrayIsArray(value)) malformedImportResult();
+  const rawLength = readStableDataProperty(value, "length");
+  if (
+    typeof rawLength !== "number" ||
+    !Number.isSafeInteger(rawLength) ||
+    rawLength < 0 ||
+    rawLength > maximumLength
+  ) {
+    malformedImportResult();
+  }
+  const expectedKeys = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < rawLength; index++) expectedKeys.add(String(index));
+  for (const keys of [ownKeys(value), ownKeys(value)]) {
+    if (keys.length !== expectedKeys.size || keys.some((key) => !expectedKeys.has(key))) {
+      malformedImportResult();
+    }
+  }
+  const entries: T[] = [];
+  for (let index = 0; index < rawLength; index++) {
+    entries.push(snapshot(readStableDataProperty(value, index)));
+  }
+  Object.freeze(entries);
+  return entries;
+}
+
+function snapshotString(value: unknown): string {
+  if (typeof value !== "string") malformedImportResult();
+  return value;
+}
+
+function normalizeImportBatchResult(raw: unknown, attempted: readonly File[]): NormalizedImportBatch {
+  try {
+    const result = requirePlainRecord(raw);
+    requireExactKeys(result, ["documents", "failed"]);
+    const documents = snapshotArray(
+      readStableDataProperty(result, "documents"),
+      attempted.length,
+      (entry): ImportedDocument => {
+        const document = requirePlainRecord(entry);
+        requireExactKeys(document, ["id", "title", "warnings"]);
+        const id = snapshotString(readStableDataProperty(document, "id"));
+        const title = snapshotString(readStableDataProperty(document, "title"));
+        const warnings = snapshotArray(
+          readStableDataProperty(document, "warnings"),
+          MAX_IMPORT_RESULT_WARNINGS,
+          snapshotString,
+        );
+        return Object.freeze({ id, title, warnings });
+      },
+    );
+    const failed = snapshotArray(
+      readStableDataProperty(result, "failed"),
+      attempted.length,
+      (entry): FailedImport => {
+        const failure = requirePlainRecord(entry);
+        requireExactKeys(failure, ["index", "name", "error"]);
+        const index = readStableDataProperty(failure, "index");
+        const name = snapshotString(readStableDataProperty(failure, "name"));
+        const error = snapshotString(readStableDataProperty(failure, "error"));
+        if (typeof index !== "number" || !Number.isSafeInteger(index)) malformedImportResult();
+        return Object.freeze({ index, name, error });
+      },
+    );
+    if (documents.length + failed.length !== attempted.length) malformedImportResult();
+
+    const failedAt = new Map<number, FailedImport>();
+    for (const failure of failed) {
+      if (
+        failure.index < 0 ||
+        failure.index >= attempted.length ||
+        failedAt.has(failure.index) ||
+        failure.name !== attempted[failure.index].name
+      ) {
+        malformedImportResult();
+      }
+      failedAt.set(failure.index, failure);
+    }
+    structuredCloneValue?.(raw);
+    return Object.freeze({ documents, failed, failedAt });
+  } catch {
+    malformedImportResult();
+  }
 }
 
 export interface ImportDialogProps {
@@ -142,6 +349,7 @@ interface ImportItemPublication {
   readonly warnings: readonly string[];
   readonly error: string | undefined;
   readonly retry: (() => void) | undefined;
+  readonly retryAll: (() => void) | undefined;
   readonly href: string | null;
 }
 
@@ -187,6 +395,7 @@ interface ImportResultRowPublication {
   readonly authority: ImportItemPublication;
   readonly item: HTMLLIElement;
   readonly open: ImportResultControlPublication<HTMLAnchorElement> | null;
+  readonly retry: ImportResultControlPublication<HTMLButtonElement> | null;
 }
 
 interface ImportResultDomSnapshot {
@@ -318,13 +527,17 @@ interface ImportResultPublicationSet {
     readonly authority: ImportItemPublication;
     readonly captureItem: (element: HTMLLIElement | null) => void;
     readonly captureOpen: (element: HTMLAnchorElement | null) => void;
+    readonly captureRetry: (element: HTMLButtonElement | null) => void;
   }[];
   readonly establish: () => void | (() => void);
   readonly onOpen: (
     row: ImportItemPublication,
     event: ReactMouseEvent<HTMLAnchorElement>,
   ) => void;
-  readonly onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly onRetry: (
+    row: ImportItemPublication | null,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
 }
 
 function ImportResultPublicationBoundary({
@@ -351,6 +564,7 @@ function snapshotImportItem(item: ImportItem, index: number): ImportItemPublicat
     warnings: Object.freeze([...item.warnings]),
     error: item.error,
     retry: item.retry,
+    retryAll: item.retryAll,
     href: id ? `/d/${id}` : null,
   });
 }
@@ -383,6 +597,7 @@ function importResultFactsAreCurrent(authority: ImportResultAuthority): boolean 
       item.title !== row.title ||
       item.error !== row.error ||
       item.retry !== row.retry ||
+      item.retryAll !== row.retryAll ||
       item.warnings !== row.sourceWarnings ||
       item.warnings.length !== row.warnings.length ||
       row.href !== (row.id ? `/d/${row.id}` : null)
@@ -395,11 +610,11 @@ function importResultFactsAreCurrent(authority: ImportResultAuthority): boolean 
   }
 
   const busy = sourceItems.some((item) => item.status === "uploading");
-  const retry = sourceItems.find((item) => item.retry)?.retry;
+  const retry = retryAllFrom(sourceItems);
   if (busy !== authority.busy || retry !== authority.retry) return false;
   if (retry) {
-    if (sourceItems.some((item) => item.retry && item.retry !== retry)) return false;
-    if (!busy && !sourceItems.some((item) => item.status === "error" && item.retry === retry)) return false;
+    if (sourceItems.some((item) => item.retryAll && item.retryAll !== retry)) return false;
+    if (!busy && !sourceItems.some((item) => item.status === "error" && item.retry)) return false;
   }
 
   const { source, names, text } = authority.ignored;
@@ -440,6 +655,7 @@ function importResultAuthoritiesMatch(
           row.title === candidate.title &&
           row.error === candidate.error &&
           row.retry === candidate.retry &&
+          row.retryAll === candidate.retryAll &&
           row.href === candidate.href &&
           row.warnings.length === candidate.warnings.length &&
           row.warnings.every((warning, warningIndex) => candidate.warnings[warningIndex] === warning),
@@ -618,12 +834,15 @@ function createImportResultPublication(
     items.map((row) => {
       const itemOwner = new ElementOwner<HTMLLIElement>(onElementChange);
       const openOwner = new ElementOwner<HTMLAnchorElement>(onElementChange);
+      const retryOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
       return Object.freeze({
         authority: row,
         captureItem: itemOwner.capture,
         captureOpen: openOwner.capture,
+        captureRetry: retryOwner.capture,
         itemOwner,
         openOwner,
+        retryOwner,
       });
     }),
   );
@@ -631,9 +850,11 @@ function createImportResultPublication(
   const expectedOwners = (): readonly ElementOwnerView[] => [
     rootOwner,
     listOwner,
-    ...rowOwners.flatMap(({ authority: row, itemOwner, openOwner }) =>
-      row.href ? [itemOwner, openOwner] : [itemOwner],
-    ),
+    ...rowOwners.flatMap(({ authority: row, itemOwner, openOwner, retryOwner }) => [
+      itemOwner,
+      ...(row.href ? [openOwner] : []),
+      ...(row.retry ? [retryOwner] : []),
+    ]),
     ...(ignoredText ? [ignoredOwner] : []),
     ...(retry ? [retryOwner] : []),
   ];
@@ -705,6 +926,7 @@ function createImportResultPublication(
       const row = owned.authority;
       const item = owned.itemOwner.element();
       const anchor = owned.openOwner.element();
+      const retryButton = owned.retryOwner.element();
       if (
         items[row.index] !== row ||
         !(item instanceof ownerWindow.HTMLLIElement) ||
@@ -715,7 +937,7 @@ function createImportResultPublication(
         item.className !== "import-item" ||
         item.dataset.testid !== "import-item" ||
         item.dataset.status !== row.status ||
-        item.children.length !== (row.href ? 3 : 2) ||
+        item.children.length !== 2 + (row.href ? 1 : 0) + (row.retry ? 1 : 0) ||
         item.firstElementChild?.getAttribute("aria-label") !==
           (row.status === "uploading"
             ? "Importing"
@@ -749,7 +971,7 @@ function createImportResultPublication(
           !anchor.isConnected ||
           anchor.ownerDocument !== ownerDocument ||
           anchor.parentElement !== item ||
-          item.lastElementChild !== anchor ||
+          item.children.item(2) !== anchor ||
           anchor.getAttribute("href") !== row.href ||
           anchor.className !== "import-open" ||
           anchor.dataset.testid !== "import-open" ||
@@ -765,8 +987,38 @@ function createImportResultPublication(
       ) {
         return false;
       }
+
+      if (row.retry) {
+        if (
+          !(retryButton instanceof ownerWindow.HTMLButtonElement) ||
+          !retryButton.isConnected ||
+          retryButton.ownerDocument !== ownerDocument ||
+          retryButton.parentElement !== item ||
+          item.lastElementChild !== retryButton ||
+          retryButton.type !== "button" ||
+          retryButton.className !== "btn btn-sm btn-outline shrink-0" ||
+          retryButton.disabled !== busy ||
+          retryButton.dataset.testid !== "import-row-retry" ||
+          retryButton.textContent !== `Retry ${row.name}` ||
+          (!busy && !isEffectivelyEnabled(retryButton)) ||
+          item.querySelectorAll('[data-testid="import-row-retry"]').length !== 1
+        ) {
+          return false;
+        }
+      } else if (
+        retryButton !== null ||
+        item.querySelector('[data-testid="import-row-retry"]')
+      ) {
+        return false;
+      }
     }
     if (list.querySelectorAll('[data-testid="import-open"]').length !== openCount) {
+      return false;
+    }
+    if (
+      list.querySelectorAll('[data-testid="import-row-retry"]').length !==
+      items.filter((item) => item.retry).length
+    ) {
       return false;
     }
 
@@ -941,12 +1193,18 @@ function createImportResultPublication(
   };
 
   const claimRetry = (
+    row: ImportItemPublication | null,
     event: ReactMouseEvent<HTMLButtonElement>,
   ): (() => void) | null => {
     const runtime = currentRuntime;
     const publication = runtime?.publication;
-    const control = publication?.retry;
+    const publishedRow =
+      publication && row && items[row.index] === row
+        ? publication.rows[row.index]
+        : null;
+    const control = row ? publishedRow?.retry : publication?.retry;
     const action = control?.action;
+    const retryAction = row?.retry ?? authority.retry;
     const source = event?.currentTarget;
     if (
       !runtime ||
@@ -955,8 +1213,12 @@ function createImportResultPublication(
       cells.retiredPublications.has(publication) ||
       cells.active.current !== publication ||
       publication.authority !== authority ||
-      !authority.retry ||
+      !retryAction ||
       authority.busy ||
+      (row !== null &&
+        (publishedRow?.authority !== row ||
+          cells.retiredRows.has(publishedRow) ||
+          cells.claimedRows.has(publishedRow))) ||
       !control ||
       !action ||
       source !== control.element ||
@@ -969,7 +1231,7 @@ function createImportResultPublication(
       action.publicationIdentity !== publication.identity ||
       action.controlIdentity !== control.identity ||
       action.kind !== "retry" ||
-      action.rowIndex !== null ||
+      action.rowIndex !== (row?.index ?? null) ||
       !factsAreCurrent() ||
       !exactDomIsCurrent() ||
       !runtime.publishedDomMatches()
@@ -979,11 +1241,12 @@ function createImportResultPublication(
     const nativeEvent = nativeClick(publication, event, source);
     if (!nativeEvent || !eventsAreUnclaimed(event, nativeEvent)) return null;
     cells.claimedRetryPublications.add(publication);
+    if (publishedRow) cells.claimedRows.add(publishedRow);
     cells.claimedControls.add(control);
     cells.claimedActions.add(action);
     cells.claimedReactEvents.add(event);
     cells.claimedNativeEvents.add(nativeEvent);
-    return authority.retry;
+    return retryAction;
   };
 
   const createRuntime = (): ImportResultPublicationRuntime | null => {
@@ -1002,8 +1265,10 @@ function createImportResultPublication(
       !(dialog instanceof HTMLDivElement) ||
       !rootPlacement ||
       rowOwners.some(
-        ({ authority: row, itemOwner, openOwner }) =>
-          !itemOwner.element() || (row.href ? !openOwner.element() : Boolean(openOwner.element())),
+        ({ authority: row, itemOwner, openOwner, retryOwner }) =>
+          !itemOwner.element() ||
+          (row.href ? !openOwner.element() : Boolean(openOwner.element())) ||
+          (row.retry ? !retryOwner.element() : Boolean(retryOwner.element())),
       ) ||
       (ignoredText ? !ignoredElement : Boolean(ignoredElement)) ||
       (retry ? !retryElement : Boolean(retryElement))
@@ -1037,7 +1302,12 @@ function createImportResultPublication(
       rowOwners.map((owned) => {
         const item = owned.itemOwner.element();
         const openElement = owned.openOwner.element();
-        if (!item || (owned.authority.href && !openElement)) {
+        const retryElement = owned.retryOwner.element();
+        if (
+          !item ||
+          (owned.authority.href && !openElement) ||
+          (owned.authority.retry && !retryElement)
+        ) {
           throw new Error("Cannot publish an import row without every committed ref");
         }
         return Object.freeze({
@@ -1047,6 +1317,10 @@ function createImportResultPublication(
           open:
             owned.authority.href && openElement
               ? control("open", owned.authority.index, openElement)
+              : null,
+          retry:
+            owned.authority.retry && retryElement
+              ? control("retry", owned.authority.index, retryElement)
               : null,
         });
       }),
@@ -1138,7 +1412,9 @@ function createImportResultPublication(
       domObserver = null;
     };
     const noteMutations = (records: readonly MutationRecord[]) => {
-      if (recordMutations(records)) retire("element");
+      if (recordMutations(records) && !retire("element")) {
+        releaseReplayGuard();
+      }
     };
     const retire = (reason: Retirement) => {
       if (retired) return false;
@@ -1151,6 +1427,10 @@ function createImportResultPublication(
         if (row.open) {
           cells.retiredControls.add(row.open);
           cells.retiredActions.add(row.open.action);
+        }
+        if (row.retry) {
+          cells.retiredControls.add(row.retry);
+          cells.retiredActions.add(row.retry.action);
         }
       }
       if (publication.retry) {
@@ -1167,6 +1447,9 @@ function createImportResultPublication(
         queueMicrotask(() => {
           if (!domObserver) return;
           recordMutations(domObserver.takeRecords());
+          if (!domChanged && cells.replay.current?.source === publication) {
+            return;
+          }
           domChanged = true;
           domObserver.disconnect();
           domObserver = null;
@@ -1375,7 +1658,10 @@ function createImportResultPublication(
       predecessor
         ? [
             ...predecessor.rows.flatMap((row) =>
-              row.open ? [row.open.element] : [],
+              [
+                ...(row.open ? [row.open.element] : []),
+                ...(row.retry ? [row.retry.element] : []),
+              ],
             ),
             ...(predecessor.retry ? [predecessor.retry.element] : []),
           ]
@@ -1385,9 +1671,14 @@ function createImportResultPublication(
       predecessor?.authority.mount === mount
         ? [
             ...publication.rows.flatMap((row) =>
-              row.open && !predecessorControls.has(row.open.element)
-                ? [row.open.element]
-                : [],
+              [
+                ...(row.open && !predecessorControls.has(row.open.element)
+                  ? [row.open.element]
+                  : []),
+                ...(row.retry && !predecessorControls.has(row.retry.element)
+                  ? [row.retry.element]
+                  : []),
+              ],
             ),
             ...(publication.retry &&
             !predecessorControls.has(publication.retry.element)
@@ -1417,8 +1708,11 @@ function createImportResultPublication(
     if (!publication) return;
     publication.authority.onOpenChange(false);
   };
-  const onRetry = (event: ReactMouseEvent<HTMLButtonElement>) => {
-    claimRetry(event)?.();
+  const onRetry = (
+    row: ImportItemPublication | null,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    claimRetry(row, event)?.();
   };
 
   return Object.freeze({
@@ -1471,7 +1765,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
     sourceItems: items,
     items: publishedItems,
     busy: publishedItems.some((item) => item.status === "uploading"),
-    retry: publishedItems.find((item) => item.retry)?.retry,
+    retry: retryAllFrom(publishedItems),
     ignored: Object.freeze({
       source: ignored,
       names: ignoredNames,
@@ -1496,12 +1790,12 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
   } = publication;
 
   return (
-    <Dialog open={authority.open} onOpenChange={(next) => !authority.busy && authority.onOpenChange(next)}>
+    <Dialog open={authority.open} onOpenChange={authority.onOpenChange}>
       <DialogContent title={IMPORT_DIALOG_TITLE} description={IMPORT_DIALOG_DESCRIPTION}>
         <ImportResultPublicationBoundary publication={publication}>
           <div ref={captureRoot} data-testid="import-dialog">
           <ul ref={captureList} className="import-list" data-testid="import-list">
-              {rows.map(({ authority: item, captureItem, captureOpen }) => (
+              {rows.map(({ authority: item, captureItem, captureOpen, captureRetry: captureRowRetry }) => (
                 <li
                   ref={captureItem}
                   key={`${item.name}-${item.index}`}
@@ -1536,6 +1830,18 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       Open
                     </Link>
                   )}
+                  {item.retry && (
+                    <button
+                      ref={captureRowRetry}
+                      type="button"
+                      className="btn btn-sm btn-outline shrink-0"
+                      disabled={authority.busy}
+                      data-testid="import-row-retry"
+                      onClick={(event: ReactMouseEvent<HTMLButtonElement>) => onRetry(item, event)}
+                    >
+                      Retry {item.name}
+                    </button>
+                  )}
                 </li>
               ))}
           </ul>
@@ -1555,7 +1861,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                 className="btn btn-sm btn-outline mt-4"
                 disabled={authority.busy}
                 data-testid="import-retry"
-                onClick={onRetry}
+                onClick={(event: ReactMouseEvent<HTMLButtonElement>) => onRetry(null, event)}
               >
                 Retry failed
               </button>
@@ -1582,6 +1888,10 @@ export interface UseFileImportOptions {
  * file input, the dialog items and the upload itself.
  */
 export function useFileImport(options: UseFileImportOptions = {}) {
+  const callbackSnapshot = Object.freeze({
+    onDone: options.onDone,
+    onError: options.onError,
+  });
   const [items, setItems] = useState<ImportItem[]>([]);
   const [ignored, setIgnored] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
@@ -1592,10 +1902,12 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   const authorityRef = useRef<HookAuthority | null>(null);
   const activeUploadRef = useRef<UploadOwnership | null>(null);
   const retryOwnershipRef = useRef<RetryOwnership | null>(null);
-  const optionsRef = useRef(options);
-  useEffect(() => {
-    optionsRef.current = options;
-  }, [options]);
+  const retryRequestRef = useRef<RetryRequest | null>(null);
+  const callbackSnapshotRef = useRef(callbackSnapshot);
+  const dragOwnerRef = useRef<DragListenerOwner | null>(null);
+  useLayoutEffect(() => {
+    callbackSnapshotRef.current = callbackSnapshot;
+  });
 
   const replaceItems = useCallback((next: ImportItem[]) => {
     itemsRef.current = next;
@@ -1610,23 +1922,151 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     [],
   );
 
+  const ownsSettledUpload = useCallback(
+    (ownership: UploadOwnership) =>
+      authorityRef.current === ownership.authority &&
+      activeUploadRef.current === null &&
+      generationRef.current === ownership.generation,
+    [],
+  );
+
+  const claimUploadAuthority = useCallback((current: HookAuthority): HookAuthority | null => {
+    const callbacks = callbackSnapshotRef.current;
+    if (authorityRef.current !== current || activeUploadRef.current) return null;
+    const onDone = callbacks.onDone;
+    if (authorityRef.current !== current || callbackSnapshotRef.current !== callbacks) return null;
+    const onError = callbacks.onError;
+    if (authorityRef.current !== current || callbackSnapshotRef.current !== callbacks) return null;
+    const claimed = Object.freeze({ token: current.token, onDone, onError });
+    authorityRef.current = claimed;
+    return claimed;
+  }, []);
+
+  const finalizeUpload = useCallback(
+    (ownership: UploadOwnership) => {
+      if (!ownsUpload(ownership)) return false;
+      activeUploadRef.current = null;
+      return ownsSettledUpload(ownership);
+    },
+    [ownsSettledUpload, ownsUpload],
+  );
+
+  const deliverDone = useCallback(
+    (ownership: UploadOwnership, documents: ImportedDocument[], failed: FailedImport[]) => {
+      if (!ownsSettledUpload(ownership)) return;
+      const onDone = ownership.authority.onDone;
+      if (!ownsSettledUpload(ownership)) return;
+      onDone?.(documents, failed);
+    },
+    [ownsSettledUpload],
+  );
+
+  const deliverFailure = useCallback(
+    (
+      ownership: UploadOwnership,
+      message: string,
+      documents: ImportedDocument[],
+      failed: FailedImport[],
+    ) => {
+      if (!ownsSettledUpload(ownership)) return;
+      const onError = ownership.authority.onError;
+      if (!ownsSettledUpload(ownership)) return;
+      const onDone = ownership.authority.onDone;
+      if (!ownsSettledUpload(ownership)) return;
+      let onErrorFailed = false;
+      let onErrorFailure: unknown;
+      try {
+        onError?.(message);
+      } catch (error) {
+        onErrorFailed = true;
+        onErrorFailure = error;
+      }
+
+      let onDoneFailed = false;
+      let onDoneFailure: unknown;
+      try {
+        onDone?.(documents, failed);
+      } catch (error) {
+        onDoneFailed = true;
+        onDoneFailure = error;
+      }
+
+      if (onErrorFailed && onDoneFailed) {
+        throw new AggregateError([onErrorFailure, onDoneFailure], "Import callbacks failed");
+      }
+      if (onErrorFailed) throw onErrorFailure;
+      if (onDoneFailed) throw onDoneFailure;
+    },
+    [ownsSettledUpload],
+  );
+
   const setDialogOpen = useCallback((next: boolean) => {
     if (!next) {
-      if (activeUploadRef.current) return;
+      const active = activeUploadRef.current;
+      if (active?.kind === "initial") return;
+      if (active?.kind === "retry") {
+        activeUploadRef.current = null;
+        generationRef.current++;
+      }
       retryOwnershipRef.current = null;
     }
     setOpen(next);
   }, []);
 
-  const retryFailed = useCallback(async () => {
-    const authority = authorityRef.current;
-    const retryOwnership = retryOwnershipRef.current;
-    if (!authority || activeUploadRef.current || !retryOwnership || retryOwnership.authority !== authority) return;
+  const retryDispatch = useCallback<RetryRequest>(
+    (ownership, rowIndex, action) => retryRequestRef.current?.(ownership, rowIndex, action),
+    [],
+  );
 
-    const entries = Array.from(retryOwnership.files.entries()).sort(([a], [b]) => a - b);
+  const requestRetry = useCallback<RetryRequest>(async (retryOwnership, rowIndex, action) => {
+    const currentAuthority = authorityRef.current;
+    if (
+      !currentAuthority ||
+      activeUploadRef.current ||
+      retryOwnershipRef.current !== retryOwnership ||
+      retryOwnership.authority !== currentAuthority ||
+      retryOwnership.generation !== generationRef.current
+    ) {
+      return;
+    }
+
+    const entries =
+      rowIndex === null
+        ? Array.from(retryOwnership.files.entries()).sort(([a], [b]) => a - b)
+        : retryOwnership.files.has(rowIndex)
+          ? [[rowIndex, retryOwnership.files.get(rowIndex)!] as const]
+          : [];
     if (entries.length === 0) return;
+    if (rowIndex === null) {
+      if (
+        action !== retryOwnership.retryAll ||
+        entries.some(([index, file]) => {
+          const item = itemsRef.current[index];
+          return (
+            retryOwnership.files.get(index) !== file ||
+            item?.status !== "error" ||
+            !item.retry ||
+            item.retryAll !== retryOwnership.retryAll
+          );
+        })
+      ) {
+        return;
+      }
+    } else {
+      const item = itemsRef.current[rowIndex];
+      if (
+        item?.status !== "error" ||
+        item.retry !== action ||
+        item.retryAll !== retryOwnership.retryAll
+      ) {
+        return;
+      }
+    }
 
+    const authority = claimUploadAuthority(currentAuthority);
+    if (!authority) return;
     const rowIndexes = entries.map(([index]) => index);
+    const selectedRows = new Set(rowIndexes);
     const documents = entries.map(([, file]) => file);
     const ownership: RetryBatchOwnership = {
       kind: "retry",
@@ -1641,75 +2081,108 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     if (!ownsUpload(ownership)) return;
     replaceItems(
       itemsRef.current.map((item, index) =>
-        retryOwnership.files.has(index) ? { ...item, status: "uploading", warnings: [], error: undefined } : item,
+        selectedRows.has(index)
+          ? { ...item, status: "uploading", warnings: [], error: undefined }
+          : item,
       ),
     );
 
+    let completedResult: ReturnType<typeof summarizeImportItems> | null = null;
     try {
-      const { documents: created, failed } = await uploadImportBatch(documents, ownership.images);
+      const rawResult: unknown = await uploadImportBatch(documents, ownership.images);
       if (!ownsUpload(ownership)) return;
 
-      const failedAt = new Map(failed.map((failure) => [failure.index, failure.error]));
-      const retained = new Map<number, File>();
+      const { documents: created, failedAt } = normalizeImportBatchResult(rawResult, documents);
+      const retained = new Map(retryOwnership.files);
       const outcomes = new Map<number, ImportItem>();
       let nextCreated = 0;
       for (let attemptIndex = 0; attemptIndex < rowIndexes.length; attemptIndex++) {
         const rowIndex = rowIndexes[attemptIndex];
         const file = documents[attemptIndex];
-        const retry = itemsRef.current[rowIndex]?.retry;
-        const error = failedAt.get(attemptIndex);
-        if (error !== undefined) {
-          retained.set(rowIndex, file);
-          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error, retry });
+        const failure = failedAt.get(attemptIndex);
+        if (failure) {
+          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error: failure.error });
           continue;
         }
         const document = created[nextCreated++];
-        if (document) {
-          outcomes.set(rowIndex, {
-            name: file.name,
-            status: "done",
-            id: document.id,
-            title: document.title,
-            warnings: document.warnings,
-          });
-        } else {
-          retained.set(rowIndex, file);
-          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error: "Import failed", retry });
-        }
+        if (!document) throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+        retained.delete(rowIndex);
+        outcomes.set(rowIndex, {
+          name: file.name,
+          status: "done",
+          id: document.id,
+          title: document.title,
+          warnings: document.warnings,
+        });
       }
 
-      const nextItems = itemsRef.current.map((item, index) => outcomes.get(index) ?? item);
-      if (!ownsUpload(ownership)) return;
-      replaceItems(nextItems);
-      if (!ownsUpload(ownership)) return;
-      retryOwnershipRef.current = retained.size
-        ? { authority, generation: ownership.generation, files: retained, images: ownership.images }
+      const nextOwnership = retained.size
+        ? createRetryOwnership(
+            authority,
+            ownership.generation,
+            retained,
+            ownership.images,
+            retryDispatch,
+          )
         : null;
+      const nextItems = publishRetryItems(
+        itemsRef.current.map((item, index) => outcomes.get(index) ?? item),
+        nextOwnership,
+        retryDispatch,
+      );
+      if (!ownsUpload(ownership)) return;
+      retryOwnershipRef.current = nextOwnership;
+      replaceItems(nextItems);
       const result = summarizeImportItems(nextItems);
-      if (ownsUpload(ownership)) {
-        optionsRef.current.onDone?.(result.documents, result.failed);
-      }
+      if (!finalizeUpload(ownership)) return;
+      completedResult = result;
     } catch (err) {
       if (!ownsUpload(ownership)) return;
       const message = apiErrorText(err, "Import failed");
       const nextItems = itemsRef.current.map((item, index) =>
-        retryOwnership.files.has(index) ? { ...item, status: "error" as const, warnings: [], error: message } : item,
+        selectedRows.has(index)
+          ? { ...item, status: "error" as const, warnings: [], error: message }
+          : item,
       );
+      const nextOwnership = createRetryOwnership(
+        authority,
+        ownership.generation,
+        retryOwnership.files,
+        ownership.images,
+        retryDispatch,
+      );
+      const publishedItems = publishRetryItems(nextItems, nextOwnership, retryDispatch);
       if (!ownsUpload(ownership)) return;
-      replaceItems(nextItems);
-      if (ownsUpload(ownership)) optionsRef.current.onError?.(message);
-      const result = summarizeImportItems(nextItems);
-      if (ownsUpload(ownership)) {
-        optionsRef.current.onDone?.(result.documents, result.failed);
-      }
-    } finally {
-      if (ownsUpload(ownership)) activeUploadRef.current = null;
+      retryOwnershipRef.current = nextOwnership;
+      replaceItems(publishedItems);
+      const result = summarizeImportItems(publishedItems);
+      if (!finalizeUpload(ownership)) return;
+      deliverFailure(ownership, message, result.documents, result.failed);
+      return;
     }
-  }, [ownsUpload, replaceItems]);
+    deliverDone(ownership, completedResult.documents, completedResult.failed);
+  }, [
+    claimUploadAuthority,
+    deliverDone,
+    deliverFailure,
+    finalizeUpload,
+    ownsUpload,
+    replaceItems,
+    retryDispatch,
+  ]);
+
+  useLayoutEffect(() => {
+    retryRequestRef.current = requestRetry;
+    return () => {
+      if (retryRequestRef.current === requestRetry) retryRequestRef.current = null;
+    };
+  }, [requestRetry]);
 
   const start = useCallback(async (files: Iterable<File>) => {
-    const authority = authorityRef.current;
-    if (!authority || activeUploadRef.current) return;
+    const currentAuthority = authorityRef.current;
+    if (!currentAuthority || activeUploadRef.current) return;
+    const authority = claimUploadAuthority(currentAuthority);
+    if (!authority) return;
 
     const selectedFiles = Array.from(files);
     const { documents, images, ignored: skipped } = splitImportFiles(selectedFiles);
@@ -1719,9 +2192,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setIgnored(ignoredNames);
     if (documents.length === 0) {
       const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : NOTHING_IMPORTABLE_MESSAGE;
-      optionsRef.current.onError?.(msg);
       replaceItems([]);
       setOpen(skipped.length > 0 || images.length > 0);
+      const onError = authority.onError;
+      if (authorityRef.current === authority && generationRef.current === generation) onError?.(msg);
       return;
     }
 
@@ -1738,58 +2212,89 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     if (!ownsUpload(ownership)) return;
     replaceItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
     setOpen(true);
+    let completedResult: { documents: ImportedDocument[]; failed: FailedImport[] } | null = null;
     try {
-      const { documents: created, failed } = await uploadImportBatch(documents, images);
+      const rawResult: unknown = await uploadImportBatch(documents, images);
       if (!ownsUpload(ownership)) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
-      const failedAt = new Map(failed.map((f) => [f.index, f.error]));
+      const { documents: created, failed, failedAt } = normalizeImportBatchResult(rawResult, documents);
       const retained = new Map<number, File>();
       let next = 0;
-      const nextItems = documents.map((f, i): ImportItem => {
-        const error = failedAt.get(i);
-        if (error !== undefined) {
+      const pendingItems = documents.map((f, i): ImportItem => {
+        const failure = failedAt.get(i);
+        if (failure) {
           retained.set(i, f);
-          return { name: f.name, status: "error", warnings: [], error, retry: retryFailed };
+          return { name: f.name, status: "error", warnings: [], error: failure.error };
         }
         const doc = created[next++];
-        if (doc) return { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings };
-        retained.set(i, f);
-        return { name: f.name, status: "error", warnings: [], error: "Import failed", retry: retryFailed };
+        if (!doc) throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+        return { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings };
       });
+      const retryOwnership = retained.size
+        ? createRetryOwnership(authority, generation, retained, images, retryDispatch)
+        : null;
+      const nextItems = publishRetryItems(pendingItems, retryOwnership, retryDispatch);
       if (!ownsUpload(ownership)) return;
+      retryOwnershipRef.current = retryOwnership;
       replaceItems(nextItems);
-      if (!ownsUpload(ownership)) return;
-      retryOwnershipRef.current = retained.size ? { authority, generation, files: retained, images } : null;
-      if (ownsUpload(ownership)) optionsRef.current.onDone?.(created, failed);
+      if (!finalizeUpload(ownership)) return;
+      completedResult = { documents: created, failed };
     } catch (err) {
       if (!ownsUpload(ownership)) return;
       const message = apiErrorText(err, "Import failed");
-      const nextItems = documents.map((f) => ({ name: f.name, status: "error" as const, warnings: [], error: message, retry: retryFailed }));
+      const retained = new Map(documents.map((file, index) => [index, file]));
+      const retryOwnership = createRetryOwnership(
+        authority,
+        generation,
+        retained,
+        images,
+        retryDispatch,
+      );
+      const nextItems = publishRetryItems(
+        documents.map((f) => ({ name: f.name, status: "error" as const, warnings: [], error: message })),
+        retryOwnership,
+        retryDispatch,
+      );
       if (!ownsUpload(ownership)) return;
+      retryOwnershipRef.current = retryOwnership;
       replaceItems(nextItems);
-      if (ownsUpload(ownership)) optionsRef.current.onError?.(message);
-      if (ownsUpload(ownership)) optionsRef.current.onDone?.([], []);
-    } finally {
-      if (ownsUpload(ownership)) activeUploadRef.current = null;
+      if (!finalizeUpload(ownership)) return;
+      deliverFailure(ownership, message, [], []);
+      return;
     }
-  }, [ownsUpload, replaceItems, retryFailed]);
+    deliverDone(ownership, completedResult.documents, completedResult.failed);
+  }, [
+    claimUploadAuthority,
+    deliverDone,
+    deliverFailure,
+    finalizeUpload,
+    ownsUpload,
+    replaceItems,
+    retryDispatch,
+  ]);
 
   const pick = useCallback(() => inputRef.current?.click(), []);
 
-  const dragOwnerRef = useRef<DragListenerOwner | null>(null);
   const startIntentRef = useRef(start);
 
   useLayoutEffect(() => {
     startIntentRef.current = start;
     const owner = dragOwnerRef.current;
-    if (owner?.active && authorityRef.current === owner.authority) owner.start = start;
+    if (owner?.active && authorityRef.current?.token === owner.authority.token) owner.start = start;
   }, [start]);
 
   useLayoutEffect(() => {
-    const authority: HookAuthority = { token: Symbol("file-import-authority") };
+    const callbacks = callbackSnapshotRef.current;
+    const authority: HookAuthority = Object.freeze({
+      token: Symbol("file-import-authority"),
+      onDone: callbacks.onDone,
+      onError: callbacks.onError,
+    });
     const target = window;
     const ownsListeners = () =>
-      owner.active && dragOwnerRef.current === owner && authorityRef.current === owner.authority;
+      owner.active &&
+      dragOwnerRef.current === owner &&
+      authorityRef.current?.token === owner.authority.token;
     const owner: DragListenerOwner = {
       active: true,
       authority,
@@ -1830,10 +2335,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     return () => {
       owner.active = false;
       if (dragOwnerRef.current === owner) dragOwnerRef.current = null;
-      if (authorityRef.current === authority) {
+      if (authorityRef.current?.token === authority.token) {
         authorityRef.current = null;
-        if (activeUploadRef.current?.authority === authority) activeUploadRef.current = null;
-        if (retryOwnershipRef.current?.authority === authority) retryOwnershipRef.current = null;
+        if (activeUploadRef.current?.authority.token === authority.token) activeUploadRef.current = null;
+        if (retryOwnershipRef.current?.authority.token === authority.token) retryOwnershipRef.current = null;
         itemsRef.current = [];
       }
       owner.target.removeEventListener("dragenter", owner.enter);

@@ -3,7 +3,21 @@ import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, M
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent as ReactChangeEvent,
+  type Dispatch,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type SetStateAction,
+  type SyntheticEvent as ReactSyntheticEvent,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
@@ -75,6 +89,159 @@ const TRUSTED_PREVENT_DEFAULT = Function.prototype.call.bind(
 const TRUSTED_STOP_IMMEDIATE_PROPAGATION = Function.prototype.call.bind(
   Event.prototype.stopImmediatePropagation,
 ) as (event: Event) => void;
+const TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor.bind(Object);
+const TRUSTED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf.bind(Object);
+const TRUSTED_REFLECT_DEFINE_PROPERTY = Reflect.defineProperty.bind(Reflect);
+const TRUSTED_IS_PROTOTYPE_OF = Function.prototype.call.bind(
+  Object.prototype.isPrototypeOf,
+) as (prototype: object, value: object) => boolean;
+
+function capturePrototypeGetter<T>(
+  prototype: object | null,
+  property: PropertyKey,
+): ((value: object) => T) | null {
+  for (let current = prototype; current; current = TRUSTED_OBJECT_GET_PROTOTYPE_OF(current)) {
+    const descriptor = TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+      current,
+      property,
+    );
+    if (descriptor?.get) {
+      return Function.prototype.call.bind(descriptor.get) as (
+        value: object,
+      ) => T;
+    }
+  }
+  return null;
+}
+
+function capturePrototypeMethod<T extends (...args: never[]) => unknown>(
+  prototype: object | null,
+  property: PropertyKey,
+): T | null {
+  for (let current = prototype; current; current = TRUSTED_OBJECT_GET_PROTOTYPE_OF(current)) {
+    const descriptor = TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+      current,
+      property,
+    );
+    if (descriptor && "value" in descriptor && typeof descriptor.value === "function") {
+      return Function.prototype.call.bind(descriptor.value) as unknown as T;
+    }
+  }
+  return null;
+}
+
+const EVENT_PROTOTYPE = typeof Event === "undefined" ? null : Event.prototype;
+const UI_EVENT_PROTOTYPE =
+  typeof UIEvent === "undefined" ? null : UIEvent.prototype;
+const KEYBOARD_EVENT_PROTOTYPE =
+  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent.prototype;
+const MOUSE_EVENT_PROTOTYPE =
+  typeof MouseEvent === "undefined" ? null : MouseEvent.prototype;
+const INPUT_EVENT_PROTOTYPE =
+  typeof InputEvent === "undefined" ? null : InputEvent.prototype;
+const HTML_INPUT_PROTOTYPE =
+  typeof HTMLInputElement === "undefined" ? null : HTMLInputElement.prototype;
+const HTML_BUTTON_PROTOTYPE =
+  typeof HTMLButtonElement === "undefined" ? null : HTMLButtonElement.prototype;
+const HTML_ELEMENT_PROTOTYPE =
+  typeof HTMLElement === "undefined" ? null : HTMLElement.prototype;
+const ELEMENT_PROTOTYPE =
+  typeof Element === "undefined" ? null : Element.prototype;
+
+const TRUSTED_EVENT_TYPE = capturePrototypeGetter<string>(
+  EVENT_PROTOTYPE,
+  "type",
+);
+const TRUSTED_EVENT_PHASE = capturePrototypeGetter<number>(
+  EVENT_PROTOTYPE,
+  "eventPhase",
+);
+const TRUSTED_EVENT_BUBBLES = capturePrototypeGetter<boolean>(
+  EVENT_PROTOTYPE,
+  "bubbles",
+);
+const TRUSTED_EVENT_CANCELABLE = capturePrototypeGetter<boolean>(
+  EVENT_PROTOTYPE,
+  "cancelable",
+);
+const TRUSTED_EVENT_CANCEL_BUBBLE = capturePrototypeGetter<boolean>(
+  EVENT_PROTOTYPE,
+  "cancelBubble",
+);
+const TRUSTED_KEYBOARD_KEY = capturePrototypeGetter<string>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "key",
+);
+const TRUSTED_KEYBOARD_CTRL = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "ctrlKey",
+);
+const TRUSTED_KEYBOARD_META = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "metaKey",
+);
+const TRUSTED_KEYBOARD_ALT = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "altKey",
+);
+const TRUSTED_KEYBOARD_SHIFT = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "shiftKey",
+);
+const TRUSTED_KEYBOARD_REPEAT = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "repeat",
+);
+const TRUSTED_KEYBOARD_COMPOSING = capturePrototypeGetter<boolean>(
+  KEYBOARD_EVENT_PROTOTYPE,
+  "isComposing",
+);
+const TRUSTED_MOUSE_BUTTON = capturePrototypeGetter<number>(
+  MOUSE_EVENT_PROTOTYPE,
+  "button",
+);
+const TRUSTED_MOUSE_BUTTONS = capturePrototypeGetter<number>(
+  MOUSE_EVENT_PROTOTYPE,
+  "buttons",
+);
+const TRUSTED_UI_DETAIL = capturePrototypeGetter<number>(
+  UI_EVENT_PROTOTYPE,
+  "detail",
+);
+const TRUSTED_INPUT_COMPOSING = capturePrototypeGetter<boolean>(
+  INPUT_EVENT_PROTOTYPE,
+  "isComposing",
+);
+const TRUSTED_INPUT_VALUE = capturePrototypeGetter<string>(
+  HTML_INPUT_PROTOTYPE,
+  "value",
+);
+const TRUSTED_INPUT_DISABLED = capturePrototypeGetter<boolean>(
+  HTML_INPUT_PROTOTYPE,
+  "disabled",
+);
+const TRUSTED_INPUT_READ_ONLY = capturePrototypeGetter<boolean>(
+  HTML_INPUT_PROTOTYPE,
+  "readOnly",
+);
+const TRUSTED_BUTTON_DISABLED = capturePrototypeGetter<boolean>(
+  HTML_BUTTON_PROTOTYPE,
+  "disabled",
+);
+const TRUSTED_ELEMENT_HAS_ATTRIBUTE = capturePrototypeMethod<
+  (element: Element, name: string) => boolean
+>(ELEMENT_PROTOTYPE, "hasAttribute");
+const TRUSTED_ELEMENT_GET_ATTRIBUTE = capturePrototypeMethod<
+  (element: Element, name: string) => string | null
+>(ELEMENT_PROTOTYPE, "getAttribute");
+const TRUSTED_FOCUS = capturePrototypeMethod<
+  (element: HTMLElement, options?: FocusOptions) => void
+>(HTML_ELEMENT_PROTOTYPE, "focus");
+const TRUSTED_BLUR = capturePrototypeMethod<(element: HTMLElement) => void>(
+  HTML_ELEMENT_PROTOTYPE,
+  "blur",
+);
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -2169,6 +2336,2272 @@ interface SearchError {
   message: string;
 }
 
+type SearchControlActionKind =
+  | "change"
+  | "escape"
+  | "inline-clear"
+  | "empty-clear"
+  | "retry";
+
+type SearchControlElementRole =
+  | "search-root"
+  | "search-icon"
+  | "input"
+  | "hint"
+  | "loading-icon"
+  | "inline-clear"
+  | "inline-clear-icon"
+  | "error-root"
+  | "error-message"
+  | "retry"
+  | "empty-root"
+  | "empty-icon"
+  | "empty-primary"
+  | "empty-secondary"
+  | "empty-clear";
+
+interface SearchControlRenderPublication {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly authority: SearchAuthority;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+  readonly query: string;
+  readonly trimmed: string;
+  readonly results: SearchResults | null;
+  readonly serverResults: readonly SearchDoc[] | null;
+  readonly request: SearchRequestOwner | null;
+  readonly error: SearchError | null;
+  readonly searching: boolean;
+  readonly pending: boolean;
+  readonly filter: Filter;
+  readonly filtered: readonly (Doc & { snippet?: string | null })[];
+  readonly setQuery: Dispatch<SetStateAction<string>>;
+  readonly retry: () => void;
+}
+
+interface SearchControlElementOwnerView {
+  readonly role: SearchControlElementRole;
+  readonly element: () => Element | null;
+}
+
+interface SearchControlRefReplay {
+  readonly owner: SearchControlElementOwnerView;
+  readonly element: Element;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface SearchControlActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly controlIdentity: symbol;
+  readonly kind: SearchControlActionKind;
+}
+
+interface SearchControlPublication {
+  readonly identity: symbol;
+  readonly render: SearchControlRenderPublication;
+  readonly ownerDocument: Document;
+  readonly searchRoot: HTMLDivElement;
+  readonly input: HTMLInputElement;
+  readonly controls: ReadonlyMap<
+    SearchControlActionKind,
+    SearchPublishedControl
+  >;
+  readonly roots: readonly SearchControlRootPublication[];
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface SearchPublishedControl {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly element: HTMLInputElement | HTMLButtonElement;
+  readonly root: HTMLDivElement;
+  readonly targets: readonly Node[];
+  readonly paths: ReadonlyMap<Node, readonly EventTarget[]>;
+  readonly action: SearchControlActionPublication;
+}
+
+interface SearchControlRootPublication {
+  readonly role: "search-root" | "error-root" | "empty-root";
+  readonly element: HTMLDivElement;
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+}
+
+interface SearchControlReplay {
+  readonly source: SearchControlPublication;
+  readonly roots: readonly SearchControlRootPublication[];
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface SearchControlPublicationCells {
+  active: SearchControlPublication | null;
+  successorOf: SearchControlPublication | null;
+  replay: SearchControlReplay | null;
+  delivery: symbol | null;
+  readonly claimedPublications: WeakSet<SearchControlPublication>;
+  readonly claimedControls: WeakSet<SearchPublishedControl>;
+  readonly claimedActions: WeakSet<SearchControlActionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+}
+
+interface SearchNativeEventProof {
+  readonly identity: symbol;
+  readonly origin: "document-capture" | "document-root-react-capture";
+  readonly event: Event;
+  readonly publication: SearchControlPublication;
+  readonly control: SearchPublishedControl;
+  readonly action: SearchControlActionPublication;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly value: string | null;
+  readonly composing: boolean | null;
+  readonly key: string | null;
+  readonly ctrlKey: boolean | null;
+  readonly metaKey: boolean | null;
+  readonly altKey: boolean | null;
+  readonly shiftKey: boolean | null;
+  readonly repeat: boolean | null;
+  readonly button: number | null;
+  readonly buttons: number | null;
+  readonly detail: number | null;
+  readonly propagationStopped: () => boolean;
+}
+
+interface SearchReactEventProof {
+  readonly event: object;
+  readonly native: SearchNativeEventProof;
+  readonly dispatchTarget: EventTarget;
+  readonly nativePhase: number;
+}
+
+interface SearchTerminalEventProof {
+  readonly native: SearchNativeEventProof;
+  readonly capture: SearchReactEventProof;
+  readonly bubble: SearchReactEventProof;
+}
+
+interface SearchControlPublicationRuntime {
+  readonly publication: SearchControlPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: SearchControlElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly replay: () => SearchControlReplay | null;
+  readonly captureRoot: (
+    role: "search-root" | "error-root" | "empty-root",
+    event: ReactSyntheticEvent,
+  ) => void;
+  readonly captureControl: (
+    kind: SearchControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => void;
+  readonly bubbleControl: (
+    kind: SearchControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => void;
+}
+
+interface SearchControlPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureSearchRoot: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureSearchIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureInput: (
+    element: HTMLInputElement | null,
+  ) => void | (() => void);
+  readonly captureHint: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureLoadingIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureInlineClear: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureInlineClearIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureErrorRoot: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureErrorMessage: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureRetry: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureEmptyRoot: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureEmptyIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureEmptyPrimary: (
+    element: HTMLParagraphElement | null,
+  ) => void | (() => void);
+  readonly captureEmptySecondary: (
+    element: HTMLParagraphElement | null,
+  ) => void | (() => void);
+  readonly captureEmptyClear: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureRootChange: (
+    event: ReactChangeEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureInputChange: (
+    event: ReactChangeEvent<HTMLInputElement>,
+  ) => void;
+  readonly changeInput: (event: ReactChangeEvent<HTMLInputElement>) => void;
+  readonly captureRootKeyDown: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureInputKeyDown: (
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => void;
+  readonly keyDownInput: (
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => void;
+  readonly captureSearchClick: (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureInlineClearClick: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly activateInlineClear: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly captureErrorClick: (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureRetryClick: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly activateRetry: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly captureEmptyClick: (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureEmptyClearClick: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly activateEmptyClear: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+}
+
+class SearchControlElementOwner<T extends Element>
+  implements SearchControlElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: SearchControlElementRole,
+    private readonly onChange: (
+      owner: SearchControlElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+const SEARCH_CONTROL_MISSING = Symbol("search-control-missing");
+
+function searchControlOwnValue(
+  value: object,
+  property: PropertyKey,
+): unknown | typeof SEARCH_CONTROL_MISSING {
+  const descriptor = TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, property);
+  return descriptor && "value" in descriptor
+    ? descriptor.value
+    : SEARCH_CONTROL_MISSING;
+}
+
+function searchControlNodes(element: HTMLElement): readonly Node[] {
+  const nodes: Node[] = [];
+  const visit = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(element);
+  return Object.freeze(nodes);
+}
+
+function searchControlPaths(
+  ownerDocument: Document,
+  targets: readonly Node[],
+) {
+  const entries: [Node, readonly EventTarget[]][] = [];
+  for (const target of targets) {
+    const path = templateGridEventPath(ownerDocument, target);
+    if (!path) return null;
+    entries.push([target, path]);
+  }
+  return new Map(entries);
+}
+
+function searchControlRenderIsExact(render: SearchControlRenderPublication) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.authority) &&
+    render.authority.mount === render.mount &&
+    render.authority.user === render.user &&
+    render.authority.userId === render.userId &&
+    render.user.id === render.userId &&
+    render.trimmed === render.query.trim() &&
+    (render.results === null ||
+      (render.results.authority === render.authority &&
+        render.results.query === render.trimmed)) &&
+    (render.serverResults === null ||
+      (render.results?.documents === render.serverResults &&
+        render.trimmed.length >= MIN_QUERY_LENGTH &&
+        render.error === null)) &&
+    (render.request === null ||
+      (render.request.authority === render.authority &&
+        render.request.query === render.trimmed)) &&
+    render.searching === (render.request !== null) &&
+    (render.error === null ||
+      (render.error.authority === render.authority &&
+        render.error.query === render.trimmed))
+  );
+}
+
+function searchControlRendersMatch(
+  previous: SearchControlRenderPublication,
+  current: SearchControlRenderPublication,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.authority === current.authority &&
+    previous.user === current.user &&
+    previous.userId === current.userId &&
+    previous.query === current.query &&
+    previous.trimmed === current.trimmed &&
+    previous.results === current.results &&
+    previous.serverResults === current.serverResults &&
+    previous.request === current.request &&
+    previous.error === current.error &&
+    previous.searching === current.searching &&
+    previous.pending === current.pending &&
+    previous.filter === current.filter &&
+    previous.filtered === current.filtered &&
+    previous.setQuery === current.setQuery &&
+    previous.retry === current.retry &&
+    searchControlRenderIsExact(previous) &&
+    searchControlRenderIsExact(current)
+  );
+}
+
+function searchControlExpectedText(render: SearchControlRenderPublication) {
+  return {
+    error: render.error
+      ? `Content search failed: ${render.error.message}. Showing title matches only.`
+      : null,
+    primary: render.pending
+      ? `Searching for "${render.trimmed}"…`
+      : render.error
+        ? `No title matches for "${render.trimmed}"`
+        : `No matches for "${render.trimmed}"`,
+    secondary: render.pending
+      ? "Looking through titles and content."
+      : render.error
+        ? "Content results are unavailable. Retry the search above."
+        : "Try a different search.",
+  };
+}
+
+interface SearchControlOwners {
+  readonly searchRoot: SearchControlElementOwner<HTMLDivElement>;
+  readonly searchIcon: SearchControlElementOwner<SVGSVGElement>;
+  readonly input: SearchControlElementOwner<HTMLInputElement>;
+  readonly hint: SearchControlElementOwner<HTMLSpanElement>;
+  readonly loadingIcon: SearchControlElementOwner<SVGSVGElement>;
+  readonly inlineClear: SearchControlElementOwner<HTMLButtonElement>;
+  readonly inlineClearIcon: SearchControlElementOwner<SVGSVGElement>;
+  readonly errorRoot: SearchControlElementOwner<HTMLDivElement>;
+  readonly errorMessage: SearchControlElementOwner<HTMLSpanElement>;
+  readonly retry: SearchControlElementOwner<HTMLButtonElement>;
+  readonly emptyRoot: SearchControlElementOwner<HTMLDivElement>;
+  readonly emptyIcon: SearchControlElementOwner<SVGSVGElement>;
+  readonly emptyPrimary: SearchControlElementOwner<HTMLParagraphElement>;
+  readonly emptySecondary: SearchControlElementOwner<HTMLParagraphElement>;
+  readonly emptyClear: SearchControlElementOwner<HTMLButtonElement>;
+}
+
+function searchControlHasEmptyState(render: SearchControlRenderPublication) {
+  return (
+    render.filter !== "trash" &&
+    render.trimmed.length > 0 &&
+    render.filtered.length === 0
+  );
+}
+
+function searchControlHasEmptyClear(render: SearchControlRenderPublication) {
+  return searchControlHasEmptyState(render) && !render.pending;
+}
+
+function searchControlExpectedOwners(
+  render: SearchControlRenderPublication,
+  owners: SearchControlOwners,
+): readonly SearchControlElementOwnerView[] {
+  return Object.freeze([
+    owners.searchRoot,
+    owners.searchIcon,
+    owners.input,
+    ...(render.query ? [owners.inlineClear, owners.inlineClearIcon] : [owners.hint]),
+    ...(render.searching ? [owners.loadingIcon] : []),
+    ...(render.error
+      ? [owners.errorRoot, owners.errorMessage, owners.retry]
+      : []),
+    ...(searchControlHasEmptyState(render)
+      ? [
+          owners.emptyRoot,
+          owners.emptyIcon,
+          owners.emptyPrimary,
+          owners.emptySecondary,
+          ...(searchControlHasEmptyClear(render) ? [owners.emptyClear] : []),
+        ]
+      : []),
+  ]);
+}
+
+function searchControlAncestorsAreEnabled(
+  element: HTMLElement,
+  root: HTMLElement,
+) {
+  if (!TRUSTED_ELEMENT_HAS_ATTRIBUTE || !TRUSTED_ELEMENT_GET_ATTRIBUTE) {
+    return false;
+  }
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (
+      TRUSTED_ELEMENT_HAS_ATTRIBUTE(current, "inert") ||
+      TRUSTED_ELEMENT_HAS_ATTRIBUTE(current, "hidden") ||
+      TRUSTED_ELEMENT_GET_ATTRIBUTE(current, "aria-disabled")?.toLowerCase() ===
+        "true"
+    ) {
+      return false;
+    }
+    if (current === root) return true;
+  }
+  return false;
+}
+
+function searchControlIsEnabled(
+  control: HTMLInputElement | HTMLButtonElement,
+  root: HTMLDivElement,
+) {
+  const ownerWindow = control.ownerDocument.defaultView;
+  if (!ownerWindow) return false;
+  const disabled =
+    control instanceof ownerWindow.HTMLInputElement
+      ? TRUSTED_INPUT_DISABLED?.(control)
+      : TRUSTED_BUTTON_DISABLED?.(control);
+  return (
+    disabled === false &&
+    searchControlAncestorsAreEnabled(control, root)
+  );
+}
+
+function searchControlElementsAreExact(
+  render: SearchControlRenderPublication,
+  owners: SearchControlOwners,
+  allowChangedInputValue = false,
+) {
+  if (
+    !TRUSTED_INPUT_VALUE ||
+    !TRUSTED_INPUT_DISABLED ||
+    !TRUSTED_INPUT_READ_ONLY ||
+    !TRUSTED_BUTTON_DISABLED
+  ) {
+    return false;
+  }
+  const searchRoot = owners.searchRoot.element();
+  const searchIcon = owners.searchIcon.element();
+  const input = owners.input.element();
+  const hint = owners.hint.element();
+  const loadingIcon = owners.loadingIcon.element();
+  const inlineClear = owners.inlineClear.element();
+  const inlineClearIcon = owners.inlineClearIcon.element();
+  const errorRoot = owners.errorRoot.element();
+  const errorMessage = owners.errorMessage.element();
+  const retry = owners.retry.element();
+  const emptyRoot = owners.emptyRoot.element();
+  const emptyIcon = owners.emptyIcon.element();
+  const emptyPrimary = owners.emptyPrimary.element();
+  const emptySecondary = owners.emptySecondary.element();
+  const emptyClear = owners.emptyClear.element();
+  const ownerDocument = searchRoot?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    !searchControlRenderIsExact(render) ||
+    !ownerWindow ||
+    !(searchRoot instanceof ownerWindow.HTMLDivElement) ||
+    !(searchIcon instanceof ownerWindow.SVGSVGElement) ||
+    !(input instanceof ownerWindow.HTMLInputElement) ||
+    !searchRoot.isConnected ||
+    searchRoot.className !== "relative mx-auto w-full max-w-xl" ||
+    searchRoot.children.item(0) !== searchIcon ||
+    searchRoot.children.item(1) !== input ||
+    searchIcon.parentElement !== searchRoot ||
+    searchIcon.getAttribute("width") !== "16" ||
+    searchIcon.getAttribute("height") !== "16" ||
+    searchIcon.getAttribute("aria-hidden") !== "true" ||
+    !searchIcon.classList.contains("lucide-search") ||
+    searchIcon.className.baseVal !==
+      "lucide lucide-search pointer-events-none absolute left-3 top-2.5 text-ink-4" ||
+    input.parentElement !== searchRoot ||
+    input.className !==
+      cn(
+        "input pl-9",
+        render.query && render.searching
+          ? "pr-16"
+          : render.query
+            ? "pr-9"
+            : "pr-9 sm:pr-12",
+      ) ||
+    input.getAttribute("placeholder") !== "Search documents" ||
+    input.getAttribute("aria-label") !== "Search documents" ||
+    input.dataset.testid !== "search" ||
+    TRUSTED_INPUT_DISABLED(input) ||
+    TRUSTED_INPUT_READ_ONLY(input) ||
+    (!allowChangedInputValue && TRUSTED_INPUT_VALUE(input) !== render.query) ||
+    !searchControlIsEnabled(input, searchRoot)
+  ) {
+    return false;
+  }
+
+  let searchIndex = 2;
+  if (!render.query) {
+    if (
+      !(hint instanceof ownerWindow.HTMLSpanElement) ||
+      hint.parentElement !== searchRoot ||
+      searchRoot.children.item(searchIndex++) !== hint ||
+      hint.className !==
+        "pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" ||
+      hint.getAttribute("aria-hidden") !== "true" ||
+      hint.children.length !== 1 ||
+      hint.firstElementChild?.tagName !== "KBD" ||
+      hint.textContent !== "/"
+    ) {
+      return false;
+    }
+  } else if (hint !== null) {
+    return false;
+  }
+
+  if (render.searching) {
+    if (
+      !(loadingIcon instanceof ownerWindow.SVGSVGElement) ||
+      loadingIcon.parentElement !== searchRoot ||
+      searchRoot.children.item(searchIndex++) !== loadingIcon ||
+      loadingIcon.getAttribute("width") !== "16" ||
+      loadingIcon.getAttribute("height") !== "16" ||
+      loadingIcon.dataset.testid !== "search-loading" ||
+      !loadingIcon.classList.contains("lucide-loader-circle") ||
+      !loadingIcon.classList.contains("animate-spin")
+    ) {
+      return false;
+    }
+  } else if (loadingIcon !== null) {
+    return false;
+  }
+
+  if (render.query) {
+    if (
+      !(inlineClear instanceof ownerWindow.HTMLButtonElement) ||
+      !(inlineClearIcon instanceof ownerWindow.SVGSVGElement) ||
+      inlineClear.parentElement !== searchRoot ||
+      searchRoot.children.item(searchIndex++) !== inlineClear ||
+      inlineClear.type !== "button" ||
+      inlineClear.className !==
+        "absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center text-ink-3 transition-colors hover:text-ink max-sm:-right-1 max-sm:-top-1 max-sm:h-11 max-sm:w-11" ||
+      inlineClear.getAttribute("aria-label") !== "Clear search" ||
+      inlineClear.dataset.testid !== "search-clear" ||
+      TRUSTED_BUTTON_DISABLED(inlineClear) ||
+      inlineClear.children.length !== 1 ||
+      inlineClear.firstElementChild !== inlineClearIcon ||
+      inlineClearIcon.parentElement !== inlineClear ||
+      inlineClearIcon.getAttribute("width") !== "16" ||
+      inlineClearIcon.getAttribute("height") !== "16" ||
+      !inlineClearIcon.classList.contains("lucide-x") ||
+      !searchControlIsEnabled(inlineClear, searchRoot)
+    ) {
+      return false;
+    }
+  } else if (inlineClear !== null || inlineClearIcon !== null) {
+    return false;
+  }
+  if (searchRoot.children.length !== searchIndex) return false;
+
+  if (render.error) {
+    const text = searchControlExpectedText(render);
+    if (
+      !(errorRoot instanceof ownerWindow.HTMLDivElement) ||
+      !(errorMessage instanceof ownerWindow.HTMLSpanElement) ||
+      !(retry instanceof ownerWindow.HTMLButtonElement) ||
+      !errorRoot.isConnected ||
+      errorRoot.ownerDocument !== ownerDocument ||
+      errorRoot.className !==
+        "mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" ||
+      errorRoot.getAttribute("role") !== "alert" ||
+      errorRoot.getAttribute("aria-atomic") !== "true" ||
+      errorRoot.dataset.testid !== "search-error" ||
+      errorRoot.children.length !== 2 ||
+      errorRoot.firstElementChild !== errorMessage ||
+      errorMessage.parentElement !== errorRoot ||
+      errorMessage.className !== "min-w-0 flex-1" ||
+      errorMessage.textContent?.trim() !== text.error ||
+      errorRoot.lastElementChild !== retry ||
+      retry.parentElement !== errorRoot ||
+      retry.type !== "button" ||
+      retry.className !== "btn btn-sm btn-outline shrink-0" ||
+      TRUSTED_BUTTON_DISABLED(retry) !== render.searching ||
+      retry.getAttribute("aria-busy") !==
+        (render.searching ? "true" : null) ||
+      retry.textContent?.trim() !==
+        (render.searching ? "Retrying…" : "Retry") ||
+      (!render.searching && !searchControlIsEnabled(retry, errorRoot))
+    ) {
+      return false;
+    }
+  } else if (errorRoot !== null || errorMessage !== null || retry !== null) {
+    return false;
+  }
+
+  if (searchControlHasEmptyState(render)) {
+    const text = searchControlExpectedText(render);
+    const hasClear = searchControlHasEmptyClear(render);
+    if (
+      !(emptyRoot instanceof ownerWindow.HTMLDivElement) ||
+      !(emptyIcon instanceof ownerWindow.SVGSVGElement) ||
+      !(emptyPrimary instanceof ownerWindow.HTMLParagraphElement) ||
+      !(emptySecondary instanceof ownerWindow.HTMLParagraphElement) ||
+      !emptyRoot.isConnected ||
+      emptyRoot.ownerDocument !== ownerDocument ||
+      emptyRoot.className !==
+        "rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" ||
+      emptyRoot.dataset.testid !== "empty-state" ||
+      emptyRoot.children.length !== (hasClear ? 4 : 3) ||
+      emptyRoot.children.item(0) !== emptyIcon ||
+      emptyIcon.parentElement !== emptyRoot ||
+      emptyIcon.getAttribute("width") !== "28" ||
+      emptyIcon.getAttribute("height") !== "28" ||
+      !emptyIcon.classList.contains("lucide-file-text") ||
+      emptyIcon.className.baseVal !==
+        "lucide lucide-file-text mx-auto mb-3 text-ink-4" ||
+      emptyRoot.children.item(1) !== emptyPrimary ||
+      emptyPrimary.parentElement !== emptyRoot ||
+      emptyPrimary.className !== "text-sm font-medium text-ink-2" ||
+      emptyPrimary.textContent?.trim() !== text.primary ||
+      emptyRoot.children.item(2) !== emptySecondary ||
+      emptySecondary.parentElement !== emptyRoot ||
+      emptySecondary.className !== "mt-1 text-sm text-ink-3" ||
+      emptySecondary.textContent?.trim() !== text.secondary
+    ) {
+      return false;
+    }
+    if (hasClear) {
+      if (
+        !(emptyClear instanceof ownerWindow.HTMLButtonElement) ||
+        emptyRoot.children.item(3) !== emptyClear ||
+        emptyClear.parentElement !== emptyRoot ||
+        emptyClear.type !== "button" ||
+        emptyClear.className !==
+          "mt-3 text-sm font-medium text-accent hover:underline" ||
+        emptyClear.dataset.testid !== "empty-state-clear-search" ||
+        emptyClear.textContent?.trim() !== "Clear search" ||
+        TRUSTED_BUTTON_DISABLED(emptyClear) ||
+        !searchControlIsEnabled(emptyClear, emptyRoot)
+      ) {
+        return false;
+      }
+    } else if (emptyClear !== null) {
+      return false;
+    }
+  } else if (
+    emptyRoot !== null ||
+    emptyIcon !== null ||
+    emptyPrimary !== null ||
+    emptySecondary !== null ||
+    emptyClear !== null
+  ) {
+    return false;
+  }
+
+  const expectedOwners = searchControlExpectedOwners(render, owners);
+  const elements = expectedOwners.map((owner) => owner.element());
+  return (
+    elements.every(
+      (element): element is Element =>
+        Boolean(
+          element &&
+            element.isConnected &&
+            element.ownerDocument === ownerDocument,
+        ),
+    ) && new Set(elements).size === elements.length
+  );
+}
+
+function searchControlPlacement(element: Element): TemplateGridPlacement | null {
+  const placement: TemplateGridNodePlacement[] = [];
+  const ownerDocument = element.ownerDocument;
+  let current: Node | null = element;
+  while (current) {
+    placement.push(
+      Object.freeze({
+        node: current,
+        parent: current.parentNode,
+        previousSibling: current.previousSibling,
+        nextSibling: current.nextSibling,
+      }),
+    );
+    if (current === ownerDocument) return Object.freeze(placement);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function searchControlPlacementMatches(
+  ownerDocument: Document,
+  placement: TemplateGridPlacement,
+) {
+  return templateGridPlacementMatches(ownerDocument, placement);
+}
+
+function searchControlRootsMatch(
+  ownerDocument: Document,
+  roots: readonly SearchControlRootPublication[],
+) {
+  return roots.every(
+    ({ element, dom, placement }) =>
+      element.isConnected &&
+      element.ownerDocument === ownerDocument &&
+      dom.node === element &&
+      templateGridDomMatches(dom) &&
+      searchControlPlacementMatches(ownerDocument, placement),
+  );
+}
+
+interface SearchControlDomGuard {
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+function createSearchControlDomGuard(
+  ownerDocument: Document,
+  roots: readonly SearchControlRootPublication[],
+  onMutation: () => void,
+  allowReactInputNameReplay: (
+    records: readonly MutationRecord[],
+  ) => boolean,
+): SearchControlDomGuard | null {
+  const MutationObserverConstructor = ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const rootElements = roots.map(({ element }) => element);
+  const placements = roots.flatMap(({ placement }) => placement);
+  const relevant = (mutation: MutationRecord) => {
+    if (
+      rootElements.some(
+        (root) => mutation.target === root || root.contains(mutation.target),
+      )
+    ) {
+      return true;
+    }
+    if (mutation.type === "attributes") {
+      return (
+        (mutation.attributeName === "aria-disabled" ||
+          mutation.attributeName === "disabled" ||
+          mutation.attributeName === "hidden" ||
+          mutation.attributeName === "inert" ||
+          mutation.attributeName === "readonly") &&
+        placements.some(({ node }) => mutation.target === node)
+      );
+    }
+    if (mutation.type !== "childList") return false;
+    return placements.some(
+      ({ node, parent }) =>
+        mutation.target === parent &&
+        (mutation.previousSibling === node ||
+          mutation.nextSibling === node ||
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (changedNode) =>
+              changedNode === node ||
+              (changedNode.nodeType === 1 &&
+                (changedNode as Element).contains(node)),
+          )),
+    );
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    const relevantRecords = records.filter(relevant);
+    if (
+      !changed &&
+      relevantRecords.length > 0 &&
+      !allowReactInputNameReplay(relevantRecords)
+    ) {
+      changed = true;
+      onMutation();
+    }
+    return changed;
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(ownerDocument, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    unchanged: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function searchControlPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+  ownerDocument: Document,
+) {
+  const actualView = actual.at(-1);
+  const expectedView = expected.at(-1);
+  const hasOwnerDocumentView =
+    actualView === expectedView ||
+    (typeof actualView === "object" &&
+      actualView !== null &&
+      "document" in actualView &&
+      actualView.document === ownerDocument &&
+      "window" in actualView &&
+      actualView.window === actualView);
+  return (
+    actual.length === expected.length &&
+    hasOwnerDocumentView &&
+    actual
+      .slice(0, -1)
+      .every((entry, index) => entry === expected[index])
+  );
+}
+
+function searchControlNativeSupportIsAvailable() {
+  return Boolean(
+    TRUSTED_EVENT_CURRENT_TARGET &&
+      TRUSTED_EVENT_DEFAULT_PREVENTED &&
+      TRUSTED_EVENT_TARGET &&
+      TRUSTED_EVENT_TYPE &&
+      TRUSTED_EVENT_PHASE &&
+      TRUSTED_EVENT_BUBBLES &&
+      TRUSTED_EVENT_CANCELABLE &&
+      TRUSTED_EVENT_CANCEL_BUBBLE &&
+      TRUSTED_KEYBOARD_KEY &&
+      TRUSTED_KEYBOARD_CTRL &&
+      TRUSTED_KEYBOARD_META &&
+      TRUSTED_KEYBOARD_ALT &&
+      TRUSTED_KEYBOARD_SHIFT &&
+      TRUSTED_KEYBOARD_REPEAT &&
+      TRUSTED_KEYBOARD_COMPOSING &&
+      TRUSTED_MOUSE_BUTTON &&
+      TRUSTED_MOUSE_BUTTONS &&
+      TRUSTED_UI_DETAIL &&
+      TRUSTED_INPUT_VALUE &&
+      TRUSTED_FOCUS &&
+      TRUSTED_BLUR,
+  );
+}
+
+function createSearchControlPublication(
+  render: SearchControlRenderPublication,
+  cells: SearchControlPublicationCells,
+  requestSuccessor: () => void,
+): SearchControlPublicationSet {
+  let currentRuntime: SearchControlPublicationRuntime | null = null;
+  let lastRuntime: SearchControlPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const onElementChange = (
+    owner: SearchControlElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf === runtime.publication
+    ) {
+      const replay = runtime.replay();
+      if (
+        replay &&
+        searchControlElementsAreExact(render, owners) &&
+        replay.source.searchRoot === owners.searchRoot.element()
+      ) {
+        cells.replay = replay;
+        successorRequested = true;
+        requestSuccessor();
+      }
+    }
+  };
+
+  const owners: SearchControlOwners = {
+    searchRoot: new SearchControlElementOwner<HTMLDivElement>(
+      "search-root",
+      onElementChange,
+    ),
+    searchIcon: new SearchControlElementOwner<SVGSVGElement>(
+      "search-icon",
+      onElementChange,
+    ),
+    input: new SearchControlElementOwner<HTMLInputElement>(
+      "input",
+      onElementChange,
+    ),
+    hint: new SearchControlElementOwner<HTMLSpanElement>(
+      "hint",
+      onElementChange,
+    ),
+    loadingIcon: new SearchControlElementOwner<SVGSVGElement>(
+      "loading-icon",
+      onElementChange,
+    ),
+    inlineClear: new SearchControlElementOwner<HTMLButtonElement>(
+      "inline-clear",
+      onElementChange,
+    ),
+    inlineClearIcon: new SearchControlElementOwner<SVGSVGElement>(
+      "inline-clear-icon",
+      onElementChange,
+    ),
+    errorRoot: new SearchControlElementOwner<HTMLDivElement>(
+      "error-root",
+      onElementChange,
+    ),
+    errorMessage: new SearchControlElementOwner<HTMLSpanElement>(
+      "error-message",
+      onElementChange,
+    ),
+    retry: new SearchControlElementOwner<HTMLButtonElement>(
+      "retry",
+      onElementChange,
+    ),
+    emptyRoot: new SearchControlElementOwner<HTMLDivElement>(
+      "empty-root",
+      onElementChange,
+    ),
+    emptyIcon: new SearchControlElementOwner<SVGSVGElement>(
+      "empty-icon",
+      onElementChange,
+    ),
+    emptyPrimary: new SearchControlElementOwner<HTMLParagraphElement>(
+      "empty-primary",
+      onElementChange,
+    ),
+    emptySecondary: new SearchControlElementOwner<HTMLParagraphElement>(
+      "empty-secondary",
+      onElementChange,
+    ),
+    emptyClear: new SearchControlElementOwner<HTMLButtonElement>(
+      "empty-clear",
+      onElementChange,
+    ),
+  };
+
+  const createRuntime = (): SearchControlPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    if (
+      !searchControlNativeSupportIsAvailable() ||
+      !searchControlElementsAreExact(render, owners)
+    ) {
+      return null;
+    }
+    const searchRoot = owners.searchRoot.element();
+    const input = owners.input.element();
+    if (!searchRoot || !input) return null;
+    const ownerDocument = searchRoot.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const addOwnerWindowListener = ownerWindow
+      ? capturePrototypeMethod<
+          (
+            target: EventTarget,
+            type: string,
+            listener: (event: Event) => void,
+            options?: boolean | AddEventListenerOptions,
+          ) => void
+        >(ownerWindow.EventTarget.prototype, "addEventListener")
+      : null;
+    const removeOwnerWindowListener = ownerWindow
+      ? capturePrototypeMethod<
+          (
+            target: EventTarget,
+            type: string,
+            listener: (event: Event) => void,
+            options?: boolean | EventListenerOptions,
+          ) => void
+        >(ownerWindow.EventTarget.prototype, "removeEventListener")
+      : null;
+    const preventOwnerDefault = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "preventDefault",
+        )
+      : null;
+    const stopOwnerPropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopPropagation",
+        )
+      : null;
+    const stopOwnerImmediatePropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopImmediatePropagation",
+        )
+      : null;
+    if (
+      !ownerWindow ||
+      !addOwnerWindowListener ||
+      !removeOwnerWindowListener ||
+      !preventOwnerDefault ||
+      !stopOwnerPropagation ||
+      !stopOwnerImmediatePropagation ||
+      !(searchRoot instanceof ownerWindow.HTMLDivElement) ||
+      !(input instanceof ownerWindow.HTMLInputElement)
+    ) {
+      return null;
+    }
+    const rootEntries: [
+      SearchControlRootPublication["role"],
+      HTMLDivElement | null,
+    ][] = [
+      ["search-root", searchRoot],
+      [
+        "error-root",
+        render.error
+          ? (owners.errorRoot.element() as HTMLDivElement | null)
+          : null,
+      ],
+      [
+        "empty-root",
+        searchControlHasEmptyState(render)
+          ? (owners.emptyRoot.element() as HTMLDivElement | null)
+          : null,
+      ],
+    ];
+    const roots: SearchControlRootPublication[] = [];
+    for (const [role, element] of rootEntries) {
+      if (!element) continue;
+      const placement = searchControlPlacement(element);
+      if (!placement) return null;
+      roots.push(
+        Object.freeze({
+          role,
+          element,
+          dom: snapshotTemplateGridDom(element),
+          placement,
+        }),
+      );
+    }
+    const publishedRoots = Object.freeze(roots);
+    if (!searchControlRootsMatch(ownerDocument, publishedRoots)) return null;
+
+    const identity = Symbol("dashboard-search-controls-publication");
+    const controls = new Map<SearchControlActionKind, SearchPublishedControl>();
+    const addControl = (
+      kind: SearchControlActionKind,
+      element: HTMLInputElement | HTMLButtonElement,
+      root: HTMLDivElement,
+    ) => {
+      const targets =
+        element instanceof ownerWindow.HTMLInputElement
+          ? Object.freeze([element] as Node[])
+          : searchControlNodes(element);
+      const paths = searchControlPaths(ownerDocument, targets);
+      if (!paths) return false;
+      const controlIdentity = Symbol(`dashboard-search-${kind}-control`);
+      const control: SearchPublishedControl = Object.freeze({
+        identity: controlIdentity,
+        publicationIdentity: identity,
+        element,
+        root,
+        targets,
+        paths,
+        action: Object.freeze({
+          identity: Symbol(`dashboard-search-${kind}-action`),
+          publicationIdentity: identity,
+          controlIdentity,
+          kind,
+        }),
+      });
+      controls.set(kind, control);
+      return true;
+    };
+    if (
+      !addControl("change", input, searchRoot) ||
+      !addControl("escape", input, searchRoot)
+    ) {
+      return null;
+    }
+    const inlineClear = owners.inlineClear.element();
+    if (
+      render.query &&
+      (!(inlineClear instanceof ownerWindow.HTMLButtonElement) ||
+        !addControl("inline-clear", inlineClear, searchRoot))
+    ) {
+      return null;
+    }
+    const errorRoot = owners.errorRoot.element();
+    const retry = owners.retry.element();
+    if (
+      render.error &&
+      (!(errorRoot instanceof ownerWindow.HTMLDivElement) ||
+        !(retry instanceof ownerWindow.HTMLButtonElement) ||
+        !addControl("retry", retry, errorRoot))
+    ) {
+      return null;
+    }
+    const emptyRoot = owners.emptyRoot.element();
+    const emptyClear = owners.emptyClear.element();
+    if (
+      searchControlHasEmptyClear(render) &&
+      (!(emptyRoot instanceof ownerWindow.HTMLDivElement) ||
+        !(emptyClear instanceof ownerWindow.HTMLButtonElement) ||
+        !addControl("empty-clear", emptyClear, emptyRoot))
+    ) {
+      return null;
+    }
+
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: SearchControlRefReplay[] = [];
+    let guard: SearchControlDomGuard | null = null;
+    let nativeProof: SearchNativeEventProof | null = null;
+    let reactRootProof: SearchReactEventProof | null = null;
+    let reactCaptureProof: SearchReactEventProof | null = null;
+    let reactBubbleProof: SearchReactEventProof | null = null;
+    let nativeBoundaryProof: SearchNativeEventProof | null = null;
+    let terminal: SearchTerminalEventProof | null = null;
+    let windowTerminal: SearchTerminalEventProof | null = null;
+    let terminalWindowListener: Readonly<{
+      target: EventTarget;
+      type: string;
+    }> | null = null;
+    const publication: SearchControlPublication = Object.freeze({
+      identity,
+      render,
+      ownerDocument,
+      searchRoot,
+      input,
+      controls,
+      roots: publishedRoots,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const removeTerminalWindowListener = () => {
+      if (!terminalWindowListener) return;
+      removeOwnerWindowListener(
+        terminalWindowListener.target,
+        terminalWindowListener.type,
+        onNativeWindowBubble,
+      );
+      terminalWindowListener = null;
+    };
+    const clearEventProof = (proof?: SearchNativeEventProof) => {
+      if (proof && nativeProof !== proof) return;
+      removeTerminalWindowListener();
+      nativeProof = null;
+      reactRootProof = null;
+      reactCaptureProof = null;
+      reactBubbleProof = null;
+      nativeBoundaryProof = null;
+      terminal = null;
+      windowTerminal = null;
+    };
+    const releaseGuard = () => {
+      guard?.release();
+      guard = null;
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      clearEventProof();
+      releaseNativeListeners();
+      if (cells.active === publication) {
+        cells.active = null;
+        cells.successorOf = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "other") {
+        releaseGuard();
+      } else {
+        queueMicrotask(() => {
+          if (cells.replay?.source !== publication) releaseGuard();
+        });
+      }
+      return true;
+    };
+    const publicationOwnsCurrentDom = (allowChangedInputValue = false) => {
+      if (
+        retired ||
+        cells.active !== publication ||
+        publication.render !== render ||
+        !searchControlRenderIsExact(render) ||
+        !searchControlElementsAreExact(
+          render,
+          owners,
+          allowChangedInputValue,
+        ) ||
+        !searchControlRootsMatch(ownerDocument, publishedRoots) ||
+        !guard?.unchanged()
+      ) {
+        retire("other");
+        return false;
+      }
+      return true;
+    };
+    const controlForNative = (
+      event: Event,
+    ): SearchPublishedControl | null => {
+      if (!TRUSTED_EVENT_TYPE || !TRUSTED_EVENT_TARGET) return null;
+      const type = TRUSTED_EVENT_TYPE(event);
+      const target = TRUSTED_EVENT_TARGET(event);
+      if (!(target instanceof ownerWindow.Node)) return null;
+      if ((type === "input" || type === "change") && target === input) {
+        return controls.get("change") ?? null;
+      }
+      if (type === "keydown" && target === input) {
+        return controls.get("escape") ?? null;
+      }
+      if (type !== "click") return null;
+      for (const kind of [
+        "inline-clear",
+        "empty-clear",
+        "retry",
+      ] as const) {
+        const control = controls.get(kind);
+        if (control?.targets.includes(target)) return control;
+      }
+      return null;
+    };
+    const exactNativeEvent = (
+      event: Event,
+      origin: SearchNativeEventProof["origin"],
+      control: SearchPublishedControl,
+    ): SearchNativeEventProof | null => {
+      if (
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_TARGET ||
+        !TRUSTED_EVENT_TYPE ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_BUBBLES ||
+        !TRUSTED_EVENT_CANCELABLE ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        !TRUSTED_INPUT_VALUE ||
+        !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.Event.prototype, event) ||
+        !publicationOwnsCurrentDom(control.action.kind === "change")
+      ) {
+        return null;
+      }
+      const type = TRUSTED_EVENT_TYPE(event);
+      const target = TRUSTED_EVENT_TARGET(event);
+      if (!(target instanceof ownerWindow.Node)) return null;
+      const expectedPath = control.paths.get(target);
+      const path = TRUSTED_EVENT_COMPOSED_PATH(event);
+      if (
+        !expectedPath ||
+        !searchControlPathMatches(expectedPath, path, ownerDocument) ||
+        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
+        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.CAPTURING_PHASE ||
+        !TRUSTED_EVENT_BUBBLES(event) ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        control.publicationIdentity !== identity ||
+        control.action.publicationIdentity !== identity ||
+        control.action.controlIdentity !== control.identity ||
+        !searchControlIsEnabled(control.element, control.root)
+      ) {
+        return null;
+      }
+
+      let value: string | null = null;
+      let composing: boolean | null = null;
+      let key: string | null = null;
+      let ctrlKey: boolean | null = null;
+      let metaKey: boolean | null = null;
+      let altKey: boolean | null = null;
+      let shiftKey: boolean | null = null;
+      let repeat: boolean | null = null;
+      let button: number | null = null;
+      let buttons: number | null = null;
+      let detail: number | null = null;
+      if (control.action.kind === "change") {
+        if (type !== "input" && type !== "change") return null;
+        value = TRUSTED_INPUT_VALUE(input);
+        if (
+          type === "input" &&
+          TRUSTED_INPUT_COMPOSING &&
+          "InputEvent" in ownerWindow &&
+          TRUSTED_IS_PROTOTYPE_OF(ownerWindow.InputEvent.prototype, event)
+        ) {
+          composing = TRUSTED_INPUT_COMPOSING(event);
+        }
+      } else if (control.action.kind === "escape") {
+        if (
+          type !== "keydown" ||
+          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.KeyboardEvent.prototype, event) ||
+          !TRUSTED_KEYBOARD_KEY ||
+          !TRUSTED_KEYBOARD_CTRL ||
+          !TRUSTED_KEYBOARD_META ||
+          !TRUSTED_KEYBOARD_ALT ||
+          !TRUSTED_KEYBOARD_SHIFT ||
+          !TRUSTED_KEYBOARD_REPEAT ||
+          !TRUSTED_KEYBOARD_COMPOSING ||
+          !TRUSTED_UI_DETAIL
+        ) {
+          return null;
+        }
+        key = TRUSTED_KEYBOARD_KEY(event);
+        ctrlKey = TRUSTED_KEYBOARD_CTRL(event);
+        metaKey = TRUSTED_KEYBOARD_META(event);
+        altKey = TRUSTED_KEYBOARD_ALT(event);
+        shiftKey = TRUSTED_KEYBOARD_SHIFT(event);
+        repeat = TRUSTED_KEYBOARD_REPEAT(event);
+        composing = TRUSTED_KEYBOARD_COMPOSING(event);
+        detail = TRUSTED_UI_DETAIL(event);
+        if (key !== "Escape" || repeat || composing) return null;
+      } else {
+        if (
+          type !== "click" ||
+          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.MouseEvent.prototype, event) ||
+          !TRUSTED_MOUSE_BUTTON ||
+          !TRUSTED_MOUSE_BUTTONS ||
+          !TRUSTED_UI_DETAIL
+        ) {
+          return null;
+        }
+        button = TRUSTED_MOUSE_BUTTON(event);
+        buttons = TRUSTED_MOUSE_BUTTONS(event);
+        detail = TRUSTED_UI_DETAIL(event);
+        if (button !== 0 || buttons !== 0 || detail < 0) return null;
+      }
+      if (
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopPropagation",
+        ) ||
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopImmediatePropagation",
+        )
+      ) {
+        return null;
+      }
+      let propagationStopped = false;
+      const stopPropagation = () => {
+        propagationStopped = true;
+        stopOwnerPropagation(event);
+      };
+      const stopImmediatePropagation = () => {
+        propagationStopped = true;
+        stopOwnerImmediatePropagation(event);
+      };
+      if (
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopPropagation,
+        }) ||
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopImmediatePropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopImmediatePropagation,
+        })
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        identity: Symbol("dashboard-search-native-event"),
+        origin,
+        event,
+        publication,
+        control,
+        action: control.action,
+        target,
+        path: Object.freeze([...path]),
+        type,
+        bubbles: true,
+        cancelable: TRUSTED_EVENT_CANCELABLE(event),
+        value,
+        composing,
+        key,
+        ctrlKey,
+        metaKey,
+        altKey,
+        shiftKey,
+        repeat,
+        button,
+        buttons,
+        detail,
+        propagationStopped: () => propagationStopped,
+      });
+    };
+
+    const blockCrossedEvent = (event: Event) => {
+      preventOwnerDefault(event);
+      stopOwnerImmediatePropagation(event);
+    };
+    const beginNativeEvent = (
+      event: Event,
+      origin: SearchNativeEventProof["origin"],
+    ) => {
+      if (nativeProof) {
+        if (nativeProof.event === event) return nativeProof;
+        if (controlForNative(event)) {
+          cells.attemptedNativeEvents.add(event);
+          blockCrossedEvent(event);
+        }
+        return null;
+      }
+      const control = controlForNative(event);
+      if (!control) return null;
+      if (cells.attemptedNativeEvents.has(event)) {
+        blockCrossedEvent(event);
+        return null;
+      }
+      cells.attemptedNativeEvents.add(event);
+      const proof = exactNativeEvent(event, origin, control);
+      if (!proof) return null;
+      nativeProof = proof;
+      queueMicrotask(() => {
+        if (nativeProof !== proof || terminal !== null) return;
+        clearEventProof(proof);
+        publication.retire();
+        requestSuccessor();
+      });
+      return proof;
+    };
+
+    const nativeEventStillMatches = (proof: SearchNativeEventProof) => {
+      if (
+        !TRUSTED_EVENT_TARGET ||
+        !TRUSTED_EVENT_TYPE ||
+        !TRUSTED_EVENT_BUBBLES ||
+        !TRUSTED_EVENT_CANCELABLE ||
+        TRUSTED_EVENT_TARGET(proof.event) !== proof.target ||
+        TRUSTED_EVENT_TYPE(proof.event) !== proof.type ||
+        TRUSTED_EVENT_BUBBLES(proof.event) !== proof.bubbles ||
+        TRUSTED_EVENT_CANCELABLE(proof.event) !== proof.cancelable
+      ) {
+        return false;
+      }
+      if (proof.action.kind === "escape") {
+        return Boolean(
+          TRUSTED_KEYBOARD_KEY &&
+            TRUSTED_KEYBOARD_CTRL &&
+            TRUSTED_KEYBOARD_META &&
+            TRUSTED_KEYBOARD_ALT &&
+            TRUSTED_KEYBOARD_SHIFT &&
+            TRUSTED_KEYBOARD_REPEAT &&
+            TRUSTED_KEYBOARD_COMPOSING &&
+            TRUSTED_UI_DETAIL &&
+            TRUSTED_KEYBOARD_KEY(proof.event) === proof.key &&
+            TRUSTED_KEYBOARD_CTRL(proof.event) === proof.ctrlKey &&
+            TRUSTED_KEYBOARD_META(proof.event) === proof.metaKey &&
+            TRUSTED_KEYBOARD_ALT(proof.event) === proof.altKey &&
+            TRUSTED_KEYBOARD_SHIFT(proof.event) === proof.shiftKey &&
+            TRUSTED_KEYBOARD_REPEAT(proof.event) === proof.repeat &&
+            TRUSTED_KEYBOARD_COMPOSING(proof.event) === proof.composing &&
+            TRUSTED_UI_DETAIL(proof.event) === proof.detail,
+        );
+      }
+      if (
+        proof.action.kind === "inline-clear" ||
+        proof.action.kind === "empty-clear" ||
+        proof.action.kind === "retry"
+      ) {
+        return Boolean(
+          TRUSTED_MOUSE_BUTTON &&
+            TRUSTED_MOUSE_BUTTONS &&
+            TRUSTED_UI_DETAIL &&
+            TRUSTED_MOUSE_BUTTON(proof.event) === proof.button &&
+            TRUSTED_MOUSE_BUTTONS(proof.event) === proof.buttons &&
+            TRUSTED_UI_DETAIL(proof.event) === proof.detail,
+        );
+      }
+      if (
+        proof.type === "input" &&
+        proof.composing !== null &&
+        TRUSTED_INPUT_COMPOSING
+      ) {
+        return TRUSTED_INPUT_COMPOSING(proof.event) === proof.composing;
+      }
+      return true;
+    };
+
+    const expectedReactName = (kind: SearchControlActionKind) =>
+      kind === "change"
+        ? "onChange"
+        : kind === "escape"
+          ? "onKeyDown"
+          : "onClick";
+    const expectedReactType = (kind: SearchControlActionKind) =>
+      kind === "change"
+        ? "change"
+        : kind === "escape"
+          ? "keydown"
+          : "click";
+    const reactEventMatches = (
+      event: object,
+      proof: SearchNativeEventProof,
+      currentTarget: Element,
+    ): SearchReactEventProof | null => {
+      if (
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        searchControlOwnValue(event, "_reactName") !==
+          expectedReactName(proof.action.kind) ||
+        searchControlOwnValue(event, "type") !==
+          expectedReactType(proof.action.kind) ||
+        searchControlOwnValue(event, "nativeEvent") !== proof.event ||
+        searchControlOwnValue(event, "target") !== proof.target ||
+        searchControlOwnValue(event, "currentTarget") !== currentTarget ||
+        searchControlOwnValue(event, "bubbles") !== proof.bubbles ||
+        searchControlOwnValue(event, "defaultPrevented") !==
+          TRUSTED_EVENT_DEFAULT_PREVENTED(proof.event)
+      ) {
+        return null;
+      }
+      const dispatchTarget = TRUSTED_EVENT_CURRENT_TARGET(proof.event);
+      const nativePhase = TRUSTED_EVENT_PHASE(proof.event);
+      if (
+        !dispatchTarget ||
+        nativePhase === ownerWindow.Event.NONE ||
+        (dispatchTarget !== ownerDocument &&
+          (!(dispatchTarget instanceof ownerWindow.Node) ||
+            dispatchTarget.ownerDocument !== ownerDocument ||
+            !dispatchTarget.contains(searchRoot)))
+      ) {
+        return null;
+      }
+      if (proof.action.kind === "escape") {
+        const reactComposing = searchControlOwnValue(event, "isComposing");
+        if (
+          searchControlOwnValue(event, "key") !== proof.key ||
+          searchControlOwnValue(event, "ctrlKey") !== proof.ctrlKey ||
+          searchControlOwnValue(event, "metaKey") !== proof.metaKey ||
+          searchControlOwnValue(event, "altKey") !== proof.altKey ||
+          searchControlOwnValue(event, "shiftKey") !== proof.shiftKey ||
+          searchControlOwnValue(event, "repeat") !== proof.repeat ||
+          (reactComposing !== SEARCH_CONTROL_MISSING &&
+            reactComposing !== proof.composing)
+        ) {
+          return null;
+        }
+      } else if (proof.action.kind !== "change") {
+        if (
+          searchControlOwnValue(event, "button") !== proof.button ||
+          searchControlOwnValue(event, "buttons") !== proof.buttons ||
+          searchControlOwnValue(event, "detail") !== proof.detail
+        ) {
+          return null;
+        }
+      }
+      return Object.freeze({ event, native: proof, dispatchTarget, nativePhase });
+    };
+
+    const rootForAction = (kind: SearchControlActionKind) =>
+      kind === "retry"
+        ? "error-root"
+        : kind === "empty-clear"
+          ? "empty-root"
+          : "search-root";
+    const startReactWrapper = (
+      event: object,
+      allowCurrent: object | null,
+    ) => {
+      if (event === allowCurrent) return true;
+      if (
+        cells.claimedReactEvents.has(event) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        return false;
+      }
+      cells.attemptedReactEvents.add(event);
+      return true;
+    };
+    const captureRoot = (
+      role: "search-root" | "error-root" | "empty-root",
+      event: ReactSyntheticEvent,
+    ) => {
+      if (!event || typeof event !== "object") return;
+      if (!startReactWrapper(event, null)) return;
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      if (!(nativeEvent instanceof ownerWindow.Event)) return;
+      const proof =
+        nativeProof?.event === nativeEvent
+          ? nativeProof
+          : TRUSTED_EVENT_CURRENT_TARGET?.(nativeEvent) === ownerDocument &&
+              TRUSTED_EVENT_PHASE?.(nativeEvent) ===
+                ownerWindow.Event.CAPTURING_PHASE
+            ? beginNativeEvent(nativeEvent, "document-root-react-capture")
+            : null;
+      if (
+        !proof ||
+        rootForAction(proof.action.kind) !== role ||
+        reactRootProof ||
+        !publicationOwnsCurrentDom(proof.action.kind === "change")
+      ) {
+        return;
+      }
+      const root = proof.control.root;
+      const matched = reactEventMatches(event, proof, root);
+      if (matched) reactRootProof = matched;
+    };
+    const captureControl = (
+      kind: SearchControlActionKind,
+      event: ReactSyntheticEvent,
+    ) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        !nativeProof ||
+        nativeProof.action.kind !== kind ||
+        !reactRootProof ||
+        reactCaptureProof ||
+        !startReactWrapper(event, reactRootProof.event)
+      ) {
+        return;
+      }
+      const matched = reactEventMatches(
+        event,
+        nativeProof,
+        nativeProof.control.element,
+      );
+      if (
+        matched &&
+        matched.event === reactRootProof.event &&
+        matched.dispatchTarget === reactRootProof.dispatchTarget &&
+        matched.nativePhase === reactRootProof.nativePhase
+      ) {
+        reactCaptureProof = matched;
+      }
+    };
+    const bubbleControl = (
+      kind: SearchControlActionKind,
+      event: ReactSyntheticEvent,
+    ) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        !nativeProof ||
+        nativeProof.action.kind !== kind ||
+        !reactCaptureProof ||
+        reactBubbleProof ||
+        !startReactWrapper(event, reactCaptureProof.event)
+      ) {
+        return;
+      }
+      const matched = reactEventMatches(
+        event,
+        nativeProof,
+        nativeProof.control.element,
+      );
+      if (
+        matched &&
+        matched.nativePhase === ownerWindow.Event.BUBBLING_PHASE &&
+        (matched.event !== reactCaptureProof.event ||
+          (matched.dispatchTarget === reactCaptureProof.dispatchTarget &&
+            matched.nativePhase === reactCaptureProof.nativePhase))
+      ) {
+        reactBubbleProof = matched;
+      }
+    };
+
+    const releaseClaim = (proof: SearchNativeEventProof) => {
+      cells.claimedPublications.delete(publication);
+      cells.claimedControls.delete(proof.control);
+      cells.claimedActions.delete(proof.action);
+    };
+    const authenticateTerminal = (proof: SearchNativeEventProof) => {
+      const capture = reactCaptureProof;
+      const bubble = reactBubbleProof;
+      if (
+        !capture ||
+        !bubble ||
+        nativeBoundaryProof !== proof ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedControls.has(proof.control) ||
+        cells.claimedActions.has(proof.action) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(bubble.event)
+      ) {
+        return null;
+      }
+      if (
+        !publicationOwnsCurrentDom(proof.action.kind === "change") ||
+        !nativeEventStillMatches(proof) ||
+        !searchControlIsEnabled(proof.control.element, proof.control.root)
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        native: proof,
+        capture,
+        bubble,
+      });
+    };
+    const claimTerminal = (proof: SearchTerminalEventProof) => {
+      const native = proof.native;
+      if (
+        cells.claimedPublications.has(publication) ||
+        cells.claimedControls.has(native.control) ||
+        cells.claimedActions.has(native.action) ||
+        cells.claimedNativeEvents.has(native.event) ||
+        cells.claimedReactEvents.has(proof.capture.event) ||
+        cells.claimedReactEvents.has(proof.bubble.event)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedControls.add(native.control);
+      cells.claimedActions.add(native.action);
+      cells.claimedNativeEvents.add(native.event);
+      cells.claimedReactEvents.add(proof.capture.event);
+      cells.claimedReactEvents.add(proof.bubble.event);
+      return true;
+    };
+    const deliver = (proof: SearchTerminalEventProof) => {
+      const native = proof.native;
+      if (
+        terminal !== proof ||
+        nativeProof !== native ||
+        cells.delivery !== null ||
+        cells.active !== publication ||
+        !cells.claimedPublications.has(publication) ||
+        !cells.claimedControls.has(native.control) ||
+        !cells.claimedActions.has(native.action) ||
+        !cells.claimedNativeEvents.has(native.event) ||
+        !cells.claimedReactEvents.has(proof.capture.event) ||
+        !cells.claimedReactEvents.has(proof.bubble.event) ||
+        !nativeEventStillMatches(native) ||
+        !publicationOwnsCurrentDom(native.action.kind === "change") ||
+        !searchControlIsEnabled(native.control.element, native.control.root)
+      ) {
+        releaseClaim(native);
+        clearEventProof(native);
+        return false;
+      }
+      cells.delivery = publication.identity;
+      publication.retire();
+      try {
+        if (native.action.kind === "change") {
+          if (native.value === null || native.value === render.query) return false;
+          render.setQuery(native.value);
+        } else if (native.action.kind === "escape") {
+          if (render.query) render.setQuery("");
+          else {
+            TRUSTED_BLUR?.(publication.input);
+            requestSuccessor();
+          }
+        } else if (
+          native.action.kind === "inline-clear" ||
+          native.action.kind === "empty-clear"
+        ) {
+          render.setQuery("");
+          TRUSTED_FOCUS?.(publication.input);
+        } else {
+          if (!render.error || render.searching) return false;
+          render.retry();
+        }
+      } finally {
+        if (cells.delivery === publication.identity) cells.delivery = null;
+      }
+      return true;
+    };
+    const rejectTerminal = (proof: SearchTerminalEventProof) => {
+      releaseClaim(proof.native);
+      clearEventProof(proof.native);
+      publication.retire();
+      requestSuccessor();
+    };
+    const settleTerminal = (proof: SearchTerminalEventProof) => {
+      const native = proof.native;
+      if (
+        terminal !== proof ||
+        windowTerminal !== proof ||
+        nativeProof !== native ||
+        cells.delivery !== null ||
+        cells.active !== publication ||
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        TRUSTED_EVENT_CURRENT_TARGET(native.event) !== null ||
+        TRUSTED_EVENT_PHASE(native.event) !== ownerWindow.Event.NONE ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(native.event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(native.event) ||
+        native.propagationStopped() ||
+        !nativeEventStillMatches(native) ||
+        !publicationOwnsCurrentDom(native.action.kind === "change") ||
+        !searchControlIsEnabled(native.control.element, native.control.root) ||
+        !claimTerminal(proof)
+      ) {
+        rejectTerminal(proof);
+        return;
+      }
+      if (native.action.kind === "escape") {
+        preventOwnerDefault(native.event);
+      }
+      if (!deliver(proof)) {
+        publication.retire();
+        requestSuccessor();
+      }
+    };
+
+    const onNativeCapture = (event: Event) => {
+      beginNativeEvent(event, "document-capture");
+    };
+    const onNativeBubble = (event: Event) => {
+      if (
+        !nativeProof ||
+        nativeProof.event !== event ||
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
+        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(event)
+      ) {
+        return;
+      }
+      const authenticated = authenticateTerminal(nativeProof);
+      if (!authenticated) return;
+      const windowTarget =
+        authenticated.native.path[authenticated.native.path.length - 1];
+      if (
+        !windowTarget ||
+        !TRUSTED_IS_PROTOTYPE_OF(
+          ownerWindow.EventTarget.prototype,
+          windowTarget,
+        )
+      ) {
+        return;
+      }
+      terminal = authenticated;
+      removeTerminalWindowListener();
+      addOwnerWindowListener(
+        windowTarget,
+        authenticated.native.type,
+        onNativeWindowBubble,
+      );
+      terminalWindowListener = Object.freeze({
+        target: windowTarget,
+        type: authenticated.native.type,
+      });
+      queueMicrotask(() => {
+        if (terminal === authenticated) settleTerminal(authenticated);
+      });
+    };
+    const onNativeWindowBubble = (event: Event) => {
+      const authenticated = terminal;
+      if (
+        !authenticated ||
+        authenticated.native.event !== event ||
+        !TRUSTED_EVENT_CURRENT_TARGET ||
+        !TRUSTED_EVENT_PHASE ||
+        !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+        !TRUSTED_EVENT_CANCEL_BUBBLE ||
+        TRUSTED_EVENT_CURRENT_TARGET(event) !== terminalWindowListener?.target ||
+        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
+        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        authenticated.native.propagationStopped() ||
+        !searchControlPathMatches(
+          authenticated.native.path,
+          TRUSTED_EVENT_COMPOSED_PATH(event),
+          ownerDocument,
+        )
+      ) {
+        return;
+      }
+      windowTerminal = authenticated;
+    };
+    const boundaryListeners = [...controls.values()].map((control) => {
+      const type =
+        control.action.kind === "change"
+          ? ["input", "change"]
+          : control.action.kind === "escape"
+            ? ["keydown"]
+            : ["click"];
+      const listener = (event: Event) => {
+        if (
+          nativeProof?.event === event &&
+          nativeProof.control === control &&
+          TRUSTED_EVENT_CURRENT_TARGET?.(event) === control.element &&
+          (TRUSTED_EVENT_PHASE?.(event) ===
+            ownerWindow.Event.CAPTURING_PHASE ||
+            TRUSTED_EVENT_PHASE?.(event) === ownerWindow.Event.AT_TARGET) &&
+          publicationOwnsCurrentDom(control.action.kind === "change") &&
+          searchControlIsEnabled(control.element, control.root)
+        ) {
+          nativeBoundaryProof = nativeProof;
+        }
+      };
+      return Object.freeze({ control, type, listener });
+    });
+    const addNativeListeners = () => {
+      for (const type of ["input", "change", "keydown", "click"]) {
+        TRUSTED_ADD_EVENT_LISTENER(
+          ownerDocument,
+          type,
+          onNativeCapture,
+          true,
+        );
+        TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
+      }
+      for (const { control, type, listener } of boundaryListeners) {
+        for (const eventType of type) {
+          TRUSTED_ADD_EVENT_LISTENER(
+            control.element,
+            eventType,
+            listener,
+            true,
+          );
+        }
+      }
+    };
+    const releaseNativeListeners = () => {
+      for (const type of ["input", "change", "keydown", "click"]) {
+        TRUSTED_REMOVE_EVENT_LISTENER(
+          ownerDocument,
+          type,
+          onNativeCapture,
+          true,
+        );
+        TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
+      }
+      removeTerminalWindowListener();
+      for (const { control, type, listener } of boundaryListeners) {
+        for (const eventType of type) {
+          TRUSTED_REMOVE_EVENT_LISTENER(
+            control.element,
+            eventType,
+            listener,
+            true,
+          );
+        }
+      }
+    };
+
+    const runtime: SearchControlPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = searchControlExpectedOwners(render, owners).map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish dashboard search controls without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        guard = createSearchControlDomGuard(
+          ownerDocument,
+          publishedRoots,
+          () => retire("other"),
+          (records) =>
+            ((nativeProof?.action.kind === "change" &&
+              nativeBoundaryProof === nativeProof &&
+              reactRootProof?.native === nativeProof &&
+              reactCaptureProof?.native === nativeProof &&
+              reactBubbleProof?.native === nativeProof) ||
+              cells.replay?.source === publication) &&
+            records.length === 2 &&
+            records[0]?.type === "attributes" &&
+            records[0].target === input &&
+            records[0].attributeName === "name" &&
+            records[0].oldValue === null &&
+            records[1]?.type === "attributes" &&
+            records[1].target === input &&
+            records[1].attributeName === "name" &&
+            records[1].oldValue === "" &&
+            TRUSTED_ELEMENT_HAS_ATTRIBUTE?.(input, "name") === false,
+        );
+        if (
+          !guard ||
+          cells.active ||
+          !searchControlElementsAreExact(render, owners) ||
+          !searchControlRootsMatch(ownerDocument, publishedRoots) ||
+          !guard.unchanged()
+        ) {
+          releaseGuard();
+          return false;
+        }
+        cells.active = publication;
+        cells.successorOf = null;
+        cells.replay = null;
+        addNativeListeners();
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: SearchControlElementOwnerView,
+        element: Element | null,
+        previous: Element | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        ((layoutRetired &&
+          (retirement === "layout" || retirement === "element") &&
+          refs.every((entry) => entry.state === "reattached")) ||
+          (!layoutRetired &&
+            retirement === "element" &&
+            refs.some((entry) => entry.state === "reattached") &&
+            refs.every(
+              (entry) =>
+                entry.state === "attached" ||
+                entry.state === "reattached",
+            ))) &&
+        refs.length === searchControlExpectedOwners(render, owners).length &&
+        refs.every(
+          (entry) =>
+            entry.owner.element() === entry.element,
+        ) &&
+        searchControlElementsAreExact(render, owners) &&
+        searchControlRootsMatch(ownerDocument, publishedRoots) &&
+        Boolean(guard?.unchanged()),
+      replay: () =>
+        guard
+          ? Object.freeze({
+              source: publication,
+              roots: publishedRoots,
+              unchanged: guard.unchanged,
+              release: releaseGuard,
+            })
+          : null,
+      captureRoot,
+      captureControl,
+      bubbleControl,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        const replay = lastRuntime.replay();
+        if (replay) {
+          cells.replay = replay;
+          successorRequested = true;
+          requestSuccessor();
+        }
+      }
+      return;
+    }
+    if (!searchControlElementsAreExact(render, owners)) return;
+    const replay = cells.replay;
+    if (replay) {
+      const sameFacts = searchControlRendersMatch(replay.source.render, render);
+      const exact =
+        sameFacts &&
+        replay.source.isRetired() &&
+        cells.successorOf === replay.source &&
+        replay.unchanged() &&
+        replay.roots.length > 0 &&
+        replay.roots.every((root) => {
+          const currentRoot =
+            root.role === "search-root"
+              ? owners.searchRoot.element()
+              : root.role === "error-root"
+                ? owners.errorRoot.element()
+                : owners.emptyRoot.element();
+          return (
+            currentRoot === root.element &&
+            publishedRootStillMatches(root)
+          );
+        });
+      cells.replay = null;
+      replay.release();
+      if (cells.successorOf === replay.source) cells.successorOf = null;
+      if (sameFacts && !exact) return;
+    }
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active;
+    if (previous) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+
+    function publishedRootStillMatches(
+      root: SearchControlRootPublication,
+    ) {
+      return (
+        root.dom.node === root.element &&
+        templateGridDomMatches(root.dom) &&
+        searchControlPlacementMatches(root.element.ownerDocument, root.placement)
+      );
+    }
+  };
+
+  const root = (
+    role: "search-root" | "error-root" | "empty-root",
+    event: ReactSyntheticEvent,
+  ) => currentRuntime?.captureRoot(role, event);
+  const capture = (
+    kind: SearchControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => currentRuntime?.captureControl(kind, event);
+  const bubble = (
+    kind: SearchControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => currentRuntime?.bubbleControl(kind, event);
+
+  return Object.freeze({
+    establish,
+    captureSearchRoot: owners.searchRoot.capture,
+    captureSearchIcon: owners.searchIcon.capture,
+    captureInput: owners.input.capture,
+    captureHint: owners.hint.capture,
+    captureLoadingIcon: owners.loadingIcon.capture,
+    captureInlineClear: owners.inlineClear.capture,
+    captureInlineClearIcon: owners.inlineClearIcon.capture,
+    captureErrorRoot: owners.errorRoot.capture,
+    captureErrorMessage: owners.errorMessage.capture,
+    captureRetry: owners.retry.capture,
+    captureEmptyRoot: owners.emptyRoot.capture,
+    captureEmptyIcon: owners.emptyIcon.capture,
+    captureEmptyPrimary: owners.emptyPrimary.capture,
+    captureEmptySecondary: owners.emptySecondary.capture,
+    captureEmptyClear: owners.emptyClear.capture,
+    captureRootChange: (event: ReactChangeEvent<HTMLDivElement>) =>
+      root("search-root", event),
+    captureInputChange: (event: ReactChangeEvent<HTMLInputElement>) =>
+      capture("change", event),
+    changeInput: (event: ReactChangeEvent<HTMLInputElement>) =>
+      bubble("change", event),
+    captureRootKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) =>
+      root("search-root", event),
+    captureInputKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) =>
+      capture("escape", event),
+    keyDownInput: (event: ReactKeyboardEvent<HTMLInputElement>) =>
+      bubble("escape", event),
+    captureSearchClick: (event: ReactMouseEvent<HTMLDivElement>) =>
+      root("search-root", event),
+    captureInlineClearClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      capture("inline-clear", event),
+    activateInlineClear: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      bubble("inline-clear", event),
+    captureErrorClick: (event: ReactMouseEvent<HTMLDivElement>) =>
+      root("error-root", event),
+    captureRetryClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      capture("retry", event),
+    activateRetry: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      bubble("retry", event),
+    captureEmptyClick: (event: ReactMouseEvent<HTMLDivElement>) =>
+      root("empty-root", event),
+    captureEmptyClearClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      capture("empty-clear", event),
+    activateEmptyClear: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      bubble("empty-clear", event),
+  });
+}
+
 interface NoticeAuthority {
   mount: symbol;
   userId: string;
@@ -2241,20 +4674,40 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const router = useRouter();
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchRefOwner = useRef<object | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteOpenRef = useRef(false);
-  const clearSearch = useCallback(() => {
-    setQuery("");
-    searchRef.current?.focus();
-  }, []);
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
   const [searchMount] = useState(() => Symbol("dashboard-search"));
   const searchAuthority = useMemo<SearchAuthority>(
-    () => ({ mount: searchMount, visit: Symbol("dashboard-user-visit"), user, userId: user.id }),
+    () =>
+      Object.freeze({
+        mount: searchMount,
+        visit: Symbol("dashboard-user-visit"),
+        user,
+        userId: user.id,
+      }),
     [searchMount, user],
   );
+  const [searchControlCells] = useState<SearchControlPublicationCells>(() => ({
+    active: null,
+    successorOf: null,
+    replay: null,
+    delivery: null,
+    claimedPublications: new WeakSet(),
+    claimedControls: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+  }));
+  const [, setSearchControlRevision] = useState(0);
+  const requestSearchControlSuccessor = useCallback(() => {
+    setSearchControlRevision((revision) => revision + 1);
+  }, []);
   const searchAuthorityRef = useRef<SearchAuthority | null>(null);
   const searchShortcutOwnerRef = useRef<SearchShortcutOwner | null>(null);
   const paletteShortcutOwnerRef = useRef<PaletteShortcutOwner | null>(null);
@@ -2640,7 +5093,6 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       setDebouncedSearch(owner);
     }, SEARCH_DEBOUNCE_MS);
     searchDebounceOwner.current = owner;
-
     return () => {
       retireSearchDebounce(owner);
       const request = searchRequestOwner.current;
@@ -2894,6 +5346,94 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       }),
     [create, listDocs, router, pickFile, changeFilter],
   );
+  const currentSearchResults =
+    results?.authority === searchAuthority && results.query === trimmed
+      ? results
+      : null;
+  const currentSearchRequest = searching ? searchingOwner : null;
+  // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
+  // eslint-disable-next-line react-hooks/refs
+  const searchControlRender: SearchControlRenderPublication = Object.freeze({
+    identity: Symbol("dashboard-search-controls-render"),
+    mount: searchMount,
+    authority: searchAuthority,
+    user,
+    userId: user.id,
+    query,
+    trimmed,
+    results: currentSearchResults,
+    serverResults,
+    request: currentSearchRequest,
+    error: currentSearchError,
+    searching,
+    pending,
+    filter,
+    filtered,
+    setQuery,
+    retry: retrySearch,
+  });
+  const {
+    establish: establishSearchControls,
+    captureSearchRoot,
+    captureSearchIcon,
+    captureInput: capturePublishedSearchInput,
+    captureHint,
+    captureLoadingIcon,
+    captureInlineClear,
+    captureInlineClearIcon,
+    captureErrorRoot,
+    captureErrorMessage,
+    captureRetry,
+    captureEmptyRoot,
+    captureEmptyIcon,
+    captureEmptyPrimary,
+    captureEmptySecondary,
+    captureEmptyClear,
+    captureRootChange,
+    captureInputChange,
+    changeInput,
+    captureRootKeyDown,
+    captureInputKeyDown,
+    keyDownInput,
+    captureSearchClick,
+    captureInlineClearClick,
+    activateInlineClear,
+    captureErrorClick,
+    captureRetryClick,
+    activateRetry,
+    captureEmptyClick,
+    captureEmptyClearClick,
+    activateEmptyClear,
+  } = createSearchControlPublication(
+    searchControlRender,
+    searchControlCells,
+    requestSearchControlSuccessor,
+  );
+  const captureSearchInput = useCallback(
+    (element: HTMLInputElement | null) => {
+      const cleanup = capturePublishedSearchInput(element);
+      if (element) {
+        searchRefOwner.current = capturePublishedSearchInput;
+        searchRef.current = element;
+      } else if (searchRefOwner.current === capturePublishedSearchInput) {
+        searchRefOwner.current = null;
+        searchRef.current = null;
+      }
+      if (!element) return cleanup;
+      return () => {
+        cleanup?.();
+        if (searchRefOwner.current === capturePublishedSearchInput) {
+          searchRefOwner.current = null;
+          searchRef.current = null;
+        }
+      };
+    },
+    [capturePublishedSearchInput],
+  );
+  useLayoutEffect(
+    () => establishSearchControls(),
+    [establishSearchControls],
+  );
 
   return (
     <TooltipProvider>
@@ -2908,39 +5448,43 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               <Logo className="h-8 w-8" />
               <span className="wordmark hidden text-lg font-semibold text-ink sm:inline">Markdoc</span>
             </Link>
-            <div className="relative mx-auto w-full max-w-xl">
-              <Search size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
+            <div
+              ref={captureSearchRoot}
+              className="relative mx-auto w-full max-w-xl"
+              onChangeCapture={captureRootChange}
+              onKeyDownCapture={captureRootKeyDown}
+              onClickCapture={captureSearchClick}
+            >
+              <Search ref={captureSearchIcon} size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
               <input
-                ref={searchRef}
+                ref={captureSearchInput}
                 className={cn("input pl-9", query && searching ? "pr-16" : query ? "pr-9" : "pr-9 sm:pr-12")}
                 placeholder="Search documents"
                 aria-label="Search documents"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Escape") return;
-                  e.preventDefault();
-                  // First press clears the query, second press leaves the field (the find bar's Esc convention).
-                  if (query) setQuery("");
-                  else e.currentTarget.blur();
-                }}
+                onChangeCapture={captureInputChange}
+                onChange={changeInput}
+                onKeyDownCapture={captureInputKeyDown}
+                onKeyDown={keyDownInput}
                 data-testid="search"
               />
               {!query && (
-                <span className="pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" aria-hidden="true">
+                <span ref={captureHint} className="pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" aria-hidden="true">
                   <Kbd>/</Kbd>
                 </span>
               )}
-              {searching && <Loader2 size={16} className={cn("pointer-events-none absolute top-2.5 animate-spin text-ink-4", query ? "right-9" : "right-3")} data-testid="search-loading" />}
+              {searching && <Loader2 ref={captureLoadingIcon} size={16} className={cn("pointer-events-none absolute top-2.5 animate-spin text-ink-4", query ? "right-9" : "right-3")} data-testid="search-loading" />}
               {query && (
                 <button
+                  ref={captureInlineClear}
                   type="button"
                   className="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center text-ink-3 transition-colors hover:text-ink max-sm:-right-1 max-sm:-top-1 max-sm:h-11 max-sm:w-11"
-                  onClick={clearSearch}
+                  onClickCapture={captureInlineClearClick}
+                  onClick={activateInlineClear}
                   aria-label="Clear search"
                   data-testid="search-clear"
                 >
-                  <X size={16} />
+                  <X ref={captureInlineClearIcon} size={16} />
                 </button>
               )}
             </div>
@@ -3108,11 +5652,26 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           </div>
 
           {currentSearchError && (
-            <div className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="search-error">
-              <span className="min-w-0 flex-1">
+            <div
+              ref={captureErrorRoot}
+              className="mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+              role="alert"
+              aria-atomic="true"
+              data-testid="search-error"
+              onClickCapture={captureErrorClick}
+            >
+              <span ref={captureErrorMessage} className="min-w-0 flex-1">
                 Content search failed: {currentSearchError.message}. Showing title matches only.
               </span>
-              <button type="button" className="btn btn-sm btn-outline shrink-0" onClick={retrySearch} disabled={searching} aria-busy={searching || undefined}>
+              <button
+                ref={captureRetry}
+                type="button"
+                className="btn btn-sm btn-outline shrink-0"
+                onClickCapture={captureRetryClick}
+                onClick={activateRetry}
+                disabled={searching}
+                aria-busy={searching || undefined}
+              >
                 {searching ? "Retrying…" : "Retry"}
               </button>
             </div>
@@ -3150,16 +5709,28 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               <TemplateGrid compact onPick={(t) => void create(t)} busy={creating} />
             </div>
           ) : filtered.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
-              <FileText className="mx-auto mb-3 text-ink-4" size={28} />
-              <p className="text-sm font-medium text-ink-2">
+            <div
+              ref={trimmed ? captureEmptyRoot : undefined}
+              className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center"
+              data-testid="empty-state"
+              onClickCapture={trimmed ? captureEmptyClick : undefined}
+            >
+              <FileText ref={trimmed ? captureEmptyIcon : undefined} className="mx-auto mb-3 text-ink-4" size={28} />
+              <p ref={trimmed ? captureEmptyPrimary : undefined} className="text-sm font-medium text-ink-2">
                 {pending ? `Searching for "${trimmed}"…` : currentSearchError ? `No title matches for "${trimmed}"` : trimmed ? `No matches for "${trimmed}"` : filter === "starred" ? "No starred documents" : "No matches"}
               </p>
-              <p className="mt-1 text-sm text-ink-3">
+              <p ref={trimmed ? captureEmptySecondary : undefined} className="mt-1 text-sm text-ink-3">
                 {pending ? "Looking through titles and content." : currentSearchError ? "Content results are unavailable. Retry the search above." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
               </p>
               {trimmed && !pending && (
-                <button type="button" className="mt-3 text-sm font-medium text-accent hover:underline" onClick={clearSearch} data-testid="empty-state-clear-search">
+                <button
+                  ref={captureEmptyClear}
+                  type="button"
+                  className="mt-3 text-sm font-medium text-accent hover:underline"
+                  onClickCapture={captureEmptyClearClick}
+                  onClick={activateEmptyClear}
+                  data-testid="empty-state-clear-search"
+                >
                   Clear search
                 </button>
               )}
