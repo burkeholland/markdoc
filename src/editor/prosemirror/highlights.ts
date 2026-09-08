@@ -108,7 +108,7 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
   return DecorationSet.create(doc, decorations);
 }
 
-function refreshSignature(session: CollabSession, getFocus: () => number | null): string {
+function highlightSignature(session: CollabSession): string {
   const highlights = collectHighlights(session, null);
   const parts = highlights.map((highlight) => {
     const rangeMatters =
@@ -121,8 +121,11 @@ function refreshSignature(session: CollabSession, getFocus: () => number | null)
   });
   parts.push(`identity:${session.relativePositionVersion}:${session.commentRangeVersion}`);
   parts.push(`held:${session.binding.hasHeldSync ? 1 : 0}`);
-  parts.push(`focus:${getFocus() ?? ""}`);
   return parts.join("|");
+}
+
+function refreshSignature(session: CollabSession, getFocus: () => number | null): string {
+  return `${highlightSignature(session)}|focus:${getFocus() ?? ""}`;
 }
 
 export interface HighlightHandlers {
@@ -163,8 +166,8 @@ export function richHighlightAtPointer(
   return position ? richHighlightAtPosition(view, session, event, position.pos) : null;
 }
 
-// Match ProseMirror's double-click window so a second native press can retire the first click.
-const HIGHLIGHT_ACTIVATION_DELAY_MS = 500;
+// Chromium honors Windows' documented 5000 ms cap; wait past it so the second press retires first.
+const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
 const DRAG_TOLERANCE_PX = 4;
 
 interface RichHighlightPress {
@@ -176,7 +179,6 @@ interface RichHighlightPress {
 }
 
 interface PendingRichHighlightActivation {
-  event: MouseEvent;
   target: PositionedHighlightTarget;
   signature: string;
   selection: EditorView["state"]["selection"];
@@ -194,7 +196,6 @@ function isPlainPrimaryEvent(event: MouseEvent): boolean {
 
 function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlightTarget | null): boolean {
   return !!b &&
-    a.element === b.element &&
     a.kind === b.kind &&
     a.id === b.id &&
     a.sourcePosition === b.sourcePosition &&
@@ -272,10 +273,9 @@ function installRichHighlightActivation(
       clearPress();
     }
   };
-  const schedule = (current: RichHighlightPress, event: MouseEvent) => {
+  const schedule = (current: RichHighlightPress) => {
     clearPending();
     const activation: PendingRichHighlightActivation = {
-      event,
       target: current.target,
       signature: current.signature,
       selection: view.state.selection,
@@ -324,7 +324,7 @@ function installRichHighlightActivation(
     }
     current.released = true;
     stopPressTracking();
-    schedule(current, event);
+    schedule(current);
     releaseTimer = setTimeout(clearPress, 0);
   };
   const down = (event: MouseEvent) => {
@@ -362,7 +362,6 @@ function installRichHighlightActivation(
       clearPending();
       return;
     }
-    pending.event = event;
     pending.selection = view.state.selection;
   };
 
@@ -380,8 +379,7 @@ function installRichHighlightActivation(
       if (
         pending &&
         (currentView.state.doc !== previousState.doc ||
-          !pending.selection.eq(currentView.state.selection) ||
-          !currentView.hasFocus())
+          !pending.selection.eq(currentView.state.selection))
       ) {
         clearPending();
       }
@@ -420,15 +418,18 @@ export function richHighlightsPlugin(session: CollabSession, handlers: Highlight
       decorations: (state) => key.getState(state),
     },
     view(view) {
+      let activationSignature = highlightSignature(session);
       let signature = refreshSignature(session, getFocus);
       const activation = handlers.onHighlightClick
-        ? installRichHighlightActivation(view, session, handlers.onHighlightClick, () => signature)
+        ? installRichHighlightActivation(view, session, handlers.onHighlightClick, () => activationSignature)
         : null;
       const unsubscribe = session.subscribe(() => {
+        const nextActivationSignature = highlightSignature(session);
         const next = refreshSignature(session, getFocus);
         if (next === signature) return;
+        if (nextActivationSignature !== activationSignature) activation?.retire();
+        activationSignature = nextActivationSignature;
         signature = next;
-        activation?.retire();
         scheduleRefresh(view);
       });
       return {

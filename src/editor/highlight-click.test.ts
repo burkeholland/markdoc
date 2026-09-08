@@ -49,6 +49,7 @@ const KINDS: ActivatableHighlightKind[] = ["comment", "comment-resolved", "sugge
 const GESTURES: Gesture[] = ["primary", "auxiliary", "context", "double"];
 const BOUNDARIES: Boundary[] = ["start", "interior", "end", "after"];
 const MUTATIONS: Mutation[] = ["live", "reanchor-away", "removed", "kind-changed", "range-less", "reanchor-containing"];
+const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
 const harnesses: Harness[] = [];
 
 let pointerTarget: HTMLElement | null = null;
@@ -145,7 +146,8 @@ function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: 
       }),
       parent: host,
     });
-    codeView.dispatch({ effects: setHighlights.of(collectHighlights(session, { from: 0, to: 0 })) });
+    const focus = session.activeSurface === "rich" ? { from: 0, to: 0 } : null;
+    codeView.dispatch({ effects: setHighlights.of(collectHighlights(session, focus)) });
     vi.spyOn(codeView, "posAtCoords").mockImplementation(() => sourcePosition);
     view = codeView;
   } else {
@@ -155,7 +157,7 @@ function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: 
         plugins: [
           markdownBindingPlugin(session.binding),
           richHighlightsPlugin(session, {
-            getFocusSource: () => 0,
+            getFocusSource: () => session.activeSurface === "code" ? 0 : null,
             onHighlightClick: rawClick,
           }),
         ],
@@ -288,7 +290,7 @@ function performInteraction(
     sequence(2, false);
     dispatch(harness.target, "dblclick", { button, detail: 2 });
   }
-  if (flushActivation) vi.advanceTimersByTime(500);
+  if (flushActivation) vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
   expect(viewHasFocus(harness)).toBe(true);
 }
 
@@ -336,7 +338,7 @@ describe("live highlight click ownership", () => {
         dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
         dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
         dispatch(harness.target, "click", { button: 0, detail: 1 });
-        vi.advanceTimersByTime(500);
+        vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
 
         expect(harness.rawClick, mutation).toHaveBeenCalledOnce();
         expect(harness.setActiveComment, mutation).not.toHaveBeenCalled();
@@ -427,6 +429,69 @@ describe("live highlight click ownership", () => {
     expect(viewHasFocus(harness)).toBe(true);
   });
 
+  it.each(SURFACES)("activates the first click after its inactive %s pane takes focus", async (surface) => {
+    const harness = makeHarness(surface, "comment");
+    const sourcePosition = ITEM_RANGE.from + 2;
+    harness.session.setActiveSurface(surface === "rich" ? "code" : "rich");
+    await Promise.resolve();
+    if (surface === "source") {
+      (harness.view as CodeView).dispatch({
+        effects: setHighlights.of(collectHighlights(harness.session, { from: 0, to: 0 })),
+      });
+    } else {
+      refreshRichHighlights(harness.view as RichView);
+    }
+    harness.setSourcePosition(sourcePosition);
+    dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+
+    harness.session.setActiveSurface(surface === "rich" ? "rich" : "code");
+    await Promise.resolve();
+    if (surface === "source") {
+      (harness.view as CodeView).dispatch({
+        effects: setHighlights.of(collectHighlights(harness.session, null)),
+      });
+    } else {
+      refreshRichHighlights(harness.view as RichView);
+    }
+    dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
+    dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+    dispatch(harness.target, "click", { button: 0, detail: 1 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
+
+    expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith("comment", harness.id, sourcePosition);
+    expect(harness.setActiveComment).toHaveBeenCalledExactlyOnceWith(harness.id);
+    expect(harness.panelIsOpen()).toBe(true);
+    expect(harness.session.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each(SURFACES)("lets a browser-classified second %s press after 500 ms cancel activation", (surface) => {
+    const harness = makeHarness(surface, "comment");
+    const sourcePosition = ITEM_RANGE.from + 2;
+    const selection = harness.view.state.selection.toJSON();
+    harness.view.focus();
+    harness.setSourcePosition(sourcePosition);
+    const sequence = (detail: number) => {
+      dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail });
+      dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail });
+      dispatch(harness.target, "pointerup", { button: 0, detail });
+      dispatch(harness.target, "mouseup", { button: 0, detail });
+      dispatch(harness.target, "click", { button: 0, detail });
+    };
+
+    sequence(1);
+    vi.advanceTimersByTime(501);
+    sequence(2);
+    dispatch(harness.target, "dblclick", { button: 0, detail: 2 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.setActiveComment).not.toHaveBeenCalled();
+    expect(harness.panelIsOpen()).toBe(false);
+    expect(harness.view.state.selection.toJSON()).toEqual(selection);
+    expect(harness.session.ytext.toString()).toBe(TEXT);
+  });
+
   it.each(SURFACES)("retires drags and later selection movement in the %s editor", (surface) => {
     const harness = makeHarness(surface, "comment");
     const sourcePosition = ITEM_RANGE.from + 2;
@@ -439,7 +504,7 @@ describe("live highlight click ownership", () => {
     dispatch(harness.target, "pointerup", { button: 0, detail: 1, clientX: 18 });
     dispatch(harness.target, "mouseup", { button: 0, detail: 1, clientX: 18 });
     dispatch(harness.target, "click", { button: 0, detail: 1, clientX: 18 });
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
     expect(harness.rawClick).not.toHaveBeenCalled();
 
     dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
@@ -448,7 +513,7 @@ describe("live highlight click ownership", () => {
     dispatch(harness.target, "pointercancel", { button: 0, detail: 1 });
     dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
     dispatch(harness.target, "click", { button: 0, detail: 1 });
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
     expect(harness.rawClick).not.toHaveBeenCalled();
 
     performInteraction(harness, "primary", sourcePosition, "live", false);
@@ -459,7 +524,7 @@ describe("live highlight click ownership", () => {
       const away = harness.session.binding.getSourceMap().srcToPm(AWAY_RANGE.from + 1);
       rich.dispatch(rich.state.tr.setSelection(TextSelection.create(rich.state.doc, away)));
     }
-    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_DELAY_MS);
 
     expect(harness.rawClick).not.toHaveBeenCalled();
     expect(harness.panelIsOpen()).toBe(false);
@@ -484,7 +549,7 @@ describe("live highlight click ownership", () => {
       } else {
         refreshRichHighlights(harness.view as RichView);
       }
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(HIGHLIGHT_ACTIVATION_DELAY_MS);
 
       expect(harness.rawClick).not.toHaveBeenCalled();
       expect(harness.panelIsOpen()).toBe(false);
@@ -506,7 +571,7 @@ describe("live highlight click ownership", () => {
       performInteraction(harness, "primary", sourcePosition, "live", false);
       harness.destroy();
       harnesses.pop();
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(HIGHLIGHT_ACTIVATION_DELAY_MS);
       expect(harness.rawClick).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(0);
       expect(harness.session.ytext.toString()).toBe(TEXT);

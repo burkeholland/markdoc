@@ -1,8 +1,9 @@
-import { StateEffect, StateField, type EditorSelection, type Extension, type Range } from "@codemirror/state";
+import { StateEffect, StateField, type EditorSelection, type Extension, type Range, type Text } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import {
   elementEditorRange,
   eventHighlightTarget,
+  isActivatableHighlightKind,
   type HighlightClickHandler,
   type HighlightTarget,
 } from "../highlight-activation";
@@ -66,10 +67,24 @@ function build(highlights: SourceHighlight[], docLength: number): DecorationSet 
 interface SourceHighlightsState {
   source: SourceHighlight[];
   deco: DecorationSet;
+  activationVersion: number;
+}
+
+function sameActivationHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
+  const left = a.filter((highlight) => isActivatableHighlightKind(highlight.kind));
+  const right = b.filter((highlight) => isActivatableHighlightKind(highlight.kind));
+  return left.length === right.length && left.every((highlight, index) => {
+    const other = right[index]!;
+    return highlight.from === other.from &&
+      highlight.to === other.to &&
+      highlight.kind === other.kind &&
+      highlight.id === other.id &&
+      highlight.active === other.active;
+  });
 }
 
 const highlightsField = StateField.define<SourceHighlightsState>({
-  create: () => ({ source: [], deco: Decoration.none }),
+  create: () => ({ source: [], deco: Decoration.none, activationVersion: 0 }),
   update(value, tr) {
     let source = value.source;
     let changed = false;
@@ -79,8 +94,14 @@ const highlightsField = StateField.define<SourceHighlightsState>({
         changed = true;
       }
     }
-    if (changed) return { source, deco: build(source, tr.newDoc.length) };
-    if (tr.docChanged) return { source, deco: value.deco.map(tr.changes) };
+    if (changed) {
+      return {
+        source,
+        deco: build(source, tr.newDoc.length),
+        activationVersion: value.activationVersion + (sameActivationHighlights(value.source, source) ? 0 : 1),
+      };
+    }
+    if (tr.docChanged) return { source, deco: value.deco.map(tr.changes), activationVersion: value.activationVersion };
     return value;
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
@@ -105,37 +126,52 @@ export function sourceHighlightAtPointer(view: EditorView, event: MouseEvent): P
   const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
   const current = view.state.field(highlightsField, false);
   if (!range || !current) return null;
+  return sourceHighlightOwnsRange(current, { ...target, sourcePosition, ...range })
+    ? { ...target, sourcePosition, ...range }
+    : null;
+}
+
+function sourceHighlightOwnsRange(
+  current: SourceHighlightsState,
+  target: PositionedHighlightTarget,
+): boolean {
   let ownsRange = false;
-  current.deco.between(range.from, range.to, (from, to, decoration) => {
+  current.deco.between(target.from, target.to, (from, to, decoration) => {
     const attributes = decoration.spec.attributes as Record<string, string> | undefined;
     if (
-      from <= range.from &&
-      range.to <= to &&
+      from <= target.from &&
+      target.to <= to &&
       attributes?.["data-highlight-kind"] === target.kind &&
       attributes["data-highlight-id"] === target.id
     ) {
       ownsRange = true;
     }
   });
-  return ownsRange ? { ...target, sourcePosition, ...range } : null;
+  return ownsRange;
 }
 
-// Match the editor's double-click window so a second native press can retire the first click.
-const HIGHLIGHT_ACTIVATION_DELAY_MS = 500;
+function sourceHighlightIsCurrent(view: EditorView, target: PositionedHighlightTarget): boolean {
+  const current = view.state.field(highlightsField, false);
+  return !!current && sourceHighlightOwnsRange(current, target);
+}
+
+// Chromium honors Windows' documented 5000 ms cap; wait past it so the second press retires first.
+const HIGHLIGHT_ACTIVATION_DELAY_MS = 5001;
 const DRAG_TOLERANCE_PX = 4;
 
 interface SourceHighlightPress {
   down: MouseEvent;
   pointerId: number | null;
   target: PositionedHighlightTarget;
-  highlights: SourceHighlightsState;
+  doc: Text;
+  activationVersion: number;
   released: boolean;
 }
 
 interface PendingSourceHighlightActivation {
-  event: MouseEvent;
   target: PositionedHighlightTarget;
-  highlights: SourceHighlightsState;
+  doc: Text;
+  activationVersion: number;
   selection: EditorSelection;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -151,7 +187,6 @@ function isPlainPrimaryEvent(event: MouseEvent): boolean {
 
 function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlightTarget | null): boolean {
   return !!b &&
-    a.element === b.element &&
     a.kind === b.kind &&
     a.id === b.id &&
     a.sourcePosition === b.sourcePosition &&
@@ -213,21 +248,22 @@ function installSourceHighlightActivation(
       clearPress();
     }
   };
-  const schedule = (current: SourceHighlightPress, event: MouseEvent) => {
+  const schedule = (current: SourceHighlightPress) => {
     clearPending();
     const activation: PendingSourceHighlightActivation = {
-      event,
       target: current.target,
-      highlights: current.highlights,
+      doc: current.doc,
+      activationVersion: current.activationVersion,
       selection: view.state.selection,
       timer: setTimeout(() => {
         if (pending !== activation) return;
         pending = null;
         if (
           !dom.isConnected ||
-          activation.highlights !== currentHighlights() ||
+          activation.doc !== view.state.doc ||
+          activation.activationVersion !== currentHighlights()?.activationVersion ||
           !activation.selection.eq(view.state.selection) ||
-          !samePositionedTarget(activation.target, sourceHighlightAtPointer(view, activation.event))
+          !sourceHighlightIsCurrent(view, activation.target)
         ) {
           return;
         }
@@ -256,7 +292,8 @@ function installSourceHighlightActivation(
       !isPlainPrimaryEvent(event) ||
       event.buttons !== 0 ||
       movedPastClickTolerance(current.down, event) ||
-      current.highlights !== currentHighlights() ||
+      current.doc !== view.state.doc ||
+      current.activationVersion !== currentHighlights()?.activationVersion ||
       !samePositionedTarget(current.target, sourceHighlightAtPointer(view, event))
     ) {
       clearPress();
@@ -264,7 +301,7 @@ function installSourceHighlightActivation(
     }
     current.released = true;
     stopPressTracking();
-    schedule(current, event);
+    schedule(current);
     releaseTimer = setTimeout(clearPress, 0);
   };
   const down = (event: MouseEvent) => {
@@ -274,7 +311,14 @@ function installSourceHighlightActivation(
     if (event.defaultPrevented || !isPlainPrimaryEvent(event) || event.buttons !== 1 || !highlights) return;
     const target = sourceHighlightAtPointer(view, event);
     if (!target) return;
-    press = { down: event, pointerId: currentPointerId, target, highlights, released: false };
+    press = {
+      down: event,
+      pointerId: currentPointerId,
+      target,
+      doc: view.state.doc,
+      activationVersion: highlights.activationVersion,
+      released: false,
+    };
     owner.addEventListener("mousemove", move, true);
     owner.addEventListener("mouseup", up, true);
     owner.addEventListener("pointerup", pointerUp, true);
@@ -287,7 +331,8 @@ function installSourceHighlightActivation(
       !current?.released ||
       !isPlainPrimaryEvent(event) ||
       event.buttons !== 0 ||
-      current.highlights !== currentHighlights() ||
+      current.doc !== view.state.doc ||
+      current.activationVersion !== currentHighlights()?.activationVersion ||
       !samePositionedTarget(current.target, sourceHighlightAtPointer(view, event))
     ) {
       clearPending();
@@ -297,7 +342,6 @@ function installSourceHighlightActivation(
       clearPending();
       return;
     }
-    pending.event = event;
     pending.selection = view.state.selection;
   };
 
@@ -312,11 +356,11 @@ function installSourceHighlightActivation(
   return {
     update(update) {
       const highlights = currentHighlights();
-      if (press && (update.docChanged || press.highlights !== highlights)) clearPress();
+      if (press && (update.docChanged || press.activationVersion !== highlights?.activationVersion)) clearPress();
       if (
         pending &&
         (update.docChanged ||
-          pending.highlights !== highlights ||
+          pending.activationVersion !== highlights?.activationVersion ||
           !pending.selection.eq(update.state.selection) ||
           (update.focusChanged && !update.view.hasFocus))
       ) {
