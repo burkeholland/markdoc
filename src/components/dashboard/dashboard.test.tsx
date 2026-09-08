@@ -2348,7 +2348,9 @@ describe("TrashView publication ownership", () => {
     const root = createRoot(host);
     const first = trashedDoc("provenance", "Provenance");
     const second = trashedDoc("other", "Other");
+    const onRetry = vi.fn();
     const onRestore = vi.fn<(document: DocumentSummaryDto) => void>();
+    const onPurge = vi.fn<(document: DocumentSummaryDto) => void>();
     let targetHandler: CapturedReactClick | null = null;
 
     try {
@@ -2360,9 +2362,9 @@ describe("TrashView publication ownership", () => {
               busy={null}
               loading={false}
               error="Retry"
-              onRetry={() => {}}
+              onRetry={onRetry}
               onRestore={onRestore}
-              onPurge={() => {}}
+              onPurge={onPurge}
             />
             <button type="button" data-testid="foreign-trash-control" onClick={(event) => targetHandler?.(event)}>
               Foreign
@@ -2449,19 +2451,58 @@ describe("TrashView publication ownership", () => {
       expect(onRestore).toHaveBeenCalledTimes(1);
       alertReplacement.replaceWith(alert);
 
+      const replaceDuringClick = (actionButton: HTMLButtonElement, element: Element) => {
+        const replacement = element.cloneNode(true) as Element;
+        const restoreClick = interceptReactClick(actionButton, (current, event) => {
+          element.replaceWith(replacement);
+          current(event);
+          replacement.replaceWith(element);
+          current(event);
+        });
+        actionButton.click();
+        restoreClick();
+      };
+      const trashRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
+      const list = host.querySelector<HTMLUListElement>('[data-testid="trash-list"]')!;
+      replaceDuringClick(button, trashRoot);
+      replaceDuringClick(button, list);
+      replaceDuringClick(button, card);
+      replaceDuringClick(button, button);
+      expect(onRestore).toHaveBeenCalledTimes(5);
+
+      const retry = directRetryButton(host);
+      replaceDuringClick(retry, retry);
+      expect(onRetry).toHaveBeenCalledTimes(1);
+
+      const purge = directTrashButton(host, first.title, "purge-button");
+      replaceDuringClick(purge, purge);
+      expect(onPurge).toHaveBeenCalledTimes(1);
+      expect(onPurge).toHaveBeenLastCalledWith(first);
+
+      const secondCard = directTrashCard(host, second.title);
+      const reorderReset = interceptReactClick(button, (current, event) => {
+        list.append(card);
+        current(event);
+        list.insertBefore(card, secondCard);
+        current(event);
+      });
+      button.click();
+      reorderReset();
+      expect(onRestore).toHaveBeenCalledTimes(6);
+
       const clone = button.cloneNode(true) as HTMLButtonElement;
       button.replaceWith(clone);
       host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenCalledTimes(6);
       clone.replaceWith(button);
 
       button.remove();
       host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
+      expect(onRestore).toHaveBeenCalledTimes(6);
       card.querySelector("div:last-child > div")!.prepend(button);
 
       button.click();
-      expect(onRestore).toHaveBeenCalledTimes(2);
+      expect(onRestore).toHaveBeenCalledTimes(7);
       expect(onRestore).toHaveBeenLastCalledWith(first);
     } finally {
       await act(async () => root.unmount());
