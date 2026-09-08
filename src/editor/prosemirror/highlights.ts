@@ -184,6 +184,7 @@ interface PendingRichHighlightActivation {
   target: PositionedHighlightTarget;
   signature: string;
   selection: EditorView["state"]["selection"];
+  confirmed: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -285,10 +286,12 @@ function installRichHighlightActivation(
       target: current.target,
       signature: current.signature,
       selection: view.state.selection,
+      confirmed: false,
       timer: setTimeout(() => {
         if (pending !== activation) return;
         pending = null;
         if (
+          !activation.confirmed ||
           view.isDestroyed ||
           !dom.isConnected ||
           activation.signature !== currentSignature() ||
@@ -371,6 +374,7 @@ function installRichHighlightActivation(
       return;
     }
     pending.selection = view.state.selection;
+    pending.confirmed = true;
   };
 
   dom.addEventListener("pointerdown", pointerDown, true);
