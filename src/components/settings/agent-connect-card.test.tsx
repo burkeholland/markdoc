@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -72,6 +72,7 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 type ClickHandler = (event: { currentTarget: HTMLButtonElement }) => void;
 type KeyHandler = (event: { key: string; currentTarget: HTMLButtonElement; preventDefault: () => void }) => void;
 type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+type PermissionHintClickHandler = (event: PermissionEvent) => void;
 
 interface PermissionHintProps {
   testIdPrefix: string;
@@ -83,14 +84,17 @@ interface CapturedPermissionHint {
   root: HTMLDivElement;
   pre: HTMLPreElement;
   button: HTMLButtonElement;
-  click: ClickHandler;
+  click: PermissionHintClickHandler;
   rootRef: ElementRef<HTMLDivElement>;
   preRef: ElementRef<HTMLPreElement>;
   buttonRef: ElementRef<HTMLButtonElement>;
 }
 
 interface PermissionEvent {
-  currentTarget: HTMLButtonElement;
+  type: string;
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: Event;
   preventDefault: ReturnType<typeof vi.fn>;
   stopPropagation: ReturnType<typeof vi.fn>;
 }
@@ -111,8 +115,32 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function permissionEvent(currentTarget: HTMLButtonElement): PermissionEvent {
-  return { currentTarget, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+function permissionEvent(
+  currentTarget: HTMLButtonElement,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+  button = 0,
+  type = "click",
+): PermissionEvent {
+  const ownerDocument = currentTarget.ownerDocument;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor("click", {
+    bubbles: true,
+    cancelable: true,
+    button,
+  });
+  Object.defineProperty(nativeEvent, "target", {
+    configurable: true,
+    value: nativeTarget,
+  });
+  return {
+    type,
+    currentTarget,
+    target,
+    nativeEvent,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
 }
 
 function expectEventUntouched(event: PermissionEvent) {
@@ -128,7 +156,7 @@ function capturePermissionHint(prefix: string): CapturedPermissionHint {
     root,
     pre,
     button,
-    click: reactHandler<ClickHandler>(button, "onClick"),
+    click: reactHandler<PermissionHintClickHandler>(button, "onClick"),
     rootRef: reactHandler<ElementRef<HTMLDivElement>>(root, "ref"),
     preRef: reactHandler<ElementRef<HTMLPreElement>>(pre, "ref"),
     buttonRef: reactHandler<ElementRef<HTMLButtonElement>>(button, "ref"),
@@ -864,6 +892,87 @@ describe("CopyBlock exact control publications", () => {
 });
 
 describe("Copilot permission exact copy control", () => {
+  it("keeps exact success and fallback controls usable through Strict Mode replay", async () => {
+    vi.useFakeTimers();
+    const attempts = [deferred<boolean>(), deferred<boolean>()];
+    let reentry: { hint: CapturedPermissionHint; event: PermissionEvent } | null = null;
+    copyText.mockImplementation(() => {
+      if (!reentry) throw new Error("The current permission hint was not captured");
+      reentry.hint.click(reentry.event);
+      reentry.hint.click(permissionEvent(reentry.hint.button));
+      return attempts[copyText.mock.calls.length - 1]!.promise;
+    });
+    const strictHint = (key: string) => (
+      <StrictMode>
+        <section key={key}>
+          <CopilotPermissionsHint testIdPrefix="strict-hint" className="strict-class" scope="comment" />
+        </section>
+      </StrictMode>
+    );
+    const view = renderDirect(strictHint("a"));
+    const stale = capturePermissionHint("strict-hint");
+    const staleIcon = stale.button.firstElementChild;
+    if (!staleIcon) throw new Error("The permission button has no rendered icon");
+    const successEvent = permissionEvent(stale.button, staleIcon, staleIcon);
+    reentry = { hint: stale, event: successEvent };
+
+    act(() => {
+      stale.click(successEvent);
+      stale.click(successEvent);
+    });
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(copilotAllowToolLine(undefined, "comment"));
+    expect(selectContents).not.toHaveBeenCalled();
+    expectEventUntouched(successEvent);
+
+    await act(async () => {
+      attempts[0].resolve(true);
+      await attempts[0].promise;
+    });
+    expect(screen.getByTestId("strict-hint-allow-copy")).toHaveTextContent("Copied");
+
+    act(() => view.root.render(strictHint("b")));
+    const current = capturePermissionHint("strict-hint");
+    expect(current.root).not.toBe(stale.root);
+    expect(current.pre).not.toBe(stale.pre);
+    expect(current.button).not.toBe(stale.button);
+
+    act(() => {
+      stale.rootRef(current.root);
+      stale.preRef(current.pre);
+      stale.buttonRef(current.button);
+      current.rootRef(stale.root);
+      current.preRef(stale.pre);
+      current.buttonRef(stale.button);
+      stale.rootRef(null);
+      stale.preRef(null);
+      stale.buttonRef(null);
+    });
+
+    const currentIcon = current.button.firstElementChild;
+    if (!currentIcon) throw new Error("The current permission button has no rendered icon");
+    const fallbackEvent = permissionEvent(current.button, currentIcon, currentIcon);
+    const crossedEvent = permissionEvent(stale.button);
+    reentry = { hint: current, event: fallbackEvent };
+    act(() => {
+      stale.click(fallbackEvent);
+      current.click(crossedEvent);
+      current.click(fallbackEvent);
+      current.click(fallbackEvent);
+    });
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(copilotAllowToolLine(undefined, "comment"));
+    expectEventUntouched(fallbackEvent);
+    expectEventUntouched(crossedEvent);
+
+    await act(async () => {
+      attempts[1].reject(new Error("clipboard unavailable"));
+      await Promise.resolve();
+    });
+    expect(selectContents).toHaveBeenCalledExactlyOnceWith(current.pre);
+    expect(screen.getByTestId("strict-hint-allow-copy")).toHaveTextContent("Select & press Ctrl+C");
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
   it("preserves the rendered hint and claims an exact event only once", async () => {
     const settlement = deferred<boolean>();
     copyText.mockReturnValue(settlement.promise);
@@ -898,21 +1007,22 @@ describe("Copilot permission exact copy control", () => {
     expect(screen.getByTestId("direct-hint-allow-copy")).toHaveTextContent("Copied");
   });
 
-  it("rejects sibling, foreign, detached, disabled, and replacement sources without observable work", () => {
+  it("rejects fabricated, crossed, foreign, detached, disabled, mutated, and replacement sources without observable work", () => {
     const settlement = deferred<boolean>();
     copyText.mockReturnValue(settlement.promise);
     const firstView = renderDirect(<CopilotPermissionsHint testIdPrefix="first-hint" scope="read" />);
     renderDirect(<CopilotPermissionsHint testIdPrefix="sibling-hint" scope="comment" />);
     const first = capturePermissionHint("first-hint");
     const sibling = capturePermissionHint("sibling-hint");
+    const icon = first.button.firstElementChild;
+    if (!icon) throw new Error("The permission button has no rendered icon");
     const foreign = document.createElement("button");
     const detached = document.createElement("button");
     document.body.append(foreign);
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const observer = observeMutations(firstView.host);
 
-    const expectInert = (source: HTMLButtonElement) => {
-      const event = permissionEvent(source);
+    const expectEventInert = (event: PermissionEvent) => {
       const markup = firstView.host.innerHTML;
       observer.takeRecords();
       focus.mockClear();
@@ -925,13 +1035,24 @@ describe("Copilot permission exact copy control", () => {
       expect(firstView.host.innerHTML).toBe(markup);
       return event;
     };
+    const expectInert = (source: HTMLButtonElement) =>
+      expectEventInert(permissionEvent(source));
 
+    expectEventInert({ ...permissionEvent(first.button), nativeEvent: new Event("click") });
+    expectEventInert(permissionEvent(first.button, first.button, first.button, 1));
+    expectEventInert(permissionEvent(first.button, icon, first.button));
+    expectEventInert(permissionEvent(first.button, first.button, first.button, 0, "pointerdown"));
     expectInert(sibling.button);
     expectInert(foreign);
     expectInert(detached);
     first.button.disabled = true;
     expectInert(first.button);
     first.button.disabled = false;
+
+    const injected = document.createElement("span");
+    first.button.append(injected);
+    expectEventInert(permissionEvent(first.button, injected, injected));
+    injected.remove();
 
     const replacement = first.button.cloneNode(true) as HTMLButtonElement;
     first.button.replaceWith(replacement);
@@ -941,6 +1062,40 @@ describe("Copilot permission exact copy control", () => {
 
     foreign.remove();
   });
+
+  it.each(["root", "pre", "button"] as const)(
+    "does not promote a partial %s detach and reinsert callback sequence",
+    (role) => {
+      const view = renderDirect(
+        <CopilotPermissionsHint testIdPrefix={`partial-${role}`} scope="comment" />,
+      );
+      const hint = capturePermissionHint(`partial-${role}`);
+      const event = permissionEvent(hint.button);
+      const observer = observeMutations(view.host);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+      observer.takeRecords();
+      act(() => {
+        if (role === "root") {
+          hint.rootRef(null);
+          hint.rootRef(hint.root);
+        } else if (role === "pre") {
+          hint.preRef(null);
+          hint.preRef(hint.pre);
+        } else {
+          hint.buttonRef(null);
+          hint.buttonRef(hint.button);
+        }
+        hint.click(event);
+      });
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectEventUntouched(event);
+      expect(focus).not.toHaveBeenCalled();
+      expect(observer.takeRecords()).toHaveLength(0);
+    },
+  );
 
   it.each([
     [
