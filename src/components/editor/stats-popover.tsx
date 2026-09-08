@@ -382,15 +382,28 @@ interface StatsNativeProvenance {
 
 interface StatsPointerProvenance extends StatsNativeProvenance {
   readonly kind: "pointerdown";
+  readonly pointerDown: StatsPointerEventProof;
+  pointerUp: StatsPointerEventProof | null;
+  click: StatsPointerEventProof | null;
+  expiresAt: number;
+}
+
+interface StatsPointerEventProof {
+  readonly event: PointerEvent;
+  readonly type: "pointerdown" | "pointerup" | "click";
   readonly target: Node;
-  readonly pointerId: number | null;
+  readonly path: readonly EventTarget[];
+  readonly phase: number;
+  readonly timeStamp: number;
   readonly button: number;
-  pointerUp: Event | null;
-  click: MouseEvent | null;
-  clickTarget: EventTarget | null;
-  clickPath: readonly EventTarget[] | null;
-  clickPhase: number;
-  callbackExpiresAt: number | null;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+  readonly detail: number;
 }
 
 interface StatsNativeCapture {
@@ -435,6 +448,7 @@ const STATS_RESPONSIVE_CONTENT_ATTRIBUTES = new Set([
   "style",
 ]);
 const STATS_POINTER_CALLBACK_LEASE_MS = 1_000;
+const STATS_POINTER_GESTURE_LEASE_MS = 5_000;
 
 function statsSnapshot(stats: DocStats): StatsSnapshot {
   return Object.freeze({ stats, ...stats });
@@ -1267,21 +1281,83 @@ class StatsDisclosureCoordinator {
     }
     this.releaseCapture();
     let active = true;
-    const pointerPartMatches = (
-      provenance: StatsPointerProvenance,
+    const capturePointerEvent = (
       event: Event,
+      type: StatsPointerEventProof["type"],
+    ): StatsPointerEventProof | null => {
+      const PointerEventConstructor = ownerWindow.PointerEvent;
+      const target = event.target;
+      const path = event.composedPath();
+      if (
+        !PointerEventConstructor ||
+        !(event instanceof PointerEventConstructor) ||
+        event.type !== type ||
+        event.currentTarget !== document ||
+        event.eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        !statsNodeFromDocument(target, document) ||
+        !target.isConnected ||
+        !path.includes(target) ||
+        !path.includes(document) ||
+        event.button !== 0 ||
+        typeof event.pointerId !== "number" ||
+        typeof event.pointerType !== "string" ||
+        typeof event.isPrimary !== "boolean"
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        event,
+        type,
+        target,
+        path: Object.freeze([...path]),
+        phase: event.eventPhase,
+        timeStamp: event.timeStamp,
+        button: event.button,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        isPrimary: event.isPrimary,
+        detail: event.detail,
+      });
+    };
+    const pointerPathsMatch = (
+      first: readonly EventTarget[],
+      second: readonly EventTarget[],
+    ) =>
+      first.length === second.length &&
+      first.every((value, index) => value === second[index]);
+    const pointerPartMatches = (
+      pointerDown: StatsPointerEventProof,
+      next: StatsPointerEventProof,
+    ) =>
+      next.target === pointerDown.target &&
+      pointerPathsMatch(next.path, pointerDown.path) &&
+      next.phase === pointerDown.phase &&
+      next.timeStamp >= pointerDown.timeStamp &&
+      next.button === pointerDown.button &&
+      next.ctrlKey === pointerDown.ctrlKey &&
+      next.altKey === pointerDown.altKey &&
+      next.metaKey === pointerDown.metaKey &&
+      next.shiftKey === pointerDown.shiftKey &&
+      next.pointerId === pointerDown.pointerId &&
+      next.pointerType === pointerDown.pointerType &&
+      (next.type === "click" ||
+        next.isPrimary === pointerDown.isPrimary) &&
+      (next.type !== "click" || next.detail > 0);
+    const pointerProvenanceIsCurrent = (
+      provenance: StatsPointerProvenance,
     ) => {
-      const pointerId = Reflect.get(event, "pointerId");
-      const button = Reflect.get(event, "button");
-      return (
-        event.target === provenance.target &&
-        (provenance.pointerId === null
-          ? typeof pointerId !== "number"
-          : pointerId === provenance.pointerId) &&
-        (event.type === "pointercancel" ||
-          typeof button !== "number" ||
-          button === provenance.button)
-      );
+      if (
+        this.#pointerProvenance !== provenance ||
+        ownerWindow.performance.now() >= provenance.expiresAt
+      ) {
+        this.forgetProvenance(provenance.event);
+        return false;
+      }
+      return true;
     };
     const remember = (event: Event) => {
       const publication = this.#current;
@@ -1294,47 +1370,43 @@ class StatsDisclosureCoordinator {
       }
       const capturedPointer = this.#pointerProvenance;
       if (event.type === "pointercancel") {
-        if (
-          capturedPointer?.publication === publication &&
-          pointerPartMatches(capturedPointer, event)
-        ) {
+        if (capturedPointer) {
           this.forgetProvenance(capturedPointer.event);
         }
         return;
       }
-      if (
-        event.type === "pointerup" &&
-        capturedPointer?.publication === publication
-      ) {
-        if (!pointerPartMatches(capturedPointer, event)) {
+      if (event.type === "pointerup") {
+        if (!capturedPointer) return;
+        const pointerUp = capturePointerEvent(event, "pointerup");
+        if (
+          capturedPointer.publication !== publication ||
+          !pointerProvenanceIsCurrent(capturedPointer) ||
+          capturedPointer.pointerUp ||
+          capturedPointer.click ||
+          !pointerUp ||
+          !pointerPartMatches(capturedPointer.pointerDown, pointerUp)
+        ) {
           this.forgetProvenance(capturedPointer.event);
           return;
         }
-        capturedPointer.pointerUp = event;
-        capturedPointer.ownerWindow.clearTimeout(capturedPointer.timeoutId);
-        capturedPointer.timeoutId = ownerWindow.setTimeout(
-          () => this.forgetProvenance(capturedPointer.event),
-          0,
-        );
+        capturedPointer.pointerUp = pointerUp;
         return;
       }
-      if (
-        event.type === "click" &&
-        capturedPointer?.publication === publication
-      ) {
+      if (event.type === "click" && capturedPointer) {
+        const click = capturePointerEvent(event, "click");
         if (
+          capturedPointer.publication !== publication ||
+          !pointerProvenanceIsCurrent(capturedPointer) ||
           !capturedPointer.pointerUp ||
-          !(event instanceof ownerWindow.MouseEvent) ||
-          event.button !== capturedPointer.button ||
-          event.target !== capturedPointer.target
+          capturedPointer.click ||
+          !click ||
+          click.timeStamp < capturedPointer.pointerUp.timeStamp ||
+          !pointerPartMatches(capturedPointer.pointerDown, click)
         ) {
           this.forgetProvenance(capturedPointer.event);
         } else {
-          capturedPointer.click = event;
-          capturedPointer.clickTarget = event.target;
-          capturedPointer.clickPath = Object.freeze([...event.composedPath()]);
-          capturedPointer.clickPhase = event.eventPhase;
-          capturedPointer.callbackExpiresAt =
+          capturedPointer.click = click;
+          capturedPointer.expiresAt =
             ownerWindow.performance.now() + STATS_POINTER_CALLBACK_LEASE_MS;
           capturedPointer.ownerWindow.clearTimeout(capturedPointer.timeoutId);
           capturedPointer.timeoutId = ownerWindow.setTimeout(
@@ -1378,12 +1450,6 @@ class StatsDisclosureCoordinator {
       ) {
         return;
       }
-      if (
-        kind === "pointerdown" &&
-        Reflect.get(event, "isPrimary") === false
-      ) {
-        return;
-      }
       const provenance: StatsNativeProvenance = {
         publication,
         event,
@@ -1393,25 +1459,25 @@ class StatsDisclosureCoordinator {
         timeoutId: 0,
       };
       if (kind === "pointerdown") {
-        const pointerId = Reflect.get(event, "pointerId");
-        const button = Reflect.get(event, "button");
+        const pointerDown = capturePointerEvent(event, "pointerdown");
+        if (!pointerDown || pointerDown.isPrimary !== true) return;
+        const expiresAt =
+          ownerWindow.performance.now() + STATS_POINTER_GESTURE_LEASE_MS;
         const pointerProvenance: StatsPointerProvenance = {
           ...provenance,
           kind,
-          target,
-          pointerId:
-            typeof pointerId === "number" ? pointerId : null,
-          button: typeof button === "number" ? button : 0,
+          pointerDown,
           pointerUp: null,
           click: null,
-          clickTarget: null,
-          clickPath: null,
-          clickPhase: ownerWindow.Event.NONE,
-          callbackExpiresAt: null,
+          expiresAt,
         };
         this.#pointerProvenance = pointerProvenance;
         this.#nativeProvenance.set(event, pointerProvenance);
         this.#provenanceRecords.add(pointerProvenance);
+        pointerProvenance.timeoutId = ownerWindow.setTimeout(
+          () => this.forgetProvenance(event),
+          STATS_POINTER_GESTURE_LEASE_MS,
+        );
         return;
       }
       this.#nativeProvenance.set(event, provenance);
@@ -2493,14 +2559,14 @@ class StatsDisclosureCoordinator {
       (source === "pointer" &&
         (!pointerProvenance?.pointerUp ||
           !pointerProvenance.click ||
-          !pointerProvenance.clickPath ||
-          pointerProvenance.callbackExpiresAt === null ||
           ownerWindow.performance.now() >=
-            pointerProvenance.callbackExpiresAt ||
-          pointerProvenance.target !== target ||
-          pointerProvenance.clickPhase === ownerWindow.Event.NONE ||
-          pointerProvenance.clickTarget !== target ||
-          !pointerProvenance.clickPath.includes(document)))
+            pointerProvenance.expiresAt ||
+          pointerProvenance.pointerDown.target !== target ||
+          pointerProvenance.pointerDown.phase !==
+            ownerWindow.Event.CAPTURING_PHASE ||
+          pointerProvenance.pointerDown.isPrimary !== true ||
+          pointerProvenance.click.target !== target ||
+          !pointerProvenance.click.path.includes(document)))
     ) {
       return;
     }
@@ -2520,7 +2586,7 @@ class StatsDisclosureCoordinator {
         event,
         originalEvent,
         source === "pointer"
-          ? (pointerProvenance?.click ?? undefined)
+          ? pointerProvenance?.click?.event
           : undefined,
       )
     ) {
