@@ -358,21 +358,59 @@ test.describe("axe: pages", () => {
   // Since #1495 the aside (one Tab stop per h2/h3) precedes the article in the DOM on every screen size, so
   // keyboard and screen-reader users need a way past it (#1564): a skip link as the first Tab stop, hidden
   // until focused; a <main> landmark; and a focusable article target, because Chromium only scrolls to a
-  // fragment whose element is not focusable.
-  test("reader skip link: first Tab stop, Enter focuses the article inside the one main landmark", async ({ browser }) => {
-    const { page, context } = await signIn(browser, "a11y-reader-skip");
-    const id = await createDocument(page, DOC, "Reader skip-link fixture");
+  // fragment whose element is not focusable. The sticky title follows the logo and shares that target.
+  test("reader skip and header-title links focus the article below the sticky header", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const isLoopback = (url: string) => ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname);
+    await context.route(/^https?:\/\//, async (route) => {
+      if (isLoopback(route.request().url())) await route.continue();
+      else await route.abort("blockedbyclient");
+    });
+    await context.routeWebSocket((url) => !isLoopback(url), (socket) => socket.close());
+    const page = await context.newPage();
+    await devLogin(page, "a11y-reader-skip");
+    await page.waitForLoadState("networkidle");
+    const title = "Reader skip-link fixture";
+    const id = await createDocument(page, DOC, title);
     expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
     await page.goto(`/p/${id}`);
     await waitForHydration(page);
     await expect(page.getByTestId("reader-body")).toBeVisible();
     const viewport = page.viewportSize()!;
+    const header = page.getByTestId("reader-header");
+    const titleLink = page.getByTestId("reader-header-title");
+    const articleTarget = page.getByTestId("reader-article");
+    const articlePosition = async () => (await articleTarget.boundingBox())!.y;
+    const expectArticlePosition = async () => {
+      await expect.poll(articlePosition).toBeGreaterThanOrEqual(56);
+      await expect.poll(articlePosition).toBeLessThanOrEqual(100);
+    };
 
     const skip = page.getByTestId("reader-skip-link");
     const aboveViewport = async () => {
       const box = await skip.boundingBox();
       return box !== null && box.y + box.height <= 0;
     };
+    await expect(header).toHaveCSS("height", "56px");
+    await expect(titleLink).toHaveCount(1);
+    await expect(titleLink).toHaveAttribute("href", "#reader-article");
+    await expect(titleLink).toHaveAttribute("title", title);
+    await expect(titleLink).toHaveAccessibleName(title);
+    await expect(header.getByText(title, { exact: true })).toHaveCount(1);
+    await expect(page.locator('header [data-testid="reader-header-title"][href="#reader-article"]')).toHaveCount(1);
+    await expect(page.locator('[data-testid="reader-skip-link"][href="#reader-article"]')).toHaveCount(1);
+    await expect(page.locator("#reader-article")).toHaveCount(1);
+    await expect(articleTarget).toHaveAttribute("tabindex", "-1");
+    for (const control of [
+      page.getByTestId("open-in-editor"),
+      page.getByTestId("reader-copy-link"),
+      page.getByTestId("reader-download"),
+      page.getByTestId("reader-download-menu"),
+    ]) {
+      const [headerBox, controlBox] = await Promise.all([header.boundingBox(), control.boundingBox()]);
+      expect(controlBox!.y).toBeGreaterThanOrEqual(headerBox!.y);
+      expect(controlBox!.y + controlBox!.height).toBeLessThanOrEqual(headerBox!.y + headerBox!.height);
+    }
     expect(await aboveViewport(), "the skip link sits above the viewport until it has focus").toBe(true);
 
     // Tab once: the link is focused, rendered whole inside the viewport and above the sticky header.
@@ -391,22 +429,41 @@ test.describe("axe: pages", () => {
     );
     expect(topmost, "the focused skip link paints over the sticky header").toBe(true);
 
-    // Tab again: it hides and focus moves on to the header's logo link, as it did before the link existed.
+    // The title follows the unchanged logo stop and exposes the global keyboard-focus affordance.
     await page.keyboard.press("Tab");
     await expect(page.getByRole("link", { name: "All documents" })).toBeFocused();
     await expect.poll(aboveViewport, "the skip link hides again once focus leaves it").toBe(true);
-    await page.keyboard.press("Shift+Tab");
-    await expect(skip).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(titleLink).toBeFocused();
+    expect(await titleLink.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("solid");
 
-    // Enter: the article itself takes focus, its top inside the viewport and clear of the sticky header.
+    // Native Enter activation focuses the target at its existing 88 px scroll margin.
     await page.keyboard.press("Enter");
     await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
+    await expectArticlePosition();
+
+    // Pointer activation has the same native focus and scroll behavior after the title is off-screen.
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await expect(page.getByTestId("reader-title")).not.toBeInViewport();
+    await titleLink.click();
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
+    await expectArticlePosition();
+
+    // The original first stop and skip-link activation remain unchanged.
+    await page.reload();
+    await waitForHydration(page);
+    await page.keyboard.press("Tab");
+    await expect(skip).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id ?? null)).toBe("reader-article");
+    await expectArticlePosition();
+
     // No focus ring on the target: a click in the text focuses the article too, and the first PageDown after
     // it would otherwise frame the whole column (the base-layer ring is for controls).
-    expect(await page.getByTestId("reader-article").evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
-    const article = (await page.getByTestId("reader-article").boundingBox())!;
-    const header = (await page.getByTestId("reader-header").boundingBox())!;
-    expect(article.y).toBeGreaterThanOrEqual(header.y + header.height);
+    expect(await articleTarget.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
+    const article = (await articleTarget.boundingBox())!;
+    const headerBox = (await header.boundingBox())!;
+    expect(article.y).toBeGreaterThanOrEqual(headerBox.y + headerBox.height);
     expect(article.y).toBeLessThan(viewport.height);
     await expect(page.getByTestId("reader-title")).toBeInViewport({ ratio: 1 });
 
