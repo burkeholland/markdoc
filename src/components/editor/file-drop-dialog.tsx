@@ -500,6 +500,7 @@ function createPublicationRuntime(
   coordinator: PublicationCoordinator,
   content: HTMLDivElement,
   owners: readonly ElementOwnerView[],
+  onRetire: () => void,
 ): PublicationRuntime {
   type Retirement = "element" | "layout" | "other";
   const placement = capturePlacement(content);
@@ -528,6 +529,7 @@ function createPublicationRuntime(
     if (retired) return false;
     retired = true;
     retirement = reason;
+    onRetire();
     coordinator.retire(publication);
     queueMicrotask(() => {
       if (coordinator.replay()?.source !== publication) domGuard?.release();
@@ -798,27 +800,39 @@ function exactNativeDismissal(
 }
 
 function exactNativeOutsideClick(
+  pointer: {
+    readonly target: EventTarget | null;
+    readonly pointerId: number;
+    readonly pointerType: string;
+    readonly isPrimary: boolean;
+  },
   event: MouseEvent,
   publication: FileDropPublication,
-  target: EventTarget | null,
 ) {
   const ownerDocument = publication.ownerDocument;
   const view = ownerDocument.defaultView;
+  const PointerEventConstructor = view?.PointerEvent;
+  const target = event.target;
   return Boolean(
     view &&
-      event instanceof view.MouseEvent &&
+      PointerEventConstructor &&
+      event instanceof PointerEventConstructor &&
       event.type === "click" &&
       event.eventPhase !== view.Event.NONE &&
       event.bubbles &&
       !event.defaultPrevented &&
       event.button === 0 &&
-      event.target === target &&
+      !event.ctrlKey &&
+      target === pointer.target &&
       target instanceof view.Node &&
       target.isConnected &&
       target.ownerDocument === ownerDocument &&
       event.composedPath().includes(target) &&
       event.composedPath().includes(ownerDocument) &&
-      !publication.content.contains(target),
+      !publication.content.contains(target) &&
+      event.pointerId === pointer.pointerId &&
+      event.pointerType === pointer.pointerType &&
+      event.isPrimary === pointer.isPrimary,
   );
 }
 
@@ -914,15 +928,22 @@ function createFileDropPresentation(
     | {
         readonly publication: FileDropPublication;
         readonly event: object;
-        consumed: boolean;
+        readonly nativeEvent: Event;
       }
     | null = null;
   let outsidePointer:
     | {
         readonly publication: FileDropPublication;
         readonly target: EventTarget | null;
+        readonly pointerId: number;
+        readonly pointerType: string;
+        readonly isPrimary: boolean;
       }
     | null = null;
+  const clearDismissalAuthority = () => {
+    dismissal = null;
+    outsidePointer = null;
+  };
   const onElementChange = (
     owner: ElementOwnerView,
     element: Element | null,
@@ -934,8 +955,7 @@ function createFileDropPresentation(
     if (element === null || (element !== null && last !== null && element !== last)) {
       currentRuntime?.retireForElement();
       currentRuntime = null;
-      dismissal = null;
-      outsidePointer = null;
+      clearDismissalAuthority();
     }
     if (
       runtime?.isExactElementReplay() &&
@@ -1191,6 +1211,7 @@ function createFileDropPresentation(
       coordinator,
       dom.content,
       expectedOwners(),
+      clearDismissalAuthority,
     );
     currentRuntime = runtime;
     lastRuntime = runtime;
@@ -1205,11 +1226,12 @@ function createFileDropPresentation(
   const dismissalAction = Object.freeze({
     identity: Symbol("file-drop-dismissal"),
   });
-  const publishDismissal = (
+  const stageDismissal = (
     publication: FileDropPublication,
     event: object,
     nativeEvent: Event,
   ) => {
+    clearDismissalAuthority();
     if (
       hasOperation() ||
       !owns(publication) ||
@@ -1218,21 +1240,15 @@ function createFileDropPresentation(
         dismissalAction,
         event,
         nativeEvent,
-      ) ||
-      !coordinator.claim(
-        publication,
-        dismissalAction,
-        event,
-        nativeEvent,
       )
     ) {
       return;
     }
-    const proof = { publication, event, consumed: false };
+    const proof = { publication, event, nativeEvent };
     dismissal = proof;
-    queueMicrotask(() => {
+    publication.ownerDocument.defaultView?.setTimeout(() => {
       if (dismissal === proof) dismissal = null;
-    });
+    }, 0);
   };
   const onClickCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
     const publication = coordinator.active();
@@ -1251,7 +1267,7 @@ function createFileDropPresentation(
       dom.bridge,
       dom.close,
     );
-    if (nativeEvent) publishDismissal(publication, event, nativeEvent);
+    if (nativeEvent) stageDismissal(publication, event, nativeEvent);
   };
   const authorizeNativeDismissal = (
     publication: FileDropPublication,
@@ -1260,18 +1276,18 @@ function createFileDropPresentation(
     const view = publication.ownerDocument.defaultView;
     const PointerEventConstructor = view?.PointerEvent;
     if (!view) return;
+    const pointer = outsidePointer;
+    clearDismissalAuthority();
     if (
-      event instanceof view.MouseEvent &&
-      !(PointerEventConstructor && event instanceof PointerEventConstructor)
+      event.type === "click" &&
+      PointerEventConstructor &&
+      event instanceof PointerEventConstructor
     ) {
-      const pointer = outsidePointer;
-      outsidePointer = null;
       if (
-        event.type === "click" &&
         pointer?.publication === publication &&
-        exactNativeOutsideClick(event, publication, pointer.target)
+        exactNativeOutsideClick(pointer, event, publication)
       ) {
-        publishDismissal(publication, event, event);
+        stageDismissal(publication, event, event);
       }
       return;
     }
@@ -1280,7 +1296,7 @@ function createFileDropPresentation(
         publication.authority === authority &&
         exactNativeDismissal(event, publication)
       ) {
-        publishDismissal(publication, event, event);
+        stageDismissal(publication, event, event);
       }
       return;
     }
@@ -1290,7 +1306,6 @@ function createFileDropPresentation(
     ) {
       return;
     }
-    outsidePointer = null;
     if (
       publication.authority !== authority ||
       !exactNativeDismissal(event, publication)
@@ -1300,6 +1315,9 @@ function createFileDropPresentation(
     outsidePointer = {
       publication,
       target: event.target,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      isPrimary: event.isPrimary,
     };
   };
   const onOpenChange = (open: boolean) => {
@@ -1307,14 +1325,19 @@ function createFileDropPresentation(
     if (
       open ||
       !proof ||
-      proof.consumed ||
       proof.publication.authority !== authority ||
-      !owns(proof.publication)
+      !owns(proof.publication) ||
+      !coordinator.claim(
+        proof.publication,
+        dismissalAction,
+        proof.event,
+        proof.nativeEvent,
+      )
     ) {
+      clearDismissalAuthority();
       return;
     }
-    proof.consumed = true;
-    dismissal = null;
+    clearDismissalAuthority();
     proof.publication.retire();
     authority.onClose();
   };

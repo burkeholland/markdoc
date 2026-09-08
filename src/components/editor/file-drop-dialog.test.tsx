@@ -57,7 +57,24 @@ class ControlledFileReader {
   }
 }
 
-class ControlledPointerEvent extends MouseEvent {}
+interface ControlledPointerEventInit extends MouseEventInit {
+  pointerId?: number;
+  pointerType?: string;
+  isPrimary?: boolean;
+}
+
+class ControlledPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: ControlledPointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -123,6 +140,86 @@ interface CapturedOption {
 
 const directViews: DirectView[] = [];
 const mutationObservers: MutationObserver[] = [];
+
+interface DocumentListenerRecord {
+  readonly type: string;
+  readonly listener: EventListenerOrEventListenerObject;
+  readonly capture: boolean;
+  active: boolean;
+}
+
+function captureDocumentDismissalListeners() {
+  const records: DocumentListenerRecord[] = [];
+  const nativeAdd = document.addEventListener.bind(document);
+  const nativeRemove = document.removeEventListener.bind(document);
+  vi.spyOn(document, "addEventListener").mockImplementation(
+    (type, listener, options) => {
+      records.push({
+        type,
+        listener,
+        capture:
+          typeof options === "boolean"
+            ? options
+            : Boolean(options?.capture),
+        active: true,
+      });
+      nativeAdd(type, listener, options);
+    },
+  );
+  vi.spyOn(document, "removeEventListener").mockImplementation(
+    (type, listener, options) => {
+      const capture =
+        typeof options === "boolean" ? options : Boolean(options?.capture);
+      const record = records.findLast(
+        (candidate) =>
+          candidate.active &&
+          candidate.type === type &&
+          candidate.listener === listener &&
+          candidate.capture === capture,
+      );
+      if (record) record.active = false;
+      nativeRemove(type, listener, options);
+    },
+  );
+  const active = (type: string) =>
+    records.filter((record) => record.active && record.type === type);
+  return {
+    componentCapture() {
+      const pointerListeners = active("pointerdown");
+      const clickListeners = active("click");
+      const record = active("keydown").find(
+        ({ listener }) =>
+          pointerListeners.some(
+            (candidate) => candidate.listener === listener,
+          ) &&
+          clickListeners.some(
+            (candidate) => candidate.listener === listener,
+          ),
+      );
+      if (!record) {
+        throw new Error(
+          "Dropped-file document dismissal listener was not registered",
+        );
+      }
+      return record.listener;
+    },
+    suspend(...types: string[]) {
+      for (const record of records) {
+        if (!record.active || !types.includes(record.type)) continue;
+        nativeRemove(record.type, record.listener, record.capture);
+        record.active = false;
+      }
+    },
+  };
+}
+
+function invokeEventListener(
+  listener: EventListenerOrEventListenerObject,
+  event: Event,
+) {
+  if (typeof listener === "function") listener.call(document, event);
+  else listener.handleEvent(event);
+}
 
 function renderDirect(node: ReactNode): DirectView {
   const host = document.createElement("div");
@@ -942,14 +1039,24 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
           }),
         );
         await act(async () => {});
-        fireEvent.click(outside);
+        outside.dispatchEvent(
+          new ControlledPointerEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
         outside.dispatchEvent(
           new ControlledPointerEvent("pointerdown", {
             bubbles: true,
             button: 0,
           }),
         );
-        fireEvent.click(outside);
+        outside.dispatchEvent(
+          new ControlledPointerEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
       }
 
       expect(handlers.onClose).toHaveBeenCalledOnce();
@@ -957,6 +1064,158 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
       expect(uploadImportFiles).not.toHaveBeenCalled();
     },
   );
+
+  it("keeps Escape authority through a browser microtask before Radix handles it", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-delayed-escape.md", 0), handlers),
+    );
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("keydown");
+    const content = screen.getByRole("dialog");
+    const openChange = captureOpenChange();
+    content.addEventListener(
+      "keydown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+
+    content.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }),
+    );
+    await Promise.resolve();
+    act(() => openChange(false));
+
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+  });
+
+  it("keeps linked PointerEvent authority through a browser microtask before Radix handles it", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-delayed-outside.md", 0), handlers),
+    );
+    await act(
+      () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+    const overlay = document.querySelector(".dialog-overlay");
+    if (!(overlay instanceof HTMLDivElement)) {
+      throw new Error("Dialog overlay was not rendered");
+    }
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("pointerdown", "click");
+    const openChange = captureOpenChange();
+    overlay.addEventListener(
+      "pointerdown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.addEventListener(
+      "click",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerId: 17,
+        pointerType: "mouse",
+        isPrimary: true,
+      }),
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("click", {
+        bubbles: true,
+        button: 0,
+        pointerId: 17,
+        pointerType: "mouse",
+        isPrimary: true,
+      }),
+    );
+    await Promise.resolve();
+    act(() => openChange(false));
+
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+  });
+
+  it("leaves the current options usable after unconsumed dismissal authority expires", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-failed-dismissal.md", 8), handlers),
+    );
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("keydown");
+    const content = screen.getByRole("dialog");
+    const openChange = captureOpenChange();
+    content.addEventListener(
+      "keydown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    content.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }),
+    );
+    await act(
+      () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+
+    act(() => openChange(false));
+    expect(handlers.onClose).not.toHaveBeenCalled();
+
+    const overlay = document.querySelector(".dialog-overlay");
+    if (!(overlay instanceof HTMLDivElement)) {
+      throw new Error("Dialog overlay was not rendered");
+    }
+    nativeDismissal.suspend("pointerdown", "click");
+    overlay.addEventListener(
+      "pointerdown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.addEventListener(
+      "click",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerId: 31,
+      }),
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("click", {
+        bubbles: true,
+        button: 0,
+        pointerId: 32,
+      }),
+    );
+    act(() => openChange(false));
+    expect(handlers.onClose).not.toHaveBeenCalled();
+
+    activate(captureOption("replace"));
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Still usable");
+    expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+      "Still usable",
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
 
   it.each(["attributes", "detach", "replacement", "reorder"] as const)(
     "permanently rejects a publication after restored %s mutation",
