@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect } from "react";
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { OutlinePanel } from "./outline";
@@ -57,11 +57,17 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   return handler as T;
 }
 
-type CapturedClick = (event: { currentTarget: HTMLButtonElement }) => void;
+type CapturedClickEvent = {
+  currentTarget: HTMLButtonElement;
+  target?: EventTarget;
+  nativeEvent?: globalThis.MouseEvent;
+};
+type CapturedClick = (event: CapturedClickEvent) => void;
 type CapturedKeyDown = (event: {
   key: string;
   currentTarget: HTMLUListElement;
   target: EventTarget;
+  nativeEvent?: globalThis.KeyboardEvent;
   preventDefault: () => void;
 }) => void;
 type CapturedRef<T> = (element: T | null) => void;
@@ -435,6 +441,9 @@ describe("OutlinePanel active heading reveal", () => {
 
     click({ currentTarget: toggle });
     click({ currentTarget: toggle });
+    expect(onToggle).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
     expect(onToggle).toHaveBeenCalledOnce();
 
     const replacement = toggle.cloneNode(true) as HTMLButtonElement;
@@ -482,6 +491,9 @@ describe("OutlinePanel active heading reveal", () => {
     click({ currentTarget: button });
     click({ currentTarget: button });
     reactHandler<CapturedClick>(other, "onClick")({ currentTarget: button });
+    expect(onSelect).not.toHaveBeenCalled();
+
+    fireEvent.click(button);
     expect(onSelect).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(headings[index]);
     expect(onSelect.mock.calls[0][0]).toBe(headings[index]);
@@ -535,14 +547,17 @@ describe("OutlinePanel active heading reveal", () => {
 
     buttons[current].focus();
     focus.mockClear();
-    act(() => keyDown({ key, currentTarget: list, target: buttons[current], preventDefault }));
-    expect(preventDefault).toHaveBeenCalledOnce();
+    const nativeKey = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    const nativePreventDefault = vi.spyOn(nativeKey, "preventDefault");
+    act(() => buttons[current].dispatchEvent(nativeKey));
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
     expect(buttons[next]).toHaveFocus();
     expect(querySelectorAll).not.toHaveBeenCalled();
 
     keyDown({ key, currentTarget: list, target: buttons[next], preventDefault });
-    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(preventDefault).not.toHaveBeenCalled();
     expect(focus).toHaveBeenCalledOnce();
     foreignList.remove();
     foreignButton.remove();
@@ -612,18 +627,12 @@ describe("OutlinePanel active heading reveal", () => {
     expect(selectA).not.toHaveBeenCalled();
     expect(stalePreventDefault).not.toHaveBeenCalled();
 
-    reactHandler<CapturedClick>(buttonsB[1], "onClick")({ currentTarget: buttonsB[1] });
-    reactHandler<CapturedClick>(toggleElementB, "onClick")({ currentTarget: toggleElementB });
-    const currentPreventDefault = vi.fn();
+    fireEvent.click(buttonsB[1]);
+    fireEvent.click(toggleElementB);
     buttonsB[0].focus();
-    act(() =>
-      reactHandler<CapturedKeyDown>(listB, "onKeyDown")({
-        key: "ArrowDown",
-        currentTarget: listB,
-        target: buttonsB[0],
-        preventDefault: currentPreventDefault,
-      }),
-    );
+    const currentKey = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+    const currentPreventDefault = vi.spyOn(currentKey, "preventDefault");
+    act(() => buttonsB[0].dispatchEvent(currentKey));
     expect(selectB).toHaveBeenCalledOnce();
     expect(selectB).toHaveBeenCalledWith(headings[1]);
     expect(toggleB).toHaveBeenCalledOnce();
@@ -653,7 +662,7 @@ describe("OutlinePanel active heading reveal", () => {
       staleClick({ currentTarget: currentButton });
       expect(selectA).not.toHaveBeenCalled();
 
-      reactHandler<CapturedClick>(currentButton, "onClick")({ currentTarget: currentButton });
+      fireEvent.click(currentButton);
       expect(selectB).toHaveBeenCalledOnce();
       expect(selectB.mock.calls[0][0]).toBe(heading);
     },
@@ -678,7 +687,7 @@ describe("OutlinePanel active heading reveal", () => {
     staleSecond({ currentTarget: buttonsB[0] });
     expect(selectA).not.toHaveBeenCalled();
 
-    reactHandler<CapturedClick>(buttonsB[0], "onClick")({ currentTarget: buttonsB[0] });
+    fireEvent.click(buttonsB[0]);
     expect(selectB).toHaveBeenCalledOnce();
     expect(selectB.mock.calls[0][0]).toBe(replacement);
   });
@@ -776,7 +785,7 @@ describe("OutlinePanel active heading reveal", () => {
     expect(selectA).not.toHaveBeenCalled();
     expect(scrollIntoView).not.toHaveBeenCalled();
 
-    reactHandler<CapturedClick>(currentButton, "onClick")({ currentTarget: currentButton });
+    fireEvent.click(currentButton);
     expect(selectB).toHaveBeenCalledOnce();
     expect(selectB.mock.calls[0][0]).toBe(currentHeadings[1]);
   });
@@ -796,14 +805,14 @@ describe("OutlinePanel active heading reveal", () => {
     const staleHide = reactHandler<CapturedClick>(hideB, "onClick");
     staleShow({ currentTarget: hideB });
     expect(toggleA).not.toHaveBeenCalled();
-    staleHide({ currentTarget: hideB });
+    fireEvent.click(hideB);
     expect(toggleB).toHaveBeenCalledOnce();
 
     rendered.rerender(<OutlinePanel session={session} open={false} onToggle={toggleC} onSelect={() => {}} />);
     const showC = screen.getByRole<HTMLButtonElement>("button", { name: "Show outline" });
     staleHide({ currentTarget: showC });
     expect(toggleB).toHaveBeenCalledOnce();
-    reactHandler<CapturedClick>(showC, "onClick")({ currentTarget: showC });
+    fireEvent.click(showC);
     expect(toggleC).toHaveBeenCalledOnce();
   });
 
@@ -849,6 +858,228 @@ describe("OutlinePanel active heading reveal", () => {
     expect(selectA).toHaveBeenCalledOnce();
     expect(toggleB).toHaveBeenCalledOnce();
     expect(selectB).toHaveBeenCalledOnce();
+  });
+
+  it("keeps exact controls authoritative through direct-root StrictMode replay", async () => {
+    const headings = loadHeadings();
+    session.localCursor.rich = headings[0].from;
+    const collapsedToggle = vi.fn();
+    let expandedToggleHandler: CapturedClick | null = null;
+    let expandedToggleEvent: CapturedClickEvent | null = null;
+    const expandedToggle = vi.fn(() => {
+      if (expandedToggleHandler && expandedToggleEvent) expandedToggleHandler(expandedToggleEvent);
+    });
+    let headingHandler: CapturedClick | null = null;
+    let headingEvent: CapturedClickEvent | null = null;
+    const select = vi.fn(() => {
+      if (headingHandler && headingEvent) headingHandler(headingEvent);
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <OutlinePanel session={session} open={false} onToggle={collapsedToggle} onSelect={select} />
+          </StrictMode>,
+        );
+      });
+      const collapsedRoot = within(host).getByTestId("outline-collapsed");
+      const show = within(host).getByRole<HTMLButtonElement>("button", { name: "Show outline" });
+      const staleCollapsedRootRef = reactHandler<CapturedRef<HTMLElement>>(collapsedRoot, "ref");
+      const staleCollapsedToggleRef = reactHandler<CapturedRef<HTMLButtonElement>>(show, "ref");
+      const staleShow = reactHandler<CapturedClick>(show, "onClick");
+      staleShow({ currentTarget: show });
+      expect(collapsedToggle).not.toHaveBeenCalled();
+      fireEvent.click(show);
+      expect(collapsedToggle).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <OutlinePanel session={session} open onToggle={expandedToggle} onSelect={select} />
+          </StrictMode>,
+        );
+      });
+      const expandedRoot = within(host).getByTestId("outline");
+      const toggle = within(host).getByRole<HTMLButtonElement>("button", { name: "Hide outline" });
+      const nav = within(host).getByRole("navigation", { name: "Document outline" });
+      const list = nav.querySelector("ul");
+      if (!list) throw new Error("Strict outline list was not rendered");
+      const buttons = within(nav).getAllByRole<HTMLButtonElement>("button");
+      const items = buttons.map((button) => button.parentElement);
+      if (items.some((item) => !(item instanceof HTMLLIElement))) throw new Error("Strict outline row was not rendered");
+      const staleExpandedRootRef = reactHandler<CapturedRef<HTMLElement>>(expandedRoot, "ref");
+      const staleExpandedToggleRef = reactHandler<CapturedRef<HTMLButtonElement>>(toggle, "ref");
+      const staleExpandedNavRef = reactHandler<CapturedRef<HTMLElement>>(nav, "ref");
+      const staleExpandedListRef = reactHandler<CapturedRef<HTMLUListElement>>(list, "ref");
+      const staleExpandedItemRefs = items.map((item) => reactHandler<CapturedRef<HTMLLIElement>>(item as HTMLLIElement, "ref"));
+      const staleExpandedButtonRefs = buttons.map((button) => reactHandler<CapturedRef<HTMLButtonElement>>(button, "ref"));
+      const staleExpandedToggle = reactHandler<CapturedClick>(toggle, "onClick");
+      const staleExpandedHeading = reactHandler<CapturedClick>(buttons[1], "onClick");
+      const staleExpandedKey = reactHandler<CapturedKeyDown>(list, "onKeyDown");
+
+      fireEvent.click(toggle);
+      expect(expandedToggle).toHaveBeenCalledOnce();
+      staleCollapsedRootRef(null);
+      staleCollapsedToggleRef(null);
+      staleCollapsedRootRef(expandedRoot);
+      staleCollapsedToggleRef(toggle);
+
+      const iframe = document.createElement("iframe");
+      document.body.append(iframe);
+      const foreignWindow = iframe.contentWindow;
+      const foreignDocument = iframe.contentDocument;
+      if (!foreignWindow || !foreignDocument) throw new Error("Cross-document test frame was not created");
+      const foreignGlobal = foreignWindow as Window & typeof globalThis;
+      const foreignButton = foreignDocument.createElement("button");
+      foreignDocument.body.append(foreignButton);
+      foreignButton.addEventListener(
+        "click",
+        (nativeEvent) => {
+          staleExpandedHeading({
+            currentTarget: buttons[1],
+            target: nativeEvent.target ?? foreignButton,
+            nativeEvent: nativeEvent as globalThis.MouseEvent,
+          });
+        },
+        { capture: true, once: true },
+      );
+      foreignButton.dispatchEvent(new foreignGlobal.MouseEvent("click", { bubbles: true }));
+      const foreignList = foreignDocument.createElement("ul");
+      const foreignListButton = foreignDocument.createElement("button");
+      foreignList.append(foreignListButton);
+      foreignDocument.body.append(foreignList);
+      const foreignPreventDefault = vi.fn();
+      foreignListButton.addEventListener(
+        "keydown",
+        (nativeEvent) => {
+          staleExpandedKey({
+            key: "ArrowDown",
+            currentTarget: list,
+            target: nativeEvent.target ?? foreignListButton,
+            nativeEvent: nativeEvent as globalThis.KeyboardEvent,
+            preventDefault: foreignPreventDefault,
+          });
+        },
+        { capture: true, once: true },
+      );
+      foreignListButton.dispatchEvent(new foreignGlobal.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      expect(select).not.toHaveBeenCalled();
+      expect(foreignPreventDefault).not.toHaveBeenCalled();
+      iframe.remove();
+
+      expandedToggleHandler = staleExpandedToggle;
+      toggle.addEventListener(
+        "click",
+        (nativeEvent) => {
+          const replayEvent: CapturedClickEvent = {
+            currentTarget: toggle,
+            target: nativeEvent.target ?? toggle,
+            nativeEvent: nativeEvent as globalThis.MouseEvent,
+          };
+          staleShow(replayEvent);
+          expandedToggleEvent = replayEvent;
+          staleExpandedToggle(replayEvent);
+          staleExpandedToggle(replayEvent);
+        },
+        { capture: true, once: true },
+      );
+      fireEvent.click(toggle);
+      expect(expandedToggle).toHaveBeenCalledTimes(2);
+      expandedToggleEvent = null;
+
+      headingHandler = staleExpandedHeading;
+      buttons[1].addEventListener(
+        "click",
+        (nativeEvent) => {
+          const replayEvent: CapturedClickEvent = {
+            currentTarget: buttons[1],
+            target: nativeEvent.target ?? buttons[1],
+            nativeEvent: nativeEvent as globalThis.MouseEvent,
+          };
+          headingEvent = replayEvent;
+          staleExpandedHeading(replayEvent);
+          staleExpandedHeading(replayEvent);
+        },
+        { capture: true, once: true },
+      );
+      fireEvent.click(buttons[1]);
+      expect(select).toHaveBeenCalledOnce();
+      expect(select).toHaveBeenLastCalledWith(headings[1]);
+      headingEvent = null;
+
+      buttons[0].focus();
+      const repeatedKey = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
+      const repeatedPreventDefault = vi.spyOn(repeatedKey, "preventDefault");
+      buttons[0].addEventListener(
+        "keydown",
+        (nativeEvent) => {
+          const replayEvent = {
+            key: "ArrowDown",
+            currentTarget: list,
+            target: nativeEvent.target ?? buttons[0],
+            nativeEvent: nativeEvent as globalThis.KeyboardEvent,
+            preventDefault: () => nativeEvent.preventDefault(),
+          };
+          staleExpandedKey(replayEvent);
+          staleExpandedKey(replayEvent);
+        },
+        { capture: true, once: true },
+      );
+      act(() => buttons[0].dispatchEvent(repeatedKey));
+      expect(repeatedPreventDefault).toHaveBeenCalledOnce();
+      expect(buttons[1]).toHaveFocus();
+
+      let currentNav = within(host).getByRole("navigation", { name: "Document outline" });
+      let currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
+      fireEvent.keyDown(currentButtons[1], { key: "Home" });
+      expect(currentButtons[0]).toHaveFocus();
+      currentNav = within(host).getByRole("navigation", { name: "Document outline" });
+      currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
+      fireEvent.keyDown(currentButtons[0], { key: "End" });
+      expect(currentButtons.at(-1)).toHaveFocus();
+
+      const currentRoot = within(host).getByTestId("outline");
+      const currentToggle = within(host).getByRole<HTMLButtonElement>("button", { name: "Hide outline" });
+      currentNav = within(host).getByRole("navigation", { name: "Document outline" });
+      const currentList = currentNav.querySelector("ul");
+      if (!currentList) throw new Error("Current Strict outline list was not rendered");
+      currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
+      const currentItems = currentButtons.map((button) => button.parentElement as HTMLLIElement);
+      staleExpandedRootRef(null);
+      staleExpandedToggleRef(null);
+      staleExpandedNavRef(null);
+      staleExpandedListRef(null);
+      staleExpandedItemRefs.forEach((ref) => ref(null));
+      staleExpandedButtonRefs.forEach((ref) => ref(null));
+      staleExpandedRootRef(currentRoot);
+      staleExpandedToggleRef(currentToggle);
+      staleExpandedNavRef(currentNav);
+      staleExpandedListRef(currentList);
+      staleExpandedItemRefs.forEach((ref, index) => ref(currentItems[index]));
+      staleExpandedButtonRefs.forEach((ref, index) => ref(currentButtons[index]));
+
+      currentButtons[1].addEventListener(
+        "click",
+        (nativeEvent) => {
+          staleExpandedHeading({
+            currentTarget: currentButtons[1],
+            target: nativeEvent.target ?? currentButtons[1],
+            nativeEvent: nativeEvent as globalThis.MouseEvent,
+          });
+        },
+        { capture: true, once: true },
+      );
+      fireEvent.click(currentButtons[1]);
+      expect(select).toHaveBeenCalledTimes(2);
+      expect(select).toHaveBeenLastCalledWith(headings[1]);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 
   it("rejects an equal-looking unmounted presentation and admits its remount", () => {
