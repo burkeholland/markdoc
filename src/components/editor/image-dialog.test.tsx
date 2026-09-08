@@ -1723,6 +1723,10 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         onSubmit={onSubmit}
       />,
     );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/quarantined.png" },
+    });
+    await act(async () => {});
     const input = screen.getByTestId("image-url") as HTMLInputElement;
     const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
     const originalCancel = screen.getByRole("button", { name: "Cancel" });
@@ -1735,6 +1739,9 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     content.className = className;
     await act(async () => {});
 
+    const submit = submitEvent();
+    act(() => imageForm().dispatchEvent(submit));
+    expect(submit.defaultPrevented).toBe(true);
     fireEvent.click(originalCancel);
     expect(staleClose).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();

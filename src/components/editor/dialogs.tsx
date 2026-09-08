@@ -3030,10 +3030,10 @@ function createImagePresentation(
       }
       return undefined;
     }
-    if (!coordinator.acceptsAuthority(authority)) return undefined;
     submitProvenance =
       imageSubmitProvenance(authority, controls, submitRevision) ??
       submitProvenance;
+    if (!coordinator.acceptsAuthority(authority)) return undefined;
     const dom = exactDom();
     if (!factsAreCurrent() || !dom || replayRejected) {
       if (coordinator.replay()) abandonDeferredUpload();
