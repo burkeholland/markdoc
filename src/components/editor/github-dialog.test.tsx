@@ -260,6 +260,7 @@ function clonePickerSyntheticEvent<T extends object>(
 type PickerClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type PickerChangeHandler<T extends HTMLInputElement | HTMLSelectElement> = (event: ChangeEvent<T>) => void;
 type PickerSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
+type SignInRootClickHandler = (event: ReactMouseEvent<HTMLDivElement>) => void;
 
 function nativePickerClick(control: HTMLButtonElement, target: EventTarget | null = control, type = "click") {
   const MouseEventConstructor = control.ownerDocument.defaultView?.MouseEvent;
@@ -461,6 +462,560 @@ describe("GitHubSignInPrompt ownership", () => {
     expect(signIn).toHaveBeenCalledTimes(2);
     expect(currentButton).toBeDisabled();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("binds prop and key replacements to their exact current redirect despite late old refs", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    signIn.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const view = render(
+      <GitHubSignInPrompt
+        key="mount-a"
+        githubConfigured
+        redirectTo="/documents/a"
+      />,
+    );
+    const staleButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    const staleRoot = screen.getByTestId(
+      "github-signin-prompt",
+    ) as HTMLDivElement;
+    const staleClick = reactProp<PickerClickHandler>(staleButton, "onClick");
+    const staleRootRef = reactProp<RefCallback<HTMLDivElement>>(
+      staleRoot,
+      "ref",
+    );
+    const staleButtonRef = reactProp<RefCallback<HTMLButtonElement>>(
+      staleButton,
+      "ref",
+    );
+
+    view.rerender(
+      <GitHubSignInPrompt
+        key="mount-a"
+        githubConfigured
+        redirectTo="/documents/b"
+      />,
+    );
+    const propButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    const propRoot = screen.getByTestId(
+      "github-signin-prompt",
+    ) as HTMLDivElement;
+    act(() => {
+      staleRootRef(propRoot);
+      staleButtonRef(propButton);
+      staleButtonRef(null);
+      staleRootRef(null);
+    });
+    await act(async () => Promise.resolve());
+    directPickerClick(staleClick, propButton);
+    fireEvent.click(propButton);
+    expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+      redirectTo: "/documents/b",
+    });
+
+    const propClick = reactProp<PickerClickHandler>(propButton, "onClick");
+    view.rerender(
+      <GitHubSignInPrompt
+        key="mount-b"
+        githubConfigured
+        redirectTo="/documents/c"
+      />,
+    );
+    const keyedButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    directPickerClick(propClick, keyedButton);
+    staleButton.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
+    );
+    fireEvent.click(keyedButton);
+
+    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(signIn).toHaveBeenNthCalledWith(2, "github", {
+      redirectTo: "/documents/c",
+    });
+    expect(keyedButton).toBeDisabled();
+  });
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "rejects a current native event crossed through a stale handler in %s order",
+    (order) => {
+      const pending = deferred<void>();
+      signIn.mockReturnValue(pending.promise);
+      const view = render(
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/stale"
+        />,
+      );
+      const button = screen.getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      const staleClick = reactProp<PickerClickHandler>(button, "onClick");
+      view.rerender(
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/current"
+        />,
+      );
+      const current = screen.getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      const host = view.container;
+      const attack = (nativeEvent: Event) => {
+        if (!(nativeEvent instanceof MouseEvent)) return;
+        directPickerClick(staleClick, current, { nativeEvent });
+      };
+      if (order === "stale-before-current") {
+        current.addEventListener("click", attack, {
+          capture: true,
+          once: true,
+        });
+      } else {
+        host.addEventListener("click", attack, { once: true });
+      }
+
+      current.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+      expect(signIn).not.toHaveBeenCalled();
+      expect(current).toBeEnabled();
+
+      fireEvent.click(current);
+      expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+        redirectTo: "/documents/current",
+      });
+      expect(current).toBeDisabled();
+    },
+  );
+
+  it("keeps an exact sibling prompt usable without borrowing its event", () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    render(
+      <>
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/first"
+        />
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/second"
+        />
+      </>,
+    );
+    const [first, second] = screen.getAllByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    if (!first || !second) throw new Error("Expected two sign-in prompts");
+
+    fireEvent.click(second);
+    expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+      redirectTo: "/documents/second",
+    });
+    expect(first).toBeEnabled();
+    expect(second).toBeDisabled();
+  });
+
+  it("rejects fabricated, sibling, foreign, and incomplete-ref deliveries before a clean successor", () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    const view = render(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/current"
+      />,
+    );
+    const root = screen.getByTestId("github-signin-prompt");
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    const click = reactProp<PickerClickHandler>(button, "onClick");
+    const rootCapture = reactProp<SignInRootClickHandler>(
+      root,
+      "onClickCapture",
+    );
+    const buttonRef = reactProp<RefCallback<HTMLButtonElement>>(button, "ref");
+    const sibling = document.createElement("button");
+    sibling.type = "button";
+    root.append(sibling);
+    const foreign = document.createElement("button");
+    foreign.type = "button";
+    document.body.append(foreign);
+
+    directPickerClick(click, button);
+    directPickerClick(click, sibling);
+    directPickerClick(click, foreign);
+    rootCapture({
+      type: "click",
+      currentTarget: root,
+      target: button,
+      nativeEvent: nativePickerClick(button),
+    } as unknown as ReactMouseEvent<HTMLDivElement>);
+    act(() => {
+      buttonRef(null);
+      buttonRef(button);
+    });
+    sibling.remove();
+    fireEvent.click(button);
+    expect(signIn).not.toHaveBeenCalled();
+    foreign.remove();
+
+    view.rerender(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/successor"
+      />,
+    );
+    const successor = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    fireEvent.click(successor);
+    expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+      redirectTo: "/documents/successor",
+    });
+  });
+
+  it("publishes one exact successor after direct-root Strict Mode ref and layout replay", async () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    const view = await renderStrictPicker(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/strict"
+      />,
+    );
+    try {
+      const button = view.picker.getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      fireEvent.click(button);
+      expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+        redirectTo: "/documents/strict",
+      });
+      expect(button).toBeDisabled();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it.each([
+    "label mutation",
+    "placement mutation",
+    "detach and reattach",
+  ] as const)(
+    "permanently retires a restored %s and leaves a clean successor usable",
+    (change) => {
+      const pending = deferred<void>();
+      signIn.mockReturnValue(pending.promise);
+      const view = render(
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/restored"
+        />,
+      );
+      const root = screen.getByTestId("github-signin-prompt");
+      const button = screen.getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      const parent = root.parentNode;
+      if (!parent) throw new Error("The sign-in prompt has no parent");
+
+      if (change === "label mutation") {
+        const label = button.lastChild;
+        if (!label) throw new Error("The sign-in prompt has no label");
+        const value = label.nodeValue;
+        label.nodeValue = " Changed";
+        label.nodeValue = value;
+      } else if (change === "placement mutation") {
+        const sibling = document.createElement("span");
+        parent.insertBefore(sibling, root);
+        sibling.remove();
+      } else {
+        const next = root.nextSibling;
+        root.remove();
+        parent.insertBefore(root, next);
+      }
+
+      fireEvent.click(button);
+      expect(signIn).not.toHaveBeenCalled();
+      expect(button).toBeEnabled();
+
+      view.rerender(
+        <GitHubSignInPrompt
+          githubConfigured
+          redirectTo="/documents/fresh"
+        />,
+      );
+      const successor = screen.getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      fireEvent.click(successor);
+      expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+        redirectTo: "/documents/fresh",
+      });
+    },
+  );
+
+  it("retires owner-document adoption and keeps a distinct clean owner usable", async () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerDocument = frame.contentDocument;
+    const ownerWindow = frame.contentWindow;
+    if (!ownerDocument || !ownerWindow) {
+      throw new Error("The test iframe has no document");
+    }
+    const host = ownerDocument.createElement("div");
+    ownerDocument.body.append(host);
+    const root = createRoot(host);
+    try {
+      await act(async () => {
+        root.render(
+          <GitHubSignInPrompt
+            githubConfigured
+            redirectTo="/documents/foreign"
+          />,
+        );
+      });
+      const prompt = within(host).getByTestId("github-signin-prompt");
+      const button = within(host).getByRole<HTMLButtonElement>("button", {
+        name: /Sign in with GitHub/,
+      });
+      const parent = prompt.parentNode;
+      if (!parent) throw new Error("The foreign prompt has no parent");
+      document.adoptNode(prompt);
+      ownerDocument.adoptNode(prompt);
+      parent.append(prompt);
+      const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent;
+      if (!MouseEventConstructor) {
+        throw new Error("The test iframe has no MouseEvent");
+      }
+      button.dispatchEvent(
+        new MouseEventConstructor("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+      expect(signIn).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      frame.remove();
+    }
+
+    render(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/local"
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with GitHub/ }),
+    );
+    expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+      redirectTo: "/documents/local",
+    });
+  });
+
+  it("keeps stale success and failure inert after later keyed successors", async () => {
+    const staleSuccess = deferred<void>();
+    const staleFailure = deferred<void>();
+    const current = deferred<void>();
+    signIn
+      .mockReturnValueOnce(staleSuccess.promise)
+      .mockReturnValueOnce(staleFailure.promise)
+      .mockReturnValueOnce(current.promise);
+    const view = render(
+      <GitHubSignInPrompt
+        key="success"
+        githubConfigured
+        redirectTo="/documents/success"
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with GitHub/ }),
+    );
+    view.rerender(
+      <GitHubSignInPrompt
+        key="failure"
+        githubConfigured
+        redirectTo="/documents/failure"
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with GitHub/ }),
+    );
+    view.rerender(
+      <GitHubSignInPrompt
+        key="current"
+        githubConfigured
+        redirectTo="/documents/current"
+      />,
+    );
+    const currentButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    fireEvent.click(currentButton);
+
+    await act(async () => {
+      staleSuccess.resolve();
+      staleFailure.reject(new Error("Stale GitHub failure"));
+      await Promise.all([
+        staleSuccess.promise,
+        staleFailure.promise.catch(() => undefined),
+      ]);
+    });
+
+    expect(signIn).toHaveBeenCalledTimes(3);
+    expect(currentButton).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(unhandledRejections).toEqual([]);
+  });
+
+  it("rejects a reused native event after failure before one fresh retry", async () => {
+    const failed = deferred<void>();
+    const retry = deferred<void>();
+    signIn
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    render(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/reused"
+      />,
+    );
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    const reused = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => {
+      button.dispatchEvent(reused);
+    });
+    expect(signIn).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      failed.reject(new Error("GitHub sign-in failed"));
+      await failed.promise.catch(() => undefined);
+    });
+    expect(button).toBeEnabled();
+    act(() => {
+      button.dispatchEvent(reused);
+    });
+    expect(signIn).toHaveBeenCalledTimes(1);
+    expect(button).toBeEnabled();
+
+    fireEvent.click(button);
+    expect(signIn).toHaveBeenCalledTimes(2);
+    expect(signIn).toHaveBeenNthCalledWith(2, "github", {
+      redirectTo: "/documents/reused",
+    });
+    expect(button).toBeDisabled();
+  });
+
+  it.each(["unavailable", "poisoned"] as const)(
+    "fails configured activation closed when MutationObserver is %s without breaking informational copy",
+    (state) => {
+      const Observer = window.MutationObserver;
+      const takeRecords =
+        state === "poisoned"
+          ? vi
+              .spyOn(Observer.prototype, "takeRecords")
+              .mockImplementation(() => {
+                throw new Error("poisoned MutationObserver");
+              })
+          : null;
+      if (state === "unavailable") {
+        Object.defineProperty(window, "MutationObserver", {
+          configurable: true,
+          value: undefined,
+        });
+      }
+      try {
+        const view = render(
+          <GitHubSignInPrompt
+            githubConfigured
+            redirectTo="/documents/no-platform"
+          />,
+        );
+        const button = screen.getByRole<HTMLButtonElement>("button", {
+          name: /Sign in with GitHub/,
+        });
+        expect(button).toBeEnabled();
+        fireEvent.click(button);
+        expect(signIn).not.toHaveBeenCalled();
+
+        view.rerender(
+          <GitHubSignInPrompt
+            githubConfigured={false}
+            redirectTo="/documents/no-platform"
+          />,
+        );
+        expect(screen.queryByRole("button")).toBeNull();
+        expect(screen.getByTestId("github-not-configured")).toHaveTextContent(
+          GITHUB_NOT_CONFIGURED,
+        );
+      } finally {
+        takeRecords?.mockRestore();
+        if (state === "unavailable") {
+          Object.defineProperty(window, "MutationObserver", {
+            configurable: true,
+            value: Observer,
+          });
+        }
+      }
+    },
+  );
+
+  it("releases native and mutation ownership on terminal cleanup and ignores its late failure", async () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    const disconnect = vi.spyOn(
+      MutationObserver.prototype,
+      "disconnect",
+    );
+    const remove = vi.spyOn(document, "removeEventListener");
+    const view = render(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/unmounted"
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Sign in with GitHub/ }),
+    );
+    view.unmount();
+
+    await act(async () => {
+      pending.reject(new Error("Unmounted GitHub failure"));
+      await pending.promise.catch(() => undefined);
+      await Promise.resolve();
+    });
+
+    expect(
+      remove.mock.calls.some(
+        ([type, listener]) =>
+          type === "click" && typeof listener === "function",
+      ),
+    ).toBe(true);
+    expect(disconnect).toHaveBeenCalled();
+    expect(screen.queryByTestId("github-signin-prompt")).toBeNull();
+    expect(unhandledRejections).toEqual([]);
   });
 });
 
