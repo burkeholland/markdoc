@@ -358,7 +358,10 @@ describe("ImageDialog upload lifecycle", () => {
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(input.value).toBe("");
-      await act(async () => {});
+      await act(
+        async () =>
+          new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+      );
 
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
@@ -1788,17 +1791,36 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(staleClose).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
 
-    await view.render(
-      <ImageDialog
-        open
-        onOpenChange={currentClose}
-        onSubmit={onSubmit}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    function RecoveryDialog() {
+      const [open, setOpen] = useState(true);
+      const close = useCallback((nextOpen: boolean) => {
+        currentClose(nextOpen);
+        setOpen(nextOpen);
+      }, []);
+      return (
+        <ImageDialog
+          open={open}
+          onOpenChange={close}
+          onSubmit={onSubmit}
+        />
+      );
+    }
+    await view.render(<RecoveryDialog />);
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/recovered.png" },
+    });
+    await act(async () => {});
+    const recovered = submitEvent();
+    act(() => imageForm().dispatchEvent(recovered));
+    expect(recovered.defaultPrevented).toBe(true);
     expect(staleClose).not.toHaveBeenCalled();
     expect(currentClose).toHaveBeenCalledOnce();
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      "https://example.com/recovered.png",
+      "",
+    );
   });
 
   it("stops inherited submit poison before React bubble extraction", async () => {
@@ -1886,6 +1908,171 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       "https://example.com/canonical.png",
       "",
     );
+  });
+
+  it("delivers before a later form bubble listener can poison submit", async () => {
+    const onOpenChange = vi.fn();
+    const onSubmit = vi.fn();
+    function ControlledDialog() {
+      const [open, setOpen] = useState(true);
+      const close = useCallback((nextOpen: boolean) => {
+        onOpenChange(nextOpen);
+        setOpen(nextOpen);
+      }, []);
+      return (
+        <ImageDialog
+          open={open}
+          onOpenChange={close}
+          onSubmit={onSubmit}
+        />
+      );
+    }
+    await renderStrictRoot(<ControlledDialog />);
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/terminal.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const latePoison = vi.fn((event: Event) => {
+      Object.setPrototypeOf(
+        event,
+        Object.create(Object.getPrototypeOf(event), {
+          target: {
+            configurable: true,
+            get: () => {
+              throw new Error("Late inherited target must not run");
+            },
+          },
+        }),
+      );
+    });
+    const uncaught = vi.fn((event: ErrorEvent) => event.preventDefault());
+    form.addEventListener("submit", latePoison);
+    window.addEventListener("error", uncaught);
+    const submit = submitEvent();
+    let dispatched = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+    } finally {
+      window.removeEventListener("error", uncaught);
+    }
+
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(latePoison).not.toHaveBeenCalled();
+    expect(uncaught).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      "https://example.com/terminal.png",
+      "",
+    );
+  });
+
+  it("rejects submit poisoned and stopped before the terminal guard", async () => {
+    const onOpenChange = vi.fn();
+    const onSubmit = vi.fn();
+    const earlyPoison = vi.fn((event: Event) => {
+      event.stopPropagation();
+      Object.setPrototypeOf(
+        event,
+        Object.create(Object.getPrototypeOf(event), {
+          composedPath: {
+            configurable: true,
+            get: () => {
+              throw new Error("Early inherited composedPath must not run");
+            },
+          },
+          submitter: {
+            configurable: true,
+            get: () => {
+              throw new Error("Early inherited submitter must not run");
+            },
+          },
+          target: {
+            configurable: true,
+            get: () => {
+              throw new Error("Early inherited target must not run");
+            },
+          },
+          type: {
+            configurable: true,
+            get: () => {
+              throw new Error("Early inherited type must not run");
+            },
+          },
+        }),
+      );
+    });
+    const nativeAddEventListener = EventTarget.prototype.addEventListener;
+    const formAddEventListener = Object.getOwnPropertyDescriptor(
+      HTMLFormElement.prototype,
+      "addEventListener",
+    );
+    let installed = false;
+    Object.defineProperty(HTMLFormElement.prototype, "addEventListener", {
+      configurable: true,
+      value: function (
+        this: HTMLFormElement,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        if (type === "submit" && !installed) {
+          installed = true;
+          nativeAddEventListener.call(this, type, earlyPoison, { once: true });
+        }
+        nativeAddEventListener.call(this, type, listener, options);
+      },
+    });
+    try {
+      await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={onOpenChange}
+          onSubmit={onSubmit}
+        />,
+      );
+    } finally {
+      if (formAddEventListener) {
+        Object.defineProperty(
+          HTMLFormElement.prototype,
+          "addEventListener",
+          formAddEventListener,
+        );
+      } else {
+        Reflect.deleteProperty(
+          HTMLFormElement.prototype,
+          "addEventListener",
+        );
+      }
+    }
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/rejected.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const uncaught = vi.fn((event: ErrorEvent) => event.preventDefault());
+    window.addEventListener("error", uncaught);
+    const poisoned = submitEvent();
+    let dispatched = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(poisoned);
+      });
+    } finally {
+      window.removeEventListener("error", uncaught);
+    }
+
+    expect(earlyPoison).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(poisoned.defaultPrevented).toBe(true);
+    expect(uncaught).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("suppresses a genuine submit after staged replay rejection and recovers freshly", async () => {

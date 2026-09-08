@@ -654,6 +654,9 @@ const IMAGE_HAS_OWN = Object.prototype.hasOwnProperty;
 const IMAGE_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
 const IMAGE_GET_PROTOTYPE_OF = Object.getPrototypeOf;
 const IMAGE_OWN_KEYS = Reflect.ownKeys;
+const IMAGE_WEAK_MAP_DELETE = WeakMap.prototype.delete;
+const IMAGE_WEAK_MAP_GET = WeakMap.prototype.get;
+const IMAGE_WEAK_MAP_SET = WeakMap.prototype.set;
 
 function imageUploadErrorText(error: unknown) {
   try {
@@ -879,6 +882,15 @@ interface ImageSubmitProvenance {
   readonly nativeEvent: ImageNativeSubmitIntrinsics;
 }
 
+interface ImageSubmitCaptureProof {
+  readonly nativeEvent: Event;
+  readonly provenance: ImageSubmitProvenance;
+  readonly reactEvent: React.FormEvent<HTMLFormElement>;
+  readonly delivery: ImageSubmitTerminalDelivery;
+}
+
+type ImageSubmitTerminalDelivery = (proof: ImageSubmitCaptureProof) => void;
+
 interface ImageNativePropertySnapshot {
   readonly key: PropertyKey;
   readonly kind: "accessor" | "data";
@@ -909,7 +921,9 @@ interface ImageNativeSubmitIntrinsics {
   readonly preventDefault: (event: Event) => boolean;
   readonly capturePublicSurface: (event: Event) => boolean;
   readonly publicSurfaceIsCanonical: (event: Event) => boolean;
-  readonly stopPropagation: (event: Event) => void;
+  readonly releasePublicSurface: (event: Event) => void;
+  readonly propagationStopped: (event: Event) => boolean;
+  readonly stopImmediatePropagation: (event: Event) => void;
 }
 
 interface ImageReplayValidation {
@@ -1228,6 +1242,8 @@ class ImageDismissalListener {
   #submitForm: HTMLFormElement | null = null;
   #submitListener: ((event: Event) => void) | null = null;
   #submitProvenance: ImageSubmitProvenance | null = null;
+  #submitDelivery: ImageSubmitTerminalDelivery | null = null;
+  #submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
 
   constructor(private readonly coordinator: ImagePublicationCoordinator) {}
 
@@ -1259,26 +1275,72 @@ class ImageDismissalListener {
     ownerDocument.addEventListener("click", listener, true);
   }
 
-  attachSubmit(provenance: ImageSubmitProvenance) {
+  attachSubmit(
+    provenance: ImageSubmitProvenance,
+    delivery: ImageSubmitTerminalDelivery,
+  ) {
     const form = provenance.form;
     this.#submitProvenance = provenance;
+    this.#submitDelivery = delivery;
     if (this.#submitForm === form && this.#submitListener) return;
     this.releaseSubmit();
     this.#submitProvenance = provenance;
+    this.#submitDelivery = delivery;
     const listener = (event: Event) => {
+      const proof = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, this.#submitProofs, [
+        event,
+      ]) as ImageSubmitCaptureProof | undefined;
+      if (!proof) return;
+      IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitProofs, [event]);
+      const intrinsics = proof.provenance.nativeEvent;
+      const propagationWasStopped = intrinsics.propagationStopped(event);
+      intrinsics.stopImmediatePropagation(event);
       const current = this.#submitProvenance;
-      if (
-        !current ||
-        current.form !== form ||
-        current.nativeEvent.publicSurfaceIsCanonical(event)
-      ) {
-        return;
+      const currentDelivery = this.#submitDelivery;
+      try {
+        if (
+          propagationWasStopped ||
+          current !== proof.provenance ||
+          currentDelivery !== proof.delivery ||
+          current?.form !== form ||
+          !intrinsics.publicSurfaceIsCanonical(event)
+        ) {
+          return;
+        }
+        proof.delivery(proof);
+      } finally {
+        intrinsics.releasePublicSurface(event);
       }
-      current.nativeEvent.stopPropagation(event);
     };
     this.#submitForm = form;
     this.#submitListener = listener;
     form.addEventListener("submit", listener);
+  }
+
+  stageSubmit(proof: ImageSubmitCaptureProof) {
+    if (
+      this.#submitForm !== proof.provenance.form ||
+      this.#submitProvenance !== proof.provenance ||
+      this.#submitDelivery !== proof.delivery ||
+      !this.#submitListener
+    ) {
+      return false;
+    }
+    IMAGE_APPLY(IMAGE_WEAK_MAP_SET, this.#submitProofs, [
+      proof.nativeEvent,
+      proof,
+    ]);
+    queueMicrotask(() => {
+      const current = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, this.#submitProofs, [
+        proof.nativeEvent,
+      ]) as ImageSubmitCaptureProof | undefined;
+      if (current !== proof) return;
+      IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitProofs, [
+        proof.nativeEvent,
+      ]);
+      proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
+    });
+    return true;
   }
 
   releaseWhenDetached(bridge: HTMLDivElement) {
@@ -1293,6 +1355,8 @@ class ImageDismissalListener {
     this.#submitForm = null;
     this.#submitListener = null;
     this.#submitProvenance = null;
+    this.#submitDelivery = null;
+    this.#submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
     if (form && listener) form.removeEventListener("submit", listener);
   }
 
@@ -2296,6 +2360,7 @@ function captureImageNativeSubmitIntrinsics(
   const defaultPrevented = getter<boolean>("defaultPrevented");
   const bubbles = getter<boolean>("bubbles");
   const cancelable = getter<boolean>("cancelable");
+  const propagationStopped = getter<boolean>("cancelBubble");
   const composedPath = getOwnPropertyDescriptor(
     eventPrototype,
     "composedPath",
@@ -2304,9 +2369,9 @@ function captureImageNativeSubmitIntrinsics(
     eventPrototype,
     "preventDefault",
   )?.value;
-  const stopPropagation = getOwnPropertyDescriptor(
+  const stopImmediatePropagation = getOwnPropertyDescriptor(
     eventPrototype,
-    "stopPropagation",
+    "stopImmediatePropagation",
   )?.value;
   const submitter =
     typeof SubmitEventConstructor === "function"
@@ -2322,9 +2387,10 @@ function captureImageNativeSubmitIntrinsics(
     !defaultPrevented ||
     !bubbles ||
     !cancelable ||
+    !propagationStopped ||
     typeof composedPath !== "function" ||
     typeof preventDefault !== "function" ||
-    typeof stopPropagation !== "function" ||
+    typeof stopImmediatePropagation !== "function" ||
     (typeof SubmitEventConstructor === "function" &&
       typeof submitter !== "function")
   ) {
@@ -2337,13 +2403,13 @@ function captureImageNativeSubmitIntrinsics(
   const isSubmitEvent = (value: Event) =>
     typeof SubmitEventConstructor === "function" &&
     IMAGE_APPLY(IMAGE_HAS_INSTANCE, SubmitEventConstructor, [value]);
-  let publicSurface:
-    | {
-        readonly event: Event;
-        readonly ownProperties: readonly ImageNativePropertySnapshot[];
-        readonly prototypeChain: readonly ImageNativePrototypeSnapshot[];
-      }
-    | null = null;
+  const publicSurfaces = new WeakMap<
+    Event,
+    {
+      readonly ownProperties: readonly ImageNativePropertySnapshot[];
+      readonly prototypeChain: readonly ImageNativePrototypeSnapshot[];
+    }
+  >();
   return Object.freeze({
     isEvent,
     isSubmitEvent,
@@ -2364,7 +2430,7 @@ function captureImageNativeSubmitIntrinsics(
       return defaultPrevented(event);
     },
     capturePublicSurface: (event: Event) => {
-      publicSurface = null;
+      IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, publicSurfaces, [event]);
       const prototypeChain = canonicalChain(event);
       const ownProperties = captureProperties(event);
       if (
@@ -2374,23 +2440,36 @@ function captureImageNativeSubmitIntrinsics(
       ) {
         return false;
       }
-      publicSurface = Object.freeze({
+      IMAGE_APPLY(IMAGE_WEAK_MAP_SET, publicSurfaces, [
         event,
-        ownProperties,
-        prototypeChain,
-      });
+        Object.freeze({
+          ownProperties,
+          prototypeChain,
+        }),
+      ]);
       return true;
     },
     publicSurfaceIsCanonical: (event: Event) => {
-      const captured = publicSurface;
+      const captured = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, publicSurfaces, [
+        event,
+      ]) as
+        | {
+            readonly ownProperties: readonly ImageNativePropertySnapshot[];
+            readonly prototypeChain: readonly ImageNativePrototypeSnapshot[];
+          }
+        | undefined;
       return (
-        captured?.event === event &&
+        captured !== undefined &&
         prototypeChainMatches(event, captured.prototypeChain) &&
         propertiesMatch(event, captured.ownProperties)
       );
     },
-    stopPropagation: (event: Event) => {
-      IMAGE_APPLY(stopPropagation, event, []);
+    releasePublicSurface: (event: Event) => {
+      IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, publicSurfaces, [event]);
+    },
+    propagationStopped,
+    stopImmediatePropagation: (event: Event) => {
+      IMAGE_APPLY(stopImmediatePropagation, event, []);
     },
   });
 }
@@ -2517,20 +2596,13 @@ function imageExactNativeError(
     : null;
 }
 
-function imageExactNativeSubmit(
-  event: React.FormEvent<HTMLFormElement>,
+function imageExactNativeSubmitEvent(
+  nativeEvent: Event,
   provenance: ImageSubmitProvenance,
   expectedDefaultPrevented: boolean,
 ) {
   const { form, insert, content } = provenance;
-  const nativeEvent = event.nativeEvent;
   const intrinsics = provenance.nativeEvent;
-  const wrapper = event as React.FormEvent<HTMLFormElement> & {
-    readonly _reactName?: unknown;
-    readonly isDefaultPrevented?: unknown;
-    readonly isPropagationStopped?: unknown;
-    readonly persist?: unknown;
-  };
   if (!intrinsics.isEvent(nativeEvent)) return null;
   const path = intrinsics.composedPath(nativeEvent);
   if (
@@ -2543,11 +2615,6 @@ function imageExactNativeSubmit(
     !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [form]) ||
     !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [content]) ||
     !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [provenance.ownerDocument]) ||
-    event.currentTarget !== form ||
-    wrapper._reactName !== "onSubmit" ||
-    typeof wrapper.isDefaultPrevented !== "function" ||
-    typeof wrapper.isPropagationStopped !== "function" ||
-    typeof wrapper.persist !== "function" ||
     !form.isConnected ||
     form.ownerDocument !== provenance.ownerDocument ||
     insert.form !== form ||
@@ -2564,6 +2631,32 @@ function imageExactNativeSubmit(
     return null;
   }
   return nativeEvent;
+}
+
+function imageExactNativeSubmit(
+  event: React.FormEvent<HTMLFormElement>,
+  provenance: ImageSubmitProvenance,
+  expectedDefaultPrevented: boolean,
+) {
+  const nativeEvent = event.nativeEvent;
+  const wrapper = event as React.FormEvent<HTMLFormElement> & {
+    readonly _reactName?: unknown;
+    readonly isDefaultPrevented?: unknown;
+    readonly isPropagationStopped?: unknown;
+    readonly persist?: unknown;
+  };
+  return imageExactNativeSubmitEvent(
+    nativeEvent,
+    provenance,
+    expectedDefaultPrevented,
+  ) &&
+    event.currentTarget === provenance.form &&
+    wrapper._reactName === "onSubmit" &&
+    typeof wrapper.isDefaultPrevented === "function" &&
+    typeof wrapper.isPropagationStopped === "function" &&
+    typeof wrapper.persist === "function"
+    ? nativeEvent
+    : null;
 }
 
 function imageSubmitProvenance(
@@ -3038,12 +3131,6 @@ function createImagePresentation(
   let currentRuntime: ImagePublicationRuntime | null = null;
   let lastRuntime: ImagePublicationRuntime | null = null;
   let submitProvenance: ImageSubmitProvenance | null = null;
-  let capturedSubmit:
-    | {
-        readonly nativeEvent: Event;
-        readonly provenance: ImageSubmitProvenance;
-      }
-    | null = null;
   let submitRevision = 0;
   let successorRequested = false;
   let partialRecoveryQueued = false;
@@ -3367,7 +3454,10 @@ function createImagePresentation(
     );
     if (nextSubmitProvenance) {
       submitProvenance = nextSubmitProvenance;
-      dismissalListener.attachSubmit(nextSubmitProvenance);
+      dismissalListener.attachSubmit(
+        nextSubmitProvenance,
+        deliverFormSubmit,
+      );
     }
     if (!coordinator.acceptsAuthority(authority)) return undefined;
     const dom = exactDom();
@@ -3410,7 +3500,10 @@ function createImagePresentation(
     );
     if (replacementSubmitProvenance) {
       submitProvenance = replacementSubmitProvenance;
-      dismissalListener.attachSubmit(replacementSubmitProvenance);
+      dismissalListener.attachSubmit(
+        replacementSubmitProvenance,
+        deliverFormSubmit,
+      );
     }
     if (!replayValidation.complete()) {
       runtime.retireForElement();
@@ -3737,10 +3830,55 @@ function createImagePresentation(
     }
     closeCurrent(publication, false);
   };
+  const deliverFormSubmit: ImageSubmitTerminalDelivery = (proof) => {
+    const committed = lastRuntime?.publication ?? null;
+    const provenance = submitProvenance;
+    const ownedForm = form.owner.element();
+    const nativeEvent = proof.nativeEvent;
+    if (
+      proof.delivery !== deliverFormSubmit ||
+      proof.provenance !== provenance ||
+      !ownedForm ||
+      provenance.authority !== authority ||
+      provenance.form !== ownedForm ||
+      !provenance.nativeEvent.publicSurfaceIsCanonical(nativeEvent) ||
+      imageExactNativeSubmitEvent(nativeEvent, provenance, true) !== nativeEvent ||
+      !submitSuppressionIsCurrent(provenance)
+    ) {
+      return;
+    }
+    const publication = currentPublication(
+      authority.uploading ? "file" : null,
+    );
+    if (
+      !publication ||
+      !committed ||
+      publication !== committed ||
+      publication.dom.form !== ownedForm ||
+      publication.dom.insert !== insert.owner.element() ||
+      authority.submitDisabled ||
+      authority.uploading ||
+      activeUpload() !== null ||
+      !authority.normalizedSrc ||
+      imageExactNativeSubmitEvent(nativeEvent, provenance, true) !== nativeEvent ||
+      !provenance.nativeEvent.publicSurfaceIsCanonical(nativeEvent) ||
+      !owns(publication)
+    ) {
+      return;
+    }
+    const claimed = claim(
+      publication,
+      form,
+      insert.action,
+      proof.reactEvent,
+      nativeEvent,
+    );
+    if (!claimed) return;
+    closeCurrent(publication, true);
+  };
   const onFormSubmitCapture = (
     event: React.FormEvent<HTMLFormElement>,
   ) => {
-    capturedSubmit = null;
     const provenance = submitProvenance;
     const ownedForm = form.owner.element();
     if (
@@ -3756,62 +3894,22 @@ function createImagePresentation(
     if (!nativeEvent || !provenance.nativeEvent.preventDefault(nativeEvent)) {
       return;
     }
-    if (provenance.nativeEvent.capturePublicSurface(nativeEvent)) {
-      capturedSubmit = { nativeEvent, provenance };
-    }
-  };
-  const onFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    const captured = capturedSubmit;
-    capturedSubmit = null;
-    const committed = lastRuntime?.publication ?? null;
-    const provenance = submitProvenance;
-    const ownedForm = form.owner.element();
-    if (
-      !captured ||
-      !provenance ||
-      !ownedForm ||
-      captured.provenance !== provenance ||
-      provenance.authority !== authority ||
-      provenance.form !== ownedForm ||
-      event.currentTarget !== ownedForm
-    ) {
+    if (!provenance.nativeEvent.capturePublicSurface(nativeEvent)) {
+      provenance.nativeEvent.stopImmediatePropagation(nativeEvent);
       return;
     }
-    const nativeEvent = imageExactNativeSubmit(event, provenance, true);
-    if (
-      !nativeEvent ||
-      captured.nativeEvent !== nativeEvent ||
-      !provenance.nativeEvent.publicSurfaceIsCanonical(nativeEvent)
-    ) {
-      return;
-    }
-    if (!submitSuppressionIsCurrent(provenance)) return;
-    const publication = currentPublication(
-      authority.uploading ? "file" : null,
-    );
-    if (
-      !publication ||
-      !committed ||
-      publication !== committed ||
-      publication.dom.form !== ownedForm ||
-      publication.dom.insert !== insert.owner.element() ||
-      authority.submitDisabled ||
-      authority.uploading ||
-      activeUpload() !== null ||
-      !authority.normalizedSrc
-    ) {
-      return;
-    }
-    const claimed = claim(
-      publication,
-      form,
-      insert.action,
-      event,
+    const proof = Object.freeze({
       nativeEvent,
-    );
-    if (!claimed) return;
-    closeCurrent(publication, true);
+      provenance,
+      reactEvent: event,
+      delivery: deliverFormSubmit,
+    });
+    if (!dismissalListener.stageSubmit(proof)) {
+      provenance.nativeEvent.releasePublicSurface(nativeEvent);
+      provenance.nativeEvent.stopImmediatePropagation(nativeEvent);
+    }
   };
+  const onFormSubmit = () => {};
   const onClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
     const publication = currentPublication();
     const bridgeElement = bridge.owner.element();
