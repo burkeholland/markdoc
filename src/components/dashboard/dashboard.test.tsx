@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { StrictMode, startTransition, useEffect, useLayoutEffect, useState } from "react";
+import { StrictMode, createElement, startTransition, useEffect, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
@@ -305,14 +305,7 @@ function documentStar(title: string) {
   return within(link.closest("li")!).getByTestId("star-toggle");
 }
 
-type CapturedClickEvent = {
-  readonly currentTarget: HTMLButtonElement;
-  preventDefault: ReturnType<typeof vi.fn>;
-  stopPropagation: ReturnType<typeof vi.fn>;
-};
-
 type CapturedClick = (event?: unknown) => void;
-type CapturedTemplateClick = (event: CapturedClickEvent) => void;
 type CapturedReactClick = (event: unknown) => void;
 type CapturedReactRef = (node: Element | null) => void;
 
@@ -324,26 +317,29 @@ function captureClick(element: HTMLElement): CapturedClick {
   return props.onClick;
 }
 
-function captureTemplateClick(element: HTMLButtonElement): CapturedTemplateClick {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error("React props were not attached to the template button");
-  const props = (element as unknown as Record<string, { onClick?: CapturedTemplateClick } | undefined>)[propsKey];
-  if (!props?.onClick) throw new Error("The template button did not have an onClick handler");
-  return props.onClick;
-}
-
 function reactPropsEntry(element: Element): {
   key: string;
-  record: Record<string, { onClick?: CapturedReactClick; ref?: CapturedReactRef }>;
-  props: { onClick?: CapturedReactClick; ref?: CapturedReactRef };
+  record: Record<string, { onClick?: CapturedReactClick; onClickCapture?: CapturedReactClick; ref?: CapturedReactRef }>;
+  props: { onClick?: CapturedReactClick; onClickCapture?: CapturedReactClick; ref?: CapturedReactRef };
 } {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the element");
-  const record = element as unknown as Record<string, { onClick?: CapturedReactClick; ref?: CapturedReactRef }>;
+  const record = element as unknown as Record<
+    string,
+    {
+      onClick?: CapturedReactClick;
+      onClickCapture?: CapturedReactClick;
+      ref?: CapturedReactRef;
+    }
+  >;
   return { key: propsKey, record, props: record[propsKey]! };
 }
 
-function reactProps(element: Element): { onClick?: CapturedReactClick; ref?: CapturedReactRef } {
+function reactProps(element: Element): {
+  onClick?: CapturedReactClick;
+  onClickCapture?: CapturedReactClick;
+  ref?: CapturedReactRef;
+} {
   return reactPropsEntry(element).props;
 }
 
@@ -351,6 +347,16 @@ function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
   const onClick = reactProps(element).onClick;
   if (!onClick) throw new Error("The button did not have an onClick handler");
   return onClick;
+}
+
+function captureTemplateActivation(
+  element: HTMLButtonElement,
+): CapturedReactClick {
+  const onClickCapture = reactProps(element).onClickCapture;
+  if (!onClickCapture) {
+    throw new Error("The template button did not have an activation handler");
+  }
+  return onClickCapture;
 }
 
 function captureReactRef(element: Element): CapturedReactRef {
@@ -367,6 +373,25 @@ function interceptReactClick(
   const original = props.onClick;
   if (!original) throw new Error("The button did not have an onClick handler");
   const intercepted = { ...props, onClick: (event: unknown) => invoke(original, event) };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
+
+function interceptTemplateActivation(
+  element: HTMLButtonElement,
+  invoke: (original: CapturedReactClick, event: unknown) => void,
+): () => void {
+  const { key, record, props } = reactPropsEntry(element);
+  const original = props.onClickCapture;
+  if (!original) {
+    throw new Error("The template button did not have an activation handler");
+  }
+  const intercepted = {
+    ...props,
+    onClickCapture: (event: unknown) => invoke(original, event),
+  };
   record[key] = intercepted;
   return () => {
     if (record[key] === intercepted) record[key] = props;
@@ -404,29 +429,97 @@ function templateGrid(host: HTMLElement): HTMLUListElement {
   return grid;
 }
 
-function capturedActivationEvent(button: HTMLButtonElement) {
+function fabricatedTemplateClick(
+  button: HTMLButtonElement,
+  target: EventTarget = button,
+) {
+  const MouseEventConstructor = button.ownerDocument.defaultView!.MouseEvent;
   return {
+    type: "click",
+    button: 0,
+    buttons: 0,
+    detail: 1,
+    bubbles: true,
+    defaultPrevented: false,
     currentTarget: button,
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
+    target,
+    nativeEvent: new MouseEventConstructor("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      detail: 1,
+    }),
   };
 }
 
-function invokeCapturedClick(callback: CapturedTemplateClick, source: HTMLButtonElement) {
-  const event = capturedActivationEvent(source);
-  callback(event);
-  return event;
+function dispatchTemplateClick(
+  button: HTMLButtonElement,
+  target: Element = button,
+  beforeOriginal?: (
+    original: CapturedReactClick,
+    event: unknown,
+  ) => void,
+) {
+  let handler: CapturedReactClick | null = null;
+  let reactEvent: unknown = null;
+  const restore = interceptTemplateActivation(button, (original, event) => {
+    handler = original;
+    reactEvent = event;
+    beforeOriginal?.(original, event);
+    original(event);
+  });
+  const MouseEventConstructor = button.ownerDocument.defaultView!.MouseEvent;
+  const nativeEvent = new MouseEventConstructor("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    buttons: 0,
+    detail: 1,
+  });
+  try {
+    target.dispatchEvent(nativeEvent);
+  } finally {
+    restore();
+  }
+  if (!handler || !reactEvent) {
+    throw new Error("The dispatched template click did not reach React");
+  }
+  return { handler, reactEvent, nativeEvent };
 }
 
-function expectInertCapturedClick(callback: CapturedTemplateClick, source: HTMLButtonElement, host: HTMLElement) {
-  const event = capturedActivationEvent(source);
+function expectInertTemplateCall(
+  callback: CapturedReactClick,
+  event: unknown,
+  host: HTMLElement,
+) {
   const activeElement = document.activeElement;
   const markup = host.innerHTML;
   callback(event);
-  expect(event.preventDefault).not.toHaveBeenCalled();
-  expect(event.stopPropagation).not.toHaveBeenCalled();
   expect(document.activeElement).toBe(activeElement);
   expect(host.innerHTML).toBe(markup);
+}
+
+function templateRefBindings(host: HTMLElement) {
+  const grid = templateGrid(host);
+  const elements: Element[] = [grid];
+  for (const card of grid.children) {
+    const button = card.firstElementChild;
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error("Template card did not contain a button");
+    }
+    const icon = button.children.item(0)?.firstElementChild;
+    const name = button.children.item(1);
+    const description = button.children.item(2);
+    if (!icon || !name || !description) {
+      throw new Error("Template button refs were incomplete");
+    }
+    elements.push(card, button, icon, name, description);
+  }
+  return elements.map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
 }
 
 type KeydownCallback = (event: KeyboardEvent) => void;
@@ -492,20 +585,44 @@ afterEach(() => {
 });
 
 describe("TemplateGrid publication ownership", () => {
-  it("preserves presentation and gives each committed idle publication one exact template activation", async () => {
+  it("publishes a distinct exact successor after direct-root Strict Mode replay and preserves every card", async () => {
     const host = document.createElement("div");
-    document.body.append(host);
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner, host);
     const root = createRoot(host);
     const onPick = vi.fn<(template: Template) => void>();
     const first = PICKER_TEMPLATES[0];
     const second = PICKER_TEMPLATES[1];
+    const passiveCleanup = vi.fn();
+    let firstSetupHandler: CapturedReactClick | null = null;
+    let layoutSetups = 0;
 
     try {
       await act(async () => {
-        root.render(<TemplateGrid onPick={onPick} busy={null} />);
+        root.render(
+          <StrictMode>
+            <TemplateGridBoundary
+              onPick={onPick}
+              busy={null}
+              boundary={1}
+              onPassiveCleanup={passiveCleanup}
+              onBoundary={() => {
+                layoutSetups += 1;
+                firstSetupHandler ??= captureTemplateActivation(
+                  templateButton(host, first.id),
+                );
+              }}
+            />
+          </StrictMode>,
+        );
       });
 
       const grid = templateGrid(host);
+      const currentFirst = templateButton(host, first.id);
+      const currentHandler = captureTemplateActivation(currentFirst);
+      expect(layoutSetups).toBeGreaterThanOrEqual(2);
+      expect(passiveCleanup).toHaveBeenCalled();
+      expect(currentHandler).not.toBe(firstSetupHandler);
       expect(grid).toHaveClass("grid", "gap-3", "sm:grid-cols-2", "lg:grid-cols-3");
       expect(grid).not.toHaveClass("grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
       expect(Array.from(grid.children, (card) => card.firstElementChild?.getAttribute("data-testid"))).toEqual(
@@ -521,522 +638,682 @@ describe("TemplateGrid publication ownership", () => {
         expect(button).not.toHaveAttribute("aria-busy");
       }
 
-      const firstButton = templateButton(host, first.id);
-      const secondButton = templateButton(host, second.id);
-      const staleFirstActivation = captureTemplateClick(firstButton);
-      const competingActivation = captureTemplateClick(secondButton);
-      invokeCapturedClick(staleFirstActivation, firstButton);
-      invokeCapturedClick(staleFirstActivation, firstButton);
-      invokeCapturedClick(competingActivation, secondButton);
+      focusOwner.focus();
+      expectInertTemplateCall(
+        firstSetupHandler!,
+        fabricatedTemplateClick(currentFirst),
+        host,
+      );
+      expect(onPick).not.toHaveBeenCalled();
+      await act(async () => {
+        currentFirst.click();
+      });
       expect(onPick).toHaveBeenCalledTimes(1);
       expect(onPick).toHaveBeenLastCalledWith(first);
-
+      expect(document.activeElement).toBe(focusOwner);
       await act(async () => {
-        root.render(<TemplateGrid compact onPick={onPick} busy={second.id} />);
+        currentFirst.click();
       });
-      expect(templateGrid(host)).toHaveClass("grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
-      for (const template of PICKER_TEMPLATES) expect(templateButton(host, template.id)).toBeDisabled();
-      const busyButton = templateButton(host, second.id);
-      expect(busyButton).toHaveAttribute("aria-busy", "true");
-      expect(busyButton.querySelector("svg")).toHaveClass("animate-spin");
-      const busyActivation = captureTemplateClick(busyButton);
-      invokeCapturedClick(staleFirstActivation, firstButton);
-      invokeCapturedClick(busyActivation, busyButton);
       expect(onPick).toHaveBeenCalledTimes(1);
 
       await act(async () => {
-        root.render(<TemplateGrid compact onPick={onPick} busy={null} />);
+        root.render(
+          <StrictMode>
+            <TemplateGridBoundary
+              onPick={onPick}
+              busy={null}
+              boundary={2}
+              onPassiveCleanup={passiveCleanup}
+            />
+          </StrictMode>,
+        );
       });
-      const idleAgainButton = templateButton(host, second.id);
-      const idleAgainActivation = captureTemplateClick(idleAgainButton);
-      invokeCapturedClick(busyActivation, busyButton);
-      invokeCapturedClick(idleAgainActivation, idleAgainButton);
-      invokeCapturedClick(idleAgainActivation, idleAgainButton);
+      const currentSecond = templateButton(host, second.id);
+      expect(captureTemplateActivation(currentSecond)).not.toBe(currentHandler);
+      expectInertTemplateCall(
+        firstSetupHandler!,
+        fabricatedTemplateClick(currentSecond),
+        host,
+      );
+      await act(async () => {
+        dispatchTemplateClick(
+          currentSecond,
+          currentSecond.children.item(2) as Element,
+        );
+      });
       expect(onPick).toHaveBeenCalledTimes(2);
       expect(onPick).toHaveBeenLastCalledWith(second);
+      expect(document.activeElement).toBe(focusOwner);
     } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each(
-    (["sibling card", "foreign connected button", "detached published button", "replacement button"] as const).flatMap((source) =>
-      (["wrong-before-current", "current-before-wrong"] as const).map((order) => ({ source, order })),
-    ),
-  )("rejects a $source without claiming the current publication in $order order", async ({ source, order }) => {
-    const host = document.createElement("div");
-    const focusOwner = document.createElement("button");
-    document.body.append(focusOwner, host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let cleanupWrongSource = () => {};
-
-    try {
-      await act(async () => {
-        root.render(<TemplateGrid onPick={onPick} busy={null} />);
-      });
-      const exactButton = templateButton(host, template.id);
-      const exactActivation = captureTemplateClick(exactButton);
-      const card = exactButton.parentElement;
-      if (!(card instanceof HTMLLIElement)) throw new Error("Template button was not rendered in a card");
-      focusOwner.focus();
-
-      const prepareWrongSource = () => {
-        if (source === "sibling card") return templateButton(host, PICKER_TEMPLATES[1].id);
-        if (source === "foreign connected button") {
-          const foreign = document.createElement("button");
-          document.body.append(foreign);
-          cleanupWrongSource = () => foreign.remove();
-          return foreign;
-        }
-        if (source === "detached published button") {
-          exactButton.remove();
-          cleanupWrongSource = () => card.replaceChildren(exactButton);
-          return exactButton;
-        }
-        const replacement = document.createElement("button");
-        card.replaceChildren(replacement);
-        cleanupWrongSource = () => card.replaceChildren(exactButton);
-        return replacement;
-      };
-      const invokeWrongSource = (wrongSource: HTMLButtonElement) => {
-        expectInertCapturedClick(exactActivation, wrongSource, host);
-        if (source === "sibling card") {
-          expectInertCapturedClick(captureTemplateClick(wrongSource), exactButton, host);
-        }
-      };
-
-      if (order === "wrong-before-current") {
-        const wrongSource = prepareWrongSource();
-        invokeWrongSource(wrongSource);
-        expect(onPick).not.toHaveBeenCalled();
-        cleanupWrongSource();
-        cleanupWrongSource = () => {};
-        invokeCapturedClick(exactActivation, exactButton);
-      } else {
-        invokeCapturedClick(exactActivation, exactButton);
-        const wrongSource = prepareWrongSource();
-        invokeWrongSource(wrongSource);
-      }
-
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      cleanupWrongSource();
       await act(async () => root.unmount());
       focusOwner.remove();
       host.remove();
     }
   });
 
-  it.each(["wrong-before-current", "current-before-wrong"] as const)(
-    "binds reused DOM to the new callback before the parent layout boundary in %s order",
-    async (order) => {
+  it("rejects partial ref replay and late old refs without poisoning a fresh successor", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid key="initial" onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const bindings = templateRefBindings(host);
+      const staleButton = templateButton(host, template.id);
+      const staleHandler = captureTemplateActivation(staleButton);
+      const partial = bindings.find(
+        ({ element }) => element === staleButton,
+      )!;
+      await act(async () => {
+        partial.ref(null);
+        partial.ref(partial.element);
+      });
+      await act(async () => {
+        dispatchTemplateClick(staleButton);
+      });
+      expect(onPick).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid key="fresh" onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const currentButton = templateButton(host, template.id);
+      expect(currentButton).not.toBe(staleButton);
+      const late = bindings[0];
+      await act(async () => {
+        late.ref(currentButton);
+        late.ref(null);
+      });
+      expectInertTemplateCall(
+        staleHandler,
+        fabricatedTemplateClick(currentButton),
+        host,
+      );
+      await act(async () => {
+        dispatchTemplateClick(currentButton);
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("authenticates the exact native event when React owns the owner document", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerDocument = frame.contentDocument;
+    if (!ownerDocument) throw new Error("The test frame has no document");
+    ownerDocument.open();
+    ownerDocument.write(
+      "<!doctype html><html><head></head><body></body></html>",
+    );
+    ownerDocument.close();
+    const root = createRoot(ownerDocument);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>,
+        );
+      });
+      const button = ownerDocument.querySelector<HTMLButtonElement>(
+        `[data-testid="template-${template.id}"]`,
+      );
+      if (!button) throw new Error("The document-root card was not rendered");
+      await act(async () => {
+        button.click();
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      frame.remove();
+    }
+  });
+
+  it("retires callback, busy and compact generations while preserving busy presentation", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const stalePick = vi.fn<(template: Template) => void>();
+    const currentPick = vi.fn<(template: Template) => void>();
+    const first = PICKER_TEMPLATES[0];
+    const second = PICKER_TEMPLATES[1];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={stalePick} busy={null} compact={false} />
+          </StrictMode>,
+        );
+      });
+      const reusedButton = templateButton(host, first.id);
+      const staleHandler = captureTemplateActivation(reusedButton);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid
+              onPick={currentPick}
+              busy={second.id}
+              compact
+            />
+          </StrictMode>,
+        );
+      });
+      expect(templateButton(host, first.id)).toBe(reusedButton);
+      expect(templateGrid(host)).toHaveClass(
+        "grid-cols-2",
+        "sm:grid-cols-3",
+        "lg:grid-cols-4",
+      );
+      for (const template of PICKER_TEMPLATES) {
+        expect(templateButton(host, template.id)).toBeDisabled();
+      }
+      const busyButton = templateButton(host, second.id);
+      expect(busyButton).toHaveAttribute("aria-busy", "true");
+      expect(busyButton.querySelector("svg")).toHaveClass("animate-spin");
+      expectInertTemplateCall(
+        staleHandler,
+        fabricatedTemplateClick(reusedButton),
+        host,
+      );
+      await act(async () => {
+        busyButton.click();
+      });
+      expectInertTemplateCall(
+        captureTemplateActivation(busyButton),
+        fabricatedTemplateClick(busyButton),
+        host,
+      );
+      expect(stalePick).not.toHaveBeenCalled();
+      expect(currentPick).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={currentPick} busy={null} compact />
+          </StrictMode>,
+        );
+      });
+      const idleButton = templateButton(host, second.id);
+      expect(idleButton).toBeEnabled();
+      expect(idleButton).not.toHaveAttribute("aria-busy");
+      expect(idleButton.querySelector("svg")).not.toHaveClass(
+        "animate-spin",
+      );
+      await act(async () => {
+        dispatchTemplateClick(idleButton);
+      });
+      expect(stalePick).not.toHaveBeenCalled();
+      expect(currentPick).toHaveBeenCalledTimes(1);
+      expect(currentPick).toHaveBeenLastCalledWith(second);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["id", "name", "description", "icon"] as const)(
+    "latches template %s primitive drift and restoration",
+    async (field) => {
       const host = document.createElement("div");
-      const focusOwner = document.createElement("button");
-      document.body.append(focusOwner, host);
+      document.body.append(host);
       const root = createRoot(host);
-      const stalePick = vi.fn<(template: Template) => void>();
-      const currentPick = vi.fn<(template: Template) => void>();
-      const passiveCleanup = vi.fn();
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      const original = {
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        icon: template.icon,
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <TemplateGrid onPick={onPick} busy={null} />
+            </StrictMode>,
+          );
+        });
+        const button = templateButton(host, original.id);
+        if (field === "id") template.id = `${original.id}-changed`;
+        else if (field === "name") {
+          template.name = `${original.name} changed`;
+        } else if (field === "description") {
+          template.description = `${original.description} changed`;
+        } else {
+          template.icon = original.icon === "Scale" ? "File" : "Scale";
+        }
+        await act(async () => {
+          dispatchTemplateClick(button);
+        });
+        Object.assign(template, original);
+        await act(async () => {
+          dispatchTemplateClick(button);
+        });
+        expect(onPick).not.toHaveBeenCalled();
+
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <TemplateGrid
+                key={`recovered-${field}`}
+                onPick={onPick}
+                busy={null}
+              />
+            </StrictMode>,
+          );
+        });
+        await act(async () => {
+          dispatchTemplateClick(templateButton(host, original.id));
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        Object.assign(template, original);
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("latches exact template object and ordered identity drift until a fresh render", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const originals = [...PICKER_TEMPLATES];
+    const first = originals[0];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const identityButton = templateButton(host, first.id);
+      const equalTemplate = { ...first };
+      PICKER_TEMPLATES.splice(
+        0,
+        PICKER_TEMPLATES.length,
+        equalTemplate,
+        ...originals.slice(1),
+      );
+      await act(async () => {
+        dispatchTemplateClick(identityButton);
+      });
+      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const reorderedButton = templateButton(host, first.id);
+      PICKER_TEMPLATES.splice(
+        0,
+        PICKER_TEMPLATES.length,
+        ...originals.slice(1),
+        originals[0],
+      );
+      await act(async () => {
+        dispatchTemplateClick(reorderedButton);
+      });
+      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
+      expect(onPick).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid key="recovered" onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        dispatchTemplateClick(templateButton(host, first.id));
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(first);
+    } finally {
+      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "subtree mutation",
+    "card reorder",
+    "grid detach",
+    "higher ancestor detach",
+    "higher ancestor disabled state",
+  ] as const)(
+    "latches %s and restoration, then permits a fresh exact successor",
+    async (scenario) => {
+      const outer = document.createElement("section");
+      const host = document.createElement("div");
+      outer.append(host);
+      document.body.append(outer);
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
       const template = PICKER_TEMPLATES[0];
 
       try {
         await act(async () => {
           root.render(
-            <TemplateGridBoundary onPick={stalePick} busy={null} onPassiveCleanup={passiveCleanup} />,
+            <StrictMode>
+              <TemplateGrid onPick={onPick} busy={null} />
+            </StrictMode>,
           );
         });
+        const grid = templateGrid(host);
         const button = templateButton(host, template.id);
-        const staleActivation = captureTemplateClick(button);
-        let currentActivation!: CapturedTemplateClick;
-        focusOwner.focus();
-        let boundaryReached!: () => void;
-        const atBoundary = new Promise<void>((resolve) => {
-          boundaryReached = resolve;
-        });
-
-        root.render(
-          <TemplateGridBoundary
-            onPick={currentPick}
-            busy={null}
-            boundary={1}
-            onPassiveCleanup={passiveCleanup}
-            onBoundary={() => {
-              expect(passiveCleanup).not.toHaveBeenCalled();
-              const currentButton = templateButton(host, template.id);
-              expect(currentButton).toBe(button);
-              currentActivation = captureTemplateClick(currentButton);
-              if (order === "wrong-before-current") {
-                expectInertCapturedClick(staleActivation, currentButton, host);
-                expect(currentPick).not.toHaveBeenCalled();
-                invokeCapturedClick(currentActivation, button);
-              } else {
-                invokeCapturedClick(currentActivation, button);
-                expectInertCapturedClick(staleActivation, currentButton, host);
-              }
-              expect(stalePick).not.toHaveBeenCalled();
-              expect(currentPick).toHaveBeenCalledTimes(1);
-              expect(currentPick).toHaveBeenLastCalledWith(template);
-              expect(document.activeElement).toBe(focusOwner);
-              boundaryReached();
-            }}
-          />,
-        );
-        await atBoundary;
-        await act(async () => {});
-        expect(passiveCleanup).toHaveBeenCalledTimes(1);
-
-        const currentButton = templateButton(host, template.id);
-        expectInertCapturedClick(staleActivation, currentButton, host);
-        expectInertCapturedClick(currentActivation, button, host);
-        expect(stalePick).not.toHaveBeenCalled();
-        expect(currentPick).toHaveBeenCalledTimes(1);
-      } finally {
-        await act(async () => root.unmount());
-        focusOwner.remove();
-        host.remove();
-      }
-    },
-  );
-
-  it("retires idle authority at the busy boundary and makes the next idle publication independently usable", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const passiveCleanup = vi.fn();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(<TemplateGridBoundary onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
-      });
-      const button = templateButton(host, template.id);
-      const idleActivation = captureTemplateClick(button);
-      let busyBoundaryReached!: () => void;
-      const atBusyBoundary = new Promise<void>((resolve) => {
-        busyBoundaryReached = resolve;
-      });
-
-      root.render(
-        <TemplateGridBoundary
-          onPick={onPick}
-          busy={template.id}
-          boundary={1}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            const busyButton = templateButton(host, template.id);
-            expect(busyButton).toBe(button);
-            expect(busyButton).toBeDisabled();
-            invokeCapturedClick(idleActivation, button);
-            invokeCapturedClick(captureTemplateClick(busyButton), busyButton);
-            expect(onPick).not.toHaveBeenCalled();
-            busyBoundaryReached();
-          }}
-        />,
-      );
-      await atBusyBoundary;
-      await act(async () => {});
-
-      let idleBoundaryReached!: () => void;
-      const atIdleBoundary = new Promise<void>((resolve) => {
-        idleBoundaryReached = resolve;
-      });
-      root.render(
-        <TemplateGridBoundary
-          onPick={onPick}
-          busy={null}
-          boundary={2}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).toHaveBeenCalledTimes(1);
-            const currentButton = templateButton(host, template.id);
-            const currentActivation = captureTemplateClick(currentButton);
-            invokeCapturedClick(idleActivation, button);
-            invokeCapturedClick(currentActivation, currentButton);
-            expect(onPick).toHaveBeenCalledTimes(1);
-            expect(onPick).toHaveBeenLastCalledWith(template);
-            idleBoundaryReached();
-          }}
-        />,
-      );
-      await atIdleBoundary;
-      await act(async () => {});
-      expect(passiveCleanup).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("retires noncompact authority before the compact parent layout boundary while reusing callback and DOM identities", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const passiveCleanup = vi.fn();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(<TemplateGridBoundary onPick={onPick} busy={null} compact={false} onPassiveCleanup={passiveCleanup} />);
-      });
-      const oldGrid = templateGrid(host);
-      const oldButton = templateButton(host, template.id);
-      const staleActivation = captureTemplateClick(oldButton);
-      let boundaryReached!: () => void;
-      const atBoundary = new Promise<void>((resolve) => {
-        boundaryReached = resolve;
-      });
-
-      root.render(
-        <TemplateGridBoundary
-          onPick={onPick}
-          busy={null}
-          compact
-          boundary={1}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            expect(templateGrid(host)).toBe(oldGrid);
-            expect(templateButton(host, template.id)).toBe(oldButton);
-            expect(templateGrid(host)).toHaveClass("grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
-            invokeCapturedClick(staleActivation, oldButton);
-            invokeCapturedClick(captureTemplateClick(oldButton), oldButton);
-            expect(onPick).toHaveBeenCalledTimes(1);
-            expect(onPick).toHaveBeenLastCalledWith(template);
-            boundaryReached();
-          }}
-        />,
-      );
-      await atBoundary;
-      await act(async () => {});
-      invokeCapturedClick(staleActivation, oldButton);
-      expect(onPick).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("binds reordered replacement template fields and replacement card DOM to the new publication", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const passiveCleanup = vi.fn();
-    const originals = [...PICKER_TEMPLATES];
-    const original = originals[0];
-    const replacement: Template = {
-      ...original,
-      id: "replacement-template",
-      name: "Replacement template",
-      description: "Replacement description",
-      icon: "Scale",
-    };
-
-    try {
-      await act(async () => {
-        root.render(<TemplateGridBoundary onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
-      });
-      const oldCard = templateButton(host, original.id).parentElement;
-      const oldButton = templateButton(host, original.id);
-      const staleActivation = captureTemplateClick(oldButton);
-      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, originals[1], replacement, ...originals.slice(2));
-      let boundaryReached!: () => void;
-      const atBoundary = new Promise<void>((resolve) => {
-        boundaryReached = resolve;
-      });
-
-      root.render(
-        <TemplateGridBoundary
-          onPick={onPick}
-          busy={null}
-          boundary={1}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            const grid = templateGrid(host);
-            const replacementButton = templateButton(host, replacement.id);
-            expect(grid.children.item(0)?.firstElementChild).toBe(templateButton(host, originals[1].id));
-            expect(replacementButton.parentElement).not.toBe(oldCard);
-            expect(replacementButton).not.toBe(oldButton);
-            expect(oldButton.isConnected).toBe(false);
-            expect(replacementButton).toHaveTextContent(replacement.name);
-            expect(replacementButton).toHaveTextContent(replacement.description);
-            expect(replacementButton.querySelector("svg")).toHaveClass("lucide-scale");
-            invokeCapturedClick(staleActivation, oldButton);
-            invokeCapturedClick(captureTemplateClick(replacementButton), replacementButton);
-            expect(onPick).toHaveBeenCalledTimes(1);
-            expect(onPick).toHaveBeenLastCalledWith(replacement);
-            boundaryReached();
-          }}
-        />,
-      );
-      await atBoundary;
-      await act(async () => {});
-      invokeCapturedClick(staleActivation, oldButton);
-      expect(onPick).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
-      host.remove();
-    }
-  });
-
-  it.each(["wrong-before-current", "current-before-wrong"] as const)(
-    "binds an equal-looking replacement DOM to only its own callback in %s order",
-    async (order) => {
-      const host = document.createElement("div");
-      const focusOwner = document.createElement("button");
-      document.body.append(focusOwner, host);
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const passiveCleanup = vi.fn();
-      const template = PICKER_TEMPLATES[0];
-
-      try {
+        const originalMarkup = host.innerHTML;
+        if (scenario === "subtree mutation") {
+          const name = button.children.item(1)!;
+          const text = name.textContent;
+          name.textContent = "Changed and restored";
+          name.textContent = text;
+        } else if (scenario === "card reorder") {
+          const firstCard = grid.children.item(0)!;
+          const secondCard = grid.children.item(1)!;
+          grid.append(firstCard);
+          grid.insertBefore(firstCard, secondCard);
+        } else if (scenario === "grid detach") {
+          const parent = grid.parentNode!;
+          const next = grid.nextSibling;
+          grid.remove();
+          parent.insertBefore(grid, next);
+        } else if (scenario === "higher ancestor detach") {
+          const parent = outer.parentNode!;
+          const next = outer.nextSibling;
+          outer.remove();
+          parent.insertBefore(outer, next);
+        } else {
+          outer.setAttribute("inert", "");
+          outer.removeAttribute("inert");
+        }
+        expect(host.innerHTML).toBe(originalMarkup);
         await act(async () => {
-          root.render(<TemplateGridBoundary mountKey="a" onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
+          dispatchTemplateClick(button);
         });
-        const oldMarkup = host.innerHTML;
-        const oldButton = templateButton(host, template.id);
-        const staleActivation = captureTemplateClick(oldButton);
-        let currentButton!: HTMLButtonElement;
-        let currentActivation!: CapturedTemplateClick;
-        focusOwner.focus();
-        let boundaryReached!: () => void;
-        const atBoundary = new Promise<void>((resolve) => {
-          boundaryReached = resolve;
-        });
+        expect(onPick).not.toHaveBeenCalled();
 
-        root.render(
-          <TemplateGridBoundary
-            mountKey="b"
-            onPick={onPick}
-            busy={null}
-            boundary={1}
-            onPassiveCleanup={passiveCleanup}
-            onBoundary={() => {
-              expect(passiveCleanup).not.toHaveBeenCalled();
-              currentButton = templateButton(host, template.id);
-              currentActivation = captureTemplateClick(currentButton);
-              expect(currentButton).not.toBe(oldButton);
-              expect(oldButton.isConnected).toBe(false);
-              expect(host.innerHTML).toBe(oldMarkup);
-              if (order === "wrong-before-current") {
-                expectInertCapturedClick(staleActivation, currentButton, host);
-                expectInertCapturedClick(currentActivation, oldButton, host);
-                expect(onPick).not.toHaveBeenCalled();
-                invokeCapturedClick(currentActivation, currentButton);
-              } else {
-                invokeCapturedClick(currentActivation, currentButton);
-                expectInertCapturedClick(staleActivation, currentButton, host);
-                expectInertCapturedClick(currentActivation, oldButton, host);
-              }
-              expect(onPick).toHaveBeenCalledTimes(1);
-              expect(onPick).toHaveBeenLastCalledWith(template);
-              boundaryReached();
-            }}
-          />,
-        );
-        await atBoundary;
-        await act(async () => {});
-        expect(passiveCleanup).toHaveBeenCalledTimes(1);
-        expectInertCapturedClick(staleActivation, currentButton, host);
-        expectInertCapturedClick(currentActivation, oldButton, host);
-        expectInertCapturedClick(currentActivation, currentButton, host);
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <TemplateGrid
+                key={`recovered-${scenario}`}
+                onPick={onPick}
+                busy={null}
+              />
+            </StrictMode>,
+          );
+        });
+        await act(async () => {
+          dispatchTemplateClick(templateButton(host, template.id));
+        });
         expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
       } finally {
         await act(async () => root.unmount());
-        focusOwner.remove();
-        host.remove();
+        outer.remove();
       }
     },
   );
 
-  it("makes a removed publication inert at the parent boundary and leaves a later mount usable", async () => {
+  it("ignores genuinely nonadjacent ancestor churn", async () => {
+    const outer = document.createElement("section");
+    const firstFarSibling = document.createElement("div");
+    const secondFarSibling = document.createElement("div");
     const host = document.createElement("div");
-    const focusOwner = document.createElement("button");
-    document.body.append(focusOwner, host);
+    outer.append(firstFarSibling, secondFarSibling, host);
+    document.body.append(outer);
     const root = createRoot(host);
     const onPick = vi.fn<(template: Template) => void>();
-    const passiveCleanup = vi.fn();
     const template = PICKER_TEMPLATES[0];
 
     try {
       await act(async () => {
-        root.render(<TemplateGridBoundary onPick={onPick} busy={null} onPassiveCleanup={passiveCleanup} />);
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
       });
-      const oldButton = templateButton(host, template.id);
-      const staleActivation = captureTemplateClick(oldButton);
-      focusOwner.focus();
-      let removalBoundaryReached!: () => void;
-      const atRemovalBoundary = new Promise<void>((resolve) => {
-        removalBoundaryReached = resolve;
+      const nonadjacent = document.createElement("aside");
+      outer.prepend(nonadjacent);
+      nonadjacent.remove();
+      await act(async () => {
+        dispatchTemplateClick(templateButton(host, template.id));
       });
-
-      root.render(
-        <TemplateGridBoundary
-          present={false}
-          onPick={onPick}
-          busy={null}
-          boundary={1}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            const replacement = host.querySelector<HTMLButtonElement>('[data-testid="grid-replacement"]');
-            expect(replacement).toBeTruthy();
-            const markup = host.innerHTML;
-            const event = capturedActivationEvent(oldButton);
-            staleActivation(event);
-            expect(onPick).not.toHaveBeenCalled();
-            expect(event.preventDefault).not.toHaveBeenCalled();
-            expect(event.stopPropagation).not.toHaveBeenCalled();
-            expect(document.activeElement).toBe(focusOwner);
-            expect(host.innerHTML).toBe(markup);
-            removalBoundaryReached();
-          }}
-        />,
-      );
-      await atRemovalBoundary;
-      await act(async () => {});
-      expect(passiveCleanup).toHaveBeenCalledTimes(1);
-      staleActivation(capturedActivationEvent(oldButton));
-
-      let mountBoundaryReached!: () => void;
-      const atMountBoundary = new Promise<void>((resolve) => {
-        mountBoundaryReached = resolve;
-      });
-      root.render(
-        <TemplateGridBoundary
-          mountKey="later"
-          onPick={onPick}
-          busy={null}
-          boundary={2}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            const currentButton = templateButton(host, template.id);
-            const currentActivation = captureTemplateClick(currentButton);
-            invokeCapturedClick(staleActivation, oldButton);
-            invokeCapturedClick(currentActivation, currentButton);
-            expect(onPick).toHaveBeenCalledTimes(1);
-            expect(onPick).toHaveBeenLastCalledWith(template);
-            mountBoundaryReached();
-          }}
-        />,
-      );
-      await atMountBoundary;
-      await act(async () => {});
-      invokeCapturedClick(staleActivation, oldButton);
       expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
     } finally {
       await act(async () => root.unmount());
-      focusOwner.remove();
+      outer.remove();
+    }
+  });
+
+  it("keeps an equal-looking remount distinct from stale handlers and late refs", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid key="a" onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const oldMarkup = host.innerHTML;
+      const oldButton = templateButton(host, template.id);
+      const staleHandler = captureTemplateActivation(oldButton);
+      const staleRefs = templateRefBindings(host);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid key="b" onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const currentButton = templateButton(host, template.id);
+      expect(currentButton).not.toBe(oldButton);
+      expect(oldButton.isConnected).toBe(false);
+      expect(host.innerHTML).toBe(oldMarkup);
+      await act(async () => {
+        staleRefs[1].ref(currentButton.parentElement);
+        staleRefs[1].ref(null);
+      });
+      await act(async () => {
+        dispatchTemplateClick(currentButton, currentButton, (_original, event) => {
+          staleHandler(event);
+        });
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects crossed rows and event wrappers without poisoning either current card", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const first = PICKER_TEMPLATES[0];
+    const second = PICKER_TEMPLATES[1];
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const firstButton = templateButton(host, first.id);
+      const firstHandler = captureTemplateActivation(firstButton);
+      let firstEvent: unknown;
+      await act(async () => {
+        firstEvent = dispatchTemplateClick(
+          templateButton(host, second.id),
+          templateButton(host, second.id),
+          (_original, event) => {
+            firstHandler(event);
+          },
+        ).reactEvent;
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(second);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} compact={false} />
+          </StrictMode>,
+        );
+      });
+      const currentFirst = templateButton(host, first.id);
+      const currentHandler = captureTemplateActivation(currentFirst);
+      expectInertTemplateCall(currentHandler, firstEvent, host);
+      expectInertTemplateCall(
+        currentHandler,
+        fabricatedTemplateClick(
+          currentFirst,
+          templateButton(host, second.id),
+        ),
+        host,
+      );
+      await act(async () => {
+        dispatchTemplateClick(currentFirst);
+      });
+      expect(onPick).toHaveBeenCalledTimes(2);
+      expect(onPick).toHaveBeenLastCalledWith(first);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims publication, row, wrapper and native event before reentrant or repeated activation", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const first = PICKER_TEMPLATES[0];
+    const second = PICKER_TEMPLATES[1];
+    let liveHandler: CapturedReactClick | null = null;
+    let liveEvent: unknown = null;
+
+    try {
+      onPick.mockImplementationOnce(() => {
+        liveHandler?.(liveEvent);
+      });
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const button = templateButton(host, first.id);
+      const handler = captureTemplateActivation(button);
+      expectInertTemplateCall(
+        handler,
+        fabricatedTemplateClick(button),
+        host,
+      );
+      let accepted!: ReturnType<typeof dispatchTemplateClick>;
+      await act(async () => {
+        accepted = dispatchTemplateClick(
+          button,
+          button,
+          (original, event) => {
+            liveHandler = original;
+            liveEvent = event;
+          },
+        );
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(first);
+      expectInertTemplateCall(accepted.handler, accepted.reactEvent, host);
+      await act(async () => {
+        button.click();
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid
+              key="successor"
+              onPick={onPick}
+              busy={null}
+            />
+          </StrictMode>,
+        );
+      });
+      const successor = templateButton(host, second.id);
+      expectInertTemplateCall(
+        accepted.handler,
+        fabricatedTemplateClick(successor),
+        host,
+      );
+      const secondary = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 1,
+        buttons: 0,
+        detail: 1,
+      });
+      await act(async () => {
+        successor.dispatchEvent(secondary);
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        dispatchTemplateClick(successor);
+      });
+      expect(onPick).toHaveBeenCalledTimes(2);
+      expect(onPick).toHaveBeenLastCalledWith(second);
+    } finally {
+      await act(async () => root.unmount());
       host.remove();
     }
   });

@@ -103,146 +103,1351 @@ const TEMPLATE_ICONS: Record<TemplateIcon, typeof File> = {
   Sparkles,
 };
 
+const TEMPLATE_GRID_CLASS = "grid gap-3";
+const TEMPLATE_GRID_COMPACT_CLASS = "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4";
+const TEMPLATE_GRID_DEFAULT_CLASS = "sm:grid-cols-2 lg:grid-cols-3";
+const TEMPLATE_CARD_CLASS = "min-w-0";
+const TEMPLATE_BUTTON_CLASS =
+  "group flex h-full w-full flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left transition hover:border-accent hover:shadow-sm focus-visible:border-accent disabled:cursor-default disabled:opacity-60";
+const TEMPLATE_ICON_CONTAINER_CLASS =
+  "flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-on-accent";
+const TEMPLATE_NAME_CLASS = "block text-sm font-semibold text-ink";
+const TEMPLATE_DESCRIPTION_CLASS = "block text-xs leading-4 text-ink-3";
+
 interface TemplateGridEntryPublication {
-  index: number;
-  template: Template;
-  id: string;
-  name: string;
-  description: string;
-  icon: TemplateIcon;
+  readonly identity: symbol;
+  readonly index: number;
+  readonly template: Template;
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly icon: TemplateIcon;
+  readonly isBusy: boolean;
+  readonly Icon: typeof File;
+  readonly iconClassName: string | undefined;
 }
 
 interface TemplateGridRenderPublication {
-  onPick: (template: Template) => void;
-  busy: string | null;
-  compact: boolean | undefined;
-  entries: TemplateGridEntryPublication[];
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly templates: readonly Template[];
+  readonly onPick: (template: Template) => void;
+  readonly busy: string | null;
+  readonly compact: boolean | undefined;
+  readonly gridClassName: string;
+  readonly entries: readonly TemplateGridEntryPublication[];
+}
+
+type TemplateGridElementRole =
+  | "grid"
+  | "card"
+  | "button"
+  | "icon"
+  | "name"
+  | "description";
+
+interface TemplateGridElementOwnerView {
+  readonly role: TemplateGridElementRole;
+  readonly index: number | null;
+  readonly element: () => Element | null;
+}
+
+interface TemplateGridRefReplay {
+  readonly owner: TemplateGridElementOwnerView;
+  readonly element: Element;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface TemplateGridDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly TemplateGridDomSnapshot[];
+}
+
+interface TemplateGridNodePlacement {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+type TemplateGridPlacement = readonly TemplateGridNodePlacement[];
+
+interface TemplateGridDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface TemplateGridActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly entryIdentity: symbol;
+  readonly index: number;
 }
 
 interface TemplateGridDomPublication {
-  entry: TemplateGridEntryPublication;
-  card: HTMLLIElement | null;
-  button: HTMLButtonElement | null;
+  readonly identity: symbol;
+  readonly entry: TemplateGridEntryPublication;
+  readonly card: HTMLLIElement;
+  readonly button: HTMLButtonElement;
+  readonly icon: SVGSVGElement;
+  readonly name: HTMLSpanElement;
+  readonly description: HTMLSpanElement;
+  readonly action: TemplateGridActionPublication;
+  readonly targets: readonly Node[];
 }
 
 interface TemplateGridPublication {
-  render: TemplateGridRenderPublication;
-  grid: HTMLUListElement;
-  entries: TemplateGridDomPublication[];
+  readonly identity: symbol;
+  readonly render: TemplateGridRenderPublication;
+  readonly grid: HTMLUListElement;
+  readonly ownerDocument: Document;
+  readonly entries: readonly TemplateGridDomPublication[];
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
 }
 
-function currentTemplateGridPublication(
-  current: TemplateGridPublication | null,
-  claimed: TemplateGridPublication | null,
-  render: TemplateGridRenderPublication,
-  entry: TemplateGridEntryPublication,
-  source: HTMLButtonElement,
-): TemplateGridPublication | null {
-  if (!current || current.render !== render || claimed === current || render.busy !== null) return null;
-  const sourceEntry = current.entries[entry.index];
-  if (sourceEntry?.entry !== entry || sourceEntry.button !== source || current.entries.length !== PICKER_TEMPLATES.length) return null;
+interface TemplateGridReplay {
+  readonly source: TemplateGridPublication;
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
 
-  const grid = current.grid;
-  if (!grid.isConnected || grid.children.length !== current.entries.length) return null;
-  for (const published of current.entries) {
-    const { card, button } = published;
-    const rendered = published.entry;
+interface TemplateGridPublicationCells {
+  readonly active: { current: TemplateGridPublication | null };
+  readonly successorOf: { current: TemplateGridPublication | null };
+  readonly replay: { current: TemplateGridReplay | null };
+  readonly claimedPublications: WeakSet<TemplateGridPublication>;
+  readonly claimedEntries: WeakSet<TemplateGridDomPublication>;
+  readonly claimedActions: WeakSet<TemplateGridActionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+}
+
+interface TemplateGridNativeClickProof {
+  readonly event: MouseEvent;
+  readonly entry: TemplateGridDomPublication;
+  readonly action: TemplateGridActionPublication;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+}
+
+interface TemplateGridReactClickProof {
+  readonly event: object;
+  readonly native: TemplateGridNativeClickProof;
+}
+
+interface TemplateGridPublicationRuntime {
+  readonly publication: TemplateGridPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: TemplateGridElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly replay: () => TemplateGridReplay | null;
+  readonly captureReactClick: (
+    event: ReactMouseEvent<HTMLUListElement>,
+  ) => void;
+  readonly activate: (
+    entry: TemplateGridEntryPublication,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => TemplateGridDomPublication | null;
+}
+
+interface TemplateGridEntryOwnerSet {
+  readonly entry: TemplateGridEntryPublication;
+  readonly card: TemplateGridElementOwner<HTMLLIElement>;
+  readonly button: TemplateGridElementOwner<HTMLButtonElement>;
+  readonly icon: TemplateGridElementOwner<SVGSVGElement>;
+  readonly name: TemplateGridElementOwner<HTMLSpanElement>;
+  readonly description: TemplateGridElementOwner<HTMLSpanElement>;
+}
+
+interface TemplateGridPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureGrid: (
+    element: HTMLUListElement | null,
+  ) => void | (() => void);
+  readonly captureClick: (
+    event: ReactMouseEvent<HTMLUListElement>,
+  ) => void;
+  readonly entries: readonly {
+    readonly entry: TemplateGridEntryPublication;
+    readonly captureCard: (
+      element: HTMLLIElement | null,
+    ) => void | (() => void);
+    readonly captureButton: (
+      element: HTMLButtonElement | null,
+    ) => void | (() => void);
+    readonly captureIcon: (
+      element: SVGSVGElement | null,
+    ) => void | (() => void);
+    readonly captureName: (
+      element: HTMLSpanElement | null,
+    ) => void | (() => void);
+    readonly captureDescription: (
+      element: HTMLSpanElement | null,
+    ) => void | (() => void);
+    readonly activate: (
+      event: ReactMouseEvent<HTMLButtonElement>,
+    ) => TemplateGridDomPublication | null;
+  }[];
+}
+
+class TemplateGridElementOwner<T extends Element>
+  implements TemplateGridElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: TemplateGridElementRole,
+    readonly index: number | null,
+    private readonly onChange: (
+      owner: TemplateGridElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+function templateGridAttributes(
+  node: Node,
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotTemplateGridDom(node: Node): TemplateGridDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: templateGridAttributes(node),
+    children: Object.freeze(
+      [...node.childNodes].map(snapshotTemplateGridDom),
+    ),
+  });
+}
+
+function templateGridDomMatches(snapshot: TemplateGridDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = templateGridAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node &&
+        templateGridDomMatches(child),
+    )
+  );
+}
+
+function snapshotTemplateGridPlacement(
+  grid: HTMLUListElement,
+): TemplateGridPlacement | null {
+  const placement: TemplateGridNodePlacement[] = [];
+  const ownerDocument = grid.ownerDocument;
+  let current: Node | null = grid;
+  while (current) {
+    placement.push(
+      Object.freeze({
+        node: current,
+        parent: current.parentNode,
+        previousSibling: current.previousSibling,
+        nextSibling: current.nextSibling,
+      }),
+    );
+    if (current === ownerDocument) return Object.freeze(placement);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function templateGridPlacementMatches(
+  ownerDocument: Document,
+  placement: TemplateGridPlacement,
+) {
+  if (placement.length === 0) return false;
+  for (let index = 0; index < placement.length; index++) {
+    const current = placement[index]!;
+    const next = placement[index + 1];
     if (
-      PICKER_TEMPLATES[rendered.index] !== rendered.template ||
-      rendered.template.id !== rendered.id ||
-      rendered.template.name !== rendered.name ||
-      rendered.template.description !== rendered.description ||
-      rendered.template.icon !== rendered.icon ||
-      !card?.isConnected ||
-      !button?.isConnected ||
-      grid.children.item(rendered.index) !== card ||
+      current.node.parentNode !== current.parent ||
+      current.node.previousSibling !== current.previousSibling ||
+      current.node.nextSibling !== current.nextSibling ||
+      (next && current.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placement.at(-1)!;
+  return (
+    last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null
+  );
+}
+
+function templateGridMutationTouchesPlacement(
+  placement: TemplateGridPlacement,
+  mutation: MutationRecord,
+) {
+  if (mutation.type === "attributes") {
+    return (
+      (mutation.attributeName === "aria-disabled" ||
+        mutation.attributeName === "disabled" ||
+        mutation.attributeName === "hidden" ||
+        mutation.attributeName === "inert") &&
+      placement.some(({ node }) => mutation.target === node)
+    );
+  }
+  if (mutation.type !== "childList") return false;
+  return placement.some(
+    ({ node, parent }) =>
+      mutation.target === parent &&
+      (mutation.previousSibling === node ||
+        mutation.nextSibling === node ||
+        [...mutation.addedNodes, ...mutation.removedNodes].some(
+          (changed) =>
+            changed === node ||
+            (changed.nodeType === 1 && (changed as Element).contains(node)),
+        )),
+  );
+}
+
+function createTemplateGridDomGuard(
+  grid: HTMLUListElement,
+  placement: TemplateGridPlacement,
+): TemplateGridDomGuard | null {
+  const MutationObserverConstructor =
+    grid.ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const record = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some(
+      (mutation) =>
+        mutation.target === grid ||
+        grid.contains(mutation.target) ||
+        templateGridMutationTouchesPlacement(placement, mutation),
+    );
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(grid, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  const observedParents = new Set<Node>();
+  for (const { parent } of placement) {
+    if (parent && !observedParents.has(parent)) {
+      observedParents.add(parent);
+      observer.observe(parent, {
+        ...(parent.nodeType === 1
+          ? {
+              attributeFilter: [
+                "aria-disabled",
+                "disabled",
+                "hidden",
+                "inert",
+              ],
+              attributeOldValue: true,
+              attributes: true,
+            }
+          : {}),
+        childList: true,
+      });
+    }
+  }
+  return Object.freeze({
+    isClean: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function templateGridNodes(element: HTMLElement): readonly Node[] {
+  const nodes: Node[] = [];
+  const visit = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(element);
+  return Object.freeze(nodes);
+}
+
+function templateGridEventPath(
+  ownerDocument: Document,
+  target: Node,
+): readonly EventTarget[] | null {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return null;
+  const path: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    path.push(current);
+    current = current.parentNode;
+  }
+  if (path.at(-1) !== ownerDocument) return null;
+  path.push(ownerWindow);
+  return Object.freeze(path);
+}
+
+function templateGridEventPathMatches(
+  ownerDocument: Document,
+  target: Node,
+  actual: readonly EventTarget[],
+) {
+  const expected = templateGridEventPath(ownerDocument, target);
+  const actualView = actual.at(-1);
+  const expectedView = expected?.at(-1);
+  const hasOwnerDocumentView =
+    actualView === expectedView ||
+    (typeof actualView === "object" &&
+      actualView !== null &&
+      "document" in actualView &&
+      actualView.document === ownerDocument &&
+      "window" in actualView &&
+      actualView.window === actualView);
+  return Boolean(
+    expected &&
+      actual.length === expected.length &&
+      hasOwnerDocumentView &&
+      actual
+        .slice(0, -1)
+        .every((entry, index) => entry === expected[index]),
+  );
+}
+
+function templateGridRenderMatches(
+  previous: TemplateGridRenderPublication,
+  current: TemplateGridRenderPublication,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.templates === current.templates &&
+    previous.onPick === current.onPick &&
+    previous.busy === current.busy &&
+    previous.compact === current.compact &&
+    previous.gridClassName === current.gridClassName &&
+    previous.entries.length === current.entries.length &&
+    previous.entries.every((entry, index) => {
+      const next = current.entries[index];
+      return (
+        next &&
+        entry.index === next.index &&
+        entry.template === next.template &&
+        entry.id === next.id &&
+        entry.name === next.name &&
+        entry.description === next.description &&
+        entry.icon === next.icon &&
+        entry.isBusy === next.isBusy &&
+        entry.Icon === next.Icon &&
+        entry.iconClassName === next.iconClassName
+      );
+    })
+  );
+}
+
+function templateGridFactsAreCurrent(
+  render: TemplateGridRenderPublication,
+) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.entries) &&
+    render.templates === PICKER_TEMPLATES &&
+    render.gridClassName ===
+      cn(
+        TEMPLATE_GRID_CLASS,
+        render.compact
+          ? TEMPLATE_GRID_COMPACT_CLASS
+          : TEMPLATE_GRID_DEFAULT_CLASS,
+      ) &&
+    render.entries.length === render.templates.length &&
+    render.entries.every((entry, index) => {
+      const template = render.templates[index];
+      const isBusy = render.busy === entry.id;
+      return (
+        Object.isFrozen(entry) &&
+        entry.index === index &&
+        template === entry.template &&
+        entry.template.id === entry.id &&
+        entry.template.name === entry.name &&
+        entry.template.description === entry.description &&
+        entry.template.icon === entry.icon &&
+        entry.isBusy === isBusy &&
+        entry.Icon ===
+          (isBusy ? Loader2 : TEMPLATE_ICONS[entry.icon]) &&
+        entry.iconClassName === (isBusy ? "animate-spin" : undefined)
+      );
+    })
+  );
+}
+
+function templateGridIsEffectivelyEnabled(
+  grid: HTMLUListElement,
+  button: HTMLButtonElement,
+) {
+  if (button.disabled || button.matches(":disabled")) return false;
+  let reachedGrid = false;
+  let current: Element | null = button;
+  while (current) {
+    if (
+      current.hasAttribute("inert") ||
+      current.hasAttribute("hidden") ||
+      current.getAttribute("aria-disabled") === "true"
+    ) {
+      return false;
+    }
+    if (current === grid) reachedGrid = true;
+    current = current.parentElement;
+  }
+  return reachedGrid;
+}
+
+function templateGridElementsAreCurrent(
+  render: TemplateGridRenderPublication,
+  gridOwner: TemplateGridElementOwnerView,
+  entryOwners: readonly TemplateGridEntryOwnerSet[],
+) {
+  const grid = gridOwner.element();
+  const ownerWindow = grid?.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(grid instanceof ownerWindow.HTMLUListElement) ||
+    !grid.isConnected ||
+    grid.tagName !== "UL" ||
+    grid.className !== render.gridClassName ||
+    grid.dataset.testid !== "template-grid" ||
+    grid.childNodes.length !== render.entries.length ||
+    grid.children.length !== render.entries.length ||
+    entryOwners.length !== render.entries.length
+  ) {
+    return false;
+  }
+
+  const elements: Element[] = [grid];
+  for (const owned of entryOwners) {
+    const entry = owned.entry;
+    const card = owned.card.element();
+    const button = owned.button.element();
+    const icon = owned.icon.element();
+    const name = owned.name.element();
+    const description = owned.description.element();
+    if (
+      render.entries[entry.index] !== entry ||
+      !(card instanceof ownerWindow.HTMLLIElement) ||
+      !(button instanceof ownerWindow.HTMLButtonElement) ||
+      !(icon instanceof ownerWindow.SVGSVGElement) ||
+      !(name instanceof ownerWindow.HTMLSpanElement) ||
+      !(description instanceof ownerWindow.HTMLSpanElement) ||
+      !card.isConnected ||
+      !button.isConnected ||
+      !icon.isConnected ||
+      !name.isConnected ||
+      !description.isConnected ||
+      [card, button, icon, name, description].some(
+        (element) => element.ownerDocument !== grid.ownerDocument,
+      ) ||
+      grid.children.item(entry.index) !== card ||
       card.parentElement !== grid ||
-      card.firstElementChild !== button ||
+      card.tagName !== "LI" ||
+      card.className !== TEMPLATE_CARD_CLASS ||
+      card.childNodes.length !== 1 ||
       card.children.length !== 1 ||
-      button.parentElement !== card
+      card.firstElementChild !== button ||
+      button.parentElement !== card ||
+      button.tagName !== "BUTTON" ||
+      button.getAttribute("type") !== "button" ||
+      button.type !== "button" ||
+      button.disabled !== (render.busy !== null) ||
+      button.matches(":disabled") !== (render.busy !== null) ||
+      button.getAttribute("aria-busy") !==
+        (entry.isBusy ? "true" : null) ||
+      button.className !== TEMPLATE_BUTTON_CLASS ||
+      button.dataset.testid !== `template-${entry.id}` ||
+      button.childNodes.length !== 3 ||
+      button.children.length !== 3
+    ) {
+      return false;
+    }
+
+    const iconContainer = button.children.item(0);
+    if (
+      !(iconContainer instanceof ownerWindow.HTMLSpanElement) ||
+      iconContainer.parentElement !== button ||
+      iconContainer.className !== TEMPLATE_ICON_CONTAINER_CLASS ||
+      iconContainer.childNodes.length !== 1 ||
+      iconContainer.children.length !== 1 ||
+      iconContainer.firstElementChild !== icon ||
+      icon.parentElement !== iconContainer ||
+      icon.getAttribute("width") !== "18" ||
+      icon.getAttribute("height") !== "18" ||
+      icon.getAttribute("aria-hidden") !== "true" ||
+      icon.classList.contains("animate-spin") !== entry.isBusy ||
+      button.children.item(1) !== name ||
+      name.parentElement !== button ||
+      name.className !== TEMPLATE_NAME_CLASS ||
+      name.children.length !== 0 ||
+      name.textContent !== entry.name ||
+      button.children.item(2) !== description ||
+      description.parentElement !== button ||
+      description.className !== TEMPLATE_DESCRIPTION_CLASS ||
+      description.children.length !== 0 ||
+      description.textContent !== entry.description
+    ) {
+      return false;
+    }
+    elements.push(card, button, icon, name, description);
+  }
+  return new Set(elements).size === elements.length;
+}
+
+function createTemplateGridPublication(
+  render: TemplateGridRenderPublication,
+  cells: TemplateGridPublicationCells,
+  requestSuccessor: () => void,
+): TemplateGridPublicationSet {
+  let currentRuntime: TemplateGridPublicationRuntime | null = null;
+  let lastRuntime: TemplateGridPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const onElementChange = (
+    owner: TemplateGridElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf.current === runtime.publication
+    ) {
+      const replay = runtime.replay();
+      if (
+        replay &&
+        templateGridFactsAreCurrent(render) &&
+        templateGridElementsAreCurrent(render, gridOwner, entryOwners) &&
+        runtime.publication.grid === gridOwner.element()
+      ) {
+        cells.replay.current = replay;
+        successorRequested = true;
+        requestSuccessor();
+      }
+    }
+  };
+
+  const gridOwner = new TemplateGridElementOwner<HTMLUListElement>(
+    "grid",
+    null,
+    onElementChange,
+  );
+  const entryOwners: readonly TemplateGridEntryOwnerSet[] =
+    render.entries.map((entry) =>
+      Object.freeze({
+        entry,
+        card: new TemplateGridElementOwner<HTMLLIElement>(
+          "card",
+          entry.index,
+          onElementChange,
+        ),
+        button: new TemplateGridElementOwner<HTMLButtonElement>(
+          "button",
+          entry.index,
+          onElementChange,
+        ),
+        icon: new TemplateGridElementOwner<SVGSVGElement>(
+          "icon",
+          entry.index,
+          onElementChange,
+        ),
+        name: new TemplateGridElementOwner<HTMLSpanElement>(
+          "name",
+          entry.index,
+          onElementChange,
+        ),
+        description: new TemplateGridElementOwner<HTMLSpanElement>(
+          "description",
+          entry.index,
+          onElementChange,
+        ),
+      }),
+    );
+  const expectedOwners = () =>
+    Object.freeze([
+      gridOwner,
+      ...entryOwners.flatMap((owned) => [
+        owned.card,
+        owned.button,
+        owned.icon,
+        owned.name,
+        owned.description,
+      ]),
+    ]);
+
+  const createRuntime = (): TemplateGridPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    const grid = gridOwner.element();
+    if (!grid) return null;
+    const ownerDocument = grid.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const placement = snapshotTemplateGridPlacement(grid);
+    if (
+      !ownerWindow ||
+      !(grid instanceof ownerWindow.HTMLUListElement) ||
+      !placement
     ) {
       return null;
     }
-  }
-  return current;
+    const predecessor = cells.active.current ?? cells.successorOf.current;
+    const predecessorElements =
+      predecessor?.render.mount === render.mount
+        ? new Set<Element>([
+            predecessor.grid,
+            ...predecessor.entries.flatMap((entry) => [
+              entry.card,
+              entry.button,
+              entry.icon,
+              entry.name,
+              entry.description,
+            ]),
+          ])
+        : null;
+    const identity = Symbol("template-grid-publication");
+    const entries = entryOwners.map((owned) => {
+      const card = owned.card.element();
+      const button = owned.button.element();
+      const icon = owned.icon.element();
+      const name = owned.name.element();
+      const description = owned.description.element();
+      if (
+        !(card instanceof ownerWindow.HTMLLIElement) ||
+        !(button instanceof ownerWindow.HTMLButtonElement) ||
+        !(icon instanceof ownerWindow.SVGSVGElement) ||
+        !(name instanceof ownerWindow.HTMLSpanElement) ||
+        !(description instanceof ownerWindow.HTMLSpanElement)
+      ) {
+        throw new Error(
+          "Cannot publish TemplateGrid without every committed entry ref",
+        );
+      }
+      const entryIdentity = Symbol("template-grid-entry");
+      return Object.freeze({
+        identity: entryIdentity,
+        entry: owned.entry,
+        card,
+        button,
+        icon,
+        name,
+        description,
+        action: Object.freeze({
+          identity: Symbol("template-grid-action"),
+          publicationIdentity: identity,
+          entryIdentity,
+          index: owned.entry.index,
+        }),
+        targets: templateGridNodes(button),
+      });
+    });
+    const dom = snapshotTemplateGridDom(grid);
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: TemplateGridRefReplay[] = [];
+    let partialReplayOwners =
+      new Set<TemplateGridElementOwnerView>();
+    let guard: TemplateGridDomGuard | null = null;
+    let nativeClick: TemplateGridNativeClickProof | null = null;
+    let reactClick: TemplateGridReactClickProof | null = null;
+
+    const publicationOwnsCurrentDom = () => {
+      if (retired || cells.active.current !== publication) return false;
+      if (
+        !templateGridFactsAreCurrent(render) ||
+        !templateGridElementsAreCurrent(render, gridOwner, entryOwners) ||
+        !publication.publishedDomMatches()
+      ) {
+        retire("other");
+        return false;
+      }
+      return true;
+    };
+    const controlForTarget = (target: Node) =>
+      entries.find((entry) => entry.targets.includes(target)) ?? null;
+    const eventPath = (event: Event, target: Node) => {
+      if (event.composedPath !== ownerWindow.Event.prototype.composedPath) {
+        return null;
+      }
+      const path = event.composedPath();
+      return templateGridEventPathMatches(ownerDocument, target, path)
+        ? Object.freeze([...path])
+        : null;
+    };
+    const nativeReactDispatchIsCurrent = (
+      native: Event,
+      phase:
+        | typeof ownerWindow.Event.CAPTURING_PHASE
+        | typeof ownerWindow.Event.BUBBLING_PHASE,
+    ) => {
+      const currentTarget = native.currentTarget;
+      return (
+        native.eventPhase === phase &&
+        currentTarget instanceof ownerWindow.Node &&
+        (currentTarget === ownerDocument ||
+          currentTarget.ownerDocument === ownerDocument) &&
+        currentTarget.contains(grid)
+      );
+    };
+    const exactNativeClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (
+        !publicationOwnsCurrentDom() ||
+        !(event instanceof ownerWindow.MouseEvent) ||
+        event.type !== "click" ||
+        event.button !== 0 ||
+        event.buttons !== 0 ||
+        event.detail < 0 ||
+        event.eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        event.currentTarget !== ownerDocument ||
+        !event.bubbles ||
+        event.defaultPrevented ||
+        !(target instanceof ownerWindow.Node) ||
+        !target.isConnected ||
+        target.ownerDocument !== ownerDocument
+      ) {
+        return null;
+      }
+      const entry = controlForTarget(target);
+      const path = eventPath(event, target);
+      return entry &&
+        templateGridIsEffectivelyEnabled(grid, entry.button) &&
+        path &&
+        path.includes(entry.button) &&
+        path.includes(entry.card) &&
+        path.includes(grid) &&
+        path.includes(ownerDocument)
+        ? Object.freeze({
+            event,
+            entry,
+            action: entry.action,
+            target,
+            path,
+          })
+        : null;
+    };
+    const onNativeClickCapture = (event: MouseEvent) => {
+      nativeClick = null;
+      reactClick = null;
+      nativeClick = exactNativeClick(event);
+    };
+    const onNativeClickBubble = (event: MouseEvent) => {
+      if (nativeClick?.event === event) {
+        nativeClick = null;
+        reactClick = null;
+      }
+    };
+    const addNativeListeners = () => {
+      ownerDocument.addEventListener("click", onNativeClickCapture, true);
+      ownerDocument.addEventListener("click", onNativeClickBubble);
+    };
+    const releaseNativeListeners = () => {
+      ownerDocument.removeEventListener("click", onNativeClickCapture, true);
+      ownerDocument.removeEventListener("click", onNativeClickBubble);
+    };
+    const publishedDomMatches = () =>
+      Boolean(
+        guard &&
+          guard.isClean() &&
+          gridOwner.element() === grid &&
+          grid === dom.node &&
+          grid.isConnected &&
+          templateGridPlacementMatches(ownerDocument, placement) &&
+          templateGridDomMatches(dom),
+      );
+    const release = () => {
+      nativeClick = null;
+      reactClick = null;
+      guard?.release();
+      guard = null;
+      releaseNativeListeners();
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      nativeClick = null;
+      reactClick = null;
+      releaseNativeListeners();
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) release();
+      });
+      return true;
+    };
+    const publication: TemplateGridPublication & {
+      readonly publishedDomMatches: () => boolean;
+    } = Object.freeze({
+      identity,
+      render,
+      grid,
+      ownerDocument,
+      entries: Object.freeze(entries),
+      dom,
+      placement,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+      publishedDomMatches,
+    });
+    const exactReactProof = (
+      event: ReactMouseEvent<HTMLButtonElement>,
+      entry: TemplateGridDomPublication,
+    ) =>
+      Boolean(
+        reactClick &&
+          nativeClick &&
+          reactClick.native === nativeClick &&
+          reactClick.event === event &&
+          event.nativeEvent === nativeClick.event &&
+          nativeReactDispatchIsCurrent(
+            nativeClick.event,
+            ownerWindow.Event.CAPTURING_PHASE,
+          ) &&
+          event.type === "click" &&
+          event.button === 0 &&
+          event.buttons === 0 &&
+          event.detail === nativeClick.event.detail &&
+          event.bubbles &&
+          !event.defaultPrevented &&
+          event.currentTarget === entry.button &&
+          event.target === nativeClick.target &&
+          nativeClick.entry === entry &&
+          nativeClick.action === entry.action &&
+          entry.targets.includes(nativeClick.target),
+      );
+    const runtime: TemplateGridPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish TemplateGrid without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        partialReplayOwners = new Set(
+          predecessorElements
+            ? refs
+                .filter(
+                  ({ element }) => !predecessorElements.has(element),
+                )
+                .map(({ owner }) => owner)
+            : [],
+        );
+        guard = createTemplateGridDomGuard(grid, placement);
+        if (!guard || cells.active.current) {
+          release();
+          return false;
+        }
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        addNativeListeners();
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: TemplateGridElementOwnerView,
+        element: Element | null,
+        previous: Element | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        refs.length === expectedOwners().length &&
+        ((layoutRetired &&
+          (retirement === "element" || retirement === "layout") &&
+          refs.every((entry) => entry.state === "reattached")) ||
+          (!layoutRetired &&
+            retirement === "element" &&
+            partialReplayOwners.size > 0 &&
+            refs.every((entry) =>
+              partialReplayOwners.has(entry.owner)
+                ? entry.state === "reattached"
+                : entry.state === "attached",
+            ))) &&
+        refs.every(
+          (entry) => entry.owner.element() === entry.element,
+        ) &&
+        publishedDomMatches(),
+      replay: () =>
+        guard
+          ? Object.freeze({
+              source: publication,
+              dom,
+              placement,
+              historyIsClean: guard.isClean,
+              release,
+            })
+          : null,
+      captureReactClick: (event: ReactMouseEvent<HTMLUListElement>) => {
+        const capturedNative =
+          nativeClick ??
+          (event.nativeEvent instanceof ownerWindow.MouseEvent
+            ? exactNativeClick(event.nativeEvent)
+            : null);
+        if (capturedNative) nativeClick = capturedNative;
+        if (
+          !capturedNative ||
+          !publicationOwnsCurrentDom() ||
+          event.nativeEvent !== capturedNative.event ||
+          !nativeReactDispatchIsCurrent(
+            capturedNative.event,
+            ownerWindow.Event.CAPTURING_PHASE,
+          ) ||
+          event.type !== "click" ||
+          event.button !== 0 ||
+          event.buttons !== 0 ||
+          event.detail !== capturedNative.event.detail ||
+          event.currentTarget !== grid ||
+          event.target !== capturedNative.target ||
+          !event.bubbles ||
+          event.defaultPrevented
+        ) {
+          reactClick = null;
+          return;
+        }
+        reactClick = Object.freeze({ event, native: capturedNative });
+      },
+      activate: (
+        entryAuthority: TemplateGridEntryPublication,
+        event: ReactMouseEvent<HTMLButtonElement>,
+      ) => {
+        const entry = publication.entries[entryAuthority.index];
+        const action = entry?.action;
+        if (
+          !entry ||
+          !action ||
+          !publicationOwnsCurrentDom() ||
+          publication.render !== render ||
+          render.busy !== null ||
+          render.entries[entryAuthority.index] !== entryAuthority ||
+          entry.entry !== entryAuthority ||
+          action.publicationIdentity !== publication.identity ||
+          action.entryIdentity !== entry.identity ||
+          action.index !== entryAuthority.index ||
+          !templateGridIsEffectivelyEnabled(grid, entry.button) ||
+          !exactReactProof(event, entry) ||
+          cells.claimedPublications.has(publication) ||
+          cells.claimedEntries.has(entry) ||
+          cells.claimedActions.has(action) ||
+          cells.claimedReactEvents.has(event) ||
+          !nativeClick ||
+          cells.claimedNativeEvents.has(nativeClick.event)
+        ) {
+          return null;
+        }
+        cells.claimedPublications.add(publication);
+        cells.claimedEntries.add(entry);
+        cells.claimedActions.add(action);
+        cells.claimedReactEvents.add(event);
+        cells.claimedNativeEvents.add(nativeClick.event);
+        publication.retire();
+        release();
+        return entry;
+      },
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        const replay = lastRuntime.replay();
+        if (
+          replay &&
+          templateGridFactsAreCurrent(render) &&
+          templateGridElementsAreCurrent(render, gridOwner, entryOwners) &&
+          lastRuntime.publication.grid === gridOwner.element()
+        ) {
+          cells.replay.current = replay;
+          successorRequested = true;
+          requestSuccessor();
+        }
+      }
+      return;
+    }
+    if (
+      !templateGridFactsAreCurrent(render) ||
+      !templateGridElementsAreCurrent(render, gridOwner, entryOwners)
+    ) {
+      return;
+    }
+    const grid = gridOwner.element();
+    const ownerWindow = grid?.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      !(grid instanceof ownerWindow.HTMLUListElement)
+    ) {
+      return;
+    }
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameFacts = templateGridRenderMatches(
+        replay.source.render,
+        render,
+      );
+      const exact =
+        sameFacts &&
+        replay.source.isRetired() &&
+        cells.successorOf.current === replay.source &&
+        replay.historyIsClean() &&
+        grid === replay.dom.node &&
+        templateGridPlacementMatches(grid.ownerDocument, replay.placement) &&
+        templateGridDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (sameFacts && !exact) return;
+    }
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active.current;
+    if (previous) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+  };
+
+  return Object.freeze({
+    establish,
+    captureGrid: gridOwner.capture,
+    captureClick: (event: ReactMouseEvent<HTMLUListElement>) => {
+      currentRuntime?.captureReactClick(event);
+    },
+    entries: Object.freeze(
+      entryOwners.map((owned) =>
+        Object.freeze({
+          entry: owned.entry,
+          captureCard: owned.card.capture,
+          captureButton: owned.button.capture,
+          captureIcon: owned.icon.capture,
+          captureName: owned.name.capture,
+          captureDescription: owned.description.capture,
+          activate: (event: ReactMouseEvent<HTMLButtonElement>) =>
+            currentRuntime?.activate(owned.entry, event) ?? null,
+        }),
+      ),
+    ),
+  });
 }
 
 /** Grid of template cards; `busy` is the id currently being created (disables the grid). */
 export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) => void; busy: string | null; compact?: boolean }) {
-  const activePublication = useRef<TemplateGridPublication | null>(null);
-  const claimedPublication = useRef<TemplateGridPublication | null>(null);
-  const gridRef = useRef<HTMLUListElement>(null);
-  const publication: TemplateGridRenderPublication = {
+  const [mount] = useState(() => Symbol("template-grid-mount"));
+  const [cells] = useState<TemplateGridPublicationCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    claimedPublications: new WeakSet(),
+    claimedEntries: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+  }));
+  const [, setPublicationRevision] = useState(0);
+  const requestSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const entries = Object.freeze(
+    PICKER_TEMPLATES.map((template, index) => {
+      const isBusy = busy === template.id;
+      return Object.freeze({
+        identity: Symbol("template-grid-entry-render"),
+        index,
+        template,
+        id: template.id,
+        name: template.name,
+        description: template.description,
+        icon: template.icon,
+        isBusy,
+        Icon: isBusy ? Loader2 : TEMPLATE_ICONS[template.icon],
+        iconClassName: isBusy ? "animate-spin" : undefined,
+      });
+    }),
+  );
+  const render: TemplateGridRenderPublication = Object.freeze({
+    identity: Symbol("template-grid-render"),
+    mount,
+    templates: PICKER_TEMPLATES,
     onPick,
     busy,
     compact,
-    entries: PICKER_TEMPLATES.map((template, index) => ({
-      index,
-      template,
-      id: template.id,
-      name: template.name,
-      description: template.description,
-      icon: template.icon,
-    })),
-  };
-
-  useLayoutEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) return;
-    const committed: TemplateGridPublication = {
-      render: publication,
-      grid,
-      entries: publication.entries.map((entry, index) => {
-        const card = grid.children.item(index);
-        const button = card?.firstElementChild;
-        return {
-          entry,
-          card: card instanceof HTMLLIElement ? card : null,
-          button: button instanceof HTMLButtonElement ? button : null,
-        };
-      }),
-    };
-    activePublication.current = committed;
-    return () => {
-      if (activePublication.current === committed) activePublication.current = null;
-    };
+    gridClassName: cn(
+      TEMPLATE_GRID_CLASS,
+      compact ? TEMPLATE_GRID_COMPACT_CLASS : TEMPLATE_GRID_DEFAULT_CLASS,
+    ),
+    entries,
   });
+  const publication = createTemplateGridPublication(
+    render,
+    cells,
+    requestSuccessor,
+  );
+
+  useLayoutEffect(() => publication.establish(), [publication]);
+  const {
+    captureGrid,
+    captureClick,
+    entries: publishedEntries,
+  } = publication;
 
   return (
     <ul
-      ref={gridRef}
-      className={cn("grid gap-3", publication.compact ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "sm:grid-cols-2 lg:grid-cols-3")}
+      ref={captureGrid}
+      className={render.gridClassName}
       data-testid="template-grid"
+      onClickCapture={captureClick}
     >
-      {publication.entries.map((entry) => {
-        const Icon = TEMPLATE_ICONS[entry.icon];
-        const isBusy = publication.busy === entry.id;
+      {publishedEntries.map((owned) => {
+        const { entry } = owned;
+        const Icon = entry.Icon;
         return (
-          <li key={entry.id} className="min-w-0">
+          <li
+            key={entry.id}
+            ref={owned.captureCard}
+            className={TEMPLATE_CARD_CLASS}
+          >
             <button
+              ref={owned.captureButton}
               type="button"
-              onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                const committed = currentTemplateGridPublication(
-                  activePublication.current,
-                  claimedPublication.current,
-                  publication,
-                  entry,
-                  event.currentTarget,
-                );
-                if (!committed) return;
-                claimedPublication.current = committed;
-                publication.onPick(entry.template);
+              onClickCapture={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                const current = owned.activate(event);
+                if (!current) return;
+                render.onPick(current.entry.template);
               }}
-              disabled={publication.busy !== null}
-              aria-busy={isBusy || undefined}
-              className="group flex h-full w-full flex-col gap-2 rounded-xl border border-line bg-surface p-4 text-left transition hover:border-accent hover:shadow-sm focus-visible:border-accent disabled:cursor-default disabled:opacity-60"
+              disabled={render.busy !== null}
+              aria-busy={entry.isBusy || undefined}
+              className={TEMPLATE_BUTTON_CLASS}
               data-testid={`template-${entry.id}`}
             >
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-3 text-ink-2 transition group-hover:bg-accent group-hover:text-on-accent">
-                {isBusy ? <Loader2 size={18} className="animate-spin" /> : <Icon size={18} />}
+              <span className={TEMPLATE_ICON_CONTAINER_CLASS}>
+                <Icon
+                  ref={owned.captureIcon}
+                  size={18}
+                  className={entry.iconClassName}
+                />
               </span>
-              <span className="block text-sm font-semibold text-ink">{entry.name}</span>
-              <span className="block text-xs leading-4 text-ink-3">{entry.description}</span>
+              <span ref={owned.captureName} className={TEMPLATE_NAME_CLASS}>
+                {entry.name}
+              </span>
+              <span
+                ref={owned.captureDescription}
+                className={TEMPLATE_DESCRIPTION_CLASS}
+              >
+                {entry.description}
+              </span>
             </button>
           </li>
         );
