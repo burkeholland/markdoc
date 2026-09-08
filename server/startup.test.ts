@@ -73,6 +73,7 @@ describe("custom development server startup", () => {
   it("initializes Next's Node AsyncLocalStorage before serving the readiness route", async () => {
     const port = await freePort();
     const distDir = `.next-e2e-startup-${process.pid}-${port}`;
+    const configHome = path.resolve(distDir, "config");
     const probe = [
       `const marker = ${JSON.stringify(NEXT_RUNTIME_READY)};`,
       "const observer = setInterval(() => {",
@@ -86,6 +87,11 @@ describe("custom development server startup", () => {
     ].join("\n");
     const env: NodeJS.ProcessEnv = {
       ...process.env,
+      APPDATA: configHome,
+      HOME: configHome,
+      LOCALAPPDATA: configHome,
+      USERPROFILE: configHome,
+      XDG_CONFIG_HOME: configHome,
       PORT: String(port),
       HOST: "127.0.0.1",
       AUTH_SECRET: "startup-test-secret-startup-test-secret",
@@ -95,6 +101,8 @@ describe("custom development server startup", () => {
       NEXT_DIST_DIR: distDir,
       RATE_LIMIT: "off",
       GITHUB_MOCK: "1",
+      NEXT_TELEMETRY_DEBUG: "",
+      NEXT_TELEMETRY_DISABLED: "1",
       NODE_ENV: "development",
     };
     let output = "";
