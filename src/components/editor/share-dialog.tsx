@@ -161,7 +161,9 @@ interface SharePresentation {
   readonly origin: string;
   readonly editorLink: string;
   readonly sourceCopyFeedback: ShareCopyFeedback | null;
+  readonly sourceCopyFallback: ShareCopyFallback | null;
   readonly copyStatus: ShareCopyStatus;
+  readonly copyFallback: boolean;
   readonly copyLabel: string;
   readonly copyCopied: boolean;
   readonly copyCallback: typeof copyText;
@@ -220,6 +222,7 @@ interface SharePresentationRuntime {
   observer: MutationObserver | null;
   placementObserver: MutationObserver | null;
   observerRetirement: object | null;
+  copyControlMutated: boolean;
   removeCloseCapture: (() => void) | null;
   closeProvenance: ShareCloseProvenance | null;
   closeProvenanceRetirement: { provenance: ShareCloseProvenance; timer: number } | null;
@@ -253,6 +256,7 @@ interface ShareLiveFacts {
   permissionFeedbackOwner: PermissionOperation | null;
   origin: string;
   copyFeedback: ShareCopyFeedback | null;
+  copyFallback: ShareCopyFallback | null;
   agentExpansion: ShareAgentExpansion | null;
 }
 
@@ -267,6 +271,11 @@ interface ShareCopyFeedback {
   readonly status: Exclude<ShareCopyStatus, "idle">;
 }
 
+interface ShareCopyFallback {
+  readonly visit: ShareVisit;
+  readonly value: string;
+}
+
 interface ShareCopyAction {
   readonly presentation: SharePresentation;
   readonly visit: ShareVisit;
@@ -276,7 +285,8 @@ interface ShareCopyAction {
 }
 
 interface ShareCopyOperation {
-  readonly action: Readonly<ShareCopyAction>;
+  action: Readonly<ShareCopyAction>;
+  phase: "invoking" | "attaching" | "pending";
   settled: boolean;
   retired: boolean;
 }
@@ -927,8 +937,30 @@ function drainPresentationMutations(runtime: SharePresentationRuntime): boolean 
   ) {
     runtime.controlPlacementMutated = true;
   }
+  if (records.some((record) => mutationTouchesCopyControl(runtime, record))) {
+    runtime.copyControlMutated = true;
+  }
   if (records.some((record) => mutationTouchesPresentation(runtime, record))) runtime.mutated = true;
   return !runtime.mutated;
+}
+
+function mutationTouchesCopyControl(
+  runtime: SharePresentationRuntime,
+  record: MutationRecord,
+): boolean {
+  const editorLink = runtime.editorLink;
+  if (!editorLink) return false;
+  const target = record.target;
+  if (target === editorLink || editorLink.contains(target)) return true;
+  if (record.type !== "childList") return false;
+  if (record.previousSibling === editorLink || record.nextSibling === editorLink) return true;
+  return [...record.addedNodes, ...record.removedNodes].some((node) =>
+    node === editorLink ||
+    (
+      node.nodeType === 1 &&
+      ((node as Element).contains(editorLink) || editorLink.contains(node))
+    )
+  );
 }
 
 function stopPresentationObservation(runtime: SharePresentationRuntime): boolean {
@@ -1017,8 +1049,9 @@ export const ShareDialog = memo(function ShareDialog({
   const claimedControlEventsRef = useRef(new WeakSet<object>());
   const claimedNativeControlEventsRef = useRef(new WeakSet<Event>());
   const claimedControlElementsRef = useRef(new WeakMap<HTMLButtonElement, object>());
-  const selectedFallbacksRef = useRef(new WeakSet<ShareCopyFeedback>());
+  const selectedFallbacksRef = useRef(new WeakSet<ShareCopyFallback>());
   const [copyFeedback, setCopyFeedback] = useState<ShareCopyFeedback | null>(null);
+  const [copyFallback, setCopyFallback] = useState<ShareCopyFallback | null>(null);
   const [agentExpansion, setAgentExpansion] = useState<ShareAgentExpansion | null>(null);
   const visit = useMemo<ShareVisit | null>(
     () => (open ? Object.freeze({ documentId: doc.id }) : null),
@@ -1038,6 +1071,12 @@ export const ShareDialog = memo(function ShareDialog({
     copyFeedback?.visit === visit &&
     copyFeedback.value === editorLink
       ? copyFeedback
+      : null;
+  const currentCopyFallback =
+    visit &&
+    copyFallback?.visit === visit &&
+    copyFallback.value === editorLink
+      ? copyFallback
       : null;
   const copyStatus: ShareCopyStatus = currentCopyFeedback?.status ?? "idle";
   const copyLabel =
@@ -1376,7 +1415,9 @@ export const ShareDialog = memo(function ShareDialog({
     origin,
     editorLink,
     sourceCopyFeedback: copyFeedback,
+    sourceCopyFallback: copyFallback,
     copyStatus,
+    copyFallback: currentCopyFallback !== null,
     copyLabel,
     copyCopied: copyStatus === "copied",
     copyCallback: copyText,
@@ -1404,6 +1445,7 @@ export const ShareDialog = memo(function ShareDialog({
       permissionFeedbackOwner: permissionFeedbackOperation,
       origin,
       copyFeedback,
+      copyFallback,
       agentExpansion,
     }),
     [
@@ -1414,6 +1456,7 @@ export const ShareDialog = memo(function ShareDialog({
       busy,
       collaboratorList,
       collaboratorPermissionOperations,
+      copyFallback,
       copyFeedback,
       doc,
       isOwner,
@@ -1486,6 +1529,7 @@ export const ShareDialog = memo(function ShareDialog({
         observer: null,
         placementObserver: null,
         observerRetirement: null,
+        copyControlMutated: false,
         removeCloseCapture: null,
         closeProvenance: null,
         closeProvenanceRetirement: null,
@@ -1529,7 +1573,6 @@ export const ShareDialog = memo(function ShareDialog({
   );
 
   const retirePresentation = useCallback((candidate: SharePresentation) => {
-    retireCopyOperation(candidate);
     const runtime = presentationRuntimesRef.current.get(candidate);
     if (runtime && !runtime.retired) {
       runtime.active = false;
@@ -1546,7 +1589,7 @@ export const ShareDialog = memo(function ShareDialog({
       }
     }
     if (activePresentationRef.current === candidate) activePresentationRef.current = null;
-  }, [retireCopyOperation]);
+  }, []);
 
   const retirePresentationLineage = useCallback(
     (candidate: SharePresentation) => {
@@ -1597,6 +1640,7 @@ export const ShareDialog = memo(function ShareDialog({
         | "observer"
         | "placementObserver"
         | "observerRetirement"
+        | "copyControlMutated"
         | "removeCloseCapture"
         | "closeProvenance"
         | "closeProvenanceRetirement"
@@ -1724,12 +1768,18 @@ export const ShareDialog = memo(function ShareDialog({
       live.origin !== candidate.origin ||
       candidate.editorLink !== `${candidate.origin}/d/${candidate.document.id}` ||
       live.copyFeedback !== candidate.sourceCopyFeedback ||
+      live.copyFallback !== candidate.sourceCopyFallback ||
       (
         live.copyFeedback?.visit === candidate.visit &&
         live.copyFeedback.value === candidate.editorLink
           ? live.copyFeedback.status
           : "idle"
       ) !== candidate.copyStatus ||
+      Boolean(
+        candidate.visit &&
+        live.copyFallback?.visit === candidate.visit &&
+        live.copyFallback.value === candidate.editorLink
+      ) !== candidate.copyFallback ||
       candidate.copyLabel !== (
         candidate.copyStatus === "copied"
           ? "Copied"
@@ -1807,7 +1857,7 @@ export const ShareDialog = memo(function ShareDialog({
       }
       const expectedControlBindings: readonly ShareControlElementRole[] = [
         "linkValue",
-        ...(candidate.copyStatus === "fallback"
+        ...(candidate.copyFallback
           ? ["linkFallback" as const]
           : []),
         "linkCopy",
@@ -1952,7 +2002,7 @@ export const ShareDialog = memo(function ShareDialog({
         !(linkValue instanceof ownerWindow.HTMLElement) ||
         linkValue.parentElement !== editorLink ||
         (
-          candidate.copyStatus !== "fallback" &&
+          !candidate.copyFallback &&
           linkValue.textContent !== candidate.editorLink
         ) ||
         !(linkCopy instanceof ownerWindow.HTMLButtonElement) ||
@@ -1981,7 +2031,7 @@ export const ShareDialog = memo(function ShareDialog({
       ) {
         return false;
       }
-      if (candidate.copyStatus === "fallback") {
+      if (candidate.copyFallback) {
         if (
           !(linkFallback instanceof ownerWindow.HTMLInputElement) ||
           linkValue !== linkFallback ||
@@ -2369,6 +2419,7 @@ export const ShareDialog = memo(function ShareDialog({
 
     const operation: ShareCopyOperation = {
       action,
+      phase: "invoking",
       settled: false,
       retired: false,
     };
@@ -2389,6 +2440,18 @@ export const ShareDialog = memo(function ShareDialog({
         status: ok ? "copied" : "fallback",
       });
       copyFeedbackRef.current = feedback;
+      if (ok) {
+        setCopyFallback((current) =>
+          current?.visit === action.visit && current.value === action.value
+            ? null
+            : current
+        );
+      } else {
+        setCopyFallback(Object.freeze({
+          visit: action.visit,
+          value: action.value,
+        }));
+      }
       setCopyFeedback(feedback);
       const timer = ownerWindow.setTimeout(() => {
         if (
@@ -2423,6 +2486,7 @@ export const ShareDialog = memo(function ShareDialog({
       return;
     }
 
+    operation.phase = "attaching";
     let then: unknown;
     try {
       then = Reflect.get(attempt, "then");
@@ -2443,10 +2507,62 @@ export const ShareDialog = memo(function ShareDialog({
         (ok: unknown) => settle(ok === true),
         () => settle(false),
       ]);
+      if (copyOperationIsCurrent(operation)) operation.phase = "pending";
     } catch {
       settle(false);
     }
   };
+
+  const transferPendingCopyOperation = useCallback((
+    candidate: SharePresentation,
+    runtime: SharePresentationRuntime,
+    placement: SharePlacementChain,
+  ) => {
+    const operation = copyOperationRef.current;
+    if (!operation || operation.action.presentation === candidate) return;
+    const previous = operation.action.presentation;
+    const previousRuntime = presentationRuntimesRef.current.get(previous);
+    if (previousRuntime) drainPresentationMutations(previousRuntime);
+    const ownerDocument = runtime.root?.ownerDocument;
+    const previousPlacement = previousRuntime?.placement;
+    if (
+      operation.retired ||
+      operation.settled ||
+      operation.phase !== "pending" ||
+      !previousRuntime ||
+      !previousRuntime.retired ||
+      !previousRuntime.claims.has("copy-link") ||
+      previousRuntime.copyControlMutated ||
+      previousRuntime.controlPlacementMutated ||
+      !previousPlacement ||
+      !ownerDocument ||
+      previousRuntime.editorLink !== runtime.editorLink ||
+      previousRuntime.linkValue !== runtime.linkValue ||
+      previousRuntime.linkCopy !== operation.action.control ||
+      runtime.linkCopy !== operation.action.control ||
+      operation.action.control.ownerDocument !== ownerDocument ||
+      candidate.visit !== operation.action.visit ||
+      candidate.editorLink !== operation.action.value ||
+      candidate.copyCallback !== operation.action.callback ||
+      runtime.claims.has("copy-link") ||
+      !sharePlacementMatches(ownerDocument, previousPlacement) ||
+      !sharePlacementsAreExactReplay(previousPlacement, placement)
+    ) {
+      retireCopyOperation(previous);
+      return;
+    }
+    const action = Object.freeze({
+      presentation: candidate,
+      visit: operation.action.visit,
+      value: operation.action.value,
+      callback: operation.action.callback,
+      control: operation.action.control,
+    });
+    operation.action = action;
+    runtime.claims.add("copy-link");
+    claimedControlActionsRef.current.add(action);
+    claimedControlElementsRef.current.set(action.control, action);
+  }, [retireCopyOperation]);
 
   const claimAgentToggle = (
     source: SharePresentation,
@@ -2482,6 +2598,9 @@ export const ShareDialog = memo(function ShareDialog({
     const Observer = ownerWindow.MutationObserver;
     if (typeof Observer !== "function") return false;
     const observer = new Observer((records) => {
+      if (records.some((record) => mutationTouchesCopyControl(runtime, record))) {
+        runtime.copyControlMutated = true;
+      }
       if (records.some((record) => mutationTouchesPresentation(runtime, record))) runtime.mutated = true;
     });
     observer.observe(runtime.dialog, { attributes: true, characterData: true, childList: true, subtree: true });
@@ -2610,6 +2729,7 @@ export const ShareDialog = memo(function ShareDialog({
       }
       runtime.placement = placement;
       if (!startPresentationObservation(runtime)) {
+        retireCopyOperation();
         retirePresentationLineage(candidate);
         return null;
       }
@@ -2617,18 +2737,22 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.published = true;
       activePresentationRef.current = candidate;
       if (!startCloseCapture(candidate, runtime)) {
+        retireCopyOperation();
         retirePresentationLineage(candidate);
         return null;
       }
+      transferPendingCopyOperation(candidate, runtime, placement);
       return candidate;
     },
     [
       currentPresentation,
       presentationDomIsValid,
       presentationFactsAreCurrent,
+      retireCopyOperation,
       retirePresentationLineage,
       startCloseCapture,
       startPresentationObservation,
+      transferPendingCopyOperation,
     ],
   );
   useLayoutEffect(() => {
@@ -2845,6 +2969,7 @@ export const ShareDialog = memo(function ShareDialog({
     const candidate = currentPresentation(source);
     if (!presentationIsCurrent(source)) return;
     retirePresentationLineage(candidate);
+    retireCopyOperation(candidate);
     retireShareRequests(candidate.visit ?? undefined);
     retirePermissionOperations(candidate.permissionContext ?? undefined);
     acceptedOnOpenChange(false);
@@ -2852,22 +2977,21 @@ export const ShareDialog = memo(function ShareDialog({
 
   const selectCopyFallback = useCallback((candidate: SharePresentation) => {
     const runtime = presentationRuntimesRef.current.get(candidate);
-    const feedback = candidate.sourceCopyFeedback;
+    const fallbackState = candidate.sourceCopyFallback;
     const fallback = runtime?.linkFallback;
     if (
-      candidate.copyStatus !== "fallback" ||
-      !feedback ||
-      feedback.status !== "fallback" ||
-      feedback.visit !== candidate.visit ||
-      feedback.value !== candidate.editorLink ||
-      selectedFallbacksRef.current.has(feedback) ||
+      !candidate.copyFallback ||
+      !fallbackState ||
+      fallbackState.visit !== candidate.visit ||
+      fallbackState.value !== candidate.editorLink ||
+      selectedFallbacksRef.current.has(fallbackState) ||
       !fallback ||
       !presentationIsCurrent(candidate) ||
       !controlPlacementIsCurrent(candidate)
     ) {
       return;
     }
-    selectedFallbacksRef.current.add(feedback);
+    selectedFallbacksRef.current.add(fallbackState);
     try {
       fallback.focus({ preventScroll: true });
     } catch {
@@ -3150,7 +3274,7 @@ export const ShareDialog = memo(function ShareDialog({
           >
             <Link2 size={13} className="shrink-0 text-ink-3" />
             <span className="shrink-0 text-ink-3">Link:</span>
-            {presentation.copyStatus === "fallback" ? (
+            {presentation.copyFallback ? (
               <input
                 ref={(element) => {
                   bindControlElement(presentation, "linkValue", element);

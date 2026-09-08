@@ -457,6 +457,147 @@ describe("ShareDialog exact control publications", () => {
     expect(copy).toHaveTextContent("Copied");
   });
 
+  it("keeps the selected fallback after its transient label expires until success or close", async () => {
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn((nextOpen: boolean) => {
+      view.rerender(
+        <StrictMode>
+          <ShareDialog open={nextOpen} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+        </StrictMode>,
+      );
+    });
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const value = `${window.location.origin}/d/${DOC_ID}`;
+
+    vi.useFakeTimers();
+    try {
+      copyText.mockResolvedValueOnce(false);
+      fireEvent.click(screen.getByTestId("copy-link"));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const fallback = screen.getByTestId("copy-link-fallback") as HTMLInputElement;
+      expect(fallback).toHaveValue(value);
+      expect(fallback).toHaveFocus();
+      expect(fallback.selectionStart).toBe(0);
+      expect(fallback.selectionEnd).toBe(value.length);
+
+      act(() => vi.advanceTimersByTime(2100));
+      expect(screen.getByTestId("copy-link-fallback")).toBe(fallback);
+      expect(fallback).toHaveValue(value);
+      expect(fallback).toHaveFocus();
+      expect(fallback.selectionStart).toBe(0);
+      expect(fallback.selectionEnd).toBe(value.length);
+      expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+
+      copyText.mockResolvedValueOnce(true);
+      fireEvent.click(screen.getByTestId("copy-link"));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a persistent fallback when the current Share visit closes", async () => {
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn((nextOpen: boolean) => {
+      view.rerender(
+        <StrictMode>
+          <ShareDialog open={nextOpen} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+        </StrictMode>,
+      );
+    });
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    copyText.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await screen.findByTestId("copy-link-fallback");
+
+    view.rerender(
+      <StrictMode>
+        <ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+  });
+
+  it("carries one pending success through a same-URL login rerender", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "same-url" } });
+    expect(screen.getByTestId("share-login")).toHaveValue("same-url");
+
+    act(() => {
+      settle?.(true);
+      settle?.(false);
+    });
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+  });
+
+  it("carries one pending failure through a same-URL collaborator completion", async () => {
+    const permission = deferred<{ ok: boolean }>();
+    addCollaborator.mockReturnValueOnce(permission.promise);
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+    const role = within(collaboratorRow("bob")).getByRole("combobox");
+    fireEvent.change(role, { target: { value: "viewer" } });
+    expect(role).toBeDisabled();
+    await act(async () => {
+      permission.resolve({ ok: true });
+      await permission.promise;
+    });
+    await waitFor(() => expect(role).toHaveValue("viewer"));
+
+    act(() => {
+      settle?.(false);
+      settle?.(true);
+    });
+    const fallback = await screen.findByTestId("copy-link-fallback");
+    expect(fallback).toHaveValue(`${window.location.origin}/d/${DOC_ID}`);
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Select & press Ctrl+C");
+  });
+
   it("owns each setup expand and collapse transition after direct-root Strict Mode replay", async () => {
     render(
       <StrictMode>
