@@ -1181,6 +1181,61 @@ describe("live fact revalidation and reentrancy", () => {
 
 describe("notification bell Strict Mode replay", () => {
   it.each([
+    ["focus-open", false],
+    ["pointerdown-close", true],
+  ] as const)("keeps the trigger exact through real tooltip %s", (_phase, closeOnPointerDown) => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    const replay = { trigger: null as CapturedControl | null };
+    createStrictBellRoot(state, { onOpen: vi.fn() }, () => {
+      replay.trigger ??= captureControl(screen.getByTestId("notifications-bell"));
+    });
+    const replayTrigger = replay.trigger;
+    if (!replayTrigger) throw new Error("Strict Mode did not expose its first layout");
+    const currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+
+    fireEvent.focus(currentTrigger.element);
+    const descriptionId = currentTrigger.element.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(screen.getByRole("tooltip")).toHaveAttribute("id", descriptionId);
+    if (closeOnPointerDown) {
+      fireEvent.pointerDown(currentTrigger.element);
+      expect(currentTrigger.element).not.toHaveAttribute("aria-describedby");
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
+
+    dispatchWithHandlers(currentTrigger, [
+      replayTrigger.click,
+      currentTrigger.click,
+      currentTrigger.click,
+    ]);
+
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    expect(currentTrigger.element).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("rejects restored non-tooltip attributes without poisoning the successor", () => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    createBellRoot(state, { onOpen: vi.fn() });
+    const staleTrigger = captureControl(screen.getByTestId("notifications-bell"));
+
+    staleTrigger.element.dataset.unrelated = "changed";
+    delete staleTrigger.element.dataset.unrelated;
+    fireEvent.click(staleTrigger.element);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    const currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+    expect(currentTrigger.element).toBe(staleTrigger.element);
+    expect(currentTrigger.click).not.toBe(staleTrigger.click);
+    dispatchWithHandlers(currentTrigger, [
+      staleTrigger.click,
+      currentTrigger.click,
+      currentTrigger.click,
+    ]);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
+  it.each([
     "trigger",
     "row",
     "read-all",

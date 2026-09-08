@@ -1,10 +1,12 @@
 "use client";
 
 import {
+  forwardRef,
   useCallback,
   useLayoutEffect,
   useMemo,
   useState,
+  type ComponentPropsWithoutRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -56,11 +58,32 @@ export interface NotificationsBellProps {
   ready?: boolean;
 }
 
+type NotificationPopoverTriggerProps = ComponentPropsWithoutRef<
+  typeof PopoverTrigger
+> & {
+  "data-state"?: string;
+  "data-radix-popper-side"?: string;
+  "data-radix-popper-align"?: string;
+};
+
+const NotificationPopoverTrigger = forwardRef<
+  HTMLButtonElement,
+  NotificationPopoverTriggerProps
+>(function NotificationPopoverTrigger(props, ref) {
+  const popoverProps = { ...props };
+  // Popover owns disclosure state; transient Radix anchor placement is not trigger authority.
+  delete popoverProps["data-state"];
+  popoverProps["data-radix-popper-side"] = undefined;
+  popoverProps["data-radix-popper-align"] = undefined;
+  return <PopoverTrigger {...popoverProps} ref={ref} />;
+});
+
 type NotificationState = ReturnType<typeof useNotifications>;
 type BellElementRole = "trigger" | "content" | "root" | "list";
 type BellActionKind = "read-retry" | "load-retry" | "read-all" | "row";
 type BellLayoutDomain = "trigger" | "portal";
 type BellRetirement = "element" | "layout" | "mutation" | "other";
+const TOOLTIP_TRIGGER_DESCRIPTION_ATTRIBUTE = "aria-describedby";
 
 interface NotificationBellVisit {
   identity: symbol;
@@ -168,6 +191,7 @@ interface BellDomSnapshot {
   readonly node: Node;
   readonly nodeValue: string | null;
   readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly ignoredAttribute: string | null;
   readonly children: readonly BellDomSnapshot[];
 }
 
@@ -317,28 +341,38 @@ function errorsMatch(source: NotificationReadError | null, frozen: NotificationR
   return source.operation === "all" && frozen.operation === "all";
 }
 
-function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+function snapshotAttributes(
+  node: Node,
+  ignoredAttribute: string | null = null,
+): readonly (readonly [string, string])[] | null {
   if (node.nodeType !== 1) return null;
   return Object.freeze(
     [...(node as Element).attributes]
+      .filter(({ name }) => name !== ignoredAttribute)
       .map(({ name, value }) => Object.freeze([name, value] as const))
       .sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 
-function snapshotBellDom(node: Node): BellDomSnapshot {
+function snapshotBellDom(
+  node: Node,
+  ignoredAttribute: string | null = null,
+): BellDomSnapshot {
   return Object.freeze({
     node,
     nodeValue: node.nodeValue,
-    attributes: snapshotAttributes(node),
-    children: Object.freeze([...node.childNodes].map(snapshotBellDom)),
+    attributes: snapshotAttributes(node, ignoredAttribute),
+    ignoredAttribute,
+    children: Object.freeze(
+      [...node.childNodes].map((child) => snapshotBellDom(child)),
+    ),
   });
 }
 
 function bellDomMatches(snapshot: BellDomSnapshot): boolean {
   const { node } = snapshot;
   if (node.nodeValue !== snapshot.nodeValue) return false;
-  const attributes = snapshotAttributes(node);
+  const attributes = snapshotAttributes(node, snapshot.ignoredAttribute);
   if (attributes === null || snapshot.attributes === null) {
     if (attributes !== snapshot.attributes) return false;
   } else if (
@@ -380,6 +414,7 @@ function bellPlacementMatches(element: HTMLElement, placement: BellPlacement) {
 }
 
 function createBellDomGuard(
+  trigger: HTMLButtonElement,
   roots: readonly HTMLElement[],
   placements: readonly BellPlacement[],
   onMutation: () => void,
@@ -389,6 +424,13 @@ function createBellDomGuard(
   if (!document || !MutationObserverConstructor) return null;
   let changed = false;
   const relevant = (record: MutationRecord) => {
+    if (
+      record.type === "attributes" &&
+      record.target === trigger &&
+      record.attributeName === TOOLTIP_TRIGGER_DESCRIPTION_ATTRIBUTE
+    ) {
+      return false;
+    }
     if (roots.some((root) => record.target === root || root.contains(record.target))) {
       return true;
     }
@@ -1026,7 +1068,7 @@ class NotificationPublicationCoordinator {
     const placements = publication.open && contentPlacement
       ? [triggerPlacement, contentPlacement]
       : [triggerPlacement];
-    const mutationGuard = createBellDomGuard(roots, placements, () => {
+    const mutationGuard = createBellDomGuard(trigger, roots, placements, () => {
       this.retire(publication, "mutation");
     });
     if (!mutationGuard) return false;
@@ -1078,7 +1120,10 @@ class NotificationPublicationCoordinator {
         mutationGuard.release();
       },
     });
-    publication.triggerDom = snapshotBellDom(trigger);
+    publication.triggerDom = snapshotBellDom(
+      trigger,
+      TOOLTIP_TRIGGER_DESCRIPTION_ATTRIBUTE,
+    );
     publication.triggerPlacement = triggerPlacement;
     publication.contentDom = content ? snapshotBellDom(content) : null;
     publication.contentPlacement = contentPlacement;
@@ -1748,7 +1793,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <Tip label="Notifications">
-        <PopoverTrigger asChild>
+        <NotificationPopoverTrigger asChild>
           <button
             ref={captureTrigger}
             type="button"
@@ -1768,7 +1813,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
               </span>
             )}
           </button>
-        </PopoverTrigger>
+        </NotificationPopoverTrigger>
       </Tip>
       {ownsDisclosure && (
         <PopoverContent
