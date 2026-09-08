@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type ComponentProps,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
@@ -191,6 +198,10 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 
 type SyncClickHandler = (event: { currentTarget: HTMLButtonElement; defaultPrevented: boolean }) => void;
 type SyncChangeHandler = (event: { currentTarget: HTMLInputElement }) => void;
+type SyncDialogCaptureHandler = (event: {
+  currentTarget: HTMLDivElement;
+  target: EventTarget | null;
+}) => void;
 
 interface CapturedSyncCallbacks {
   mergeElement: HTMLButtonElement | null;
@@ -205,6 +216,17 @@ interface CapturedSyncCallbacks {
   change: SyncChangeHandler;
   closeElement: HTMLButtonElement;
   close: SyncClickHandler;
+}
+
+interface CapturedSyncFrame extends CapturedSyncCallbacks {
+  bridgeElement: HTMLDivElement;
+  rootElement: HTMLDivElement;
+  authorizePointer: SyncDialogCaptureHandler;
+  releasePointer: SyncDialogCaptureHandler;
+  refs: readonly {
+    element: HTMLElement;
+    ref: (element: HTMLElement | null) => void;
+  }[];
 }
 
 function optionalClick(testId: string) {
@@ -235,6 +257,51 @@ function captureSyncCallbacks(): CapturedSyncCallbacks {
     change: reactHandler<SyncChangeHandler>(inputElement, "onChange"),
     closeElement,
     close: reactHandler<SyncClickHandler>(closeElement, "onClick"),
+  };
+}
+
+function captureElementRef<T extends HTMLElement>(
+  element: T,
+): (next: HTMLElement | null) => void {
+  const ref = reactHandler<RefCallback<T>>(element, "ref");
+  return (next) => ref(next as T | null);
+}
+
+function captureSyncFrame(host: HTMLElement): CapturedSyncFrame {
+  const callbacks = captureSyncCallbacks();
+  const bridgeElement = host.querySelector(".contents");
+  const rootElement = screen.getByTestId("sync-dialog");
+  if (!(bridgeElement instanceof HTMLDivElement)) {
+    throw new Error("The Sync dialog event bridge was not committed");
+  }
+  if (!(rootElement instanceof HTMLDivElement)) {
+    throw new Error("The Sync dialog root was not committed");
+  }
+  const elements: HTMLElement[] = [
+    bridgeElement,
+    rootElement,
+    callbacks.inputElement,
+    callbacks.keepElement,
+  ];
+  if (callbacks.mergeElement) elements.push(callbacks.mergeElement);
+  if (callbacks.takeElement) elements.push(callbacks.takeElement);
+  if (callbacks.compareElement) elements.push(callbacks.compareElement);
+  return {
+    ...callbacks,
+    bridgeElement,
+    rootElement,
+    authorizePointer: reactHandler<SyncDialogCaptureHandler>(
+      bridgeElement,
+      "onPointerDownCapture",
+    ),
+    releasePointer: reactHandler<SyncDialogCaptureHandler>(
+      bridgeElement,
+      "onPointerDown",
+    ),
+    refs: elements.map((element) => ({
+      element,
+      ref: captureElementRef(element),
+    })),
   };
 }
 
@@ -588,6 +655,302 @@ describe("Sync dialog action lifecycle", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it.each([
+    "message",
+    "merge",
+    "keep",
+    "take",
+    "compare",
+    "escape",
+    "outside",
+  ] as const)("keeps the current %s interaction usable once after Strict Mode replay", async (family) => {
+    vi.useRealTimers();
+    const merge = deferred<number>();
+    const keep = deferred<void>();
+    const take = deferred<void>();
+    const actions = syncActions({
+      merge: vi.fn(() => merge.promise),
+      keepMine: vi.fn(() => keep.promise),
+      takeRemote: vi.fn(() => take.promise),
+    });
+    const onOpenChange = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <SyncDialog
+          open
+          onOpenChange={onOpenChange}
+          doc={DOC}
+          sync={DIVERGED}
+          actions={actions}
+        />
+      </StrictMode>,
+    );
+
+    if (family === "message") {
+      fireEvent.change(screen.getByTestId("commit-message"), {
+        target: { value: "Strict replay message" },
+      });
+      expect(screen.getByTestId("commit-message")).toHaveValue("Strict replay message");
+    } else if (family === "merge") {
+      fireEvent.click(screen.getByTestId("sync-merge"));
+      fireEvent.click(screen.getByTestId("sync-merge"));
+      expect(actions.merge).toHaveBeenCalledOnce();
+    } else if (family === "keep") {
+      fireEvent.click(screen.getByTestId("sync-keep-mine"));
+      fireEvent.click(screen.getByTestId("sync-keep-mine"));
+      expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update big.md");
+    } else if (family === "take") {
+      fireEvent.click(screen.getByTestId("sync-take-remote"));
+      fireEvent.click(screen.getByTestId("sync-take-remote"));
+      expect(actions.takeRemote).toHaveBeenCalledOnce();
+    } else if (family === "compare") {
+      fireEvent.click(screen.getByTestId("sync-compare"));
+      fireEvent.click(screen.getByTestId("sync-compare"));
+      expect(actions.compare).toHaveBeenCalledOnce();
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } else if (family === "escape") {
+      fireEvent.keyDown(document, { key: "Escape" });
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } else {
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      fireEvent.click(outside);
+      fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      fireEvent.click(outside);
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      outside.remove();
+    }
+
+    await act(async () => {});
+  });
+
+  it("rejects crossed replay handlers, refs, and native intent without poisoning the current Strict Mode dialog", async () => {
+    vi.useRealTimers();
+    const staleActions = syncActions();
+    const currentKeep = deferred<void>();
+    const currentActions = syncActions({
+      keepMine: vi.fn(() => currentKeep.promise),
+    });
+    const staleOpenChange = vi.fn();
+    const currentOpenChange = vi.fn();
+    const view = renderDirect(
+      <StrictMode>
+        <section key="a">
+          <SyncDialog
+            open
+            onOpenChange={staleOpenChange}
+            doc={DOC}
+            sync={DIVERGED}
+            actions={staleActions}
+          />
+        </section>
+      </StrictMode>,
+    );
+    const stale = captureSyncFrame(view.host);
+    stale.authorizePointer({
+      currentTarget: stale.bridgeElement,
+      target: stale.keepElement,
+    });
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <section key="b">
+            <SyncDialog
+              open
+              onOpenChange={currentOpenChange}
+              doc={DOC}
+              sync={DIVERGED}
+              actions={currentActions}
+            />
+          </section>
+        </StrictMode>,
+      );
+    });
+    const current = captureSyncFrame(view.host);
+
+    act(() => {
+      stale.refs.forEach(({ ref }, index) => {
+        ref(current.refs[index]?.element ?? current.rootElement);
+      });
+      [...stale.refs].reverse().forEach(({ ref }) => ref(null));
+      stale.authorizePointer({
+        currentTarget: current.bridgeElement,
+        target: current.keepElement,
+      });
+      current.authorizePointer({
+        currentTarget: stale.bridgeElement,
+        target: stale.keepElement,
+      });
+      stale.change({ currentTarget: current.inputElement });
+      stale.merge?.({
+        currentTarget: current.mergeElement!,
+        defaultPrevented: false,
+      });
+      stale.keep({
+        currentTarget: current.keepElement,
+        defaultPrevented: false,
+      });
+      stale.take?.({
+        currentTarget: current.takeElement!,
+        defaultPrevented: false,
+      });
+      stale.compare?.({
+        currentTarget: current.compareElement!,
+        defaultPrevented: false,
+      });
+      stale.close({
+        currentTarget: current.closeElement,
+        defaultPrevented: false,
+      });
+
+      current.change({ currentTarget: stale.inputElement });
+      current.merge?.({
+        currentTarget: stale.mergeElement!,
+        defaultPrevented: false,
+      });
+      current.keep({
+        currentTarget: stale.keepElement,
+        defaultPrevented: false,
+      });
+      current.take?.({
+        currentTarget: stale.takeElement!,
+        defaultPrevented: false,
+      });
+      current.compare?.({
+        currentTarget: stale.compareElement!,
+        defaultPrevented: false,
+      });
+      current.close({
+        currentTarget: stale.closeElement,
+        defaultPrevented: false,
+      });
+    });
+
+    expect(staleActions.merge).not.toHaveBeenCalled();
+    expect(staleActions.keepMine).not.toHaveBeenCalled();
+    expect(staleActions.takeRemote).not.toHaveBeenCalled();
+    expect(staleActions.compare).not.toHaveBeenCalled();
+    expect(currentActions.merge).not.toHaveBeenCalled();
+    expect(currentActions.keepMine).not.toHaveBeenCalled();
+    expect(currentActions.takeRemote).not.toHaveBeenCalled();
+    expect(currentActions.compare).not.toHaveBeenCalled();
+    expect(staleOpenChange).not.toHaveBeenCalled();
+    expect(currentOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("commit-message")).toHaveValue("Update big.md");
+
+    fireEvent.change(screen.getByTestId("commit-message"), {
+      target: { value: "Current replay message" },
+    });
+    const accepted = captureSyncCallbacks();
+    act(() => {
+      accepted.keep({
+        currentTarget: accepted.keepElement,
+        defaultPrevented: false,
+      });
+      accepted.keep({
+        currentTarget: accepted.keepElement,
+        defaultPrevented: false,
+      });
+      stale.refs.forEach(({ ref }) => ref(null));
+      stale.close({
+        currentTarget: accepted.closeElement,
+        defaultPrevented: false,
+      });
+    });
+    expect(currentActions.keepMine).toHaveBeenCalledExactlyOnceWith(
+      "Current replay message",
+    );
+    expect(currentOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    expect(screen.getByTestId("sync-done")).toHaveTextContent(
+      "Published your version",
+    );
+    const closeCurrent = captureSyncFrame(view.host);
+    act(() => {
+      closeCurrent.authorizePointer({
+        currentTarget: closeCurrent.bridgeElement,
+        target: closeCurrent.closeElement,
+      });
+      stale.releasePointer({
+        currentTarget: stale.bridgeElement,
+        target: closeCurrent.closeElement,
+      });
+      closeCurrent.close({
+        currentTarget: closeCurrent.closeElement,
+        defaultPrevented: false,
+      });
+    });
+    expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("resets a normal replacement after retiring a pending Strict Mode successor action", async () => {
+    const staleKeep = deferred<void>();
+    const currentKeep = deferred<void>();
+    const staleActions = syncActions({
+      keepMine: vi.fn(() => staleKeep.promise),
+    });
+    const currentActions = syncActions({
+      keepMine: vi.fn(() => currentKeep.promise),
+    });
+    const onOpenChange = vi.fn();
+    const view = renderDirect(
+      <StrictMode>
+        <SyncDialog
+          open
+          onOpenChange={onOpenChange}
+          doc={DOC}
+          sync={DIVERGED}
+          actions={staleActions}
+        />
+      </StrictMode>,
+    );
+
+    fireEvent.click(screen.getByTestId("sync-keep-mine"));
+    expect(staleActions.keepMine).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <SyncDialog
+            open
+            onOpenChange={onOpenChange}
+            doc={DOC}
+            sync={DIVERGED}
+            actions={currentActions}
+          />
+        </StrictMode>,
+      );
+    });
+    expect(screen.getByTestId("sync-keep-mine")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("sync-keep-mine"));
+    expect(currentActions.keepMine).toHaveBeenCalledExactlyOnceWith(
+      "Update big.md",
+    );
+
+    await act(async () => {
+      staleKeep.resolve();
+    });
+    expect(screen.queryByTestId("sync-done")).toBeNull();
+    expect(screen.getByTestId("sync-keep-mine")).toBeDisabled();
+
+    await act(async () => {
+      currentKeep.resolve();
+    });
+    expect(screen.getByTestId("sync-done")).toHaveTextContent(
+      "Published your version",
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("claims Compare synchronously, invokes it once, then closes through its frozen callback", () => {
