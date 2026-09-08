@@ -19,6 +19,263 @@ import { Tip } from "@/components/ui/primitives";
 import { cn, findReplaceShortcut, shortcut } from "@/lib/utils";
 import { shallowEqual, useSessionValue } from "./use-session";
 
+type WebIdlIntrinsic = (this: unknown) => unknown;
+
+const APPLY_INTRINSIC = Reflect.apply;
+const GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const GET_PROTOTYPE_OF = Object.getPrototypeOf;
+
+function callIntrinsic<T>(intrinsic: WebIdlIntrinsic, receiver: object): T {
+  return APPLY_INTRINSIC(intrinsic, receiver, []) as T;
+}
+
+interface RealmConstructorBinding {
+  readonly name: "Event" | "KeyboardEvent" | "Node" | "Document";
+  readonly value: object;
+  readonly prototype: object;
+  readonly chain: readonly object[];
+  readonly getter: WebIdlIntrinsic | undefined;
+  readonly setter: object | undefined;
+  readonly writable: boolean | undefined;
+  readonly enumerable: boolean | undefined;
+  readonly configurable: boolean | undefined;
+  readonly prototypeWritable: boolean | undefined;
+  readonly prototypeEnumerable: boolean | undefined;
+  readonly prototypeConfigurable: boolean | undefined;
+}
+
+interface FindKeyboardIntrinsics {
+  readonly view: Window;
+  readonly event: RealmConstructorBinding;
+  readonly keyboardEvent: RealmConstructorBinding;
+  readonly node: RealmConstructorBinding;
+  readonly document: RealmConstructorBinding;
+  readonly eventGetters: Readonly<{
+    type: WebIdlIntrinsic;
+    bubbles: WebIdlIntrinsic;
+    cancelable: WebIdlIntrinsic;
+    defaultPrevented: WebIdlIntrinsic;
+    eventPhase: WebIdlIntrinsic;
+    timeStamp: WebIdlIntrinsic;
+    target: WebIdlIntrinsic;
+    currentTarget: WebIdlIntrinsic;
+  }>;
+  readonly keyboardGetters: Readonly<{
+    key: WebIdlIntrinsic;
+    code: WebIdlIntrinsic;
+    location: WebIdlIntrinsic;
+    repeat: WebIdlIntrinsic;
+    isComposing: WebIdlIntrinsic;
+    altKey: WebIdlIntrinsic;
+    ctrlKey: WebIdlIntrinsic;
+    metaKey: WebIdlIntrinsic;
+    shiftKey: WebIdlIntrinsic;
+  }>;
+  readonly nodeGetters: Readonly<{
+    ownerDocument: WebIdlIntrinsic;
+    isConnected: WebIdlIntrinsic;
+  }>;
+  readonly documentGetters: Readonly<{
+    activeElement: WebIdlIntrinsic;
+  }>;
+  readonly composedPath: WebIdlIntrinsic;
+  readonly preventDefault: WebIdlIntrinsic;
+}
+
+function captureRealmConstructor(
+  view: Window,
+  name: RealmConstructorBinding["name"],
+): RealmConstructorBinding | null {
+  try {
+    const chain: object[] = [];
+    let owner: object | null = view;
+    while (owner) {
+      chain.push(owner);
+      const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(owner, name);
+      if (descriptor) {
+        const value = "value" in descriptor
+          ? descriptor.value
+          : typeof descriptor.get === "function"
+            ? APPLY_INTRINSIC(descriptor.get, view, [])
+            : null;
+        if (typeof value !== "function") return null;
+        const prototypeDescriptor = GET_OWN_PROPERTY_DESCRIPTOR(
+          value,
+          "prototype",
+        );
+        if (
+          !prototypeDescriptor ||
+          !("value" in prototypeDescriptor) ||
+          !prototypeDescriptor.value ||
+          typeof prototypeDescriptor.value !== "object"
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          name,
+          value,
+          prototype: prototypeDescriptor.value,
+          chain: Object.freeze(chain),
+          getter: descriptor.get as WebIdlIntrinsic | undefined,
+          setter: descriptor.set,
+          writable: descriptor.writable,
+          enumerable: descriptor.enumerable,
+          configurable: descriptor.configurable,
+          prototypeWritable: prototypeDescriptor.writable,
+          prototypeEnumerable: prototypeDescriptor.enumerable,
+          prototypeConfigurable: prototypeDescriptor.configurable,
+        });
+      }
+      owner = GET_PROTOTYPE_OF(owner);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function realmConstructorIsCurrent(binding: RealmConstructorBinding): boolean {
+  try {
+    let candidate: object | null = binding.chain[0] ?? null;
+    for (let index = 0; index < binding.chain.length; index += 1) {
+      const expected = binding.chain[index];
+      if (!expected || candidate !== expected) return false;
+      const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(candidate, binding.name);
+      if (index < binding.chain.length - 1) {
+        if (descriptor) return false;
+      } else {
+        if (!descriptor) return false;
+        if (binding.getter) {
+          if (
+            "value" in descriptor ||
+            descriptor.get !== binding.getter ||
+            descriptor.set !== binding.setter ||
+            APPLY_INTRINSIC(binding.getter, binding.chain[0], []) !== binding.value
+          ) {
+            return false;
+          }
+        } else if (
+          !("value" in descriptor) ||
+          descriptor.value !== binding.value ||
+          binding.setter !== undefined
+        ) {
+          return false;
+        }
+        if (
+          descriptor.writable !== binding.writable ||
+          descriptor.enumerable !== binding.enumerable ||
+          descriptor.configurable !== binding.configurable
+        ) {
+          return false;
+        }
+      }
+      candidate = GET_PROTOTYPE_OF(candidate);
+    }
+    const prototypeDescriptor = GET_OWN_PROPERTY_DESCRIPTOR(
+      binding.value,
+      "prototype",
+    );
+    return Boolean(
+      prototypeDescriptor &&
+      "value" in prototypeDescriptor &&
+      prototypeDescriptor.value === binding.prototype &&
+      prototypeDescriptor.writable === binding.prototypeWritable &&
+      prototypeDescriptor.enumerable === binding.prototypeEnumerable &&
+      prototypeDescriptor.configurable === binding.prototypeConfigurable
+    );
+  } catch {
+    return false;
+  }
+}
+
+function captureGetter(prototype: object, name: string): WebIdlIntrinsic | null {
+  const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(prototype, name);
+  return typeof descriptor?.get === "function"
+    ? descriptor.get as WebIdlIntrinsic
+    : null;
+}
+
+function captureMethod(prototype: object, name: string): WebIdlIntrinsic | null {
+  const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(prototype, name);
+  return typeof descriptor?.value === "function"
+    ? descriptor.value as WebIdlIntrinsic
+    : null;
+}
+
+function captureFindKeyboardIntrinsics(view: Window): FindKeyboardIntrinsics | null {
+  try {
+    const event = captureRealmConstructor(view, "Event");
+    const keyboardEvent = captureRealmConstructor(view, "KeyboardEvent");
+    const node = captureRealmConstructor(view, "Node");
+    const document = captureRealmConstructor(view, "Document");
+    if (!event || !keyboardEvent || !node || !document) return null;
+    const eventGetters = {
+      type: captureGetter(event.prototype, "type"),
+      bubbles: captureGetter(event.prototype, "bubbles"),
+      cancelable: captureGetter(event.prototype, "cancelable"),
+      defaultPrevented: captureGetter(event.prototype, "defaultPrevented"),
+      eventPhase: captureGetter(event.prototype, "eventPhase"),
+      timeStamp: captureGetter(event.prototype, "timeStamp"),
+      target: captureGetter(event.prototype, "target"),
+      currentTarget: captureGetter(event.prototype, "currentTarget"),
+    };
+    const keyboardGetters = {
+      key: captureGetter(keyboardEvent.prototype, "key"),
+      code: captureGetter(keyboardEvent.prototype, "code"),
+      location: captureGetter(keyboardEvent.prototype, "location"),
+      repeat: captureGetter(keyboardEvent.prototype, "repeat"),
+      isComposing: captureGetter(keyboardEvent.prototype, "isComposing"),
+      altKey: captureGetter(keyboardEvent.prototype, "altKey"),
+      ctrlKey: captureGetter(keyboardEvent.prototype, "ctrlKey"),
+      metaKey: captureGetter(keyboardEvent.prototype, "metaKey"),
+      shiftKey: captureGetter(keyboardEvent.prototype, "shiftKey"),
+    };
+    const nodeGetters = {
+      ownerDocument: captureGetter(node.prototype, "ownerDocument"),
+      isConnected: captureGetter(node.prototype, "isConnected"),
+    };
+    const documentGetters = {
+      activeElement: captureGetter(document.prototype, "activeElement"),
+    };
+    const composedPath = captureMethod(event.prototype, "composedPath");
+    const preventDefault = captureMethod(event.prototype, "preventDefault");
+    if (
+      Object.values(eventGetters).some((getter) => !getter) ||
+      Object.values(keyboardGetters).some((getter) => !getter) ||
+      Object.values(nodeGetters).some((getter) => !getter) ||
+      Object.values(documentGetters).some((getter) => !getter) ||
+      !composedPath ||
+      !preventDefault
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      view,
+      event,
+      keyboardEvent,
+      node,
+      document,
+      eventGetters: Object.freeze(eventGetters) as FindKeyboardIntrinsics["eventGetters"],
+      keyboardGetters: Object.freeze(keyboardGetters) as FindKeyboardIntrinsics["keyboardGetters"],
+      nodeGetters: Object.freeze(nodeGetters) as FindKeyboardIntrinsics["nodeGetters"],
+      documentGetters: Object.freeze(documentGetters) as FindKeyboardIntrinsics["documentGetters"],
+      composedPath,
+      preventDefault,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function findKeyboardIntrinsicsAreCurrent(intrinsics: FindKeyboardIntrinsics) {
+  return (
+    realmConstructorIsCurrent(intrinsics.event) &&
+    realmConstructorIsCurrent(intrinsics.keyboardEvent) &&
+    realmConstructorIsCurrent(intrinsics.node) &&
+    realmConstructorIsCurrent(intrinsics.document)
+  );
+}
+
 export interface FindBarProps {
   session: CollabSession;
   /** Whether the replace row is shown. */
@@ -187,7 +444,7 @@ interface PublicationCells {
   readonly replaceFocus: CurrentCell<ReplaceFocusOwner | null>;
   readonly claimedActivations: WeakSet<object>;
   readonly claimedMouseDowns: WeakSet<object>;
-  readonly keyboardDeliveries: WeakMap<globalThis.KeyboardEvent, FindKeyboardDelivery>;
+  readonly keyboardDeliveries: WeakMap<object, FindKeyboardDelivery>;
 }
 
 interface PublicationLifecycle {
@@ -235,14 +492,40 @@ interface RefReplay {
   reattached: boolean;
 }
 
+interface FindNativeKeyboardFacts {
+  readonly event: object;
+  readonly type: string;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly eventPhase: number;
+  readonly timeStamp: number;
+  readonly target: Node;
+  readonly currentTarget: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly activeElement: Element | null;
+}
+
 interface FindKeyboardDelivery {
   readonly publication: FindBarPublication;
-  readonly target: Node;
-  readonly path: readonly EventTarget[];
+  readonly facts: FindNativeKeyboardFacts;
 }
 
 interface FindBarPublicationRuntime {
   readonly publication: FindBarPublication;
+  readonly deliverKeyboard: (
+    event: KeyboardEvent<HTMLDivElement>,
+    nativeEvent: object,
+  ) => void;
   readonly publish: (snapshot: FindBarDomSnapshot, owners: readonly ElementOwnerView[]) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
@@ -259,6 +542,131 @@ interface FindBarPublicationRuntime {
   readonly releaseReplayGuard: () => void;
   readonly snapshot: () => FindBarDomSnapshot | null;
   readonly placement: () => FindBarPlacement | null;
+}
+
+function readFindKeyboardFacts(
+  intrinsics: FindKeyboardIntrinsics,
+  event: object,
+  ownerDocument: Document,
+): FindNativeKeyboardFacts | null {
+  try {
+    if (GET_PROTOTYPE_OF(event) !== intrinsics.keyboardEvent.prototype) {
+      return null;
+    }
+    const target = callIntrinsic<EventTarget | null>(
+      intrinsics.eventGetters.target,
+      event,
+    );
+    if (!target || typeof target !== "object") return null;
+    const targetOwnerDocument = callIntrinsic<Document | null>(
+      intrinsics.nodeGetters.ownerDocument,
+      target,
+    );
+    const targetConnected = callIntrinsic<boolean>(
+      intrinsics.nodeGetters.isConnected,
+      target,
+    );
+    if (targetOwnerDocument !== ownerDocument || !targetConnected) return null;
+    const path = callIntrinsic<EventTarget[]>(
+      intrinsics.composedPath,
+      event,
+    );
+    if (!Array.isArray(path)) return null;
+    return Object.freeze({
+      event,
+      type: callIntrinsic<string>(intrinsics.eventGetters.type, event),
+      key: callIntrinsic<string>(intrinsics.keyboardGetters.key, event),
+      code: callIntrinsic<string>(intrinsics.keyboardGetters.code, event),
+      location: callIntrinsic<number>(intrinsics.keyboardGetters.location, event),
+      repeat: callIntrinsic<boolean>(intrinsics.keyboardGetters.repeat, event),
+      isComposing: callIntrinsic<boolean>(
+        intrinsics.keyboardGetters.isComposing,
+        event,
+      ),
+      altKey: callIntrinsic<boolean>(intrinsics.keyboardGetters.altKey, event),
+      ctrlKey: callIntrinsic<boolean>(intrinsics.keyboardGetters.ctrlKey, event),
+      metaKey: callIntrinsic<boolean>(intrinsics.keyboardGetters.metaKey, event),
+      shiftKey: callIntrinsic<boolean>(intrinsics.keyboardGetters.shiftKey, event),
+      bubbles: callIntrinsic<boolean>(intrinsics.eventGetters.bubbles, event),
+      cancelable: callIntrinsic<boolean>(intrinsics.eventGetters.cancelable, event),
+      defaultPrevented: callIntrinsic<boolean>(
+        intrinsics.eventGetters.defaultPrevented,
+        event,
+      ),
+      eventPhase: callIntrinsic<number>(
+        intrinsics.eventGetters.eventPhase,
+        event,
+      ),
+      timeStamp: callIntrinsic<number>(intrinsics.eventGetters.timeStamp, event),
+      target: target as Node,
+      currentTarget: callIntrinsic<EventTarget | null>(
+        intrinsics.eventGetters.currentTarget,
+        event,
+      ),
+      path: Object.freeze([...path]),
+      activeElement: callIntrinsic<Element | null>(
+        intrinsics.documentGetters.activeElement,
+        ownerDocument,
+      ),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function sameFindKeyboardDelivery(
+  captured: FindNativeKeyboardFacts,
+  current: FindNativeKeyboardFacts,
+) {
+  return (
+    current.event === captured.event &&
+    current.type === captured.type &&
+    current.key === captured.key &&
+    current.code === captured.code &&
+    current.location === captured.location &&
+    current.repeat === captured.repeat &&
+    current.isComposing === captured.isComposing &&
+    current.altKey === captured.altKey &&
+    current.ctrlKey === captured.ctrlKey &&
+    current.metaKey === captured.metaKey &&
+    current.shiftKey === captured.shiftKey &&
+    current.bubbles === captured.bubbles &&
+    current.cancelable === captured.cancelable &&
+    current.timeStamp === captured.timeStamp &&
+    current.target === captured.target &&
+    current.activeElement === captured.target &&
+    current.path.length === captured.path.length &&
+    current.path.every((entry, index) => captured.path[index] === entry)
+  );
+}
+
+function syntheticNativeEvent(event: object): object | null {
+  try {
+    const descriptor = GET_OWN_PROPERTY_DESCRIPTOR(event, "nativeEvent");
+    return descriptor &&
+      "value" in descriptor &&
+      descriptor.value &&
+      typeof descriptor.value === "object"
+      ? descriptor.value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function preventFindKeyboardDefault(
+  intrinsics: FindKeyboardIntrinsics,
+  event: object,
+) {
+  try {
+    callIntrinsic<void>(intrinsics.preventDefault, event);
+    return callIntrinsic<boolean>(
+      intrinsics.eventGetters.defaultPrevented,
+      event,
+    );
+  } catch {
+    return false;
+  }
 }
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -869,6 +1277,9 @@ function createFindBarPublication({
     const publishedRoot = root;
     const ownerDocument = root.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
+    const keyboardIntrinsics = ownerWindow
+      ? captureFindKeyboardIntrinsics(ownerWindow)
+      : null;
     const uninstallKeyboard = () => {
       if (!keyboardListening) return;
       keyboardListening = false;
@@ -879,11 +1290,9 @@ function createFindBarPublication({
       if (
         record.type === "attributes" &&
         record.attributeName === "name" &&
-        ownerWindow &&
-        record.target instanceof ownerWindow.HTMLInputElement &&
         (
-          record.target.dataset.testid === "find-input" ||
-          record.target.dataset.testid === "replace-input"
+          (record.target as Element).getAttribute?.("data-testid") === "find-input" ||
+          (record.target as Element).getAttribute?.("data-testid") === "replace-input"
         )
       ) {
         return false;
@@ -964,40 +1373,42 @@ function createFindBarPublication({
     function rememberKeyboard(event: Event) {
       if (
         !keyboardListening ||
-        !ownerWindow ||
-        !(event instanceof ownerWindow.KeyboardEvent) ||
-        event.constructor !== ownerWindow.KeyboardEvent ||
-        event.type !== "keydown" ||
-        event.key !== "F3" ||
-        event.eventPhase === ownerWindow.Event.NONE ||
-        event.currentTarget !== publishedRoot ||
-        !event.bubbles ||
-        !event.cancelable ||
-        event.defaultPrevented ||
-        event.isComposing ||
+        !keyboardIntrinsics ||
+        !findKeyboardIntrinsicsAreCurrent(keyboardIntrinsics) ||
+        cells.claimedActivations.has(event) ||
         !ownsAuthority(publication)
       ) {
         return;
       }
-      const target = event.target;
-      const path = event.composedPath();
+      const facts = readFindKeyboardFacts(
+        keyboardIntrinsics,
+        event,
+        ownerDocument,
+      );
       if (
-        !(target instanceof ownerWindow.Node) ||
-        !target.isConnected ||
-        target.ownerDocument !== ownerDocument ||
-        ownerDocument.activeElement !== target ||
-        !publishedRoot.contains(target) ||
-        !isCurrentKeyboardTarget(target) ||
-        path[0] !== target ||
-        !path.includes(publishedRoot) ||
-        !path.includes(ownerDocument)
+        !facts ||
+        facts.type !== "keydown" ||
+        facts.key !== "F3" ||
+        facts.eventPhase === 0 ||
+        facts.currentTarget !== publishedRoot ||
+        !facts.bubbles ||
+        !facts.cancelable ||
+        facts.defaultPrevented ||
+        facts.isComposing ||
+        facts.altKey ||
+        facts.ctrlKey ||
+        facts.metaKey ||
+        facts.activeElement !== facts.target ||
+        !isCurrentKeyboardTarget(facts.target) ||
+        facts.path[0] !== facts.target ||
+        !facts.path.includes(publishedRoot) ||
+        !facts.path.includes(ownerDocument)
       ) {
         return;
       }
       const delivery = Object.freeze<FindKeyboardDelivery>({
         publication,
-        target,
-        path: Object.freeze([...path]),
+        facts,
       });
       cells.keyboardDeliveries.set(event, delivery);
       queueMicrotask(() => {
@@ -1034,6 +1445,38 @@ function createFindBarPublication({
         entry.owner.element() === entry.element);
     const runtime: FindBarPublicationRuntime = Object.freeze({
       publication,
+      deliverKeyboard: (
+        event: KeyboardEvent<HTMLDivElement>,
+        nativeEvent: object,
+      ) => {
+        const delivery = cells.keyboardDeliveries.get(nativeEvent);
+        const currentFacts = keyboardIntrinsics
+          ? readFindKeyboardFacts(
+              keyboardIntrinsics,
+              nativeEvent,
+              ownerDocument,
+            )
+          : null;
+        if (
+          !keyboardIntrinsics ||
+          !findKeyboardIntrinsicsAreCurrent(keyboardIntrinsics) ||
+          !delivery ||
+          delivery.publication !== publication ||
+          !currentFacts ||
+          currentFacts.eventPhase === 0 ||
+          currentFacts.defaultPrevented ||
+          !sameFindKeyboardDelivery(delivery.facts, currentFacts) ||
+          !isCurrentKeyboardTarget(delivery.facts.target) ||
+          !publishedDomMatches() ||
+          !claim(event, nativeEvent)
+        ) {
+          return;
+        }
+        if (!preventFindKeyboardDefault(keyboardIntrinsics, nativeEvent)) return;
+        if (!authority.actionsDisabled) {
+          step(publication, delivery.facts.shiftKey ? -1 : 1);
+        }
+      },
       publish: (
         snapshot: FindBarDomSnapshot,
         owners: readonly ElementOwnerView[],
@@ -1066,7 +1509,7 @@ function createFindBarPublication({
             subtree: true,
           });
         }
-        if (ownerWindow) {
+        if (keyboardIntrinsics) {
           keyboardListening = true;
           root.addEventListener("keydown", rememberKeyboard, true);
         }
@@ -1211,90 +1654,25 @@ function createFindBarPublication({
   const onBarKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const runtime = currentRuntime;
     const publication = runtime?.publication;
-    if (!publication || !ownsBar(publication, event.currentTarget)) return;
+    if (!publication) return;
     const root = bar.element();
+    const nativeEvent = syntheticNativeEvent(event);
+    const delivery = nativeEvent
+      ? cells.keyboardDeliveries.get(nativeEvent)
+      : undefined;
+    if (delivery && nativeEvent) {
+      runtime.deliverKeyboard(event, nativeEvent);
+      return;
+    }
+    if (!ownsBar(publication, event.currentTarget)) return;
     const target = event.target;
     if (
       !root ||
       !(target instanceof Node) ||
       !target.isConnected ||
       (target !== root && !root.contains(target)) ||
-      (event.key !== "Escape" && event.key !== "F3")
+      event.key !== "Escape"
     ) return;
-    if (event.key === "F3") {
-      const ownerWindow = root.ownerDocument.defaultView;
-      const nativeEvent = event.nativeEvent;
-      const delivery = ownerWindow &&
-        nativeEvent instanceof ownerWindow.KeyboardEvent
-        ? cells.keyboardDeliveries.get(nativeEvent)
-        : undefined;
-      const path = ownerWindow && nativeEvent instanceof ownerWindow.Event
-        ? nativeEvent.composedPath()
-        : [];
-      const reactEvent = event as KeyboardEvent<HTMLDivElement> & {
-        _reactName?: unknown;
-        isDefaultPrevented?: unknown;
-        isPropagationStopped?: unknown;
-        isPersistent?: unknown;
-        persist?: unknown;
-      };
-      if (
-        !runtime ||
-        !ownerWindow ||
-        !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
-        nativeEvent.constructor !== ownerWindow.KeyboardEvent ||
-        nativeEvent.type !== "keydown" ||
-        nativeEvent.key !== "F3" ||
-        nativeEvent.isComposing ||
-        nativeEvent.eventPhase === ownerWindow.Event.NONE ||
-        !nativeEvent.bubbles ||
-        !nativeEvent.cancelable ||
-        nativeEvent.defaultPrevented ||
-        event.type !== nativeEvent.type ||
-        event.key !== nativeEvent.key ||
-        event.code !== nativeEvent.code ||
-        event.location !== nativeEvent.location ||
-        event.repeat !== nativeEvent.repeat ||
-        event.altKey !== nativeEvent.altKey ||
-        event.ctrlKey !== nativeEvent.ctrlKey ||
-        event.metaKey !== nativeEvent.metaKey ||
-        event.shiftKey !== nativeEvent.shiftKey ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.defaultPrevented ||
-        event.bubbles !== nativeEvent.bubbles ||
-        event.cancelable !== nativeEvent.cancelable ||
-        event.eventPhase !== nativeEvent.eventPhase ||
-        event.isTrusted !== nativeEvent.isTrusted ||
-        event.timeStamp !== nativeEvent.timeStamp ||
-        event.currentTarget !== root ||
-        target !== nativeEvent.target ||
-        target.ownerDocument !== root.ownerDocument ||
-        root.ownerDocument.activeElement !== target ||
-        !isCurrentKeyboardTarget(target) ||
-        reactEvent._reactName !== "onKeyDown" ||
-        typeof reactEvent.isDefaultPrevented !== "function" ||
-        reactEvent.isDefaultPrevented() ||
-        typeof reactEvent.isPropagationStopped !== "function" ||
-        reactEvent.isPropagationStopped() ||
-        typeof reactEvent.isPersistent !== "function" ||
-        !reactEvent.isPersistent() ||
-        typeof reactEvent.persist !== "function" ||
-        !delivery ||
-        delivery.publication !== publication ||
-        delivery.target !== target ||
-        delivery.path.length !== path.length ||
-        delivery.path.some((entry, index) => path[index] !== entry) ||
-        !runtime.publishedDomMatches() ||
-        !claim(event, nativeEvent)
-      ) {
-        return;
-      }
-      event.preventDefault();
-      if (!authority.actionsDisabled) step(publication, event.shiftKey ? -1 : 1);
-      return;
-    }
     closeFromKeyboard(publication, event);
   };
 
@@ -1380,7 +1758,7 @@ export function FindBar({
     replaceFocus: new CurrentCell<ReplaceFocusOwner | null>(null),
     claimedActivations: new WeakSet<object>(),
     claimedMouseDowns: new WeakSet<object>(),
-    keyboardDeliveries: new WeakMap<globalThis.KeyboardEvent, FindKeyboardDelivery>(),
+    keyboardDeliveries: new WeakMap<object, FindKeyboardDelivery>(),
   }));
   const replacement = replacementDraft.visit === visit ? replacementDraft.value : "";
   const options = find?.options;

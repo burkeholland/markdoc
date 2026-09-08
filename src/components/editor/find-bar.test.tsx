@@ -1530,6 +1530,111 @@ describe("FindBar F3 navigation", () => {
     frame.remove();
   });
 
+  it("fails closed when the owner realm KeyboardEvent binding is replaced after publication", async () => {
+    const s = session("owner", "f3-replaced-constructor");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+    const ownerWindow = input.ownerDocument.defaultView;
+    const descriptor = ownerWindow &&
+      Object.getOwnPropertyDescriptor(ownerWindow, "KeyboardEvent");
+    if (!ownerWindow || !descriptor) {
+      throw new Error("The owner realm KeyboardEvent binding is unavailable");
+    }
+    input.focus();
+    const rejected = findKey(input);
+    const original = ownerWindow.KeyboardEvent;
+    if (
+      !Reflect.set(ownerWindow, "KeyboardEvent", null) ||
+      ownerWindow.KeyboardEvent !== null
+    ) {
+      throw new Error("The owner realm KeyboardEvent binding was not replaced");
+    }
+    try {
+      act(() => input.dispatchEvent(rejected));
+    } finally {
+      Reflect.set(ownerWindow, "KeyboardEvent", original);
+    }
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+
+    const fresh = dispatchFindKey(input);
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(onReveal).toHaveBeenCalledOnce();
+  });
+
+  it("rejects non-F3 intrinsic facts even when public keyboard fields imitate F3", async () => {
+    const s = session("owner", "f3-shadowed-facts");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+    const event = findKey(input, { key: "F4", ctrlKey: true });
+    Object.defineProperties(event, {
+      key: { value: "F3" },
+      ctrlKey: { value: false },
+      shiftKey: { value: false },
+    });
+
+    act(() => {
+      input.focus();
+      input.dispatchEvent(event);
+    });
+
+    expect(event.key).toBe("F3");
+    expect(event.ctrlKey).toBe(false);
+    expect(event.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+  });
+
+  it("uses captured keyboard getters and composedPath when public fields throw or deceive", async () => {
+    const s = session("owner", "f3-intrinsic-fields");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+    const event = findKey(input, { shiftKey: true });
+    Object.defineProperties(event, {
+      key: { value: "F4" },
+      shiftKey: { value: false },
+      composedPath: {
+        value: () => {
+          throw new Error("public composedPath must not be called");
+        },
+      },
+    });
+
+    act(() => {
+      input.focus();
+      input.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(stepFind).toHaveBeenCalledWith(-1);
+    expect(onReveal).toHaveBeenCalledOnce();
+  });
+
   it("claims one native delivery once across repeated delivery and accepts a fresh successor event", async () => {
     const s = session("owner", "f3-repeat");
     const stepFind = vi.spyOn(s, "stepFind");
