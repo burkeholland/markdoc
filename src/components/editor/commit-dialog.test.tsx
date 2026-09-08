@@ -1044,6 +1044,67 @@ describe("CommitDialog visit authority", () => {
     }
   });
 
+  it("keeps first owner-gist publication Published while its control appears", async () => {
+    const publish = deferred<void>();
+    const current = actions();
+    const doc = {
+      ...repoDocument("doc-first-gist-publish", "unused.md"),
+      storage: "gist" as const,
+      gistId: "gist-first-publish",
+      gistFile: "first-publish.md",
+      repoOwner: null,
+      repoName: null,
+      repoBranch: null,
+      repoPath: null,
+      publishedAt: null,
+      githubUrl: "https://gist.github.com/gist-first-publish",
+    };
+    const refreshed = {
+      ...doc,
+      hasUnpublishedChanges: false,
+      publishedAt: "2026-09-08T10:50:00.000Z",
+      updatedAt: "2026-09-08T10:50:00.000Z",
+    };
+    const { host, root } = createHost();
+
+    current.onCommit.mockImplementationOnce(async () => {
+      await publish.promise;
+      root.render(
+        <StrictMode>
+          <CommitBoundary
+            visit="published"
+            doc={refreshed}
+            actions={current}
+          />
+        </StrictMode>,
+      );
+    });
+
+    try {
+      await render(root, { visit: "unpublished", doc, actions: current });
+      expect(screen.queryByTestId("gist-auto-update-stub")).toBeNull();
+      fireEvent.change(message(), { target: { value: "  First gist publish  " } });
+      await clickSubmit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith(
+        "First gist publish",
+      );
+
+      await resolve(publish);
+      expect(screen.getByTestId("gist-auto-update-stub")).toHaveAttribute(
+        "data-document",
+        doc.id,
+      );
+      expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+      await advance(899);
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+      await advance(1);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("claims exact Enter provenance before one implicit native form submit", async () => {
     const pending = deferred<void>();
     const current = actions(pending.promise);

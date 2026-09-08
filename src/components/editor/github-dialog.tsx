@@ -3872,16 +3872,48 @@ function commitVisitsAllowMetadataHandoff(
   );
 }
 
+function commitGistFirstPublicationAllowsVisitHandoff(
+  previous: CommitDialogVisit,
+  current: CommitDialogVisit,
+) {
+  const previousDoc = previous.doc;
+  const currentDoc = current.doc;
+  return (
+    previousDoc.storage === "gist" &&
+    currentDoc.storage === "gist" &&
+    previous.isOwner &&
+    current.isOwner &&
+    previous.destination !== current.destination &&
+    previousDoc.id === currentDoc.id &&
+    Boolean(previousDoc.gistId) &&
+    previousDoc.gistId === currentDoc.gistId &&
+    Boolean(previousDoc.gistFile) &&
+    previousDoc.gistFile === currentDoc.gistFile &&
+    Boolean(previousDoc.githubUrl) &&
+    previousDoc.githubUrl === currentDoc.githubUrl &&
+    previousDoc.ownerId === currentDoc.ownerId &&
+    previousDoc.publishedAt === null &&
+    typeof currentDoc.publishedAt === "string" &&
+    currentDoc.publishedAt.length > 0 &&
+    !previous.gistControlPresent &&
+    current.gistControlPresent
+  );
+}
+
 function commitOperationAllowsVisitHandoff(
   operation: CommitDialogOperation,
   previous: CommitDialogVisit,
   current: CommitDialogVisit,
 ) {
+  const presentationIsCompatible =
+    (previous.destination === current.destination &&
+      previous.gistControlPresent === current.gistControlPresent) ||
+    commitGistFirstPublicationAllowsVisitHandoff(previous, current);
   return (
     operation.currentVisit.get() === previous &&
     operation.visit === previous &&
     previous.mount === current.mount &&
-    previous.destination === current.destination &&
+    presentationIsCompatible &&
     previous.open === current.open &&
     previous.onCommit === current.onCommit &&
     previous.onOpenChange === current.onOpenChange &&
@@ -3890,7 +3922,6 @@ function commitOperationAllowsVisitHandoff(
     previous.title === current.title &&
     previous.description === current.description &&
     previous.label === current.label &&
-    previous.gistControlPresent === current.gistControlPresent &&
     operation.commit === current.onCommit &&
     commitDocumentFactsAllowOperationHandoff(
       previous.documentFacts,
