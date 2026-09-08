@@ -1372,7 +1372,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await act(async () => {});
     await act(
       async () =>
-        new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 10)),
     );
     staleChange({
       currentTarget: input,
@@ -1557,6 +1557,90 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(screen.getByTestId("image-alt")).toHaveValue("Replayed Alt");
     expect(screen.getByTestId("image-upload")).toBeEnabled();
   });
+
+  it.each(["url", "alt", "error"] as const)(
+    "clears a deferred upload when its %s getter retires the successor and permits a fresh retry",
+    async (getter) => {
+      const failed = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const onUpload = vi
+        .fn()
+        .mockReturnValueOnce(failed.promise)
+        .mockReturnValueOnce(retry.promise);
+      await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const input = screen.getByTestId("image-url") as HTMLInputElement;
+      const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+      const content = dialogContent();
+      const retireSuccessor = vi.fn(() => {
+        const className = content.className;
+        content.className = "mutated-during-terminal-read";
+        content.className = className;
+      });
+
+      await act(async () => {
+        inputRef(null);
+        inputRef(input);
+        if (getter === "error") {
+          const error = new Error();
+          Object.defineProperty(error, "message", {
+            get() {
+              retireSuccessor();
+              return "Untrusted failure";
+            },
+          });
+          failed.reject(error);
+          await failed.promise.catch(() => undefined);
+        } else {
+          const result = {
+            url: "/api/assets/untrusted",
+            alt: "Untrusted Alt",
+          } as UploadResult;
+          Object.defineProperty(result, getter, {
+            get() {
+              retireSuccessor();
+              return getter === "url"
+                ? "/api/assets/untrusted"
+                : "Untrusted Alt";
+            },
+          });
+          failed.resolve(result);
+          await failed.promise;
+        }
+      });
+
+      expect(retireSuccessor).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(screen.getByTestId("image-upload")).toBeEnabled(),
+      );
+      expect(screen.getByTestId("image-url")).toHaveValue("");
+      expect(screen.getByTestId("image-alt")).toHaveValue("");
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      const retryFile = new File(["retry"], "retry.webp", {
+        type: "image/webp",
+      });
+      choose(retryFile);
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      await act(async () => {
+        retry.resolve({ url: "/api/assets/retry", alt: "Retry Alt" });
+        await retry.promise;
+      });
+      expect(screen.getByTestId("image-url")).toHaveValue(
+        "/api/assets/retry",
+      );
+      expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
+      expect(screen.getByTestId("image-upload")).toBeEnabled();
+    },
+  );
 
   it("makes a released unstaged guard permanently ineligible for delayed replay", async () => {
     const staleClose = vi.fn();

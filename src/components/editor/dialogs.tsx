@@ -3416,6 +3416,23 @@ export const ImageDialog = memo(function ImageDialog({
     },
     [activeUpload, coordinator, latestAuthority],
   );
+  const abandonSettledUpload = useCallback(
+    (lease: ImageUploadLease) => {
+      const owner = lease.owner;
+      if (activeUpload.get() !== owner) return;
+      activeUpload.set(null);
+      setDraft((current) =>
+        current.visit === owner.visit &&
+        current.upload === owner &&
+        current.open
+          ? nextImageDraft(current, { upload: null })
+          : current,
+      );
+      lease.publication.retire();
+      requestSuccessor();
+    },
+    [activeUpload, requestSuccessor],
+  );
   const settleUpload = useCallback(
     (
       owner: ImageUploadOwner,
@@ -3453,25 +3470,40 @@ export const ImageDialog = memo(function ImageDialog({
         try {
           resultUrl = outcome.result.url;
         } catch (error) {
-          if (!uploadLeaseIsCurrent(lease)) return;
+          if (!uploadLeaseIsCurrent(lease)) {
+            abandonSettledUpload(lease);
+            return;
+          }
           succeeded = false;
           message = imageUploadErrorText(error);
         }
-        if (!uploadLeaseIsCurrent(lease)) return;
+        if (!uploadLeaseIsCurrent(lease)) {
+          abandonSettledUpload(lease);
+          return;
+        }
         if (succeeded) {
           try {
             resultAlt = outcome.result.alt;
           } catch (error) {
-            if (!uploadLeaseIsCurrent(lease)) return;
+            if (!uploadLeaseIsCurrent(lease)) {
+              abandonSettledUpload(lease);
+              return;
+            }
             succeeded = false;
             message = imageUploadErrorText(error);
           }
-          if (!uploadLeaseIsCurrent(lease)) return;
+          if (!uploadLeaseIsCurrent(lease)) {
+            abandonSettledUpload(lease);
+            return;
+          }
         }
       } else {
         if (!uploadLeaseIsCurrent(lease)) return;
         message = imageUploadErrorText(outcome.error);
-        if (!uploadLeaseIsCurrent(lease)) return;
+        if (!uploadLeaseIsCurrent(lease)) {
+          abandonSettledUpload(lease);
+          return;
+        }
       }
       const publication = lease.publication;
       const input = publication.dom.file;
@@ -3518,6 +3550,7 @@ export const ImageDialog = memo(function ImageDialog({
     },
     [
       activeUpload,
+      abandonSettledUpload,
       coordinator,
       deferredUploadOutcome,
       latestAuthority,
