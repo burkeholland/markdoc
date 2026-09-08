@@ -1656,6 +1656,71 @@ describe("CommentsPanel", () => {
     expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true");
   });
 
+  it("reads focus custody through the captured owner-document accessor", () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      const fixture = reviewSession("comment-navigation-active-element-accessor");
+      session = fixture.session;
+      render(
+        <CommentsPanel
+          session={session}
+          onClose={() => {}}
+          onReveal={() => {}}
+          focusTab={{ tab: "open", nonce: 1 }}
+        />,
+      );
+      const navigation = captureCommentNavigation();
+      const ownerDocument = navigation.open.element.ownerDocument;
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
+      const activeElement = Object.getOwnPropertyDescriptor(
+        ownerWindow.Document.prototype,
+        "activeElement",
+      );
+      if (!activeElement || typeof activeElement.get !== "function") {
+        throw new Error("Document.activeElement was not an accessor");
+      }
+      outside.focus();
+      expect(activeElement.get.call(ownerDocument)).toBe(outside);
+
+      Object.defineProperty(ownerDocument, "activeElement", {
+        configurable: true,
+        get: () => {
+          const actual = activeElement.get!.call(ownerDocument);
+          return actual === outside ? navigation.open.element : actual;
+        },
+      });
+      try {
+        const poisonedFocus = new ownerWindow.KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => navigation.open.element.dispatchEvent(poisonedFocus));
+        expect(activeElement.get.call(ownerDocument)).toBe(outside);
+        expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
+      } finally {
+        Reflect.deleteProperty(ownerDocument, "activeElement");
+      }
+
+      navigation.open.element.focus();
+      act(() => {
+        navigation.open.element.dispatchEvent(
+          new ownerWindow.KeyboardEvent("keydown", {
+            key: "ArrowRight",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      expect(navigation.resolved.element).toHaveFocus();
+      expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true");
+    } finally {
+      outside.remove();
+    }
+  });
+
   it("uses captured observer drains when prototype methods are replaced", async () => {
     const fixture = reviewSession("comment-navigation-observer-intrinsics");
     session = fixture.session;

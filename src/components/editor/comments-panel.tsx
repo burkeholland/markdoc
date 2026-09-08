@@ -6398,6 +6398,7 @@ type CommentNavigationKeyboardEventField =
   | "metaKey";
 
 interface CommentNavigationEventIntrinsics {
+  readonly document: CommentNavigationNativeGetters<"activeElement">;
   readonly event: CommentNavigationNativeGetters<CommentNavigationEventField>;
   readonly uiEvent: CommentNavigationNativeGetters<CommentNavigationUiEventField>;
   readonly mouseEvent: CommentNavigationNativeGetters<CommentNavigationMouseEventField>;
@@ -6447,6 +6448,9 @@ function captureCommentNavigationMethod<Method>(
 function captureCommentNavigationEventIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): CommentNavigationEventIntrinsics | null {
+  const document = captureCommentNavigationGetters(ownerWindow.Document.prototype, [
+    "activeElement",
+  ] as const);
   const event = captureCommentNavigationGetters(ownerWindow.Event.prototype, [
     "type",
     "target",
@@ -6497,6 +6501,7 @@ function captureCommentNavigationEventIntrinsics(
     "composedPath",
   );
   if (
+    !document ||
     !event ||
     !uiEvent ||
     !mouseEvent ||
@@ -6507,6 +6512,7 @@ function captureCommentNavigationEventIntrinsics(
     return null;
   }
   return Object.freeze({
+    document,
     event,
     uiEvent,
     mouseEvent,
@@ -6582,6 +6588,16 @@ function commentNavigationNativeDefaultPrevented(
     publication.eventIntrinsics.event.defaultPrevented,
     event,
   );
+}
+
+function commentNavigationActiveElement(
+  publication: CommentNavigationPublication,
+): Element | null {
+  return suggestionReflectApply(
+    publication.eventIntrinsics.document.activeElement,
+    publication.ownerDocument,
+    [],
+  ) as Element | null;
 }
 
 interface CommentNavigationTabFacts {
@@ -7643,7 +7659,7 @@ function commentNavigationNativeSnapshotMatches(
         keyboard.altKey &&
       commentNavigationNativeValue<boolean>(keyboardEvent.metaKey, event) ===
         keyboard.metaKey &&
-      publication.ownerDocument.activeElement === keyboard.activeElement,
+      commentNavigationActiveElement(publication) === keyboard.activeElement,
   );
 }
 
@@ -7964,7 +7980,7 @@ function createCommentNavigationRender(
       if (
         !active ||
         target !== active ||
-        publication.ownerDocument.activeElement !== active ||
+        commentNavigationActiveElement(publication) !== active ||
         !path.includes(active) ||
         !path.includes(publication.elements.tablist)
       ) {
@@ -8100,7 +8116,7 @@ function createCommentNavigationRender(
                 keyboardEvent.metaKey,
                 event,
               ),
-              activeElement: publication.ownerDocument.activeElement,
+              activeElement: commentNavigationActiveElement(publication),
             })
           : null;
       const snapshot: CommentNavigationNativeSnapshot = Object.freeze({
@@ -8420,11 +8436,11 @@ function createCommentNavigationRender(
         const next = publication.elements.tabs[nextIndex];
         if (!next || nextTab === null) return;
         suggestionReflectApply(commentNavigationPreventDefault, event, []);
-        if (publication.ownerDocument.activeElement !== next) {
+        if (commentNavigationActiveElement(publication) !== next) {
           suggestionReflectApply(publication.focus, next, [{ preventScroll: true }]);
         }
         if (
-          publication.ownerDocument.activeElement !== next ||
+          commentNavigationActiveElement(publication) !== next ||
           !publicationIsCurrent(true)
         ) {
           if (cells.active.current === publication && retire("action")) {
@@ -8842,7 +8858,7 @@ function createCommentNavigationRender(
         return;
       }
       suggestionReflectApply(publication.focus, selected, [{ preventScroll: true }]);
-      return publication.ownerDocument.activeElement === selected;
+      return commentNavigationActiveElement(publication) === selected;
     },
   });
   return Object.freeze(render);
