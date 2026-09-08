@@ -183,6 +183,44 @@ function dispatchWithHandlers(control: CapturedControl, handlers: readonly Mouse
   }
 }
 
+function cloneSyntheticClick(
+  event: CapturedMouseEvent,
+  syntheticConstructor: new () => object,
+) {
+  const prototype = Object.create(Object.getPrototypeOf(event), {
+    constructor: { value: syntheticConstructor },
+  });
+  return Object.assign(
+    Object.create(prototype) as CapturedMouseEvent,
+    event,
+  );
+}
+
+function dispatchWithListenerMicrotaskCheckpoint(
+  type: "click" | "focusin",
+  target: EventTarget,
+  dispatch: () => void,
+) {
+  const pending: VoidFunction[] = [];
+  const queue = vi
+    .spyOn(globalThis, "queueMicrotask")
+    .mockImplementation((callback) => pending.push(callback));
+  const checkpoint = (event: Event) => {
+    if (event.target !== target) return;
+    while (pending.length) pending.shift()!();
+  };
+  document.addEventListener(type, checkpoint, true);
+  try {
+    dispatch();
+  } finally {
+    document.removeEventListener(type, checkpoint, true);
+    queue.mockRestore();
+    act(() => {
+      while (pending.length) pending.shift()!();
+    });
+  }
+}
+
 function captureActions() {
   return {
     readRetry: screen.queryByTestId("notifications-read-retry")
@@ -614,6 +652,32 @@ describe("Radix disclosure provenance", () => {
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
     outside.remove();
   });
+
+  it.each(["click", "focus"] as const)(
+    "keeps genuine owner-document %s provenance through a listener microtask checkpoint",
+    async (kind) => {
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      createBellRoot(state, { onOpen: vi.fn() });
+      openCurrentBell();
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      if (kind === "click") {
+        fireEvent.pointerDown(outside);
+        await act(() => Promise.resolve());
+        dispatchWithListenerMicrotaskCheckpoint("click", outside, () => {
+          fireEvent.click(outside);
+        });
+      } else {
+        dispatchWithListenerMicrotaskCheckpoint("focusin", outside, () => {
+          act(() => outside.focus());
+        });
+      }
+
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      outside.remove();
+    },
+  );
 
   it("rejects stale and fabricated trigger handlers on a reused bell", () => {
     const onOpen = vi.fn();
@@ -1180,6 +1244,23 @@ describe("live fact revalidation and reentrancy", () => {
 });
 
 describe("notification bell Strict Mode replay", () => {
+  it("accepts an exact replay click after its synthetic constructor is production-mangled", () => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    createStrictBellRoot(state, { onOpen: vi.fn() }, () => undefined);
+    const trigger = captureControl(screen.getByTestId("notifications-bell"));
+    const mangledConstructor = class a {};
+
+    dispatchWithHandlers(trigger, [
+      (event) => {
+        const syntheticClick = cloneSyntheticClick(event, mangledConstructor);
+        expect(Object.getPrototypeOf(syntheticClick).constructor.name).toBe("a");
+        trigger.click(syntheticClick);
+      },
+    ]);
+
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
   it.each([
     ["focus-open", false],
     ["pointerdown-close", true],

@@ -227,6 +227,14 @@ interface BellRefReplay {
 
 type OutsideInteractionEvent = CustomEvent<{ originalEvent: Event }>;
 
+interface OutsideEventProvenance {
+  readonly publication: NotificationPublication;
+  readonly originalEvent: Event;
+  readonly provenanceEvent: Event;
+  readonly ownerWindow: Window;
+  timeoutId: number;
+}
+
 function freezeNotification(notification: NotificationDto): NotificationDto {
   return Object.freeze({
     id: notification.id,
@@ -577,7 +585,14 @@ class NotificationPublicationCoordinator {
   #elementOwners = new WeakMap<HTMLElement, BellElementOwner>();
   #proof: DisclosureProof | null = null;
   #claimedEvents = new WeakSet<Event>();
-  #currentOutsideEvents = new WeakMap<Event, Event>();
+  #currentOutsideEvent: OutsideEventProvenance | null = null;
+
+  clearOutsideEvent(publication?: NotificationPublication) {
+    const current = this.#currentOutsideEvent;
+    if (!current || (publication && current.publication !== publication)) return;
+    current.ownerWindow.clearTimeout(current.timeoutId);
+    this.#currentOutsideEvent = null;
+  }
 
   beginLease() {
     this.#lease += 1;
@@ -593,6 +608,7 @@ class NotificationPublicationCoordinator {
       this.#successorOf = null;
       this.#replay = null;
       this.#proof = null;
+      this.clearOutsideEvent();
     });
   }
 
@@ -776,6 +792,7 @@ class NotificationPublicationCoordinator {
   ) {
     if (!publication) return false;
     if (reason === "layout" && domain) publication.layoutRetired.add(domain);
+    this.clearOutsideEvent(publication);
     if (publication.retired) return false;
     publication.retired = true;
     publication.retirement = reason;
@@ -1074,18 +1091,29 @@ class NotificationPublicationCoordinator {
     if (!mutationGuard) return false;
     const document = trigger.ownerDocument;
     const ownerWindow = document.defaultView;
+    if (!ownerWindow) {
+      mutationGuard.release();
+      return false;
+    }
     let guardReleased = false;
     let deferredPointerEvent: Event | null = null;
     const activateOutsideEvent = (originalEvent: Event, provenanceEvent: Event) => {
-      this.#currentOutsideEvents.set(originalEvent, provenanceEvent);
-      queueMicrotask(() => {
-        if (this.#currentOutsideEvents.get(originalEvent) === provenanceEvent) {
-          this.#currentOutsideEvents.delete(originalEvent);
-        }
-      });
+      this.clearOutsideEvent();
+      const proof: OutsideEventProvenance = {
+        publication,
+        originalEvent,
+        provenanceEvent,
+        ownerWindow,
+        timeoutId: 0,
+      };
+      this.#currentOutsideEvent = proof;
+      proof.timeoutId = ownerWindow.setTimeout(() => {
+        if (this.#currentOutsideEvent === proof) this.#currentOutsideEvent = null;
+      }, 0);
     };
     const notePointerDown = (event: Event) => {
-      if (ownerWindow && event instanceof ownerWindow.MouseEvent && event.button === 0) {
+      this.clearOutsideEvent();
+      if (event instanceof ownerWindow.MouseEvent && event.button === 0) {
         deferredPointerEvent = event;
         return;
       }
@@ -1095,6 +1123,7 @@ class NotificationPublicationCoordinator {
     const noteClick = (event: Event) => {
       const originalEvent = deferredPointerEvent;
       deferredPointerEvent = null;
+      this.clearOutsideEvent();
       if (originalEvent) activateOutsideEvent(originalEvent, event);
     };
     const noteFocus = (event: Event) => {
@@ -1102,6 +1131,7 @@ class NotificationPublicationCoordinator {
     };
     const cancelDeferredPointer = () => {
       deferredPointerEvent = null;
+      this.clearOutsideEvent();
     };
     document.addEventListener("pointerdown", notePointerDown, true);
     document.addEventListener("pointercancel", cancelDeferredPointer, true);
@@ -1113,6 +1143,7 @@ class NotificationPublicationCoordinator {
         if (guardReleased) return;
         guardReleased = true;
         deferredPointerEvent = null;
+        this.clearOutsideEvent(publication);
         document.removeEventListener("pointerdown", notePointerDown, true);
         document.removeEventListener("pointercancel", cancelDeferredPointer, true);
         document.removeEventListener("click", noteClick, true);
@@ -1315,6 +1346,7 @@ class NotificationPublicationCoordinator {
     element: HTMLButtonElement,
     event: ReactMouseEvent<HTMLButtonElement>,
   ) {
+    if (!event || typeof event !== "object") return null;
     const document = element.ownerDocument;
     const ownerWindow = document.defaultView;
     const nativeEvent = event?.nativeEvent;
@@ -1325,29 +1357,29 @@ class NotificationPublicationCoordinator {
       isPropagationStopped?: unknown;
       persist?: unknown;
     };
-    const prototype = Object.getPrototypeOf(event) as {
-      constructor?: { name?: unknown };
-    } | null;
     if (
       !ownerWindow ||
       !(nativeEvent instanceof ownerWindow.MouseEvent) ||
       nativeEvent.type !== "click" ||
       nativeEvent.button !== 0 ||
       nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      !nativeEvent.bubbles ||
       event.type !== "click" ||
       event.button !== 0 ||
       !event.bubbles ||
       event.currentTarget !== element ||
       nativeEvent.target !== target ||
       !isNodeFromDocument(target, document) ||
+      !target.isConnected ||
       !element.contains(target) ||
       !nativeEvent.composedPath().includes(element) ||
       event.defaultPrevented ||
       nativeEvent.defaultPrevented ||
-      prototype?.constructor?.name !== "SyntheticBaseEvent" ||
       reactEvent._reactName !== "onClick" ||
       typeof reactEvent.isDefaultPrevented !== "function" ||
+      reactEvent.isDefaultPrevented() ||
       typeof reactEvent.isPropagationStopped !== "function" ||
+      reactEvent.isPropagationStopped() ||
       typeof reactEvent.persist !== "function" ||
       this.#claimedEvents.has(nativeEvent) ||
       !this.matches(publication)
@@ -1407,9 +1439,8 @@ class NotificationPublicationCoordinator {
     const ownerWindow = document?.defaultView;
     const originalEvent = event.detail?.originalEvent;
     const target = originalEvent?.target ?? null;
-    const provenanceEvent = originalEvent
-      ? this.#currentOutsideEvents.get(originalEvent)
-      : undefined;
+    const outsideProof = this.#currentOutsideEvent;
+    const provenanceEvent = outsideProof?.provenanceEvent;
     const pointerEvent =
       ownerWindow &&
       originalEvent &&
@@ -1433,6 +1464,9 @@ class NotificationPublicationCoordinator {
       !document ||
       !ownerWindow ||
       !originalEvent ||
+      !outsideProof ||
+      outsideProof.publication !== publication ||
+      outsideProof.originalEvent !== originalEvent ||
       !eventTypeMatches ||
       !provenanceEvent ||
       !(event instanceof ownerWindow.CustomEvent) ||
@@ -1463,6 +1497,7 @@ class NotificationPublicationCoordinator {
     ) {
       return;
     }
+    this.clearOutsideEvent(publication);
     this.#claimedEvents.add(originalEvent);
     publication.consumed = true;
     this.#proof = { publication, nextOpen: false, event: originalEvent };
