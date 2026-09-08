@@ -75,6 +75,15 @@ interface PermissionHintDomSnapshot {
   readonly children: readonly PermissionHintDomSnapshot[];
 }
 
+interface PermissionHintPlacement {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+type PermissionHintPlacementChain = readonly PermissionHintPlacement[];
+
 interface PermissionHintPublication {
   readonly identity: symbol;
   readonly render: PermissionHintRender;
@@ -85,7 +94,7 @@ interface PermissionHintPublication {
   readonly button: HTMLButtonElement;
   readonly bindings: Readonly<Record<PermissionHintElementRole, PermissionHintBinding>>;
   readonly target: RefObject<HTMLPreElement | null>;
-  readonly rootParent: Node | null;
+  readonly placement: PermissionHintPlacementChain;
   readonly dom: PermissionHintDomSnapshot;
   readonly buttonTargets: readonly Node[];
   retired: boolean;
@@ -110,8 +119,6 @@ interface PermissionHintReplay {
 }
 
 const PERMISSION_HINT_ROLES = ["root", "pre", "button"] as const;
-const PermissionHintMutationObserver =
-  typeof MutationObserver === "function" ? MutationObserver : null;
 
 function permissionHintAttributes(node: Node): readonly (readonly [string, string])[] | null {
   if (node.nodeType !== 1) return null;
@@ -149,6 +156,66 @@ function permissionHintDomMatches(snapshot: PermissionHintDomSnapshot): boolean 
   return node.childNodes.length === snapshot.children.length &&
     snapshot.children.every((child, index) =>
       node.childNodes.item(index) === child.node && permissionHintDomMatches(child));
+}
+
+function snapshotPermissionHintPlacement(
+  node: Node,
+  ownerDocument: Document,
+): PermissionHintPlacementChain | null {
+  const placements: PermissionHintPlacement[] = [];
+  let current: Node | null = node;
+  while (current) {
+    placements.push(Object.freeze({
+      node: current,
+      parent: current.parentNode,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+    }));
+    if (current === ownerDocument) return Object.freeze(placements);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function permissionHintPlacementMatches(
+  ownerDocument: Document,
+  placements: PermissionHintPlacementChain,
+): boolean {
+  if (placements.length === 0) return false;
+  for (let index = 0; index < placements.length; index++) {
+    const placement = placements[index]!;
+    const next = placements[index + 1];
+    if (
+      placement.node.parentNode !== placement.parent ||
+      placement.node.previousSibling !== placement.previousSibling ||
+      placement.node.nextSibling !== placement.nextSibling ||
+      (next && placement.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placements.at(-1)!;
+  return (
+    last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null
+  );
+}
+
+function permissionHintMutationTouchesPlacement(
+  placements: PermissionHintPlacementChain,
+  mutation: MutationRecord,
+): boolean {
+  if (mutation.type !== "childList") return false;
+  return placements.some(({ node, parent }) =>
+    parent === mutation.target &&
+    (
+      mutation.previousSibling === node ||
+      mutation.nextSibling === node ||
+      [...mutation.addedNodes].includes(node) ||
+      [...mutation.removedNodes].includes(node)
+    ));
 }
 
 function permissionHintNodes(element: HTMLElement): readonly Node[] {
@@ -502,7 +569,7 @@ class PermissionHintCoordinator {
         initialDraft.render,
         target,
         replay.publication.dom,
-        replay.publication.rootParent,
+        replay.publication.placement,
       )
     ) {
       if (replay) this.#invalidateReplay(replay);
@@ -522,7 +589,7 @@ class PermissionHintCoordinator {
       successor,
       target,
       replay.publication.dom,
-      replay.publication.rootParent,
+      replay.publication.placement,
     );
     this.#replay = null;
     this.#disconnect(replay.publication);
@@ -537,7 +604,7 @@ class PermissionHintCoordinator {
     draft: PermissionHintDraft,
     target: RefObject<HTMLPreElement | null>,
     expectedDom?: PermissionHintDomSnapshot,
-    expectedRootParent?: Node | null,
+    expectedPlacement?: PermissionHintPlacementChain,
   ): PermissionHintPublication | null {
     const { generation, render } = draft;
     const { root, pre, button } = generation.elements;
@@ -556,13 +623,16 @@ class PermissionHintCoordinator {
         render,
         target,
         expectedDom,
-        expectedRootParent,
+        expectedPlacement,
       )
     ) {
       return null;
     }
+    const ownerDocument = root.ownerDocument;
+    const placement = expectedPlacement ??
+      snapshotPermissionHintPlacement(root, ownerDocument);
+    if (!placement) return null;
     const dom = expectedDom ?? snapshotPermissionHintDom(root);
-    const rootParent = expectedDom ? expectedRootParent ?? null : root.parentNode;
     return {
       identity: Symbol("copilot-permissions-publication"),
       render,
@@ -577,7 +647,7 @@ class PermissionHintCoordinator {
         button: buttonBinding,
       }),
       target,
-      rootParent,
+      placement,
       dom,
       buttonTargets: permissionHintNodes(button),
       retired: false,
@@ -598,9 +668,11 @@ class PermissionHintCoordinator {
     }
     publication.draft.committed = true;
     this.#current = publication;
-    if (PermissionHintMutationObserver) {
-      const observer = new PermissionHintMutationObserver(() => {
-        publication.mutated = true;
+    const MutationObserverConstructor =
+      publication.root.ownerDocument.defaultView?.MutationObserver;
+    if (MutationObserverConstructor) {
+      const observer = new MutationObserverConstructor((records) => {
+        this.#recordMutations(publication, records);
       });
       observer.observe(publication.root, {
         attributes: true,
@@ -608,8 +680,12 @@ class PermissionHintCoordinator {
         childList: true,
         subtree: true,
       });
-      if (publication.rootParent) {
-        observer.observe(publication.rootParent, { childList: true });
+      const observedParents = new Set<Node>();
+      for (const { parent } of publication.placement) {
+        if (parent && !observedParents.has(parent)) {
+          observedParents.add(parent);
+          observer.observe(parent, { childList: true });
+        }
       }
       publication.observer = observer;
     }
@@ -648,8 +724,27 @@ class PermissionHintCoordinator {
   }
 
   #mutationFree(publication: PermissionHintPublication): boolean {
-    return !publication.mutated &&
-      (publication.observer?.takeRecords().length ?? 0) === 0;
+    const records = publication.observer?.takeRecords();
+    if (records?.length) this.#recordMutations(publication, records);
+    return !publication.mutated;
+  }
+
+  #recordMutations(
+    publication: PermissionHintPublication,
+    records: readonly MutationRecord[],
+  ) {
+    if (
+      publication.mutated ||
+      !records.some((record) =>
+        publication.root.contains(record.target) ||
+        permissionHintMutationTouchesPlacement(publication.placement, record))
+    ) {
+      return;
+    }
+    publication.mutated = true;
+    const replay = this.#replay;
+    if (replay?.publication === publication) this.#invalidateReplay(replay);
+    else this.#retirePublication(publication, false);
   }
 
   #ownsBinding(binding: PermissionHintBinding): boolean {
@@ -687,7 +782,7 @@ class PermissionHintCoordinator {
     render: PermissionHintRender,
     target: RefObject<HTMLPreElement | null>,
     expectedDom?: PermissionHintDomSnapshot,
-    expectedRootParent?: Node | null,
+    expectedPlacement?: PermissionHintPlacementChain,
   ): boolean {
     const { root, pre, button } = generation.elements;
     const rootBinding = generation.bindings.root;
@@ -760,7 +855,8 @@ class PermissionHintCoordinator {
       button.parentElement !== controls ||
       (expectedDom && !permissionHintDomMatches(expectedDom)) ||
       (expectedDom && root !== expectedDom.node) ||
-      (expectedDom && root.parentNode !== expectedRootParent)
+      (expectedPlacement && expectedPlacement[0]?.node !== root) ||
+      (expectedPlacement && !permissionHintPlacementMatches(ownerDocument, expectedPlacement))
     ) {
       return false;
     }
@@ -776,14 +872,15 @@ class PermissionHintCoordinator {
       publication.bindings.root === publication.generation.bindings.root &&
       publication.bindings.pre === publication.generation.bindings.pre &&
       publication.bindings.button === publication.generation.bindings.button &&
-      publication.root.parentNode === publication.rootParent &&
+      publication.placement[0]?.node === publication.root &&
+      permissionHintPlacementMatches(publication.root.ownerDocument, publication.placement) &&
       this.#mutationFree(publication) &&
       this.#hierarchyIsCurrent(
         publication.generation,
         publication.render,
         publication.target,
         publication.dom,
-        publication.rootParent,
+        publication.placement,
       )
     );
   }
