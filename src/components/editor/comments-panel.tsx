@@ -174,6 +174,17 @@ const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
 const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
 const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
 const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
+const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "currentTarget",
+)?.get;
+const suggestionReflectApply = Reflect.apply;
+
+function suggestionNativeCurrentTarget(event: Event): EventTarget | null {
+  return suggestionEventCurrentTargetGetter
+    ? (suggestionReflectApply(suggestionEventCurrentTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
 
 type SuggestionActionKind = "accept" | "reject";
 
@@ -732,14 +743,6 @@ function createSuggestionActionRender(
     let domGuard: SuggestionActionDomGuard | null = null;
     const nativeDeliveries = new WeakMap<globalThis.MouseEvent, SuggestionNativeDelivery>();
     const nativeBubbleTargets = new Set<EventTarget>();
-    const ownerWindow = publication.ownerDocument.defaultView;
-    const nativeCurrentTargetGetter = ownerWindow
-      ? Object.getOwnPropertyDescriptor(ownerWindow.Event.prototype, "currentTarget")?.get
-      : undefined;
-    const nativeCurrentTarget = (event: Event): EventTarget | null =>
-      nativeCurrentTargetGetter
-        ? (Reflect.apply(nativeCurrentTargetGetter, event, []) as EventTarget | null)
-        : null;
 
     const removeListeners = () => {
       publication.ownerDocument.defaultView?.removeEventListener("click", captureNative, true);
@@ -894,7 +897,7 @@ function createSuggestionActionRender(
       if (
         !delivery ||
         delivery.snapshot.publication !== publication ||
-        nativeCurrentTarget(event) !== publication.elements.root ||
+        suggestionNativeCurrentTarget(event) !== publication.elements.root ||
         !suggestionNativeSnapshotMatches(delivery)
       ) {
         return;
@@ -963,7 +966,7 @@ function createSuggestionActionRender(
         return;
       }
       delivery.captureEvent = event;
-      const delegationTarget = nativeCurrentTarget(delivery.snapshot.event);
+      const delegationTarget = suggestionNativeCurrentTarget(delivery.snapshot.event);
       if (!delegationTarget || !delivery.snapshot.path.includes(delegationTarget)) {
         delivery.captureInvalid = true;
         return;
@@ -999,7 +1002,7 @@ function createSuggestionActionRender(
         delivery.captureActionCount !== 1 ||
         delivery.captureRootCount !== 1 ||
         delivery.captureEvent !== event ||
-        delivery.delegationTarget !== nativeCurrentTarget(delivery.snapshot.event) ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
         (delivery.captureAction && delivery.captureAction !== action) ||
         delivery.snapshot.action !== action ||
         delivery.snapshot.button !== button ||
@@ -1014,7 +1017,7 @@ function createSuggestionActionRender(
     const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
       const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
       const delivery = button ? nativeDelivery(event, button, true) : null;
-      if (delivery && delivery.delegationTarget !== nativeCurrentTarget(delivery.snapshot.event)) {
+      if (delivery && delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event)) {
         delivery.bubbleInvalid = true;
         return;
       }
@@ -1070,7 +1073,7 @@ function createSuggestionActionRender(
       if (
         delivery.bubbleRootCount !== 1 ||
         delivery.bubbleInvalid ||
-        delivery.delegationTarget !== nativeCurrentTarget(delivery.snapshot.event) ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
         delivery.bubbleEvent !== event ||
         delivery.captureEvent === event ||
         !delivery.bubbleAction ||
@@ -1090,7 +1093,7 @@ function createSuggestionActionRender(
       if (
         !delivery ||
         delivery.snapshot.publication !== publication ||
-        nativeCurrentTarget(event) !== delivery.delegationTarget
+        suggestionNativeCurrentTarget(event) !== delivery.delegationTarget
       ) {
         return;
       }

@@ -710,8 +710,26 @@ describe("CommentsPanel", () => {
             ? ownerDocument
             : ownerDocument.getElementById("root");
         if (!target) throw new Error("The host hydration root was not rendered");
+        const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+          ownerWindow.Event.prototype,
+          "currentTarget",
+        );
+        const originalCurrentTargetGetter = currentTargetDescriptor?.get;
+        if (!currentTargetDescriptor || !originalCurrentTargetGetter) {
+          throw new Error("The owner realm did not expose Event.currentTarget");
+        }
+        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", {
+          ...currentTargetDescriptor,
+          get(this: Event) {
+            const own = Object.getOwnPropertyDescriptor(this, "currentTarget");
+            return own && "value" in own
+              ? own.value
+              : Reflect.apply(originalCurrentTargetGetter, this, []);
+          },
+        });
         const errors = vi.spyOn(console, "error").mockImplementation(() => {});
         const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
+        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", currentTargetDescriptor);
 
         try {
           const actions = captureSuggestionActions(target);
