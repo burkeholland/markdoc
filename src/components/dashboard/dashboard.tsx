@@ -1184,11 +1184,6 @@ function createTemplateGridPublication(
     let reactButtonClick: TemplateGridReactEntryClickProof | null = null;
     let reactBubbleClick: TemplateGridReactEntryClickProof | null = null;
     let nativeBoundaryClick: TemplateGridNativeClickProof | null = null;
-    let nativeRootBoundary: {
-      readonly event: MouseEvent;
-      readonly target: Node;
-      readonly listener: (event: Event) => void;
-    } | null = null;
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -1274,11 +1269,15 @@ function createTemplateGridPublication(
       }
     };
     const onNativeClickBubble = (event: MouseEvent) => {
+      const proof = reactBubbleClick;
       if (
-        nativeRootBoundary?.event === event &&
-        nativeRootBoundary.target === ownerDocument
+        proof &&
+        nativeClick?.event === event &&
+        nativeCurrentTarget(event) === ownerDocument &&
+        event.eventPhase === ownerWindow.Event.BUBBLING_PHASE &&
+        !nativeWasPrevented(event)
       ) {
-        return;
+        deliver(proof, event);
       }
       if (nativeClick?.event === event) {
         nativeClick = null;
@@ -1349,14 +1348,6 @@ function createTemplateGridPublication(
           listener,
           true,
         );
-      }
-      if (nativeRootBoundary) {
-        TRUSTED_REMOVE_EVENT_LISTENER(
-          nativeRootBoundary.target,
-          "click",
-          nativeRootBoundary.listener,
-        );
-        nativeRootBoundary = null;
       }
     };
     const publishedDomMatches = () =>
@@ -1503,7 +1494,8 @@ function createTemplateGridPublication(
         action.index !== entry.entry.index ||
         !templateGridIsEffectivelyEnabled(grid, entry.button) ||
         proof.native !== nativeClick ||
-        proof.dispatchTarget !== nativeCurrentTarget(event) ||
+        nativeCurrentTarget(event) !== ownerDocument ||
+        event.eventPhase !== ownerWindow.Event.BUBBLING_PHASE ||
         proof.native.event !== event ||
         nativeWasPrevented(event) ||
         nativeWasPrevented(proof.native.event) ||
@@ -1669,47 +1661,6 @@ function createTemplateGridPublication(
           return;
         }
         reactGridClick = Object.freeze({ event, native: capturedNative });
-        if (nativeRootBoundary) {
-          TRUSTED_REMOVE_EVENT_LISTENER(
-            nativeRootBoundary.target,
-            "click",
-            nativeRootBoundary.listener,
-          );
-        }
-        const listener = (boundaryEvent: Event) => {
-          const proof = reactBubbleClick;
-          if (
-            proof &&
-            proof.dispatchTarget === dispatchTarget &&
-            boundaryEvent instanceof ownerWindow.MouseEvent &&
-            boundaryEvent === capturedNative.event &&
-            nativeCurrentTarget(boundaryEvent) === dispatchTarget &&
-            (boundaryEvent.eventPhase === ownerWindow.Event.BUBBLING_PHASE ||
-              boundaryEvent.eventPhase === ownerWindow.Event.AT_TARGET) &&
-            !nativeWasPrevented(boundaryEvent) &&
-            !nativeWasPrevented(capturedNative.event)
-          ) {
-            deliver(proof, boundaryEvent);
-          }
-          if (nativeRootBoundary?.listener === listener) {
-            TRUSTED_REMOVE_EVENT_LISTENER(
-              dispatchTarget,
-              "click",
-              listener,
-            );
-            nativeRootBoundary = null;
-          }
-        };
-        nativeRootBoundary = {
-          event: capturedNative.event,
-          target: dispatchTarget,
-          listener,
-        };
-        TRUSTED_ADD_EVENT_LISTENER(
-          dispatchTarget,
-          "click",
-          listener,
-        );
       },
       captureReactCardClick: (
         entryAuthority: TemplateGridEntryPublication,

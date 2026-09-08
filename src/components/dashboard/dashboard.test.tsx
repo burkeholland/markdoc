@@ -1348,9 +1348,14 @@ describe("TemplateGrid publication ownership", () => {
     },
   );
 
-  it.each(["container", "document"] as const)(
-    "rejects React capture relocated onto the grid for a %s root",
-    async (rootKind) => {
+  it.each([
+    ["container", "grid"],
+    ["document", "grid"],
+    ["container", "wrapper"],
+    ["document", "wrapper"],
+  ] as const)(
+    "rejects React capture relocated onto the %s-root %s",
+    async (rootKind, relocationKind) => {
       const frame = document.createElement("iframe");
       document.body.append(frame);
       const ownerDocument = frame.contentDocument;
@@ -1366,13 +1371,17 @@ describe("TemplateGrid publication ownership", () => {
             <html>
               {createElement("head")}
               <body>
-                <TemplateGrid onPick={onPick} busy={null} />
+                <div data-testid="template-root-wrapper">
+                  <TemplateGrid onPick={onPick} busy={null} />
+                </div>
               </body>
             </html>
           </StrictMode>
         ) : (
           <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
+            <div data-testid="template-root-wrapper">
+              <TemplateGrid onPick={onPick} busy={null} />
+            </div>
           </StrictMode>
         );
       const markup = renderToString(tree);
@@ -1401,6 +1410,14 @@ describe("TemplateGrid publication ownership", () => {
       if (!grid || !button) {
         throw new Error("The server template grid was not rendered");
       }
+      const wrapper = ownerDocument.querySelector<HTMLDivElement>(
+        '[data-testid="template-root-wrapper"]',
+      );
+      if (!wrapper) {
+        throw new Error("The server template wrapper was not rendered");
+      }
+      const relocatedTarget: HTMLElement =
+        relocationKind === "grid" ? grid : wrapper;
       const rootTarget: EventTarget = host;
       const ownAddDescriptor = Object.getOwnPropertyDescriptor(
         rootTarget,
@@ -1430,7 +1447,7 @@ describe("TemplateGrid publication ownership", () => {
             options === true ||
             (typeof options === "object" && options.capture === true);
           if (type === "click" && capture) {
-            grid.addEventListener(type, listener, options);
+            relocatedTarget.addEventListener(type, listener, options);
           } else {
             rootAdd(type, listener, options);
           }
@@ -1442,7 +1459,7 @@ describe("TemplateGrid publication ownership", () => {
         );
         event.stopPropagation();
       };
-      grid.addEventListener("click", attack);
+      relocatedTarget.addEventListener("click", attack);
       let root: ReturnType<typeof hydrateRoot> | null = null;
 
       try {
@@ -1456,7 +1473,7 @@ describe("TemplateGrid publication ownership", () => {
         expect(onPick).not.toHaveBeenCalled();
       } finally {
         restoreRootAdd();
-        grid.removeEventListener("click", attack);
+        relocatedTarget.removeEventListener("click", attack);
         if (root) await act(async () => root?.unmount());
         frame.remove();
       }
