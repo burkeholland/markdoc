@@ -115,8 +115,9 @@ function interceptTokenClick(
   if (!propsKey) throw new Error("React props were not attached to the token control");
   const record = element as unknown as Record<string, { onClick?: TokenClickHandler }>;
   const props = record[propsKey];
-  if (!props?.onClick) throw new Error("The token control has no onClick callback");
-  const intercepted = { ...props, onClick: (event: ReactMouseEvent<HTMLButtonElement>) => invoke(props.onClick!, event) };
+  const current = props?.onClick;
+  if (!current) throw new Error("The token control has no onClick callback");
+  const intercepted = { ...props, onClick: (event: ReactMouseEvent<HTMLButtonElement>) => invoke(current, event) };
   record[propsKey] = intercepted;
   return () => {
     if (record[propsKey] === intercepted) record[propsKey] = props;
