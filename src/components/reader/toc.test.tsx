@@ -1018,8 +1018,8 @@ describe("ReaderToc exact DOM publications", () => {
 
           observer.publish([{ target: shared, isIntersecting: true }]);
           expect(observer.disconnect).toHaveBeenCalledOnce();
-          expect(controls.links[0]).toHaveAttribute("aria-current", "location");
-          expect(controls.links[1]).not.toHaveAttribute("aria-current");
+          expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+          expect(controls.links.every((link) => !link.classList.contains("bg-accent-soft"))).toBe(true);
 
           const nextVisit = documentA.map((heading) => ({ ...heading }));
           act(() => view.root.render(
@@ -1034,45 +1034,58 @@ describe("ReaderToc exact DOM publications", () => {
           expect(directControls(view.host).links[1]).toHaveAttribute("aria-current", "location");
         });
 
-        it("drops a retired same-visit active heading on parent replay and recovers on a fresh observer", () => {
-          const renderBoundary = (domKey: string, boundary: number) => (
-            <StrictMode>
-              <DirectReaderBoundary
-                currentHeadings={documentA}
-                domKey={domKey}
-                boundary={boundary}
-              />
-            </StrictMode>
-          );
-          const view = directRoot(renderBoundary("active-a", 0));
-          let controls = directControls(view.host);
-          const observer = InstrumentedIntersectionObserver.instances.at(-1)!;
-          const shared = document.getElementById("shared")!;
+        it.each(["heading-id", "duplicate-id", "missing-id"] as const)(
+          "clears active styling when queued %s history retires during a parent replay",
+          (kind) => {
+            const currentHeadings = kind === "missing-id" ? documentWithMissing : documentA;
+            const renderBoundary = (domKey: string, boundary: number) => (
+              <StrictMode>
+                <DirectReaderBoundary
+                  currentHeadings={currentHeadings}
+                  domKey={domKey}
+                  boundary={boundary}
+                  omitHeadingId={kind === "missing-id" ? "missing" : undefined}
+                  includeIdDecoy={kind !== "heading-id"}
+                />
+              </StrictMode>
+            );
+            const view = directRoot(renderBoundary("active-a", 0));
+            let controls = directControls(view.host);
+            const observer = InstrumentedIntersectionObserver.instances.at(-1)!;
+            const shared = document.getElementById("shared")!;
 
-          observer.publish([{ target: shared, isIntersecting: true }]);
-          expect(controls.links[1]).toHaveAttribute("aria-current", "location");
-          shared.setAttribute("data-retire-observer", "true");
-          shared.removeAttribute("data-retire-observer");
-          observer.publish([{ target: shared, isIntersecting: true }]);
-          expect(observer.disconnect).toHaveBeenCalledOnce();
+            observer.publish([{ target: shared, isIntersecting: true }]);
+            expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+            if (kind === "heading-id") {
+              shared.id = "shared-tampered";
+              shared.id = "shared";
+            } else {
+              const decoy = view.host.querySelector<HTMLElement>(
+                '[data-testid="reader-heading-id-decoy"]',
+              )!;
+              decoy.id = kind === "duplicate-id" ? "shared" : "missing";
+              decoy.removeAttribute("id");
+            }
 
-          act(() => view.root.render(renderBoundary("active-a", 1)));
-          controls = directControls(view.host);
-          expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
-          expect(controls.links.every((link) => !link.classList.contains("bg-accent-soft"))).toBe(true);
+            act(() => view.root.render(renderBoundary("active-a", 1)));
+            controls = directControls(view.host);
+            expect(observer.disconnect).toHaveBeenCalledOnce();
+            expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+            expect(controls.links.every((link) => !link.classList.contains("bg-accent-soft"))).toBe(true);
 
-          observer.publish([{ target: shared, isIntersecting: true }]);
-          expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+            observer.publish([{ target: shared, isIntersecting: true }]);
+            expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
 
-          act(() => view.root.render(renderBoundary("active-b", 2)));
-          controls = directControls(view.host);
-          const freshObserver = InstrumentedIntersectionObserver.instances.at(-1)!;
-          expect(freshObserver).not.toBe(observer);
-          expect(freshObserver.connected).toBe(true);
-          freshObserver.publish([{ target: shared, isIntersecting: true }]);
-          expect(controls.links.filter((link) => link.getAttribute("aria-current") === "location"))
-            .toEqual([controls.links[1]]);
-        });
+            act(() => view.root.render(renderBoundary("active-b", 2)));
+            controls = directControls(view.host);
+            const freshObserver = InstrumentedIntersectionObserver.instances.at(-1)!;
+            expect(freshObserver).not.toBe(observer);
+            expect(freshObserver.connected).toBe(true);
+            freshObserver.publish([{ target: shared, isIntersecting: true }]);
+            expect(controls.links.filter((link) => link.getAttribute("aria-current") === "location"))
+              .toEqual([controls.links[1]]);
+          },
+        );
 
         it.each(["missing-id-restore", "duplicate-id"] as const)(
           "permanently retires stale link and observer work after a %s mutation",
@@ -1115,8 +1128,8 @@ describe("ReaderToc exact DOM publications", () => {
 
             staleObserver.publish([{ target: shared, isIntersecting: true }]);
             expect(staleObserver.disconnect).toHaveBeenCalledOnce();
-            expect(controls.links[0]).toHaveAttribute("aria-current", "location");
-            expect(controls.links[1]).not.toHaveAttribute("aria-current");
+            expect(controls.links.every((link) => !link.hasAttribute("aria-current"))).toBe(true);
+            expect(controls.links.every((link) => !link.classList.contains("bg-accent-soft"))).toBe(true);
 
             act(() => view.root.render(renderBoundary("id-b")));
             controls = directControls(view.host);

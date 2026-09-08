@@ -309,6 +309,7 @@ function useActiveHeading(
       mutationObserver?.disconnect();
       mutationObserver?.takeRecords();
       if (observerOwnerRef.current === owner) observerOwnerRef.current = null;
+      setActiveHeading((current) => current?.owner === owner ? null : current);
     };
     const publish = (id: string | null) => {
       if (!isCurrent()) return;
