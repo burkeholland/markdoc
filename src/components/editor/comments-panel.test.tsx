@@ -1846,6 +1846,75 @@ describe("CommentsPanel", () => {
     expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
   });
 
+  it.each(["NodeList", "Array"] as const)(
+    "keeps detach history exact when the owner-realm %s iterator is poisoned",
+    async (collection) => {
+      const fixture = reviewSession(
+        `comment-navigation-${collection.toLowerCase()}-iterator`,
+      );
+      session = fixture.session;
+      render(
+        <CommentsPanel
+          session={session}
+          onClose={() => {}}
+          onReveal={() => {}}
+          focusTab={{ tab: "open", nonce: 1 }}
+        />,
+      );
+      const stale = captureCommentNavigation();
+      const ownerWindow = stale.panel.ownerDocument.defaultView as
+        | (Window & typeof globalThis)
+        | null;
+      const parent = stale.panel.parentNode;
+      if (!ownerWindow || !parent) {
+        throw new Error("The Comments navigation had no owner placement");
+      }
+      expect(parent.childNodes).toHaveLength(1);
+
+      const prototype =
+        collection === "NodeList"
+          ? ownerWindow.NodeList.prototype
+          : ownerWindow.Array.prototype;
+      const iterator = Object.getOwnPropertyDescriptor(
+        prototype,
+        Symbol.iterator,
+      );
+      if (!iterator || typeof iterator.value !== "function") {
+        throw new Error(`${collection} did not have an own iterator`);
+      }
+      const emptyIterator = () => ({
+        next: () => ({ done: true as const, value: undefined }),
+      });
+      Object.defineProperty(prototype, Symbol.iterator, {
+        ...iterator,
+        value:
+          collection === "NodeList"
+            ? emptyIterator
+            : function (this: unknown[]) {
+                return this.length === 1 && this[0] === stale.panel
+                  ? emptyIterator()
+                  : Reflect.apply(iterator.value, this, []);
+              },
+      });
+      try {
+        act(() => {
+          parent.removeChild(stale.panel);
+          parent.appendChild(stale.panel);
+          dispatchReviewClick(stale.resolved.element);
+        });
+        expect(stale.open.element).toHaveAttribute("aria-selected", "true");
+      } finally {
+        Object.defineProperty(prototype, Symbol.iterator, iterator);
+      }
+
+      await act(async () => {});
+      const recovered = captureCommentNavigation();
+      expect(recovered.resolved.click).not.toBe(stale.resolved.click);
+      act(() => dispatchReviewClick(recovered.resolved.element));
+      expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
+    },
+  );
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({

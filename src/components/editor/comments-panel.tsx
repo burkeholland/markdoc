@@ -6422,6 +6422,10 @@ interface CommentNavigationMutationObserverIntrinsics {
   readonly takeRecords: MutationObserver["takeRecords"];
   readonly disconnect: MutationObserver["disconnect"];
   readonly record: CommentNavigationNativeGetters<CommentNavigationMutationRecordField>;
+  readonly nodeList: Readonly<{
+    length: CommentNavigationNativeGetter;
+    item: NodeList["item"];
+  }>;
 }
 
 function captureCommentNavigationGetters<const Fields extends readonly string[]>(
@@ -6558,8 +6562,35 @@ function captureCommentNavigationMutationObserverIntrinsics(
     "attributeName",
     "oldValue",
   ] as const);
-  if (!observe || !takeRecords || !disconnect || !record) return null;
-  return Object.freeze({ Constructor, observe, takeRecords, disconnect, record });
+  const nodeListLength = captureCommentNavigationGetters(
+    ownerWindow.NodeList.prototype,
+    ["length"] as const,
+  );
+  const nodeListItem = captureCommentNavigationMethod<NodeList["item"]>(
+    ownerWindow.NodeList.prototype,
+    "item",
+  );
+  if (
+    !observe ||
+    !takeRecords ||
+    !disconnect ||
+    !record ||
+    !nodeListLength ||
+    !nodeListItem
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    Constructor,
+    observe,
+    takeRecords,
+    disconnect,
+    record,
+    nodeList: Object.freeze({
+      length: nodeListLength.length,
+      item: nodeListItem,
+    }),
+  });
 }
 
 function commentNavigationNativeValue<Value>(
@@ -6634,16 +6665,36 @@ interface CommentNavigationMutationRecordSnapshot {
 function snapshotCommentNavigationMutationRecord(
   record: MutationRecord,
   intrinsics: CommentNavigationMutationObserverIntrinsics,
-): CommentNavigationMutationRecordSnapshot {
+): CommentNavigationMutationRecordSnapshot | null {
   const get = <Value,>(field: CommentNavigationMutationRecordField) =>
     suggestionReflectApply(intrinsics.record[field], record, []) as Value;
+  const snapshotNodes = (nodes: NodeList): readonly Node[] | null => {
+    const length = suggestionReflectApply(
+      intrinsics.nodeList.length,
+      nodes,
+      [],
+    ) as number;
+    if (!Number.isSafeInteger(length) || length < 0) return null;
+    const snapshot: Node[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const node = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
+        index,
+      ]) as Node | null;
+      if (!node) return null;
+      snapshot[index] = node;
+    }
+    return Object.freeze(snapshot);
+  };
+  const addedNodes = snapshotNodes(get<NodeList>("addedNodes"));
+  const removedNodes = snapshotNodes(get<NodeList>("removedNodes"));
+  if (!addedNodes || !removedNodes) return null;
   return Object.freeze({
     type: get<MutationRecordType>("type"),
     target: get<Node>("target"),
     previousSibling: get<Node | null>("previousSibling"),
     nextSibling: get<Node | null>("nextSibling"),
-    addedNodes: Object.freeze([...get<NodeList>("addedNodes")]),
-    removedNodes: Object.freeze([...get<NodeList>("removedNodes")]),
+    addedNodes,
+    removedNodes,
     attributeName: get<string | null>("attributeName"),
     oldValue: get<string | null>("oldValue"),
   });
@@ -7192,11 +7243,18 @@ function commentNavigationPlacementMutationIsRelevant(
   }
   return placement.chain.some(({ node, parent }) => {
     if (record.target !== parent) return false;
+    const collectionContains = (nodes: readonly Node[]) => {
+      for (let index = 0; index < nodes.length; index += 1) {
+        const changed = nodes[index]!;
+        if (changed === node || changed.contains?.(node)) return true;
+      }
+      return false;
+    };
     return (
       record.previousSibling === node ||
       record.nextSibling === node ||
-      [...record.addedNodes].some((changed) => changed === node || changed.contains?.(node)) ||
-      [...record.removedNodes].some((changed) => changed === node || changed.contains?.(node))
+      collectionContains(record.addedNodes) ||
+      collectionContains(record.removedNodes)
     );
   });
 }
@@ -7332,17 +7390,20 @@ function createCommentNavigationDomGuard(
   let changed = false;
   const recordChanges = (records: readonly MutationRecord[]) => {
     if (changed) return;
-    if (
-      records
-        .map((record) => snapshotCommentNavigationMutationRecord(record, intrinsics))
-        .some(
-          (record) =>
-            commentNavigationDomMutationIsRelevant(record, dom) ||
-            commentNavigationPlacementMutationIsRelevant(record, placement),
-        )
-    ) {
-      changed = true;
-      onChange();
+    for (let index = 0; index < records.length; index += 1) {
+      const record = snapshotCommentNavigationMutationRecord(
+        records[index]!,
+        intrinsics,
+      );
+      if (
+        !record ||
+        commentNavigationDomMutationIsRelevant(record, dom) ||
+        commentNavigationPlacementMutationIsRelevant(record, placement)
+      ) {
+        changed = true;
+        onChange();
+        return;
+      }
     }
   };
   const observer = new intrinsics.Constructor(recordChanges);
