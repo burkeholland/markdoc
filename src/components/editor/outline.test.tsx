@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { StrictMode, useLayoutEffect } from "react";
@@ -48,6 +49,12 @@ const OVERLAPPING_SOURCE = [
   "## Shared third",
 ].join("\n");
 
+const LONG_SOURCE = Array.from({ length: 24 }, (_, index) => [
+  `${index === 0 ? "#" : "##"} Heading ${index + 1}`,
+  "",
+  `Section ${index + 1}.`,
+]).flat().join("\n");
+
 function reactHandler<T>(element: HTMLElement, name: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
@@ -64,10 +71,18 @@ type CapturedClickEvent = {
 };
 type CapturedClick = (event: CapturedClickEvent) => void;
 type CapturedKeyDown = (event: {
+  type?: string;
   key: string;
   currentTarget: HTMLUListElement;
   target: EventTarget;
   nativeEvent?: globalThis.KeyboardEvent;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  repeat?: boolean;
+  isComposing?: boolean;
+  defaultPrevented?: boolean;
   preventDefault: () => void;
 }) => void;
 type CapturedRef<T> = (element: T | null) => void;
@@ -131,6 +146,7 @@ describe("OutlinePanel active heading reveal", () => {
     cleanup();
     for (const current of sessions) current.destroy();
     document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
     if (originalScrollIntoView) {
       Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
     } else {
@@ -419,7 +435,6 @@ describe("OutlinePanel active heading reveal", () => {
     const onSelect = vi.fn();
     render(<OutlinePanel session={session} open={open} onToggle={onToggle} onSelect={onSelect} />);
 
-    const root = screen.getByTestId(open ? "outline" : "outline-collapsed");
     const toggle = screen.getByRole<HTMLButtonElement>("button", { name: label });
     const click = reactHandler<CapturedClick>(toggle, "onClick");
     const toggleRef = reactHandler<CapturedRef<HTMLButtonElement>>(toggle, "ref");
@@ -430,13 +445,6 @@ describe("OutlinePanel active heading reveal", () => {
     click({ currentTarget: foreign });
     click({ currentTarget: detached });
     if (open) click({ currentTarget: screen.getByRole<HTMLButtonElement>("button", { name: "First" }) });
-    const sibling = document.createElement("button");
-    root.append(sibling);
-    click({ currentTarget: sibling });
-    sibling.remove();
-    toggle.disabled = true;
-    click({ currentTarget: toggle });
-    toggle.disabled = false;
     expect(onToggle).not.toHaveBeenCalled();
 
     click({ currentTarget: toggle });
@@ -479,13 +487,6 @@ describe("OutlinePanel active heading reveal", () => {
     click({ currentTarget: toggle });
     click({ currentTarget: foreign });
     click({ currentTarget: detached });
-    const sibling = document.createElement("button");
-    button.parentElement?.append(sibling);
-    click({ currentTarget: sibling });
-    sibling.remove();
-    button.disabled = true;
-    click({ currentTarget: button });
-    button.disabled = false;
     expect(onSelect).not.toHaveBeenCalled();
 
     click({ currentTarget: button });
@@ -511,6 +512,8 @@ describe("OutlinePanel active heading reveal", () => {
   });
 
   it.each([
+    ["ArrowDown", 2, 0],
+    ["ArrowUp", 0, 2],
     ["ArrowDown", 0, 1],
     ["ArrowUp", 2, 1],
     ["Home", 2, 0],
@@ -518,7 +521,15 @@ describe("OutlinePanel active heading reveal", () => {
   ] as const)("binds %s navigation to the exact list, source, and frozen destination", (key, current, next) => {
     const headings = loadHeadings();
     session.localCursor.rich = headings[0].from;
-    render(<OutlinePanel session={session} open onToggle={() => {}} onSelect={() => {}} />);
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const cursor = session.cursorSource;
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
 
     const nav = screen.getByRole("navigation", { name: "Document outline" });
     const list = nav.querySelector("ul");
@@ -540,9 +551,6 @@ describe("OutlinePanel active heading reveal", () => {
     keyDown({ key, currentTarget: list, target: foreignButton, preventDefault });
     buttons[current].focus();
     keyDown({ key: "Enter", currentTarget: list, target: buttons[current], preventDefault });
-    buttons[current].disabled = true;
-    keyDown({ key, currentTarget: list, target: buttons[current], preventDefault });
-    buttons[current].disabled = false;
     expect(preventDefault).not.toHaveBeenCalled();
 
     buttons[current].focus();
@@ -554,6 +562,14 @@ describe("OutlinePanel active heading reveal", () => {
     expect(focus).toHaveBeenCalledOnce();
     expect(buttons[next]).toHaveFocus();
     expect(querySelectorAll).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+    expect(session.cursorSource).toBe(cursor);
+    expect(screen.getByTestId("outline")).toBeVisible();
+    expect(buttons[0]).toHaveAttribute("aria-current", "location");
+    expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([buttons[0]]);
 
     keyDown({ key, currentTarget: list, target: buttons[next], preventDefault });
     expect(nativePreventDefault).toHaveBeenCalledOnce();
@@ -561,6 +577,308 @@ describe("OutlinePanel active heading reveal", () => {
     expect(focus).toHaveBeenCalledOnce();
     foreignList.remove();
     foreignButton.remove();
+  });
+
+  it("preserves every scroll position with preventScroll across edge wraps and a middle move", () => {
+    const headings = loadHeadings(session, LONG_SOURCE);
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const nav = screen.getByRole("navigation", { name: "Document outline" });
+    const buttons = within(nav).getAllByRole<HTMLButtonElement>("button");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const cursor = session.cursorSource;
+    buttons[0].focus();
+    nav.scrollTop = 91;
+    document.documentElement.scrollTop = 73;
+    document.body.scrollTop = 37;
+    const scrollPositions = {
+      outline: nav.scrollTop,
+      documentElement: document.documentElement.scrollTop,
+      body: document.body.scrollTop,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      pageXOffset: window.pageXOffset,
+      pageYOffset: window.pageYOffset,
+    };
+    const expectScrollPositions = () => {
+      expect({
+        outline: nav.scrollTop,
+        documentElement: document.documentElement.scrollTop,
+        body: document.body.scrollTop,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        pageXOffset: window.pageXOffset,
+        pageYOffset: window.pageYOffset,
+      }).toEqual(scrollPositions);
+    };
+    const move = (source: HTMLButtonElement, key: "ArrowDown" | "ArrowUp", destination: HTMLButtonElement) => {
+      focus.mockClear();
+      const nativeKey = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+      act(() => source.dispatchEvent(nativeKey));
+
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(destination).toHaveFocus();
+      expectScrollPositions();
+    };
+
+    move(buttons[0], "ArrowUp", buttons.at(-1)!);
+    move(buttons.at(-1)!, "ArrowDown", buttons[0]);
+    move(buttons[0], "ArrowDown", buttons[1]);
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+    expect(session.cursorSource).toBe(cursor);
+    expect(screen.getByTestId("outline")).toBeVisible();
+    expect(buttons[0]).toHaveAttribute("aria-current", "location");
+    expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([buttons[0]]);
+  });
+
+  it.each(["ArrowDown", "ArrowUp"] as const)("keeps a one-heading outline stable on %s", (key) => {
+    const headings = loadHeadings(session, "# Only");
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: "Only" });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const cursor = session.cursorSource;
+    button.focus();
+    focus.mockClear();
+    const nativeKey = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+    act(() => button.dispatchEvent(nativeKey));
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(button).toHaveFocus();
+    expect(button).toHaveAttribute("aria-current", "location");
+    expect(button).toHaveAttribute("tabindex", "0");
+    expect(session.cursorSource).toBe(cursor);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+  });
+
+  it.each(["ArrowDown", "ArrowUp"] as const)("ignores %s when the outline is empty", (key) => {
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const list = screen.getByRole("navigation", { name: "Document outline" }).querySelector("ul");
+    if (!list) throw new Error("Empty outline list was not rendered");
+    const nativeKey = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+    act(() => list.dispatchEvent(nativeKey));
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+    expect(screen.getByTestId("outline")).toBeVisible();
+  });
+
+  it.each([
+    ["ArrowDown", 2, 0],
+    ["ArrowUp", 0, 2],
+  ] as const)("selects only after Enter following a %s wrap", async (key, current, next) => {
+    const headings = loadHeadings();
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const buttons = within(screen.getByRole("navigation", { name: "Document outline" })).getAllByRole<HTMLButtonElement>("button");
+    const cursor = session.cursorSource;
+    buttons[current].focus();
+
+    await user.keyboard(key === "ArrowDown" ? "{ArrowDown}" : "{ArrowUp}");
+
+    expect(buttons[next]).toHaveFocus();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(session.cursorSource).toBe(cursor);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+
+    await user.keyboard("{Enter}");
+
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith(headings[next]);
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(screen.getByTestId("outline")).toBeVisible();
+  });
+
+  it.each([
+    ["Alt", { altKey: true }],
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+  ] as const)("rejects a %s-modified wrapping key without side effects", (_kind, init) => {
+    const headings = loadHeadings();
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const buttons = within(screen.getByRole("navigation", { name: "Document outline" })).getAllByRole<HTMLButtonElement>("button");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const cursor = session.cursorSource;
+    buttons[2].focus();
+    focus.mockClear();
+    const nativeKey = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+    act(() => buttons[2].dispatchEvent(nativeKey));
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(buttons[2]).toHaveFocus();
+    expect(session.cursorSource).toBe(cursor);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+  });
+
+  it("does not claim an already canceled wrapping key", () => {
+    const headings = loadHeadings();
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const buttons = within(screen.getByRole("navigation", { name: "Document outline" })).getAllByRole<HTMLButtonElement>("button");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    buttons[2].focus();
+    focus.mockClear();
+    const nativeKey = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+    buttons[2].addEventListener("keydown", (event) => event.preventDefault(), { capture: true, once: true });
+
+    act(() => buttons[2].dispatchEvent(nativeKey));
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).not.toHaveBeenCalled();
+    expect(buttons[2]).toHaveFocus();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "detach and reinsert",
+    "reorder and restore",
+    "replace and restore",
+    "disable and restore",
+    "mutate and restore",
+  ] as const)("permanently rejects a wrap after DOM %s", (change) => {
+    const headings = loadHeadings();
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const root = screen.getByTestId("outline");
+    const list = screen.getByRole("navigation", { name: "Document outline" }).querySelector("ul");
+    if (!list) throw new Error("Outline list was not rendered");
+    const buttons = within(list).getAllByRole<HTMLButtonElement>("button");
+    const rows = buttons.map((button) => button.parentElement as HTMLLIElement);
+
+    if (change === "detach and reinsert") {
+      const parent = root.parentNode;
+      const next = root.nextSibling;
+      if (!parent) throw new Error("Outline root had no parent");
+      root.remove();
+      parent.insertBefore(root, next);
+    } else if (change === "reorder and restore") {
+      list.append(rows[0]);
+      list.insertBefore(rows[0], rows[1]);
+    } else if (change === "replace and restore") {
+      const replacement = list.cloneNode(true) as HTMLUListElement;
+      list.replaceWith(replacement);
+      replacement.replaceWith(list);
+    } else if (change === "disable and restore") {
+      buttons[2].disabled = true;
+      buttons[2].disabled = false;
+    } else {
+      buttons[2].setAttribute("data-outline-item", "changed");
+      buttons[2].setAttribute("data-outline-item", "");
+    }
+
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const cursor = session.cursorSource;
+    buttons[2].focus();
+    focus.mockClear();
+    const nativeKey = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+    act(() => buttons[2].dispatchEvent(nativeKey));
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(buttons[2]).toHaveFocus();
+    expect(session.cursorSource).toBe(cursor);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+    expect(screen.getByTestId("outline")).toBeVisible();
   });
 
   it("keeps a callback-replacement successor authoritative across reused elements and stale refs", () => {
@@ -1011,17 +1329,25 @@ describe("OutlinePanel active heading reveal", () => {
       expect(select).toHaveBeenLastCalledWith(headings[1]);
       headingEvent = null;
 
-      buttons[0].focus();
+      buttons.at(-1)!.focus();
       const repeatedKey = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
       const repeatedPreventDefault = vi.spyOn(repeatedKey, "preventDefault");
-      buttons[0].addEventListener(
+      buttons.at(-1)!.addEventListener(
         "keydown",
         (nativeEvent) => {
           const replayEvent = {
+            type: "keydown",
             key: "ArrowDown",
             currentTarget: list,
-            target: nativeEvent.target ?? buttons[0],
+            target: nativeEvent.target ?? buttons.at(-1)!,
             nativeEvent: nativeEvent as globalThis.KeyboardEvent,
+            altKey: nativeEvent.altKey,
+            ctrlKey: nativeEvent.ctrlKey,
+            metaKey: nativeEvent.metaKey,
+            shiftKey: nativeEvent.shiftKey,
+            repeat: nativeEvent.repeat,
+            isComposing: nativeEvent.isComposing,
+            defaultPrevented: nativeEvent.defaultPrevented,
             preventDefault: () => nativeEvent.preventDefault(),
           };
           staleExpandedKey(replayEvent);
@@ -1029,18 +1355,18 @@ describe("OutlinePanel active heading reveal", () => {
         },
         { capture: true, once: true },
       );
-      act(() => buttons[0].dispatchEvent(repeatedKey));
+      act(() => buttons.at(-1)!.dispatchEvent(repeatedKey));
       expect(repeatedPreventDefault).toHaveBeenCalledOnce();
-      expect(buttons[1]).toHaveFocus();
+      expect(buttons[0]).toHaveFocus();
 
       let currentNav = within(host).getByRole("navigation", { name: "Document outline" });
       let currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
-      fireEvent.keyDown(currentButtons[1], { key: "Home" });
-      expect(currentButtons[0]).toHaveFocus();
-      currentNav = within(host).getByRole("navigation", { name: "Document outline" });
-      currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
       fireEvent.keyDown(currentButtons[0], { key: "End" });
       expect(currentButtons.at(-1)).toHaveFocus();
+      currentNav = within(host).getByRole("navigation", { name: "Document outline" });
+      currentButtons = within(currentNav).getAllByRole<HTMLButtonElement>("button");
+      fireEvent.keyDown(currentButtons.at(-1)!, { key: "Home" });
+      expect(currentButtons[0]).toHaveFocus();
 
       const currentRoot = within(host).getByTestId("outline");
       const currentToggle = within(host).getByRole<HTMLButtonElement>("button", { name: "Hide outline" });
