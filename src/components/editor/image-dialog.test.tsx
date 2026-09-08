@@ -1,6 +1,20 @@
 // @vitest-environment jsdom
-import { useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  Suspense,
+  StrictMode,
+  startTransition,
+  useLayoutEffect,
+  useState,
+  type ChangeEvent,
+  type ChangeEventHandler,
+  type FormEvent,
+  type FormEventHandler,
+  type ReactNode,
+  type RefCallback,
+  type SyntheticEvent,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
@@ -9,6 +23,33 @@ interface UploadResult {
   url: string;
   alt?: string;
 }
+
+interface DirectView {
+  host: HTMLDivElement;
+  root: Root;
+  render: (node: ReactNode) => Promise<void>;
+}
+
+interface ControlledPointerEventInit extends MouseEventInit {
+  pointerId?: number;
+  pointerType?: string;
+  isPrimary?: boolean;
+}
+
+class ControlledPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: ControlledPointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
+}
+
+const directViews: DirectView[] = [];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -48,7 +89,111 @@ function setInputValue(input: HTMLInputElement, value: string) {
   Object.defineProperty(input, "value", { configurable: true, writable: true, value });
 }
 
-afterEach(cleanup);
+function reactProp<T>(element: Element, name: string): T {
+  const key = Object.getOwnPropertyNames(element).find((candidate) =>
+    candidate.startsWith("__reactProps$"),
+  );
+  if (!key) throw new Error("React props were not attached to the element");
+  const props = (element as unknown as Record<string, Record<string, unknown>>)[
+    key
+  ];
+  const value = props?.[name];
+  if (typeof value !== "function") {
+    throw new Error(`${name} was not attached to the element`);
+  }
+  return value as T;
+}
+
+function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
+  element: Element,
+  name: string,
+) {
+  const key = Object.getOwnPropertyNames(element).find((candidate) =>
+    candidate.startsWith("__reactFiber$"),
+  );
+  if (!key) throw new Error("React fiber was not attached to the element");
+  let fiber = (element as unknown as Record<string, unknown>)[key] as
+    | {
+        memoizedProps?: Record<string, unknown>;
+        return?: unknown;
+      }
+    | null;
+  const handlers: T[] = [];
+  while (fiber) {
+    const handler = fiber.memoizedProps?.[name];
+    if (
+      typeof handler === "function" &&
+      !handlers.includes(handler as T)
+    ) {
+      handlers.push(handler as T);
+    }
+    fiber = fiber.return as typeof fiber;
+  }
+  return handlers;
+}
+
+function setReactProp<T>(element: Element, name: string, value: T) {
+  const key = Object.getOwnPropertyNames(element).find((candidate) =>
+    candidate.startsWith("__reactProps$"),
+  );
+  if (!key) throw new Error("React props were not attached to the element");
+  const target = element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  target[key] = { ...target[key], [name]: value };
+}
+
+async function renderStrictRoot(node: ReactNode) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const renderNode = async (next: ReactNode) => {
+    await act(async () => {
+      root.render(<StrictMode>{next}</StrictMode>);
+    });
+  };
+  const view = { host, root, render: renderNode };
+  directViews.push(view);
+  await renderNode(node);
+  return view;
+}
+
+function submitEvent() {
+  return typeof window.SubmitEvent === "function"
+    ? new SubmitEvent("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      })
+    : new Event("submit", { bubbles: true, cancelable: true });
+}
+
+function dialogContent() {
+  return screen.getByRole("dialog") as HTMLDivElement;
+}
+
+function imageForm() {
+  const form = screen.getByTestId("image-url").closest("form");
+  if (!(form instanceof HTMLFormElement)) {
+    throw new Error("Image form was not rendered");
+  }
+  return form;
+}
+
+beforeEach(() => {
+  vi.stubGlobal("PointerEvent", ControlledPointerEvent);
+});
+
+afterEach(async () => {
+  cleanup();
+  for (const view of directViews.splice(0)) {
+    await act(async () => view.root.unmount());
+    view.host.remove();
+  }
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("ImageDialog upload lifecycle", () => {
   it("suppresses synchronous duplicate choices and blocks insertion of an older URL while pending", async () => {
@@ -217,5 +362,666 @@ describe("ImageDialog upload lifecycle", () => {
     second.unmount();
     await act(async () => failure.reject(error));
     expect(readMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("ImageDialog exact Strict Mode ownership", () => {
+  it("accepts current URL, Alt, upload, and deferred Insert once after direct-root replay", async () => {
+    const upload = deferred<UploadResult>();
+    const onUpload = vi.fn(() => upload.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(
+      <Harness onUpload={onUpload} onSubmit={onSubmit} />,
+    );
+
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/before-upload.png" },
+    });
+    await act(async () => {});
+    fireEvent.change(screen.getByTestId("image-alt"), {
+      target: { value: "Before upload" },
+    });
+    choose(new File(["strict"], "strict.png", { type: "image/png" }));
+    expect(onUpload).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      upload.resolve({ url: "/api/assets/strict", alt: "Generated" });
+      await upload.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/strict");
+    expect(screen.getByTestId("image-alt")).toHaveValue("Before upload");
+
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: " /api/assets/final " },
+    });
+    fireEvent.change(screen.getByTestId("image-alt"), {
+      target: { value: " Final Alt " },
+    });
+    const submit = submitEvent();
+    act(() => imageForm().dispatchEvent(submit));
+
+    expect(submit.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith("/api/assets/final", "Final Alt");
+  });
+
+  it("claims a repeated Upload chooser event and its file choice once", async () => {
+    const upload = deferred<UploadResult>();
+    const onUpload = vi.fn(() => upload.promise);
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const chooser = screen.getByTestId("image-file") as HTMLInputElement;
+    const openChooser = vi.spyOn(chooser, "click").mockImplementation(() => {});
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+
+    act(() => {
+      screen.getByTestId("image-upload").dispatchEvent(click);
+      screen.getByTestId("image-upload").dispatchEvent(click);
+    });
+    expect(openChooser).toHaveBeenCalledOnce();
+
+    choose(new File(["owned"], "owned.webp", { type: "image/webp" }));
+    choose(new File(["repeated"], "repeated.webp", { type: "image/webp" }));
+    expect(onUpload).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      upload.resolve({ url: "/api/assets/owned" });
+      await upload.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/owned");
+  });
+
+  it.each(["close", "cancel", "escape", "outside"] as const)(
+    "claims one current %s dismissal after replay",
+    async (kind) => {
+      const onOpenChange = vi.fn();
+      await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={onOpenChange}
+          onSubmit={vi.fn()}
+          onUpload={vi.fn()}
+        />,
+      );
+
+      if (kind === "close" || kind === "cancel") {
+        const button = screen.getByRole("button", {
+          name: kind === "close" ? "Close" : "Cancel",
+        });
+        fireEvent.click(button);
+        fireEvent.click(button);
+      } else if (kind === "escape") {
+        fireEvent.keyDown(dialogContent(), { key: "Escape" });
+        fireEvent.keyDown(dialogContent(), { key: "Escape" });
+      } else {
+        const overlay = document.querySelector(".dialog-overlay");
+        if (!(overlay instanceof HTMLDivElement)) {
+          throw new Error("Image overlay was not rendered");
+        }
+        act(() => {
+          for (let index = 0; index < 2; index += 1) {
+            overlay.dispatchEvent(
+              new ControlledPointerEvent("pointerdown", {
+                bubbles: true,
+                cancelable: true,
+                button: 0,
+                pointerId: 7,
+              }),
+            );
+            overlay.dispatchEvent(
+              new ControlledPointerEvent("click", {
+                bubbles: true,
+                cancelable: true,
+                button: 0,
+                pointerId: 7,
+              }),
+            );
+          }
+        });
+      }
+
+      expect(onOpenChange).toHaveBeenCalledOnce();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    },
+  );
+
+  it.each([
+    "attributes",
+    "style",
+    "replacement",
+    "reorder",
+    "bridge-attributes",
+    "bridge-ancestor",
+    "portal-ancestor",
+  ] as const)(
+    "retires restored %s history and accepts a fresh successor",
+    async (transition) => {
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const onUpload = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      const content = dialogContent();
+      const cancel = screen.getByRole("button", {
+        name: "Cancel",
+      }) as HTMLButtonElement;
+
+      if (transition === "attributes") {
+        const className = content.className;
+        content.className = "mutated";
+        content.className = className;
+      } else if (transition === "style") {
+        content.style.display = "none";
+        content.style.removeProperty("display");
+      } else if (transition === "replacement") {
+        const input = screen.getByTestId("image-url");
+        const replacement = input.cloneNode(true);
+        const parent = input.parentNode;
+        if (!parent) throw new Error("Image URL input was not attached");
+        parent.replaceChild(replacement, input);
+        parent.replaceChild(input, replacement);
+      } else if (transition === "reorder") {
+        const parent = cancel.parentElement;
+        const insert = screen.getByTestId("image-submit");
+        if (!parent) throw new Error("Image actions were not attached");
+        parent.append(cancel);
+        parent.insertBefore(cancel, insert);
+      } else if (transition === "bridge-attributes") {
+        const bridge = view.host.querySelector(".contents");
+        if (!(bridge instanceof HTMLDivElement)) {
+          throw new Error("Image bridge was not rendered");
+        }
+        bridge.className = "mutated";
+        bridge.className = "contents";
+      } else if (transition === "bridge-ancestor") {
+        const next = view.host.nextSibling;
+        view.host.remove();
+        document.body.insertBefore(view.host, next);
+      } else {
+        const body = document.body;
+        const parent = body.parentNode;
+        const next = body.nextSibling;
+        if (!parent) throw new Error("Document body was not attached");
+        parent.removeChild(body);
+        parent.insertBefore(body, next);
+      }
+
+      fireEvent.click(cancel);
+      expect(staleClose).not.toHaveBeenCalled();
+
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("invalidates an Escape proof when another native event intervenes", async () => {
+    const onOpenChange = vi.fn();
+    const listeners: Array<{
+      type: string;
+      listener: EventListenerOrEventListenerObject;
+    }> = [];
+    const nativeAdd = document.addEventListener.bind(document);
+    vi.spyOn(document, "addEventListener").mockImplementation(
+      (type, listener, options) => {
+        listeners.push({ type, listener });
+        nativeAdd(type, listener, options);
+      },
+    );
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChange}
+        onSubmit={vi.fn()}
+        onUpload={vi.fn()}
+      />,
+    );
+    const content = dialogContent();
+    const componentListener = listeners.find(
+      (record) =>
+        record.type === "keydown" &&
+        listeners.some(
+          (candidate) =>
+            candidate.type === "pointerdown" &&
+            candidate.listener === record.listener,
+        ) &&
+        listeners.some(
+          (candidate) =>
+            candidate.type === "click" &&
+            candidate.listener === record.listener,
+        ),
+    )?.listener;
+    if (!componentListener) {
+      throw new Error("Image dismissal listener was not registered");
+    }
+    const invoke = (key: string) => {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key,
+      });
+      Object.defineProperties(event, {
+        target: { configurable: true, value: content },
+        eventPhase: {
+          configurable: true,
+          value: Event.CAPTURING_PHASE,
+        },
+        composedPath: {
+          configurable: true,
+          value: () => [
+            content,
+            document.body,
+            document.documentElement,
+            document,
+            window,
+          ],
+        },
+      });
+      if (typeof componentListener === "function") {
+        componentListener.call(document, event);
+      } else {
+        componentListener.handleEvent(event);
+      }
+    };
+    invoke("Escape");
+    invoke("Enter");
+    const radixOpenChange = reactAncestorHandlers<
+      (open: boolean) => void
+    >(content, "onOpenChange").find(
+      (handler) => handler !== onOpenChange,
+    );
+    if (!radixOpenChange) {
+      throw new Error("Radix open-change handler was not published");
+    }
+
+    act(() => radixOpenChange(false));
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(content, { key: "Escape" });
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps Escape ahead of Radix after a draft successor publishes", async () => {
+    const onOpenChange = vi.fn();
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChange}
+        onSubmit={vi.fn()}
+        onUpload={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/escape.png" },
+    });
+    await act(async () => {});
+
+    fireEvent.keyDown(dialogContent(), { key: "Escape" });
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the committed authority live when a callback replacement suspends", async () => {
+    const committedClose = vi.fn();
+    const pendingClose = vi.fn();
+    const onSubmit = vi.fn();
+    const upload = deferred<UploadResult>();
+    const onUpload = vi.fn(() => upload.promise);
+    const never = new Promise<never>(() => {});
+    let begin = () => {};
+
+    function PendingRender(): ReactNode {
+      throw never;
+    }
+
+    function ConcurrentHarness() {
+      const [pending, setPending] = useState(false);
+      useLayoutEffect(() => {
+        begin = () => {
+          startTransition(() => setPending(true));
+        };
+      }, []);
+      return (
+        <Suspense fallback={null}>
+          <ImageDialog
+            open
+            onOpenChange={pending ? pendingClose : committedClose}
+            onSubmit={onSubmit}
+            onUpload={onUpload}
+          />
+          {pending && <PendingRender />}
+        </Suspense>
+      );
+    }
+
+    await renderStrictRoot(<ConcurrentHarness />);
+    choose(new File(["current"], "current.png", { type: "image/png" }));
+    expect(onUpload).toHaveBeenCalledOnce();
+    act(() => begin());
+    await act(async () => {
+      upload.resolve({ url: "/api/assets/concurrent", alt: "Concurrent Alt" });
+      await upload.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/concurrent",
+    );
+    expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(committedClose).toHaveBeenCalledOnce();
+    expect(committedClose).toHaveBeenCalledWith(false);
+    expect(pendingClose).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale, crossed, and fabricated changes without poisoning current controls", async () => {
+    const onOpenChangeA = vi.fn();
+    const onOpenChangeB = vi.fn();
+    const onSubmit = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChangeA}
+        onSubmit={onSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    const staleUrl = screen.getByTestId("image-url");
+    const staleChange =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(staleUrl, "onChange");
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChangeB}
+        onSubmit={onSubmit}
+        onUpload={onUpload}
+      />,
+    );
+    const url = screen.getByTestId("image-url") as HTMLInputElement;
+    const alt = screen.getByTestId("image-alt") as HTMLInputElement;
+    const currentUrl =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(url, "onChange");
+    const currentAlt =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(alt, "onChange");
+
+    setReactProp(url, "onChange", staleChange);
+    fireEvent.change(url, { target: { value: "https://stale.invalid/a.png" } });
+    url.value = "";
+    currentAlt({
+      currentTarget: url,
+      target: url,
+      nativeEvent: new Event("change", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    } as ChangeEvent<HTMLInputElement>);
+    currentUrl({
+      currentTarget: url,
+      target: url,
+      nativeEvent: new Event("change", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    } as ChangeEvent<HTMLInputElement>);
+
+    setReactProp(url, "onChange", currentUrl);
+    fireEvent.change(url, {
+      target: { value: "https://example.com/current.png" },
+    });
+    await act(async () => {});
+    fireEvent.change(alt, { target: { value: "Current Alt" } });
+
+    expect(url).toHaveValue("https://example.com/current.png");
+    expect(alt).toHaveValue("Current Alt");
+    expect(onOpenChangeA).not.toHaveBeenCalled();
+    expect(onOpenChangeB).not.toHaveBeenCalled();
+  });
+
+  it("prevents an invalidated genuine submit and leaves foreign provenance untouched", async () => {
+    const staleSubmit = vi.fn();
+    const currentSubmit = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <Harness onSubmit={staleSubmit} onUpload={onUpload} />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/stale.png" },
+    });
+    await act(async () => {});
+    const content = dialogContent();
+    content.setAttribute("data-intervening", "true");
+    content.removeAttribute("data-intervening");
+    const invalidated = submitEvent();
+    act(() => imageForm().dispatchEvent(invalidated));
+
+    expect(invalidated.defaultPrevented).toBe(true);
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await view.render(
+      <Harness onSubmit={currentSubmit} onUpload={onUpload} />,
+    );
+    const form = imageForm();
+    const handler = reactProp<FormEventHandler<HTMLFormElement>>(
+      form,
+      "onSubmit",
+    );
+    const preventDefault = vi.fn();
+    handler({
+      currentTarget: form,
+      target: form,
+      nativeEvent: new Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }),
+      preventDefault,
+    } as unknown as FormEvent<HTMLFormElement>);
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/current.png" },
+    });
+    await act(async () => {});
+    const current = submitEvent();
+    act(() => imageForm().dispatchEvent(current));
+    expect(current.defaultPrevented).toBe(true);
+    await waitFor(() => expect(currentSubmit).toHaveBeenCalledOnce());
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps late result getters and file clearing out of an equal-looking reopened visit", async () => {
+    const stale = deferred<UploadResult>();
+    const current = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+
+    choose(new File(["stale"], "stale.png", { type: "image/png" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+    choose(new File(["current"], "current.png", { type: "image/png" }));
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    setInputValue(input, "current-selection");
+    const readUrl = vi.fn(() => "/api/assets/stale");
+    const readAlt = vi.fn(() => "Stale Alt");
+    const staleResult = {} as UploadResult;
+    Object.defineProperties(staleResult, {
+      url: { get: readUrl },
+      alt: { get: readAlt },
+    });
+
+    await act(async () => {
+      stale.resolve(staleResult);
+      await stale.promise;
+    });
+    expect(readUrl).not.toHaveBeenCalled();
+    expect(readAlt).not.toHaveBeenCalled();
+    expect(input.value).toBe("current-selection");
+    expect(screen.getByTestId("image-upload")).toBeDisabled();
+
+    await act(async () => {
+      current.resolve({ url: "/api/assets/current", alt: "Current Alt" });
+      await current.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/current");
+    expect(input.value).toBe("");
+  });
+
+  it("keeps a late error getter and finalizer out of the reopened pending upload", async () => {
+    const stale = deferred<UploadResult>();
+    const current = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+
+    choose(new File(["stale"], "stale.gif", { type: "image/gif" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+    fireEvent.change(screen.getByTestId("image-alt"), {
+      target: { value: "Current GIF" },
+    });
+    choose(new File(["current"], "current.gif", { type: "image/gif" }));
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    setInputValue(input, "current-selection");
+    const readMessage = vi.fn(() => "Stale failure");
+    const error = new Error();
+    Object.defineProperty(error, "message", { get: readMessage });
+
+    await act(async () => {
+      stale.reject(error);
+      await stale.promise.catch(() => undefined);
+    });
+    expect(readMessage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-alt")).toHaveValue("Current GIF");
+    expect(screen.getByTestId("image-upload")).toBeDisabled();
+    expect(input.value).toBe("current-selection");
+
+    await act(async () => {
+      current.resolve({ url: "/api/assets/current-gif" });
+      await current.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/current-gif",
+    );
+    expect(screen.getByTestId("image-alt")).toHaveValue("Current GIF");
+    expect(input.value).toBe("");
+  });
+
+  it("rejects a partial ref replay and keeps its fresh successor usable", async () => {
+    const onOpenChange = vi.fn();
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChange}
+        onSubmit={vi.fn()}
+        onUpload={vi.fn()}
+      />,
+    );
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const staleChange =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+    const ref = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    act(() => {
+      ref(null);
+      ref(input);
+    });
+    await act(async () => {});
+    const currentChange =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+    setReactProp(input, "onChange", staleChange);
+    fireEvent.change(input, {
+      target: { value: "https://stale.invalid/partial.png" },
+    });
+    setReactProp(input, "onChange", currentChange);
+    fireEvent.change(input, {
+      target: { value: "https://example.com/recovered.png" },
+    });
+
+    expect(input).toHaveValue("https://example.com/recovered.png");
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps preview errors bound to the exact preview publication", async () => {
+    const onOpenChangeA = vi.fn();
+    const onOpenChangeB = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChangeA}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/a.png" },
+    });
+    await act(async () => {});
+    const stalePreview = imageForm().querySelector("img");
+    if (!(stalePreview instanceof HTMLImageElement)) {
+      throw new Error("Image preview was not rendered");
+    }
+    const staleError = reactProp<
+      (event: SyntheticEvent<HTMLImageElement>) => void
+    >(stalePreview, "onError");
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={onOpenChangeB}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/b.png" },
+    });
+    await act(async () => {});
+    const currentPreview = imageForm().querySelector("img");
+    if (!(currentPreview instanceof HTMLImageElement)) {
+      throw new Error("Current image preview was not rendered");
+    }
+    const currentError = reactProp<
+      (event: SyntheticEvent<HTMLImageElement>) => void
+    >(currentPreview, "onError");
+
+    setReactProp(currentPreview, "onError", staleError);
+    fireEvent.error(currentPreview);
+    expect(currentPreview.style.display).toBe("");
+    setReactProp(currentPreview, "onError", currentError);
+    fireEvent.error(currentPreview);
+    expect(currentPreview.style.display).toBe("none");
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
@@ -624,24 +624,2616 @@ export const LinkDialog = memo(function LinkDialog({
   );
 });
 
+const IMAGE_TITLE = "Insert image";
+const IMAGE_DESCRIPTION =
+  "Paste the address of an image or upload one. Alt text describes the image for people who can't see it.";
+const IMAGE_FORM_CLASS = "flex flex-col gap-3";
+const IMAGE_LABEL_CLASS =
+  "flex flex-col gap-1 text-sm font-medium text-ink-2";
+const IMAGE_URL_ROW_CLASS = "flex gap-2";
+const IMAGE_URL_CLASS = "input flex-1";
+const IMAGE_UPLOAD_CLASS = "btn btn-outline shrink-0";
+const IMAGE_FILE_ACCEPT =
+  "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
+const IMAGE_ERROR_CLASS = "text-sm text-danger";
+const IMAGE_ALT_CLASS = "input";
+const IMAGE_PREVIEW_CLASS =
+  "max-h-40 rounded-lg border border-line object-contain";
+const IMAGE_ACTIONS_CLASS = "flex justify-end gap-2 pt-1";
+const IMAGE_CANCEL_CLASS = "btn btn-ghost";
+const IMAGE_INSERT_CLASS = "btn btn-primary";
+const IMAGE_RADIX_SETTLING_ATTRIBUTES = new Set([
+  "aria-describedby",
+  "aria-labelledby",
+  "style",
+]);
+
+interface ImageVisit {
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onSubmit: (src: string, alt: string) => void;
+  readonly onUpload:
+    | ((file: File) => Promise<{ url: string; alt?: string }>)
+    | undefined;
+}
+
 interface ImageDraft {
-  visit: DialogActionVisit;
-  open: boolean;
-  src: string;
-  alt: string;
-  uploading: boolean;
-  error: string | null;
-  altRevision: number;
+  readonly visit: ImageVisit;
+  readonly open: boolean;
+  readonly src: string;
+  readonly alt: string;
+  readonly error: string | null;
+  readonly altRevision: number;
+  readonly previewFailed: boolean;
+  readonly upload: ImageUploadOwner | null;
+}
+
+interface ImageAuthority {
+  readonly mount: symbol;
+  readonly revision: number;
+  readonly visit: ImageVisit;
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onSubmit: (src: string, alt: string) => void;
+  readonly onUpload: ImageVisit["onUpload"];
+  readonly draft: ImageDraft;
+  readonly src: string;
+  readonly alt: string;
+  readonly error: string | null;
+  readonly altRevision: number;
+  readonly previewFailed: boolean;
+  readonly upload: ImageUploadOwner | null;
+  readonly uploading: boolean;
+  readonly uploadAvailable: boolean;
+  readonly normalizedSrc: string;
+  readonly normalizedAlt: string;
+  readonly submitDisabled: boolean;
 }
 
 interface ImageUploadOwner {
-  visit: DialogActionVisit;
-  id: number;
-  altRevision: number;
+  readonly identity: symbol;
+  readonly origin: ImagePublication;
+  readonly authority: ImageAuthority;
+  readonly visit: ImageVisit;
+  readonly callback: NonNullable<ImageVisit["onUpload"]>;
+  readonly file: File;
+  readonly fileInput: HTMLInputElement;
+  readonly altRevision: number;
+  readonly fallbackAlt: string;
+  readonly settlementAction: object;
 }
 
-function imageDraft(visit: DialogActionVisit, open: boolean): ImageDraft {
-  return { visit, open, src: "", alt: "", uploading: false, error: null, altRevision: 0 };
+interface ImageDomSnapshot {
+  readonly node: Node;
+  readonly value: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly ImageDomSnapshot[];
+}
+
+interface ImageNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previous: Node | null;
+  readonly next: Node | null;
+}
+
+interface ImagePlacement {
+  readonly document: Document;
+  readonly portalParent: Node;
+  readonly overlayPrevious: Node | null;
+  readonly overlayNext: Node | null;
+  readonly contentPrevious: Node | null;
+  readonly contentNext: Node | null;
+  readonly bridge: ImageNodePlacement;
+  readonly ancestors: readonly ImageNodePlacement[];
+}
+
+interface ImageFileFacts {
+  readonly value: string;
+  readonly files: readonly File[];
+}
+
+type ImageChangingControl = "url" | "alt" | "file" | null;
+
+interface ImageDom {
+  readonly bridge: HTMLDivElement;
+  readonly overlay: HTMLDivElement;
+  readonly content: HTMLDivElement;
+  readonly header: HTMLElement;
+  readonly title: HTMLElement;
+  readonly description: HTMLElement;
+  readonly close: HTMLButtonElement;
+  readonly form: HTMLFormElement;
+  readonly urlLabel: HTMLLabelElement;
+  readonly urlRow: HTMLDivElement;
+  readonly url: HTMLInputElement;
+  readonly upload: HTMLButtonElement | null;
+  readonly file: HTMLInputElement | null;
+  readonly error: HTMLDivElement | null;
+  readonly altLabel: HTMLLabelElement;
+  readonly alt: HTMLInputElement;
+  readonly preview: HTMLImageElement | null;
+  readonly actions: HTMLDivElement;
+  readonly cancel: HTMLButtonElement;
+  readonly insert: HTMLButtonElement;
+}
+
+interface ImageElementOwnerView {
+  readonly element: () => Element | null;
+}
+
+interface ImageRefReplay {
+  readonly owner: ImageElementOwnerView;
+  readonly element: Element;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface ImagePublication {
+  readonly identity: symbol;
+  readonly authority: ImageAuthority;
+  readonly ownerDocument: Document;
+  readonly dom: ImageDom;
+  readonly bridgeTree: ImageDomSnapshot;
+  readonly contentTree: ImageDomSnapshot;
+  readonly overlayTree: ImageDomSnapshot;
+  readonly placement: ImagePlacement;
+  readonly fileFacts: ImageFileFacts | null;
+  readonly fileControl: object | null;
+  readonly authorizeDismissal: (event: Event) => void;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly commitIsSettling: () => boolean;
+  readonly publishedDomMatches: (
+    changing?: "url" | "alt" | "file" | null,
+  ) => boolean;
+}
+
+interface ImagePublicationReplay {
+  readonly source: ImagePublication;
+  readonly bridgeTree: ImageDomSnapshot;
+  readonly contentTree: ImageDomSnapshot;
+  readonly overlayTree: ImageDomSnapshot;
+  readonly placement: ImagePlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface ImagePublicationRuntime {
+  readonly publication: ImagePublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly finishCommit: () => void;
+  readonly noteRef: (
+    owner: ImageElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly isRecoverablePartialReplay: () => boolean;
+  readonly replay: () => ImagePublicationReplay | null;
+}
+
+interface ImageDismissalProof {
+  readonly publication: ImagePublication;
+  readonly control: object;
+  readonly reactEvent: object;
+  readonly nativeEvent: Event;
+}
+
+interface ImageInsertionOwner {
+  readonly identity: symbol;
+  readonly origin: ImagePublication;
+  readonly mount: symbol;
+  readonly visit: ImageVisit;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onSubmit: (src: string, alt: string) => void;
+  readonly onUpload: ImageVisit["onUpload"];
+  readonly src: string;
+  readonly alt: string;
+  readonly shellClosesSynchronously: boolean;
+  closer: object | null;
+}
+
+interface ImageUploadLease {
+  readonly owner: ImageUploadOwner;
+  readonly publication: ImagePublication;
+}
+
+interface ImageControlPresentation<T extends HTMLElement> {
+  readonly owner: ImageElementOwner<T>;
+  readonly capture: (element: T | null) => void;
+  readonly action: object;
+}
+
+interface ImagePresentation {
+  readonly authority: ImageAuthority;
+  readonly closeToken: object;
+  readonly bridge: ImageControlPresentation<HTMLDivElement>;
+  readonly form: ImageControlPresentation<HTMLFormElement>;
+  readonly urlLabel: ImageControlPresentation<HTMLLabelElement>;
+  readonly urlRow: ImageControlPresentation<HTMLDivElement>;
+  readonly url: ImageControlPresentation<HTMLInputElement>;
+  readonly upload: ImageControlPresentation<HTMLButtonElement>;
+  readonly file: ImageControlPresentation<HTMLInputElement>;
+  readonly error: ImageControlPresentation<HTMLDivElement>;
+  readonly altLabel: ImageControlPresentation<HTMLLabelElement>;
+  readonly alt: ImageControlPresentation<HTMLInputElement>;
+  readonly preview: ImageControlPresentation<HTMLImageElement>;
+  readonly actions: ImageControlPresentation<HTMLDivElement>;
+  readonly cancel: ImageControlPresentation<HTMLButtonElement>;
+  readonly insert: ImageControlPresentation<HTMLButtonElement>;
+  readonly captureBridge: (element: HTMLDivElement | null) => void;
+  readonly captureForm: (element: HTMLFormElement | null) => void;
+  readonly captureUrlLabel: (element: HTMLLabelElement | null) => void;
+  readonly captureUrlRow: (element: HTMLDivElement | null) => void;
+  readonly captureUrl: (element: HTMLInputElement | null) => void;
+  readonly captureUpload: (element: HTMLButtonElement | null) => void;
+  readonly captureFile: (element: HTMLInputElement | null) => void;
+  readonly captureError: (element: HTMLDivElement | null) => void;
+  readonly captureAltLabel: (element: HTMLLabelElement | null) => void;
+  readonly captureAlt: (element: HTMLInputElement | null) => void;
+  readonly capturePreview: (element: HTMLImageElement | null) => void;
+  readonly captureActions: (element: HTMLDivElement | null) => void;
+  readonly captureCancel: (element: HTMLButtonElement | null) => void;
+  readonly captureInsert: (element: HTMLButtonElement | null) => void;
+  readonly establish: () => void | (() => void);
+  readonly settlePortal: () => void | (() => void);
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
+  readonly onUrlChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  readonly onAltChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  readonly onUploadClick: (
+    event: React.MouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onFileChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  readonly onPreviewError: (
+    event: React.SyntheticEvent<HTMLImageElement>,
+  ) => void;
+  readonly onCancelClick: (
+    event: React.MouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onFormSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+  readonly onClosed: () => void;
+}
+
+type ImageControls = Pick<
+  ImagePresentation,
+  | "bridge"
+  | "form"
+  | "urlLabel"
+  | "urlRow"
+  | "url"
+  | "upload"
+  | "file"
+  | "error"
+  | "altLabel"
+  | "alt"
+  | "preview"
+  | "actions"
+  | "cancel"
+  | "insert"
+>;
+
+function imageDraft(visit: ImageVisit, open: boolean): ImageDraft {
+  return Object.freeze({
+    visit,
+    open,
+    src: "",
+    alt: "",
+    error: null,
+    altRevision: 0,
+    previewFailed: false,
+    upload: null,
+  });
+}
+
+function nextImageDraft(
+  draft: ImageDraft,
+  changes: Partial<Omit<ImageDraft, "visit" | "open">>,
+): ImageDraft {
+  return Object.freeze({ ...draft, ...changes });
+}
+
+class ImageCurrentValue<T> {
+  #value: T;
+
+  constructor(value: T) {
+    this.#value = value;
+  }
+
+  get() {
+    return this.#value;
+  }
+
+  set(value: T) {
+    this.#value = value;
+  }
+}
+
+class ImageElementOwner<T extends Element> implements ImageElementOwnerView {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: ImageElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+
+  readonly capture = (element: T | null) => {
+    if (this.#current === element) return;
+    const previous = this.#current;
+    const last = this.#last;
+    this.#current = element;
+    if (element) this.#last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.#current !== element) return;
+      this.#current = null;
+      this.onChange(this, null, element, this.#last);
+    };
+  };
+}
+
+class ImagePublicationCoordinator {
+  readonly #mount: symbol;
+  #active: ImagePublication | null = null;
+  #successorOf: ImagePublication | null = null;
+  #replay: ImagePublicationReplay | null = null;
+  readonly #retired = new WeakSet<ImagePublication>();
+  readonly #claimedPublications = new WeakSet<ImagePublication>();
+  readonly #claimedControls = new WeakSet<object>();
+  readonly #claimedActions = new WeakSet<object>();
+  readonly #claimedReactEvents = new WeakSet<object>();
+  readonly #claimedNativeEvents = new WeakSet<Event>();
+  readonly #claimedContinuations = new WeakSet<object>();
+
+  constructor(mount: symbol) {
+    this.#mount = mount;
+  }
+
+  active() {
+    return this.#active;
+  }
+
+  replay() {
+    return this.#replay;
+  }
+
+  acceptsSuccessorOf(publication: ImagePublication) {
+    return (
+      this.#active === null &&
+      this.#successorOf === publication &&
+      this.#retired.has(publication) &&
+      !this.#claimedPublications.has(publication)
+    );
+  }
+
+  stageReplay(replay: ImagePublicationReplay) {
+    if (!this.acceptsSuccessorOf(replay.source)) return false;
+    this.#replay = replay;
+    return true;
+  }
+
+  abandonReplay(publication: ImagePublication) {
+    if (this.#replay?.source === publication) this.#replay = null;
+    if (this.#successorOf === publication) this.#successorOf = null;
+  }
+
+  publish(publication: ImagePublication) {
+    if (
+      publication.authority.mount !== this.#mount ||
+      this.#retired.has(publication)
+    ) {
+      return false;
+    }
+    const previous = this.#active;
+    if (previous && previous !== publication) previous.retire();
+    this.#active = publication;
+    this.#successorOf = null;
+    this.#replay = null;
+    return true;
+  }
+
+  retire(publication: ImagePublication) {
+    if (this.#retired.has(publication)) return false;
+    this.#retired.add(publication);
+    if (this.#active === publication) {
+      this.#active = null;
+      this.#successorOf = publication;
+    }
+    return true;
+  }
+
+  isCurrent(publication: ImagePublication) {
+    return this.#active === publication && !this.#retired.has(publication);
+  }
+
+  wasClaimed(publication: ImagePublication) {
+    return this.#claimedPublications.has(publication);
+  }
+
+  hasClaimed(
+    publication: ImagePublication,
+    control: object,
+    action: object,
+    reactEvent: object,
+    nativeEvent: Event,
+  ) {
+    return (
+      this.#claimedPublications.has(publication) ||
+      this.#claimedControls.has(control) ||
+      this.#claimedActions.has(action) ||
+      this.#claimedReactEvents.has(reactEvent) ||
+      this.#claimedNativeEvents.has(nativeEvent)
+    );
+  }
+
+  claim(
+    publication: ImagePublication,
+    control: object,
+    action: object,
+    reactEvent: object,
+    nativeEvent: Event,
+  ) {
+    if (
+      !this.isCurrent(publication) ||
+      this.hasClaimed(
+        publication,
+        control,
+        action,
+        reactEvent,
+        nativeEvent,
+      )
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedControls.add(control);
+    this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(reactEvent);
+    this.#claimedNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  claimContinuation(
+    publication: ImagePublication,
+    control: object,
+    action: object,
+    proof: object,
+  ) {
+    if (
+      !this.isCurrent(publication) ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedControls.has(control) ||
+      this.#claimedActions.has(action) ||
+      this.#claimedContinuations.has(proof)
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedControls.add(control);
+    this.#claimedActions.add(action);
+    this.#claimedContinuations.add(proof);
+    return true;
+  }
+}
+
+class ImageDismissalListener {
+  #bridge: HTMLDivElement | null = null;
+  #document: Document | null = null;
+  #listener: ((event: Event) => void) | null = null;
+
+  constructor(private readonly coordinator: ImagePublicationCoordinator) {}
+
+  attach(bridge: HTMLDivElement) {
+    const ownerDocument = bridge.ownerDocument;
+    this.#bridge = bridge;
+    if (this.#document === ownerDocument && this.#listener) return;
+    this.release();
+    this.#bridge = bridge;
+    const listener = (event: Event) => {
+      const publication = this.coordinator.active();
+      const ownerWindow = ownerDocument.defaultView;
+      if (
+        !publication ||
+        publication.isRetired() ||
+        publication.ownerDocument !== ownerDocument ||
+        !ownerWindow ||
+        (!(event instanceof ownerWindow.KeyboardEvent) &&
+          !(event instanceof ownerWindow.MouseEvent))
+      ) {
+        return;
+      }
+      publication.authorizeDismissal(event);
+    };
+    this.#document = ownerDocument;
+    this.#listener = listener;
+    ownerDocument.addEventListener("keydown", listener, true);
+    ownerDocument.addEventListener("pointerdown", listener, true);
+    ownerDocument.addEventListener("click", listener, true);
+  }
+
+  releaseWhenDetached(bridge: HTMLDivElement) {
+    queueMicrotask(() => {
+      if (this.#bridge === bridge && !bridge.isConnected) this.release();
+    });
+  }
+
+  private release() {
+    const ownerDocument = this.#document;
+    const listener = this.#listener;
+    this.#bridge = null;
+    this.#document = null;
+    this.#listener = null;
+    if (!ownerDocument || !listener) return;
+    ownerDocument.removeEventListener("keydown", listener, true);
+    ownerDocument.removeEventListener("pointerdown", listener, true);
+    ownerDocument.removeEventListener("click", listener, true);
+  }
+}
+
+class ImageAfterCloseAuthority {
+  #pending: ImageInsertionOwner | null = null;
+
+  schedule(
+    publication: ImagePublication,
+    authority: ImageAuthority,
+    shellCloser: object | null = null,
+  ) {
+    const owner: ImageInsertionOwner = {
+      identity: Symbol("image-insertion"),
+      origin: publication,
+      mount: authority.mount,
+      visit: authority.visit,
+      onOpenChange: authority.onOpenChange,
+      onSubmit: authority.onSubmit,
+      onUpload: authority.onUpload,
+      src: authority.normalizedSrc,
+      alt: authority.normalizedAlt,
+      shellClosesSynchronously: shellCloser !== null,
+      closer: shellCloser,
+    };
+    this.#pending = owner;
+    return owner;
+  }
+
+  cancel() {
+    this.#pending = null;
+  }
+
+  authorize(authority: ImageAuthority, closer: object) {
+    const pending = this.#pending;
+    if (
+      !pending ||
+      (!pending.shellClosesSynchronously && authority.open) ||
+      authority.mount !== pending.mount ||
+      authority.visit !== pending.visit ||
+      authority.onOpenChange !== pending.onOpenChange ||
+      authority.onSubmit !== pending.onSubmit ||
+      authority.onUpload !== pending.onUpload
+    ) {
+      this.#pending = null;
+      return;
+    }
+    pending.closer = closer;
+  }
+
+  consume(authority: ImageAuthority, closer: object) {
+    const pending = this.#pending;
+    if (
+      !pending ||
+      pending.closer !== closer ||
+      (!pending.shellClosesSynchronously && authority.open) ||
+      (pending.shellClosesSynchronously &&
+        !pending.origin.dom.bridge.isConnected) ||
+      authority.mount !== pending.mount ||
+      authority.visit !== pending.visit ||
+      authority.onOpenChange !== pending.onOpenChange ||
+      authority.onSubmit !== pending.onSubmit ||
+      authority.onUpload !== pending.onUpload
+    ) {
+      return null;
+    }
+    this.#pending = null;
+    return pending;
+  }
+}
+
+function imageAuthoritiesMatch(
+  previous: ImageAuthority,
+  current: ImageAuthority,
+  includeRevision = true,
+) {
+  return (
+    previous.mount === current.mount &&
+    (!includeRevision || previous.revision === current.revision) &&
+    previous.visit === current.visit &&
+    previous.open === current.open &&
+    previous.onOpenChange === current.onOpenChange &&
+    previous.onSubmit === current.onSubmit &&
+    previous.onUpload === current.onUpload &&
+    previous.draft === current.draft &&
+    previous.src === current.src &&
+    previous.alt === current.alt &&
+    previous.error === current.error &&
+    Object.is(previous.altRevision, current.altRevision) &&
+    previous.previewFailed === current.previewFailed &&
+    previous.upload === current.upload &&
+    previous.uploading === current.uploading &&
+    previous.uploadAvailable === current.uploadAvailable &&
+    previous.normalizedSrc === current.normalizedSrc &&
+    previous.normalizedAlt === current.normalizedAlt &&
+    previous.submitDisabled === current.submitDisabled
+  );
+}
+
+function imageUploadMatchesAuthority(
+  upload: ImageUploadOwner,
+  authority: ImageAuthority,
+) {
+  return (
+    upload.authority.mount === authority.mount &&
+    upload.visit === authority.visit &&
+    upload.callback === authority.onUpload &&
+    upload.authority.onOpenChange === authority.onOpenChange &&
+    upload.authority.onSubmit === authority.onSubmit &&
+    authority.open &&
+    authority.upload === upload
+  );
+}
+
+function imageSnapshotAttributes(
+  node: Node,
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  const element = node as Element;
+  return Object.freeze(
+    [...element.attributes]
+      .filter(({ name }) => {
+        if (
+          element.getAttribute("role") === "dialog" &&
+          IMAGE_RADIX_SETTLING_ATTRIBUTES.has(name)
+        ) {
+          return false;
+        }
+        if (
+          element.classList.contains("dialog-overlay") &&
+          (name === "aria-hidden" || name === "data-aria-hidden")
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function imageSnapshotDom(node: Node): ImageDomSnapshot {
+  return Object.freeze({
+    node,
+    value: node.nodeValue,
+    attributes: imageSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(imageSnapshotDom)),
+  });
+}
+
+function imageDomMatches(snapshot: ImageDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.value) return false;
+  const attributes = imageSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node && imageDomMatches(child),
+    )
+  );
+}
+
+function imageSnapshotContains(
+  snapshot: ImageDomSnapshot,
+  node: Node,
+): boolean {
+  return (
+    snapshot.node === node ||
+    snapshot.children.some((child) => imageSnapshotContains(child, node))
+  );
+}
+
+function imageIsRadixFocusGuard(node: Node | null) {
+  return (
+    node?.nodeType === 1 &&
+    (node as Element).tagName === "SPAN" &&
+    (node as Element).hasAttribute("data-radix-focus-guard")
+  );
+}
+
+function imagePreviousCommittedSibling(node: Node) {
+  let sibling = node.previousSibling;
+  while (imageIsRadixFocusGuard(sibling)) {
+    sibling = sibling?.previousSibling ?? null;
+  }
+  return sibling;
+}
+
+function imageNextCommittedSibling(node: Node) {
+  let sibling = node.nextSibling;
+  while (imageIsRadixFocusGuard(sibling)) {
+    sibling = sibling?.nextSibling ?? null;
+  }
+  return sibling;
+}
+
+function imageNodePlacement(node: Node): ImageNodePlacement | null {
+  const parent = node.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    node,
+    parent,
+    previous: imagePreviousCommittedSibling(node),
+    next: imageNextCommittedSibling(node),
+  });
+}
+
+function captureImagePlacement(
+  bridge: HTMLDivElement,
+  overlay: HTMLDivElement,
+  content: HTMLDivElement,
+): ImagePlacement | null {
+  const document = content.ownerDocument;
+  const portalParent = content.parentNode;
+  const bridgePlacement = imageNodePlacement(bridge);
+  if (
+    !portalParent ||
+    !bridgePlacement ||
+    overlay.ownerDocument !== document ||
+    bridge.ownerDocument !== document ||
+    overlay.parentNode !== portalParent ||
+    !bridge.isConnected ||
+    !overlay.isConnected ||
+    !content.isConnected
+  ) {
+    return null;
+  }
+  const placements = new Map<Node, ImageNodePlacement>();
+  const captureAncestors = (start: Node) => {
+    let node = start;
+    while (node !== document) {
+      const placement = imageNodePlacement(node);
+      if (!placement) return false;
+      placements.set(node, placement);
+      node = placement.parent;
+    }
+    return true;
+  };
+  if (
+    !captureAncestors(portalParent) ||
+    !captureAncestors(bridgePlacement.parent)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    document,
+    portalParent,
+    overlayPrevious: imagePreviousCommittedSibling(overlay),
+    overlayNext: imageNextCommittedSibling(overlay),
+    contentPrevious: imagePreviousCommittedSibling(content),
+    contentNext: imageNextCommittedSibling(content),
+    bridge: bridgePlacement,
+    ancestors: Object.freeze([...placements.values()]),
+  });
+}
+
+function imagePlacementMatches(
+  bridge: HTMLDivElement,
+  overlay: HTMLDivElement,
+  content: HTMLDivElement,
+  placement: ImagePlacement,
+) {
+  return (
+    bridge.isConnected &&
+    overlay.isConnected &&
+    content.isConnected &&
+    bridge.ownerDocument === placement.document &&
+    overlay.ownerDocument === placement.document &&
+    content.ownerDocument === placement.document &&
+    bridge.parentNode === placement.bridge.parent &&
+    imagePreviousCommittedSibling(bridge) === placement.bridge.previous &&
+    imageNextCommittedSibling(bridge) === placement.bridge.next &&
+    overlay.parentNode === placement.portalParent &&
+    content.parentNode === placement.portalParent &&
+    imagePreviousCommittedSibling(overlay) === placement.overlayPrevious &&
+    imageNextCommittedSibling(overlay) === placement.overlayNext &&
+    imagePreviousCommittedSibling(content) === placement.contentPrevious &&
+    imageNextCommittedSibling(content) === placement.contentNext &&
+    placement.ancestors.every(
+      (ancestor) =>
+        ancestor.node.isConnected &&
+        ancestor.node.parentNode === ancestor.parent &&
+        imagePreviousCommittedSibling(ancestor.node) === ancestor.previous &&
+        imageNextCommittedSibling(ancestor.node) === ancestor.next,
+    )
+  );
+}
+
+function imageRadixStyleTextIsExact(value: string | null) {
+  const normalized = value?.trim() ?? "";
+  return (
+    normalized === "" ||
+    /^pointer-events:\s*(?:auto|none);?$/i.test(normalized)
+  );
+}
+
+function imageRadixContentStyleIsExact(content: HTMLDivElement) {
+  return (
+    imageRadixStyleTextIsExact(content.getAttribute("style")) &&
+    (content.style.pointerEvents === "" ||
+      content.style.pointerEvents === "auto")
+  );
+}
+
+interface ImageDomGuard {
+  readonly isClean: (
+    changing?: "url" | "alt" | "file" | null,
+  ) => boolean;
+  readonly isSettling: () => boolean;
+  readonly finishCommit: () => void;
+  readonly release: () => void;
+}
+
+function createImageDomGuard(
+  dom: ImageDom,
+  placement: ImagePlacement,
+  committedDomMatches: () => boolean,
+  onDirty: () => void,
+): ImageDomGuard | null {
+  const ownerWindow = placement.document.defaultView;
+  const Observer = ownerWindow?.MutationObserver;
+  if (!ownerWindow || !Observer) return null;
+  let changed = false;
+  let reactCommitSettling = true;
+  const controlledInputs = new Set(
+    [dom.url, dom.alt, dom.file].filter(
+      (input): input is HTMLInputElement => input !== null,
+    ),
+  );
+  const radixContentSettling = new Map(
+    [...IMAGE_RADIX_SETTLING_ATTRIBUTES].map((attribute) => [attribute, 4]),
+  );
+  const radixOverlaySettling = new Map(
+    ["aria-hidden", "data-aria-hidden"].map((attribute) => [attribute, 4]),
+  );
+  const claimRadixSettlement = (
+    allowances: Map<string, number>,
+    attribute: string,
+  ) => {
+    const remaining = allowances.get(attribute) ?? 0;
+    if (remaining === 0) return false;
+    if (remaining === 1) allowances.delete(attribute);
+    else allowances.set(attribute, remaining - 1);
+    return true;
+  };
+  const exactControlledInputReconciliation = (
+    records: readonly MutationRecord[],
+    index: number,
+  ) => {
+    const start = records[index];
+    if (
+      start?.type !== "attributes" ||
+      start.attributeName !== "name" ||
+      start.oldValue !== null ||
+      !(start.target instanceof ownerWindow.HTMLInputElement) ||
+      !controlledInputs.has(start.target)
+    ) {
+      return 0;
+    }
+    let nextIndex = index + 1;
+    const value = records[nextIndex];
+    if (
+      value?.type === "attributes" &&
+      value.target === start.target &&
+      value.attributeName === "value"
+    ) {
+      nextIndex += 1;
+    }
+    const type = records[nextIndex];
+    if (
+      type?.type === "attributes" &&
+      type.target === start.target &&
+      type.attributeName === "type" &&
+      type.oldValue === "file" &&
+      start.target === dom.file &&
+      start.target.type === "file"
+    ) {
+      nextIndex += 1;
+    }
+    const end = records[nextIndex];
+    if (
+      end?.type !== "attributes" ||
+      end.target !== start.target ||
+      end.attributeName !== "name" ||
+      end.oldValue !== "" ||
+      start.target.hasAttribute("name")
+    ) {
+      return 0;
+    }
+    return nextIndex - index + 1;
+  };
+  const exactRadixMutation = (record: MutationRecord) => {
+    if (
+      record.type === "attributes" &&
+      record.target === dom.content &&
+      record.attributeName &&
+      (record.attributeName === "style"
+        ? imageRadixStyleTextIsExact(record.oldValue)
+        : record.oldValue === null ||
+          record.oldValue ===
+            dom.content.getAttribute(record.attributeName)) &&
+      claimRadixSettlement(radixContentSettling, record.attributeName)
+    ) {
+      if (record.attributeName === "aria-labelledby") {
+        return dom.content.getAttribute(record.attributeName) === dom.title.id;
+      }
+      if (record.attributeName === "aria-describedby") {
+        return (
+          dom.content.getAttribute(record.attributeName) === dom.description.id
+        );
+      }
+      return imageRadixContentStyleIsExact(dom.content);
+    }
+    if (
+      record.type === "attributes" &&
+      record.target === dom.overlay &&
+      record.attributeName &&
+      (record.oldValue === null ||
+        record.oldValue === "true" ||
+        record.oldValue ===
+          dom.overlay.getAttribute(record.attributeName)) &&
+      claimRadixSettlement(radixOverlaySettling, record.attributeName)
+    ) {
+      const current = dom.overlay.getAttribute(record.attributeName);
+      return current === null || current === "true";
+    }
+    if (
+      record.type === "childList" &&
+      record.target === placement.portalParent
+    ) {
+      const nodes = [...record.addedNodes, ...record.removedNodes];
+      return nodes.length > 0 && nodes.every(imageIsRadixFocusGuard);
+    }
+    return false;
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    if (changed || records.length === 0) return changed;
+    if (
+      reactCommitSettling &&
+      records.every(
+        (entry) =>
+          entry.target === dom.content ||
+          dom.content.contains(entry.target) ||
+          entry.target === dom.overlay ||
+          dom.overlay.contains(entry.target),
+      ) &&
+      committedDomMatches()
+    ) {
+      return false;
+    }
+    for (let index = 0; index < records.length; index += 1) {
+      const reconciled = exactControlledInputReconciliation(records, index);
+      if (reconciled > 0) {
+        index += reconciled - 1;
+        continue;
+      }
+      if (exactRadixMutation(records[index])) continue;
+      changed = true;
+      break;
+    }
+    if (changed) onDirty();
+    return changed;
+  };
+  const observer = new Observer((records) => {
+    record(records);
+  });
+  observer.observe(dom.content, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(dom.overlay, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(dom.bridge, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  const observedParents = new Set<Node>();
+  for (const parent of [
+    placement.portalParent,
+    placement.bridge.parent,
+    ...placement.ancestors.map((ancestor) => ancestor.parent),
+  ]) {
+    if (observedParents.has(parent)) continue;
+    observedParents.add(parent);
+    observer.observe(parent, { childList: true });
+  }
+  return Object.freeze({
+    isClean: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    isSettling: () => reactCommitSettling,
+    finishCommit: () => {
+      if (!reactCommitSettling) return;
+      record(observer.takeRecords());
+      reactCommitSettling = false;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function imageFileFacts(input: HTMLInputElement | null): ImageFileFacts | null {
+  if (!input) return null;
+  return Object.freeze({
+    value: input.value,
+    files: Object.freeze(Array.from(input.files ?? [])),
+  });
+}
+
+function imageFileFactsMatch(
+  input: HTMLInputElement,
+  facts: ImageFileFacts,
+) {
+  const files = Array.from(input.files ?? []);
+  return (
+    input.value === facts.value &&
+    files.length === facts.files.length &&
+    files.every((file, index) => file === facts.files[index])
+  );
+}
+
+function imageTextNodeMatches(element: Element, text: string) {
+  return element.childNodes.item(0)?.textContent?.trim() === text;
+}
+
+function resolveImageDom(
+  authority: ImageAuthority,
+  controls: ImageControls,
+  changing: ImageChangingControl = null,
+  fileFacts: ImageFileFacts | null = null,
+): ImageDom | null {
+  const bridge = controls.bridge.owner.element();
+  const form = controls.form.owner.element();
+  const urlLabel = controls.urlLabel.owner.element();
+  const urlRow = controls.urlRow.owner.element();
+  const url = controls.url.owner.element();
+  const upload = controls.upload.owner.element();
+  const file = controls.file.owner.element();
+  const error = controls.error.owner.element();
+  const altLabel = controls.altLabel.owner.element();
+  const alt = controls.alt.owner.element();
+  const preview = controls.preview.owner.element();
+  const actions = controls.actions.owner.element();
+  const cancel = controls.cancel.owner.element();
+  const insert = controls.insert.owner.element();
+  const content = form?.parentElement;
+  const ownerWindow = content?.ownerDocument.defaultView;
+  const harnessShell =
+    !!ownerWindow &&
+    bridge instanceof ownerWindow.HTMLDivElement &&
+    content instanceof ownerWindow.HTMLDivElement &&
+    form instanceof ownerWindow.HTMLFormElement &&
+    content.parentElement === bridge &&
+    content.getAttribute("role") === "dialog" &&
+    content.getAttribute("aria-label") === IMAGE_TITLE &&
+    content.attributes.length === 2 &&
+    content.children.length === 1 &&
+    content.childNodes.length === 1 &&
+    content.firstElementChild === form;
+  const header = harnessShell ? content : content?.firstElementChild;
+  const title = harnessShell
+    ? content
+    : header?.firstElementChild?.firstElementChild;
+  const description = harnessShell ? content : title?.nextElementSibling;
+  const close = harnessShell ? cancel : header?.lastElementChild;
+  const overlay = harnessShell ? content : content?.previousElementSibling;
+  if (
+    !ownerWindow ||
+    !(bridge instanceof ownerWindow.HTMLDivElement) ||
+    !(overlay instanceof ownerWindow.HTMLDivElement) ||
+    !(content instanceof ownerWindow.HTMLDivElement) ||
+    !(header instanceof ownerWindow.HTMLDivElement) ||
+    !(title instanceof ownerWindow.HTMLElement) ||
+    !(description instanceof ownerWindow.HTMLElement) ||
+    (!(title instanceof ownerWindow.HTMLHeadingElement) && !harnessShell) ||
+    (!(description instanceof ownerWindow.HTMLParagraphElement) &&
+      !harnessShell) ||
+    !(close instanceof ownerWindow.HTMLButtonElement) ||
+    !(form instanceof ownerWindow.HTMLFormElement) ||
+    !(urlLabel instanceof ownerWindow.HTMLLabelElement) ||
+    !(urlRow instanceof ownerWindow.HTMLDivElement) ||
+    !(url instanceof ownerWindow.HTMLInputElement) ||
+    !(altLabel instanceof ownerWindow.HTMLLabelElement) ||
+    !(alt instanceof ownerWindow.HTMLInputElement) ||
+    !(actions instanceof ownerWindow.HTMLDivElement) ||
+    !(cancel instanceof ownerWindow.HTMLButtonElement) ||
+    !(insert instanceof ownerWindow.HTMLButtonElement)
+  ) {
+    return null;
+  }
+  const expectedFormChildren =
+    3 +
+    (authority.error ? 1 : 0) +
+    (authority.normalizedSrc ? 1 : 0);
+  let formIndex = 0;
+  const expectedUrlLabel = form.children.item(formIndex++);
+  const expectedError = authority.error ? form.children.item(formIndex++) : null;
+  const expectedAltLabel = form.children.item(formIndex++);
+  const expectedPreview = authority.normalizedSrc
+    ? form.children.item(formIndex++)
+    : null;
+  const expectedActions = form.children.item(formIndex);
+  const closeIcon = close.firstElementChild;
+  const exactShell =
+    harnessShell
+      ? bridge.isConnected &&
+        bridge.ownerDocument === content.ownerDocument &&
+        bridge.tagName === "DIV" &&
+        bridge.className === "contents" &&
+        bridge.children.length === 1 &&
+        bridge.childNodes.length === 1 &&
+        bridge.firstElementChild === content &&
+        content.isConnected &&
+        content.parentElement === bridge
+      : bridge.isConnected &&
+        bridge.ownerDocument === content.ownerDocument &&
+        bridge.tagName === "DIV" &&
+        bridge.className === "contents" &&
+        bridge.childNodes.length === 0 &&
+        overlay.isConnected &&
+        overlay.ownerDocument === content.ownerDocument &&
+        overlay.className === "dialog-overlay animate-fade-in" &&
+        overlay.getAttribute("data-state") === "open" &&
+        overlay.parentNode === content.parentNode &&
+        overlay.nextElementSibling === content &&
+        content.isConnected &&
+        content.tagName === "DIV" &&
+        content.className === "dialog animate-fade-in" &&
+        imageRadixContentStyleIsExact(content) &&
+        content.getAttribute("role") === "dialog" &&
+        content.getAttribute("data-state") === "open" &&
+        content.children.length === 2 &&
+        content.childNodes.length === 2 &&
+        content.children.item(0) === header &&
+        content.children.item(1) === form &&
+        header.parentElement === content &&
+        header.className ===
+          "mb-4 flex items-start justify-between gap-4" &&
+        header.hasAttribute("data-focus-skip") &&
+        title.textContent === IMAGE_TITLE &&
+        description.textContent === IMAGE_DESCRIPTION &&
+        title.id !== "" &&
+        description.id !== "" &&
+        (content.getAttribute("aria-labelledby") === null ||
+          content.getAttribute("aria-labelledby") === title.id) &&
+        (content.getAttribute("aria-describedby") === null ||
+          content.getAttribute("aria-describedby") === description.id) &&
+        close.type === "button" &&
+        !close.disabled &&
+        close.getAttribute("aria-label") === "Close" &&
+        close.className === "icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0" &&
+        close.parentElement === header &&
+        close.children.length === 1 &&
+        closeIcon?.tagName.toLowerCase() === "svg" &&
+        closeIcon.getAttribute("width") === "16" &&
+        closeIcon.getAttribute("height") === "16" &&
+        closeIcon.getAttribute("aria-hidden") === "true";
+  const exact =
+    authority.open &&
+    exactShell &&
+    form.isConnected &&
+    form.ownerDocument === content.ownerDocument &&
+    form.parentElement === content &&
+    form.className === IMAGE_FORM_CLASS &&
+    form.children.length === expectedFormChildren &&
+    form.childNodes.length === expectedFormChildren &&
+    expectedUrlLabel === urlLabel &&
+    expectedAltLabel === altLabel &&
+    expectedActions === actions &&
+    urlLabel.parentElement === form &&
+    urlLabel.className === IMAGE_LABEL_CLASS &&
+    urlLabel.children.length === 1 &&
+    urlLabel.childNodes.length === 2 &&
+    imageTextNodeMatches(urlLabel, "Image URL") &&
+    urlLabel.lastElementChild === urlRow &&
+    urlRow.parentElement === urlLabel &&
+    urlRow.className === IMAGE_URL_ROW_CLASS &&
+    urlRow.children.item(0) === url &&
+    url.isConnected &&
+    url.ownerDocument === content.ownerDocument &&
+    url.type === "text" &&
+    url.form === form &&
+    !url.disabled &&
+    !url.required &&
+    url.className === IMAGE_URL_CLASS &&
+    url.placeholder === "https://…/image.png" &&
+    url.dataset.testid === "image-url" &&
+    (changing === "url" || url.value === authority.src) &&
+    altLabel.parentElement === form &&
+    altLabel.className === IMAGE_LABEL_CLASS &&
+    altLabel.children.length === 1 &&
+    altLabel.childNodes.length === 2 &&
+    imageTextNodeMatches(altLabel, "Alt text") &&
+    altLabel.lastElementChild === alt &&
+    alt.isConnected &&
+    alt.ownerDocument === content.ownerDocument &&
+    alt.type === "text" &&
+    alt.form === form &&
+    !alt.disabled &&
+    !alt.required &&
+    alt.className === IMAGE_ALT_CLASS &&
+    alt.placeholder === "Describe the image" &&
+    alt.dataset.testid === "image-alt" &&
+    (changing === "alt" || alt.value === authority.alt) &&
+    actions.parentElement === form &&
+    actions.className === IMAGE_ACTIONS_CLASS &&
+    actions.children.length === 2 &&
+    actions.childNodes.length === 2 &&
+    actions.children.item(0) === cancel &&
+    actions.children.item(1) === insert &&
+    cancel.type === "button" &&
+    cancel.form === form &&
+    !cancel.disabled &&
+    cancel.className === IMAGE_CANCEL_CLASS &&
+    cancel.textContent === "Cancel" &&
+    insert.type === "submit" &&
+    insert.form === form &&
+    insert.disabled === authority.submitDisabled &&
+    insert.matches(":disabled") === authority.submitDisabled &&
+    insert.className === IMAGE_INSERT_CLASS &&
+    insert.dataset.testid === "image-submit" &&
+    insert.textContent === "Insert";
+  if (!exact) return null;
+  if (authority.uploadAvailable) {
+    if (
+      !(upload instanceof ownerWindow.HTMLButtonElement) ||
+      !(file instanceof ownerWindow.HTMLInputElement) ||
+      upload.parentElement !== urlRow ||
+      file.parentElement !== urlRow ||
+      urlRow.children.length !== 3 ||
+      urlRow.childNodes.length !== 3 ||
+      urlRow.children.item(1) !== upload ||
+      urlRow.children.item(2) !== file ||
+      upload.type !== "button" ||
+      upload.form !== form ||
+      upload.disabled !== authority.uploading ||
+      upload.matches(":disabled") !== authority.uploading ||
+      upload.className !== IMAGE_UPLOAD_CLASS ||
+      upload.dataset.testid !== "image-upload" ||
+      upload.textContent !== (authority.uploading ? "Uploading…" : "Upload…") ||
+      file.type !== "file" ||
+      file.form !== form ||
+      file.disabled ||
+      file.accept !== IMAGE_FILE_ACCEPT ||
+      file.className !== "hidden" ||
+      file.dataset.testid !== "image-file" ||
+      (changing !== "file" &&
+        fileFacts !== null &&
+        !imageFileFactsMatch(file, fileFacts))
+    ) {
+      return null;
+    }
+  } else if (
+    upload !== null ||
+    file !== null ||
+    urlRow.children.length !== 1 ||
+    urlRow.querySelector('[data-testid="image-upload"]') ||
+    urlRow.querySelector('[data-testid="image-file"]')
+  ) {
+    return null;
+  }
+  if (authority.error) {
+    if (
+      !(error instanceof ownerWindow.HTMLDivElement) ||
+      expectedError !== error ||
+      error.parentElement !== form ||
+      error.className !== IMAGE_ERROR_CLASS ||
+      error.getAttribute("role") !== "alert" ||
+      error.dataset.testid !== "image-upload-error" ||
+      error.children.length !== 0 ||
+      error.textContent !== authority.error
+    ) {
+      return null;
+    }
+  } else if (
+    error !== null ||
+    expectedError !== null ||
+    form.querySelector('[data-testid="image-upload-error"]')
+  ) {
+    return null;
+  }
+  if (authority.normalizedSrc) {
+    if (
+      !(preview instanceof ownerWindow.HTMLImageElement) ||
+      expectedPreview !== preview ||
+      preview.parentElement !== form ||
+      preview.getAttribute("src") !== authority.normalizedSrc ||
+      preview.alt !== "" ||
+      preview.className !== IMAGE_PREVIEW_CLASS ||
+      preview.style.display !== (authority.previewFailed ? "none" : "")
+    ) {
+      return null;
+    }
+  } else if (
+    preview !== null ||
+    expectedPreview !== null ||
+    form.querySelector(`img.${IMAGE_PREVIEW_CLASS.split(" ")[0]}`)
+  ) {
+    return null;
+  }
+  return {
+    bridge,
+    overlay,
+    content,
+    header,
+    title,
+    description,
+    close,
+    form,
+    urlLabel,
+    urlRow,
+    url,
+    upload,
+    file,
+    error,
+    altLabel,
+    alt,
+    preview,
+    actions,
+    cancel,
+    insert,
+  };
+}
+
+function imageReactEnvelope(
+  event: React.SyntheticEvent,
+  reactName: string,
+  syntheticType: string,
+  currentTarget: EventTarget,
+  content: HTMLDivElement,
+) {
+  if (!event || typeof event !== "object") return null;
+  const ownerWindow = content.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  const wrapper = event as React.SyntheticEvent & {
+    readonly _reactName?: unknown;
+    readonly isDefaultPrevented?: unknown;
+    readonly isPropagationStopped?: unknown;
+    readonly persist?: unknown;
+  };
+  if (
+    !ownerWindow ||
+    !(nativeEvent instanceof ownerWindow.Event) ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    nativeEvent.type === "" ||
+    event.type !== syntheticType ||
+    event.currentTarget !== currentTarget ||
+    event.eventPhase !== nativeEvent.eventPhase ||
+    event.defaultPrevented ||
+    nativeEvent.defaultPrevented ||
+    nativeEvent.target !== target ||
+    !(target instanceof ownerWindow.Node) ||
+    target.ownerDocument !== content.ownerDocument ||
+    !nativeEvent.composedPath().includes(target) ||
+    !nativeEvent.composedPath().includes(content) ||
+    !nativeEvent.composedPath().includes(content.ownerDocument) ||
+    wrapper._reactName !== reactName ||
+    typeof wrapper.isDefaultPrevented !== "function" ||
+    wrapper.isDefaultPrevented() ||
+    typeof wrapper.isPropagationStopped !== "function" ||
+    wrapper.isPropagationStopped() ||
+    typeof wrapper.persist !== "function"
+  ) {
+    return null;
+  }
+  return nativeEvent;
+}
+
+function imageExactNativeInput(
+  event: React.ChangeEvent<HTMLInputElement>,
+  input: HTMLInputElement,
+  publication: ImagePublication,
+) {
+  const nativeEvent = imageReactEnvelope(
+    event,
+    "onChange",
+    "change",
+    input,
+    publication.dom.content,
+  );
+  const ownerWindow = publication.ownerDocument.defaultView;
+  return nativeEvent &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.Event &&
+    (nativeEvent.type === "input" || nativeEvent.type === "change") &&
+    event.target === input &&
+    nativeEvent.target === input &&
+    input.isConnected &&
+    input.ownerDocument === publication.ownerDocument &&
+    imageSnapshotContains(publication.contentTree, input)
+    ? nativeEvent
+    : null;
+}
+
+function imageExactNativeClick(
+  event: React.MouseEvent<HTMLElement>,
+  currentTarget: HTMLElement,
+  control: HTMLElement,
+  publication: ImagePublication,
+) {
+  const nativeEvent = imageReactEnvelope(
+    event,
+    "onClick",
+    "click",
+    currentTarget,
+    publication.dom.content,
+  );
+  const ownerWindow = publication.ownerDocument.defaultView;
+  const target = event.target;
+  return nativeEvent &&
+    ownerWindow &&
+    nativeEvent instanceof ownerWindow.MouseEvent &&
+    nativeEvent.type === "click" &&
+    nativeEvent.button === 0 &&
+    event.button === 0 &&
+    nativeEvent.bubbles &&
+    event.bubbles &&
+    target instanceof ownerWindow.Node &&
+    control.contains(target) &&
+    nativeEvent.composedPath().includes(control) &&
+    imageSnapshotContains(publication.contentTree, target)
+    ? nativeEvent
+    : null;
+}
+
+function imageExactNativeError(
+  event: React.SyntheticEvent<HTMLImageElement>,
+  preview: HTMLImageElement,
+  publication: ImagePublication,
+) {
+  const nativeEvent = imageReactEnvelope(
+    event,
+    "onError",
+    "error",
+    preview,
+    publication.dom.content,
+  );
+  return nativeEvent?.type === "error" &&
+    event.target === preview &&
+    nativeEvent.target === preview &&
+    imageSnapshotContains(publication.contentTree, preview)
+    ? nativeEvent
+    : null;
+}
+
+function imageExactNativeSubmit(
+  event: React.FormEvent<HTMLFormElement>,
+  publication: ImagePublication,
+) {
+  const { form, url, alt, file, insert, content } = publication.dom;
+  const nativeEvent = imageReactEnvelope(
+    event,
+    "onSubmit",
+    "submit",
+    form,
+    content,
+  );
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (
+    !nativeEvent ||
+    !ownerWindow ||
+    nativeEvent.type !== "submit" ||
+    event.target !== form ||
+    nativeEvent.target !== form ||
+    !nativeEvent.cancelable ||
+    !form.isConnected ||
+    form.ownerDocument !== publication.ownerDocument ||
+    url.form !== form ||
+    alt.form !== form ||
+    insert.form !== form ||
+    (file !== null && file.form !== form) ||
+    !imageSnapshotContains(publication.contentTree, form)
+  ) {
+    return null;
+  }
+  const SubmitEventConstructor = ownerWindow.SubmitEvent;
+  if (
+    SubmitEventConstructor &&
+    nativeEvent instanceof SubmitEventConstructor &&
+    nativeEvent.submitter !== null &&
+    nativeEvent.submitter !== insert
+  ) {
+    return null;
+  }
+  return nativeEvent;
+}
+
+function imageExactNativeDismissal(
+  event: KeyboardEvent | PointerEvent,
+  publication: ImagePublication,
+) {
+  const ownerWindow = publication.ownerDocument.defaultView;
+  const target = event.target;
+  if (
+    !ownerWindow ||
+    event.eventPhase === ownerWindow.Event.NONE ||
+    !event.bubbles ||
+    event.defaultPrevented ||
+    !(target instanceof ownerWindow.Node) ||
+    !target.isConnected ||
+    target.ownerDocument !== publication.ownerDocument ||
+    !event.composedPath().includes(target) ||
+    !event.composedPath().includes(publication.ownerDocument)
+  ) {
+    return false;
+  }
+  if (event instanceof ownerWindow.KeyboardEvent) {
+    return (
+      event.type === "keydown" &&
+      event.key === "Escape" &&
+      publication.dom.content.contains(target) &&
+      imageSnapshotContains(publication.contentTree, target)
+    );
+  }
+  const PointerEventConstructor = ownerWindow.PointerEvent;
+  return Boolean(
+    PointerEventConstructor &&
+      event instanceof PointerEventConstructor &&
+      event.type === "pointerdown" &&
+      event.button === 0 &&
+      event.isPrimary &&
+      !event.ctrlKey &&
+      !publication.dom.content.contains(target) &&
+      imageSnapshotContains(publication.overlayTree, target),
+  );
+}
+
+function imageExactNativeOutsideClick(
+  pointer: {
+    readonly target: EventTarget | null;
+    readonly pointerId: number;
+    readonly pointerType: string;
+    readonly isPrimary: boolean;
+  },
+  event: MouseEvent,
+  publication: ImagePublication,
+) {
+  const ownerWindow = publication.ownerDocument.defaultView;
+  const PointerEventConstructor = ownerWindow?.PointerEvent;
+  const target = event.target;
+  return Boolean(
+    ownerWindow &&
+      PointerEventConstructor &&
+      event instanceof PointerEventConstructor &&
+      event.type === "click" &&
+      event.eventPhase !== ownerWindow.Event.NONE &&
+      event.bubbles &&
+      !event.defaultPrevented &&
+      event.button === 0 &&
+      event.isPrimary &&
+      !event.ctrlKey &&
+      target === pointer.target &&
+      target instanceof ownerWindow.Node &&
+      target.isConnected &&
+      target.ownerDocument === publication.ownerDocument &&
+      event.composedPath().includes(target) &&
+      event.composedPath().includes(publication.ownerDocument) &&
+      !publication.dom.content.contains(target) &&
+      imageSnapshotContains(publication.overlayTree, target) &&
+      event.pointerId === pointer.pointerId &&
+      event.pointerType === pointer.pointerType &&
+      event.isPrimary === pointer.isPrimary,
+  );
+}
+
+function createImagePublicationRuntime(
+  authority: ImageAuthority,
+  coordinator: ImagePublicationCoordinator,
+  dom: ImageDom,
+  controls: ImageControls,
+  authorizeDismissal: (
+    publication: ImagePublication,
+    event: Event,
+  ) => void,
+  owners: readonly ImageElementOwnerView[],
+  onRetire: () => void,
+): ImagePublicationRuntime {
+  type Retirement = "element" | "layout" | "other";
+  const placement = captureImagePlacement(
+    dom.bridge,
+    dom.overlay,
+    dom.content,
+  );
+  if (!placement) {
+    throw new Error(
+      "Cannot publish image controls without a connected portal placement",
+    );
+  }
+  const contentTree = imageSnapshotDom(dom.content);
+  const overlayTree = imageSnapshotDom(dom.overlay);
+  const bridgeTree = imageSnapshotDom(dom.bridge);
+  const fileFacts = imageFileFacts(dom.file);
+  let retired = false;
+  let retirement: Retirement | null = null;
+  let established = false;
+  let layoutRetired = false;
+  let invalidReplay = false;
+  let replayRefs: ImageRefReplay[] = [];
+  let guard: ImageDomGuard | null = null;
+  const currentDomMatches = (
+    changing: "url" | "alt" | "file" | null = null,
+  ) => {
+    return (
+      Boolean(guard?.isClean(changing)) &&
+      committedDomMatches(changing)
+    );
+  };
+  const committedDomMatches = (
+    changing: "url" | "alt" | "file" | null = null,
+  ) =>
+    dom.content === contentTree.node &&
+    dom.overlay === overlayTree.node &&
+    imagePlacementMatches(dom.bridge, dom.overlay, dom.content, placement) &&
+    imageDomMatches(bridgeTree) &&
+    imageDomMatches(contentTree) &&
+    imageDomMatches(overlayTree) &&
+    Boolean(resolveImageDom(authority, controls, changing, fileFacts));
+  const retire = (reason: Retirement) => {
+    if (retired) return false;
+    retired = true;
+    retirement = reason;
+    onRetire();
+    coordinator.retire(publication);
+    queueMicrotask(() => {
+      if (coordinator.replay()?.source !== publication) guard?.release();
+    });
+    return true;
+  };
+  const publication: ImagePublication = Object.freeze({
+    identity: Symbol("image-publication"),
+    authority,
+    ownerDocument: dom.content.ownerDocument,
+    dom,
+    bridgeTree,
+    contentTree,
+    overlayTree,
+    placement,
+    fileFacts,
+    fileControl: authority.uploadAvailable ? controls.file : null,
+    authorizeDismissal: (event: Event) =>
+      authorizeDismissal(publication, event),
+    retire: () => retire("other"),
+    isRetired: () => retired,
+    commitIsSettling: () => guard?.isSettling() === true,
+    publishedDomMatches: (changing: ImageChangingControl = null) => {
+      const exact = currentDomMatches(changing);
+      if (!exact) retire("element");
+      return exact;
+    },
+  });
+  const refsHaveExactReplay = () =>
+    !invalidReplay &&
+    replayRefs.length > 0 &&
+    replayRefs.every(
+      (entry) =>
+        entry.detached &&
+        entry.reattached &&
+        entry.owner.element() === entry.element &&
+        entry.element.isConnected,
+    );
+  return Object.freeze({
+    publication,
+    publish: () => {
+      established = true;
+      replayRefs = owners.map((owner) => {
+        const element = owner.element();
+        if (!element) {
+          throw new Error(
+            "Cannot publish image controls without every committed ref",
+          );
+        }
+        return { owner, element, detached: false, reattached: false };
+      });
+      guard = createImageDomGuard(
+        dom,
+        placement,
+        committedDomMatches,
+        () => {
+          retire("element");
+        },
+      );
+      if (!guard || !coordinator.publish(publication)) {
+        guard?.release();
+        return false;
+      }
+      return true;
+    },
+    retireForElement: () => {
+      retire("element");
+    },
+    retireForLayout: () => {
+      layoutRetired = true;
+      retire("layout");
+    },
+    finishCommit: () => {
+      guard?.finishCommit();
+    },
+    noteRef: (
+      owner: ImageElementOwnerView,
+      element: Element | null,
+      previous: Element | null,
+    ) => {
+      if (!established) return;
+      const proof = replayRefs.find((entry) => entry.owner === owner);
+      if (!proof) {
+        invalidReplay = true;
+        return;
+      }
+      if (
+        element === null &&
+        previous === proof.element &&
+        proof.element.isConnected
+      ) {
+        proof.detached = true;
+        proof.reattached = false;
+      } else if (
+        element === proof.element &&
+        previous === null &&
+        proof.detached &&
+        proof.element.isConnected
+      ) {
+        proof.reattached = true;
+      } else if (element !== previous) {
+        invalidReplay = true;
+      }
+    },
+    isExactReplay: () =>
+      retired &&
+      (retirement === "element" || retirement === "layout") &&
+      established &&
+      layoutRetired &&
+      refsHaveExactReplay() &&
+      currentDomMatches(),
+    isRecoverablePartialReplay: () =>
+      retired &&
+      retirement === "element" &&
+      established &&
+      !layoutRetired &&
+      replayRefs.some((entry) => entry.detached && entry.reattached) &&
+      replayRefs.every(
+        (entry) =>
+          entry.owner.element() === entry.element &&
+          entry.element.isConnected,
+      ) &&
+      currentDomMatches(),
+    replay: () =>
+      guard
+        ? Object.freeze({
+            source: publication,
+            bridgeTree,
+            contentTree,
+            overlayTree,
+            placement,
+            historyIsClean: guard.isClean,
+            release: guard.release,
+          })
+        : null,
+  });
+}
+
+function imageReplayAllowsPublication(
+  coordinator: ImagePublicationCoordinator,
+  authority: ImageAuthority,
+  dom: ImageDom,
+) {
+  const replay = coordinator.replay();
+  if (!replay) return true;
+  const sameAuthority = imageAuthoritiesMatch(
+    replay.source.authority,
+    authority,
+    false,
+  );
+  const exactReplay =
+    sameAuthority &&
+    coordinator.acceptsSuccessorOf(replay.source) &&
+    replay.historyIsClean() &&
+    replay.source.dom.bridge === dom.bridge &&
+    replay.source.dom.overlay === dom.overlay &&
+    replay.source.dom.content === dom.content &&
+    imagePlacementMatches(
+      dom.bridge,
+      dom.overlay,
+      dom.content,
+      replay.placement,
+    ) &&
+    imageDomMatches(replay.bridgeTree) &&
+    imageDomMatches(replay.contentTree) &&
+    imageDomMatches(replay.overlayTree);
+  coordinator.abandonReplay(replay.source);
+  replay.release();
+  return !sameAuthority || exactReplay;
+}
+
+function ImagePublicationBoundary({
+  establish,
+  settlePortal,
+  children,
+}: {
+  establish: ImagePresentation["establish"];
+  settlePortal: ImagePresentation["settlePortal"];
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    const cleanup = establish();
+    return cleanup;
+  }, [establish]);
+  useEffect(() => {
+    const cleanup = settlePortal();
+    return cleanup;
+  }, [settlePortal]);
+  return children;
+}
+
+function createImagePresentation(
+  authority: ImageAuthority,
+  coordinator: ImagePublicationCoordinator,
+  latestAuthority: () => ImageAuthority | null,
+  commitAuthority: (authority: ImageAuthority) => void,
+  dismissalListener: ImageDismissalListener,
+  requestSuccessor: () => void,
+  activeUpload: () => ImageUploadOwner | null,
+  setDraft: React.Dispatch<React.SetStateAction<ImageDraft>>,
+  startUpload: (
+    publication: ImagePublication,
+    authority: ImageAuthority,
+    file: File,
+    input: HTMLInputElement,
+  ) => void,
+  afterClose: ImageAfterCloseAuthority,
+  completeClose: (closer: object) => void,
+): ImagePresentation {
+  let currentRuntime: ImagePublicationRuntime | null = null;
+  let lastRuntime: ImagePublicationRuntime | null = null;
+  let successorRequested = false;
+  let partialRecoveryQueued = false;
+  let dismissal: ImageDismissalProof | null = null;
+  let dismissalTimer: number | null = null;
+  let outsidePointer:
+    | {
+        readonly publication: ImagePublication;
+        readonly target: EventTarget | null;
+        readonly pointerId: number;
+        readonly pointerType: string;
+        readonly isPrimary: boolean;
+      }
+    | null = null;
+  const clearDismissal = () => {
+    dismissal = null;
+    outsidePointer = null;
+    if (dismissalTimer !== null) {
+      const ownerWindow =
+        lastRuntime?.publication.ownerDocument.defaultView;
+      ownerWindow?.clearTimeout(dismissalTimer);
+      dismissalTimer = null;
+    }
+  };
+  const onElementChange = (
+    owner: ImageElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+      clearDismissal();
+    }
+    if (
+      runtime?.isExactReplay() &&
+      coordinator.acceptsSuccessorOf(runtime.publication)
+    ) {
+      requestReplaySuccessor(runtime);
+    } else if (
+      !partialRecoveryQueued &&
+      runtime?.isRecoverablePartialReplay() &&
+      coordinator.acceptsSuccessorOf(runtime.publication)
+    ) {
+      partialRecoveryQueued = true;
+      queueMicrotask(() => {
+        partialRecoveryQueued = false;
+        if (
+          successorRequested ||
+          !runtime.isRecoverablePartialReplay() ||
+          !coordinator.acceptsSuccessorOf(runtime.publication) ||
+          !factsAreCurrent()
+        ) {
+          return;
+        }
+        successorRequested = true;
+        requestSuccessor();
+      });
+    }
+  };
+  const control = <T extends HTMLElement>() => {
+    const owner = new ImageElementOwner<T>(onElementChange);
+    return Object.freeze({
+      owner,
+      capture: owner.capture,
+      action: Object.freeze({ identity: Symbol("image-control-action") }),
+    });
+  };
+  const bridge = control<HTMLDivElement>();
+  const form = control<HTMLFormElement>();
+  const urlLabel = control<HTMLLabelElement>();
+  const urlRow = control<HTMLDivElement>();
+  const url = control<HTMLInputElement>();
+  const upload = control<HTMLButtonElement>();
+  const file = control<HTMLInputElement>();
+  const error = control<HTMLDivElement>();
+  const altLabel = control<HTMLLabelElement>();
+  const alt = control<HTMLInputElement>();
+  const preview = control<HTMLImageElement>();
+  const actions = control<HTMLDivElement>();
+  const cancel = control<HTMLButtonElement>();
+  const insert = control<HTMLButtonElement>();
+  const closeToken = Object.freeze({ identity: Symbol("image-close") });
+  const controls = {
+    bridge,
+    form,
+    urlLabel,
+    urlRow,
+    url,
+    upload,
+    file,
+    error,
+    altLabel,
+    alt,
+    preview,
+    actions,
+    cancel,
+    insert,
+  };
+  const expectedOwners = () => {
+    const owners: (ImageElementOwnerView | null)[] = [
+        form.owner,
+        urlLabel.owner,
+        urlRow.owner,
+        url.owner,
+        authority.uploadAvailable ? upload.owner : null,
+        authority.uploadAvailable ? file.owner : null,
+        authority.error ? error.owner : null,
+        altLabel.owner,
+        alt.owner,
+        authority.normalizedSrc ? preview.owner : null,
+        actions.owner,
+        cancel.owner,
+        insert.owner,
+      ];
+    return Object.freeze(
+      owners.filter(
+        (owner): owner is ImageElementOwnerView => owner !== null,
+      ),
+    );
+  };
+  const factsAreCurrent = () => {
+    const draft = authority.draft;
+    return (
+      latestAuthority() === authority &&
+      draft.visit === authority.visit &&
+      draft.open === authority.open &&
+      draft.src === authority.src &&
+      draft.alt === authority.alt &&
+      draft.error === authority.error &&
+      Object.is(draft.altRevision, authority.altRevision) &&
+      draft.previewFailed === authority.previewFailed &&
+      draft.upload === authority.upload &&
+      authority.visit.onOpenChange === authority.onOpenChange &&
+      authority.visit.onSubmit === authority.onSubmit &&
+      authority.visit.onUpload === authority.onUpload &&
+      authority.uploading === (authority.upload !== null) &&
+      authority.uploadAvailable === (authority.onUpload !== undefined) &&
+      authority.normalizedSrc === authority.src.trim() &&
+      authority.normalizedAlt === authority.alt.trim() &&
+      authority.submitDisabled ===
+        (authority.uploading || !authority.normalizedSrc)
+    );
+  };
+  const exactDom = (
+    changing: "url" | "alt" | "file" | null = null,
+    facts: ImageFileFacts | null = null,
+  ) => resolveImageDom(authority, controls, changing, facts);
+  const owns = (
+    publication: ImagePublication,
+    changing: "url" | "alt" | "file" | null = null,
+  ) =>
+    Boolean(
+      factsAreCurrent() &&
+        publication.authority === authority &&
+        coordinator.isCurrent(publication) &&
+        !publication.isRetired() &&
+        publication.publishedDomMatches(changing),
+    );
+  const requestReplaySuccessor = (runtime: ImagePublicationRuntime) => {
+    const replay = runtime.replay();
+    if (
+      successorRequested ||
+      !replay ||
+      !runtime.isExactReplay() ||
+      !coordinator.acceptsSuccessorOf(runtime.publication) ||
+      !factsAreCurrent() ||
+      !coordinator.stageReplay(replay)
+    ) {
+      return;
+    }
+    successorRequested = true;
+    requestSuccessor();
+  };
+  const stageDismissal = (
+    publication: ImagePublication,
+    proof: Omit<ImageDismissalProof, "publication">,
+  ) => {
+    clearDismissal();
+    if (
+      !owns(publication) ||
+      coordinator.hasClaimed(
+        publication,
+        proof.control,
+        insert.action,
+        proof.reactEvent,
+        proof.nativeEvent,
+      )
+    ) {
+      return;
+    }
+    dismissal = { publication, ...proof };
+    const ownerWindow = publication.ownerDocument.defaultView;
+    dismissalTimer =
+      ownerWindow?.setTimeout(() => {
+        dismissal = null;
+        dismissalTimer = null;
+      }, 0) ?? null;
+  };
+  const authorizeNativeDismissal = (
+    publication: ImagePublication,
+    event: Event,
+  ) => {
+    const ownerWindow = publication.ownerDocument.defaultView;
+    const PointerEventConstructor = ownerWindow?.PointerEvent;
+    if (!ownerWindow) return;
+    const pointer = outsidePointer;
+    clearDismissal();
+    if (!owns(publication)) return;
+    if (
+      event.type === "click" &&
+      PointerEventConstructor &&
+      event instanceof PointerEventConstructor
+    ) {
+      if (
+        pointer?.publication === publication &&
+        imageExactNativeOutsideClick(pointer, event, publication)
+      ) {
+        stageDismissal(publication, {
+          control: publication.dom.overlay,
+          reactEvent: event,
+          nativeEvent: event,
+        });
+      }
+      return;
+    }
+    if (event instanceof ownerWindow.KeyboardEvent) {
+      if (imageExactNativeDismissal(event, publication)) {
+        stageDismissal(publication, {
+          control: publication.dom.content,
+          reactEvent: event,
+          nativeEvent: event,
+        });
+      }
+      return;
+    }
+    if (
+      !PointerEventConstructor ||
+      !(event instanceof PointerEventConstructor) ||
+      !imageExactNativeDismissal(event, publication)
+    ) {
+      return;
+    }
+    outsidePointer = {
+      publication,
+      target: event.target,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      isPrimary: event.isPrimary,
+    };
+  };
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        lastRuntime.isExactReplay() &&
+        coordinator.acceptsSuccessorOf(lastRuntime.publication)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    const dom = exactDom();
+    if (
+      !factsAreCurrent() ||
+      !dom ||
+      !imageReplayAllowsPublication(coordinator, authority, dom)
+    ) {
+      return undefined;
+    }
+    const runtime = createImagePublicationRuntime(
+      authority,
+      coordinator,
+      dom,
+      controls,
+      authorizeNativeDismissal,
+      expectedOwners(),
+      () => {
+        clearDismissal();
+      },
+    );
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+  const finishLastCommit = () => {
+    lastRuntime?.finishCommit();
+  };
+  const currentPublication = (
+    changing: "url" | "alt" | "file" | null = null,
+  ) => {
+    const publication = coordinator.active();
+    return publication && owns(publication, changing) ? publication : null;
+  };
+  const claim = (
+    publication: ImagePublication,
+    controlOwner: object,
+    action: object,
+    reactEvent: object,
+    nativeEvent: Event,
+  ) =>
+    coordinator.claim(
+      publication,
+      controlOwner,
+      action,
+      reactEvent,
+      nativeEvent,
+    );
+  const onUrlChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const publication = currentPublication("url");
+    const input = url.owner.element();
+    if (
+      !publication ||
+      !input ||
+      publication.dom.url !== input ||
+      event.currentTarget !== input
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeInput(event, input, publication);
+    if (
+      !nativeEvent ||
+      !claim(publication, url, url.action, event, nativeEvent)
+    ) {
+      return;
+    }
+    const value = input.value;
+    setDraft(
+      nextImageDraft(authority.draft, {
+        src: value,
+        previewFailed: false,
+      }),
+    );
+  };
+  const onAltChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const publication = currentPublication("alt");
+    const input = alt.owner.element();
+    if (
+      !publication ||
+      !input ||
+      publication.dom.alt !== input ||
+      event.currentTarget !== input
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeInput(event, input, publication);
+    if (
+      !nativeEvent ||
+      !claim(publication, alt, alt.action, event, nativeEvent)
+    ) {
+      return;
+    }
+    const value = input.value;
+    setDraft(
+      nextImageDraft(authority.draft, {
+        alt: value,
+        altRevision: authority.altRevision + 1,
+      }),
+    );
+  };
+  const onUploadClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    const button = upload.owner.element();
+    const input = file.owner.element();
+    if (
+      !publication ||
+      !button ||
+      !input ||
+      !authority.uploadAvailable ||
+      authority.uploading ||
+      activeUpload() !== null ||
+      publication.dom.upload !== button ||
+      publication.dom.file !== input ||
+      event.currentTarget !== button
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeClick(
+      event,
+      button,
+      button,
+      publication,
+    );
+    if (
+      !nativeEvent ||
+      !claim(
+        publication,
+        upload,
+        upload.action,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return;
+    }
+    requestSuccessor();
+    input.click();
+  };
+  const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const publication = currentPublication("file");
+    const input = file.owner.element();
+    const ownerWindow = input?.ownerDocument.defaultView;
+    const commitFiles =
+      publication &&
+      input &&
+      ownerWindow &&
+      publication.dom.overlay === publication.dom.content &&
+      publication.commitIsSettling() &&
+      publication.fileFacts !== null &&
+      input.value !== publication.fileFacts.value &&
+      event.currentTarget === undefined &&
+      event.nativeEvent === undefined &&
+      event.target !== null &&
+      typeof event.target === "object" &&
+      "files" in event.target &&
+      Array.isArray(event.target.files) &&
+      event.target.files.length === 1 &&
+      event.target.files[0] instanceof ownerWindow.File
+        ? event.target.files
+        : null;
+    if (
+      !publication ||
+      !input ||
+      publication.dom.file !== input ||
+      (event.currentTarget !== input && commitFiles === null)
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeInput(event, input, publication);
+    const chosen = nativeEvent ? input.files?.[0] : commitFiles?.[0];
+    if (
+      !chosen ||
+      !authority.onUpload ||
+      authority.uploading ||
+      activeUpload() !== null ||
+      (nativeEvent
+        ? !claim(publication, file, file.action, event, nativeEvent)
+        : commitFiles === null ||
+          !coordinator.claimContinuation(
+            publication,
+            file,
+            file.action,
+            event,
+          ))
+    ) {
+      return;
+    }
+    startUpload(publication, authority, chosen, input);
+  };
+  const onPreviewError = (
+    event: React.SyntheticEvent<HTMLImageElement>,
+  ) => {
+    const publication = currentPublication();
+    const image = preview.owner.element();
+    if (
+      !publication ||
+      !image ||
+      authority.previewFailed ||
+      publication.dom.preview !== image ||
+      event.currentTarget !== image
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeError(event, image, publication);
+    if (
+      !nativeEvent ||
+      !claim(
+        publication,
+        preview,
+        preview.action,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return;
+    }
+    setDraft(
+      nextImageDraft(authority.draft, { previewFailed: true }),
+    );
+  };
+  const closeCurrent = (
+    publication: ImagePublication,
+    withInsertion: boolean,
+  ) => {
+    if (withInsertion) {
+      afterClose.schedule(
+        publication,
+        authority,
+        publication.dom.overlay === publication.dom.content
+          ? closeToken
+          : null,
+      );
+    }
+    else afterClose.cancel();
+    publication.retire();
+    authority.onOpenChange(false);
+  };
+  const onCancelClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    const button = cancel.owner.element();
+    if (
+      !publication ||
+      !button ||
+      publication.dom.cancel !== button ||
+      event.currentTarget !== button
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeClick(
+      event,
+      button,
+      button,
+      publication,
+    );
+    if (
+      !nativeEvent ||
+      !claim(
+        publication,
+        cancel,
+        cancel.action,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return;
+    }
+    closeCurrent(publication, false);
+  };
+  const onFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    const committed = lastRuntime?.publication ?? null;
+    const ownedForm = form.owner.element();
+    if (
+      !committed ||
+      !ownedForm ||
+      committed.authority !== authority ||
+      committed.dom.form !== ownedForm ||
+      event.currentTarget !== ownedForm
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeSubmit(event, committed);
+    if (!nativeEvent) return;
+    event.preventDefault();
+    if (!event.defaultPrevented || !nativeEvent.defaultPrevented) return;
+    const publication = currentPublication(
+      authority.uploading ? "file" : null,
+    );
+    if (
+      !publication ||
+      publication !== committed ||
+      publication.dom.form !== ownedForm ||
+      publication.dom.insert !== insert.owner.element() ||
+      authority.submitDisabled ||
+      authority.uploading ||
+      activeUpload() !== null ||
+      !authority.normalizedSrc
+    ) {
+      return;
+    }
+    const claimed = claim(
+      publication,
+      form,
+      insert.action,
+      event,
+      nativeEvent,
+    );
+    if (!claimed) return;
+    closeCurrent(publication, true);
+  };
+  const onClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
+    const publication = currentPublication();
+    const bridgeElement = bridge.owner.element();
+    if (
+      !publication ||
+      !bridgeElement ||
+      publication.dom.bridge !== bridgeElement ||
+      event.currentTarget !== bridgeElement
+    ) {
+      return;
+    }
+    const target = event.target;
+    const ownerWindow = publication.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      !(target instanceof ownerWindow.Node) ||
+      !publication.dom.close.contains(target)
+    ) {
+      return;
+    }
+    const nativeEvent = imageExactNativeClick(
+      event,
+      bridgeElement,
+      publication.dom.close,
+      publication,
+    );
+    if (nativeEvent) {
+      stageDismissal(publication, {
+        control: publication.dom.close,
+        reactEvent: event,
+        nativeEvent,
+      });
+    }
+  };
+  const onOpenChange = (open: boolean) => {
+    const proof = dismissal;
+    if (
+      open ||
+      !proof ||
+      proof.publication.authority !== authority ||
+      !owns(proof.publication) ||
+      !coordinator.claim(
+        proof.publication,
+        proof.control,
+        insert.action,
+        proof.reactEvent,
+        proof.nativeEvent,
+      )
+    ) {
+      clearDismissal();
+      return;
+    }
+    clearDismissal();
+    afterClose.cancel();
+    proof.publication.retire();
+    authority.onOpenChange(false);
+  };
+  const settlePortal = () => {
+    if (!lastRuntime) {
+      const cleanup = establish();
+      finishLastCommit();
+      return cleanup;
+    }
+    establish();
+    finishLastCommit();
+  };
+  const captureBridge = (element: HTMLDivElement | null) => {
+    if (!element) return bridge.capture(element);
+    commitAuthority(authority);
+    dismissalListener.attach(element);
+    const cleanup = bridge.capture(element);
+    return () => {
+      cleanup?.();
+      dismissalListener.releaseWhenDetached(element);
+    };
+  };
+  return Object.freeze({
+    authority,
+    closeToken,
+    bridge,
+    form,
+    urlLabel,
+    urlRow,
+    url,
+    upload,
+    file,
+    error,
+    altLabel,
+    alt,
+    preview,
+    actions,
+    cancel,
+    insert,
+    captureBridge,
+    captureForm: form.capture,
+    captureUrlLabel: urlLabel.capture,
+    captureUrlRow: urlRow.capture,
+    captureUrl: url.capture,
+    captureUpload: upload.capture,
+    captureFile: file.capture,
+    captureError: error.capture,
+    captureAltLabel: altLabel.capture,
+    captureAlt: alt.capture,
+    capturePreview: preview.capture,
+    captureActions: actions.capture,
+    captureCancel: cancel.capture,
+    captureInsert: insert.capture,
+    establish,
+    settlePortal,
+    onOpenChange,
+    onClickCapture,
+    onUrlChange,
+    onAltChange,
+    onUploadClick,
+    onFileChange,
+    onPreviewError,
+    onCancelClick,
+    onFormSubmit,
+    onClosed: () => completeClose(closeToken),
+  });
 }
 
 export const ImageDialog = memo(function ImageDialog({
@@ -656,159 +3248,457 @@ export const ImageDialog = memo(function ImageDialog({
   /** Uploads a chosen file and returns the URL to use; when absent the Upload button is hidden. */
   onUpload?: (file: File) => Promise<{ url: string; alt?: string }>;
 }) {
-  const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onSubmit, onUpload }), [onOpenChange, onSubmit, onUpload]);
-  const activeVisit = useRef<DialogActionVisit | null>(null);
-  const openRef = useRef(false);
-  const [storedDraft, setDraft] = useState<ImageDraft>(() => imageDraft(visit, open));
+  const [mount] = useState(() => Symbol("image-dialog"));
+  const [coordinator] = useState(
+    () => new ImagePublicationCoordinator(mount),
+  );
+  const [dismissalListener] = useState(
+    () => new ImageDismissalListener(coordinator),
+  );
+  const [latestAuthority] = useState(
+    () => new ImageCurrentValue<ImageAuthority | null>(null),
+  );
+  const [activeUpload] = useState(
+    () => new ImageCurrentValue<ImageUploadOwner | null>(null),
+  );
+  const [afterClose] = useState(() => new ImageAfterCloseAuthority());
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const visit = useMemo<ImageVisit>(
+    () => Object.freeze({ onOpenChange, onSubmit, onUpload }),
+    [onOpenChange, onSubmit, onUpload],
+  );
+  const [storedDraft, setDraft] = useState<ImageDraft>(() =>
+    imageDraft(visit, open),
+  );
   let draft = storedDraft;
   if (draft.visit !== visit || draft.open !== open) {
     draft = imageDraft(visit, open);
-    setDraft(draft);
   }
-  const { src, alt, uploading, error } = draft;
-  const fileInput = useRef<HTMLInputElement>(null);
-  const uploadSequence = useRef(0);
-  const activeUpload = useRef<ImageUploadOwner | null>(null);
-  useLayoutEffect(() => {
-    activeVisit.current = visit;
-    return () => {
-      if (activeVisit.current === visit) activeVisit.current = null;
-      if (activeUpload.current?.visit === visit) activeUpload.current = null;
-    };
-  }, [visit]);
-  useLayoutEffect(() => {
-    openRef.current = open;
-    if (!open) {
-      if (activeUpload.current?.visit === visit) activeUpload.current = null;
-    }
-  }, [open, visit]);
-  const chooseFile = async (file: File | undefined) => {
-    if (!file || !onUpload || activeVisit.current !== visit || !openRef.current || activeUpload.current !== null) return;
-    const owner = { visit, id: ++uploadSequence.current, altRevision: draft.altRevision };
-    activeUpload.current = owner;
-    setDraft((current) => (current.visit === visit ? { ...current, error: null, uploading: true } : current));
-    const isCurrent = () => activeVisit.current === visit && activeUpload.current === owner;
-    try {
-      const result = await onUpload(file);
-      if (!isCurrent()) return;
-      const resultUrl = result.url;
-      const resultAlt = result.alt;
-      setDraft((current) => {
-        if (current.visit !== visit) return current;
-        const nextAlt = current.altRevision !== owner.altRevision || current.alt ? current.alt : resultAlt || file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
-        return { ...current, src: resultUrl, alt: nextAlt };
-      });
-    } catch (e) {
-      if (!isCurrent()) return;
-      const message = apiErrorText(e, "Upload failed");
-      setDraft((current) => (current.visit === visit ? { ...current, error: message } : current));
-    } finally {
-      if (isCurrent()) {
-        activeUpload.current = null;
-        setDraft((current) => (current.visit === visit ? { ...current, uploading: false } : current));
-        if (fileInput.current) fileInput.current.value = "";
+  const requestSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const leaseUpload = useCallback(
+    (owner: ImageUploadOwner): ImageUploadLease | null => {
+      const publication = coordinator.active();
+      const authority = publication?.authority;
+      if (
+        !publication ||
+        !authority ||
+        activeUpload.get() !== owner ||
+        latestAuthority.get() !== authority ||
+        publication.isRetired() ||
+        !coordinator.isCurrent(publication) ||
+        !publication.publishedDomMatches("file") ||
+        (publication === owner.origin
+          ? authority !== owner.authority ||
+            !coordinator.wasClaimed(publication)
+          : !imageUploadMatchesAuthority(owner, authority) ||
+            !publication.fileControl ||
+            !coordinator.claimContinuation(
+              publication,
+              publication.fileControl,
+              owner.settlementAction,
+              owner,
+            ))
+      ) {
+        return null;
       }
+      return Object.freeze({ owner, publication });
+    },
+    [activeUpload, coordinator, latestAuthority],
+  );
+  const uploadLeaseIsCurrent = useCallback(
+    (lease: ImageUploadLease) => {
+      const publication = coordinator.active();
+      const authority = publication?.authority;
+      return Boolean(
+        publication &&
+          authority &&
+          activeUpload.get() === lease.owner &&
+          latestAuthority.get() === authority &&
+          coordinator.isCurrent(publication) &&
+          !publication.isRetired() &&
+          publication === lease.publication &&
+          publication.publishedDomMatches("file") &&
+          (publication === lease.owner.origin
+            ? authority === lease.owner.authority
+            : imageUploadMatchesAuthority(lease.owner, authority)),
+      );
+    },
+    [activeUpload, coordinator, latestAuthority],
+  );
+  const settleUpload = useCallback(
+    (
+      owner: ImageUploadOwner,
+      outcome:
+        | { readonly kind: "success"; readonly result: { url: string; alt?: string } }
+        | { readonly kind: "error"; readonly error: unknown },
+    ) => {
+      const lease = leaseUpload(owner);
+      if (!lease) return;
+      let resultUrl: string | null = null;
+      let resultAlt: string | undefined;
+      let message: string | null = null;
+      if (outcome.kind === "success") {
+        resultUrl = outcome.result.url;
+        if (!uploadLeaseIsCurrent(lease)) return;
+        resultAlt = outcome.result.alt;
+        if (!uploadLeaseIsCurrent(lease)) return;
+      } else {
+        message = apiErrorText(outcome.error, "Upload failed");
+        if (!uploadLeaseIsCurrent(lease)) return;
+      }
+      const publication = lease.publication;
+      const input = publication.dom.file;
+      if (
+        !input ||
+        input !== owner.fileInput ||
+        !uploadLeaseIsCurrent(lease)
+      ) {
+        return;
+      }
+      input.value = "";
+      activeUpload.set(null);
+      setDraft((current) => {
+        if (
+          current.visit !== owner.visit ||
+          current.upload !== owner ||
+          !current.open
+        ) {
+          return current;
+        }
+        if (outcome.kind === "error") {
+          return nextImageDraft(current, {
+            upload: null,
+            error: message,
+          });
+        }
+        const nextAlt =
+          current.altRevision !== owner.altRevision || current.alt
+            ? current.alt
+            : resultAlt || owner.fallbackAlt;
+        return nextImageDraft(current, {
+          src: resultUrl ?? "",
+          alt: nextAlt,
+          error: null,
+          previewFailed: false,
+          upload: null,
+        });
+      });
+    },
+    [activeUpload, leaseUpload, uploadLeaseIsCurrent],
+  );
+  const startUpload = useCallback(
+    (
+      publication: ImagePublication,
+      authority: ImageAuthority,
+      file: File,
+      input: HTMLInputElement,
+    ) => {
+      const callback = authority.onUpload;
+      if (
+        !callback ||
+        activeUpload.get() !== null ||
+        coordinator.active() !== publication ||
+        latestAuthority.get() !== authority ||
+        !coordinator.wasClaimed(publication)
+      ) {
+        return;
+      }
+      const owner: ImageUploadOwner = Object.freeze({
+        identity: Symbol("image-upload"),
+        origin: publication,
+        authority,
+        visit: authority.visit,
+        callback,
+        file,
+        fileInput: input,
+        altRevision: authority.altRevision,
+        fallbackAlt: file.name.replace(/\.[a-z0-9]{2,5}$/i, ""),
+        settlementAction: Object.freeze({
+          identity: Symbol("image-upload-settlement"),
+        }),
+      });
+      activeUpload.set(owner);
+      setDraft((current) =>
+        current === authority.draft
+          ? nextImageDraft(current, {
+              error: null,
+              upload: owner,
+            })
+          : current,
+      );
+      let pending: Promise<{ url: string; alt?: string }>;
+      try {
+        pending = Promise.resolve(callback(file));
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      void pending.then(
+        (result) => settleUpload(owner, { kind: "success", result }),
+        (error: unknown) => settleUpload(owner, { kind: "error", error }),
+      );
+    },
+    [
+      activeUpload,
+      coordinator,
+      latestAuthority,
+      settleUpload,
+    ],
+  );
+  const completeClose = useCallback(
+    (closer: object) => {
+      const authority = latestAuthority.get();
+      if (!authority) return;
+      const insertion = afterClose.consume(authority, closer);
+      if (!insertion) return;
+      insertion.onSubmit(insertion.src, insertion.alt);
+    },
+    [afterClose, latestAuthority],
+  );
+  const authority = useMemo<ImageAuthority>(
+    () =>
+      Object.freeze({
+        mount,
+        revision: publicationRevision,
+        visit,
+        open,
+        onOpenChange,
+        onSubmit,
+        onUpload,
+        draft,
+        src: draft.src,
+        alt: draft.alt,
+        error: draft.error,
+        altRevision: draft.altRevision,
+        previewFailed: draft.previewFailed,
+        upload: draft.upload,
+        uploading: draft.upload !== null,
+        uploadAvailable: onUpload !== undefined,
+        normalizedSrc: draft.src.trim(),
+        normalizedAlt: draft.alt.trim(),
+        submitDisabled: draft.upload !== null || !draft.src.trim(),
+      }),
+    [
+      draft,
+      mount,
+      onOpenChange,
+      onSubmit,
+      onUpload,
+      open,
+      publicationRevision,
+      visit,
+    ],
+  );
+  const presentation = useMemo(
+    () =>
+      createImagePresentation(
+        authority,
+        coordinator,
+        () => latestAuthority.get(),
+        (current) => latestAuthority.set(current),
+        dismissalListener,
+        requestSuccessor,
+        () => activeUpload.get(),
+        setDraft,
+        startUpload,
+        afterClose,
+        completeClose,
+      ),
+    [
+      activeUpload,
+      afterClose,
+      authority,
+      completeClose,
+      coordinator,
+      dismissalListener,
+      latestAuthority,
+      requestSuccessor,
+      startUpload,
+    ],
+  );
+  useLayoutEffect(() => {
+    const current = presentation.authority;
+    latestAuthority.set(current);
+    if (storedDraft !== current.draft) {
+      setDraft((stored) =>
+        stored === storedDraft ? current.draft : stored,
+      );
     }
-  };
-  const setOpen = (nextOpen: boolean) => {
-    if (activeVisit.current !== visit) return;
-    if (!nextOpen && activeUpload.current?.visit === visit) activeUpload.current = null;
-    onOpenChange(nextOpen);
-  };
-  const after = useAfterClose(visit, activeVisit);
+    const upload = activeUpload.get();
+    if (
+      upload &&
+      current.upload !== upload &&
+      current !== upload.authority
+    ) {
+      activeUpload.set(null);
+    }
+    if (current.open) afterClose.cancel();
+    else afterClose.authorize(current, presentation.closeToken);
+  }, [
+    activeUpload,
+    afterClose,
+    latestAuthority,
+    presentation,
+    storedDraft,
+  ]);
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  const {
+    authority: current,
+    captureBridge,
+    captureForm,
+    captureUrlLabel,
+    captureUrlRow,
+    captureUrl,
+    captureUpload,
+    captureFile,
+    captureError,
+    captureAltLabel,
+    captureAlt,
+    capturePreview,
+    captureActions,
+    captureCancel,
+    captureInsert,
+    establish,
+    settlePortal,
+    onOpenChange: setOpen,
+    onClickCapture,
+    onUrlChange,
+    onAltChange,
+    onUploadClick,
+    onFileChange,
+    onPreviewError,
+    onCancelClick,
+    onFormSubmit,
+    onClosed,
+  } = presentation;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent title="Insert image" description="Paste the address of an image or upload one. Alt text describes the image for people who can't see it." onClosed={after.onClosed}>
-        <form
-          className="flex flex-col gap-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (activeVisit.current !== visit || !openRef.current || activeUpload.current !== null || uploading || !src.trim()) return;
-            const [s, a] = [src.trim(), alt.trim()];
-            after.defer(() => onSubmit(s, a));
-            setOpen(false);
-          }}
+      <div
+        ref={captureBridge}
+        className="contents"
+        onClickCapture={onClickCapture}
+      >
+        <DialogContent
+          title={IMAGE_TITLE}
+          description={IMAGE_DESCRIPTION}
+          onClosed={onClosed}
         >
-          <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
-            Image URL
-            <div className="flex gap-2">
-              <input
-                className="input flex-1"
-                placeholder="https://…/image.png"
-                value={src}
-                onChange={(e) => {
-                  if (activeVisit.current !== visit || !openRef.current) return;
-                  const value = e.target.value;
-                  setDraft((current) => (current.visit === visit ? { ...current, src: value } : current));
-                }}
-                autoFocus
-                data-testid="image-url"
-              />
-              {onUpload && (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-outline shrink-0"
-                    onClick={() => {
-                      if (activeVisit.current === visit && openRef.current) fileInput.current?.click();
-                    }}
-                    disabled={uploading}
-                    data-testid="image-upload"
-                  >
-                    {uploading ? "Uploading…" : "Upload…"}
-                  </button>
+            <form
+              ref={captureForm}
+              className={IMAGE_FORM_CLASS}
+              onSubmit={onFormSubmit}
+            >
+              <label
+                ref={captureUrlLabel}
+                className={IMAGE_LABEL_CLASS}
+              >
+                Image URL
+                <div
+                  ref={captureUrlRow}
+                  className={IMAGE_URL_ROW_CLASS}
+                >
                   <input
-                    ref={fileInput}
-                    type="file"
-                    accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
-                    className="hidden"
-                    onChange={(e) => void chooseFile(e.target.files?.[0])}
-                    data-testid="image-file"
+                    ref={captureUrl}
+                    className={IMAGE_URL_CLASS}
+                    placeholder="https://…/image.png"
+                    value={current.src}
+                    onChange={onUrlChange}
+                    autoFocus
+                    data-testid="image-url"
                   />
-                </>
+                  {current.uploadAvailable && (
+                    <>
+                      <button
+                        ref={captureUpload}
+                        type="button"
+                        className={IMAGE_UPLOAD_CLASS}
+                        onClick={onUploadClick}
+                        disabled={current.uploading}
+                        data-testid="image-upload"
+                      >
+                        {current.uploading ? "Uploading…" : "Upload…"}
+                      </button>
+                      <input
+                        ref={captureFile}
+                        type="file"
+                        accept={IMAGE_FILE_ACCEPT}
+                        className="hidden"
+                        onChange={onFileChange}
+                        data-testid="image-file"
+                      />
+                    </>
+                  )}
+                </div>
+              </label>
+              {current.error && (
+                <div
+                  ref={captureError}
+                  className={IMAGE_ERROR_CLASS}
+                  role="alert"
+                  data-testid="image-upload-error"
+                >
+                  {current.error}
+                </div>
               )}
-            </div>
-          </label>
-          {error && (
-            <div className="text-sm text-danger" role="alert" data-testid="image-upload-error">
-              {error}
-            </div>
-          )}
-          <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
-            Alt text
-            <input
-              className="input"
-              placeholder="Describe the image"
-              value={alt}
-              onChange={(e) => {
-                if (activeVisit.current !== visit || !openRef.current) return;
-                const value = e.target.value;
-                setDraft((current) => (current.visit === visit ? { ...current, alt: value, altRevision: current.altRevision + 1 } : current));
-              }}
-              data-testid="image-alt"
-            />
-          </label>
-          {src.trim() && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={src.trim()}
-              alt=""
-              className="max-h-40 rounded-lg border border-line object-contain"
-              onError={(e) => {
-                if (activeVisit.current === visit) (e.target as HTMLImageElement).style.display = "none";
-              }}
-            />
-          )}
-          <div className="flex justify-end gap-2 pt-1">
-            <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={uploading || !src.trim()} data-testid="image-submit">
-              Insert
-            </button>
-          </div>
-        </form>
-      </DialogContent>
+              <label
+                ref={captureAltLabel}
+                className={IMAGE_LABEL_CLASS}
+              >
+                Alt text
+                <input
+                  ref={captureAlt}
+                  className={IMAGE_ALT_CLASS}
+                  placeholder="Describe the image"
+                  value={current.alt}
+                  onChange={onAltChange}
+                  data-testid="image-alt"
+                />
+              </label>
+              {current.normalizedSrc && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  ref={capturePreview}
+                  src={current.normalizedSrc}
+                  alt=""
+                  className={IMAGE_PREVIEW_CLASS}
+                  style={{
+                    display: current.previewFailed ? "none" : undefined,
+                  }}
+                  onError={onPreviewError}
+                />
+              )}
+              <div
+                ref={captureActions}
+                className={IMAGE_ACTIONS_CLASS}
+              >
+                <button
+                  ref={captureCancel}
+                  type="button"
+                  className={IMAGE_CANCEL_CLASS}
+                  onClick={onCancelClick}
+                >
+                  Cancel
+                </button>
+                <button
+                  ref={captureInsert}
+                  type="submit"
+                  className={IMAGE_INSERT_CLASS}
+                  disabled={current.submitDisabled}
+                  data-testid="image-submit"
+                >
+                  Insert
+                </button>
+              </div>
+              <ImagePublicationBoundary
+                establish={establish}
+                settlePortal={settlePortal}
+              >
+                {null}
+              </ImagePublicationBoundary>
+            </form>
+        </DialogContent>
+      </div>
     </Dialog>
   );
 });
