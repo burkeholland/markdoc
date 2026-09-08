@@ -1692,10 +1692,11 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
     slot: DocumentChooserSlot<T>,
     element: T | null,
   ) => {
+    const hadActiveCommit = activeDocumentCommit.current?.candidate === candidate;
     if (slot.element !== element) retireDocumentCandidate(candidate);
     slot.element = element;
     if (!element) {
-      if (committedDocumentCandidates.current.has(candidate)) {
+      if (hadActiveCommit || committedDocumentCandidates.current.has(candidate)) {
         detachedDocumentCandidates.current.add(candidate);
       }
       retireDocumentCandidate(candidate);
