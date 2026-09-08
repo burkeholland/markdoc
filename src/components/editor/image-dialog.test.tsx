@@ -3,6 +3,7 @@ import {
   Suspense,
   StrictMode,
   startTransition,
+  useCallback,
   useLayoutEffect,
   useState,
   type ChangeEvent,
@@ -1798,6 +1799,93 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(staleClose).not.toHaveBeenCalled();
     expect(currentClose).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("stops inherited submit poison before React bubble extraction", async () => {
+    const onOpenChange = vi.fn();
+    const onSubmit = vi.fn();
+    function ControlledDialog() {
+      const [open, setOpen] = useState(true);
+      const close = useCallback((nextOpen: boolean) => {
+        onOpenChange(nextOpen);
+        setOpen(nextOpen);
+      }, []);
+      return (
+        <ImageDialog
+          open={open}
+          onOpenChange={close}
+          onSubmit={onSubmit}
+        />
+      );
+    }
+    await renderStrictRoot(<ControlledDialog />);
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/canonical.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const poison = vi.fn((event: Event) => {
+      const poisonedPrototype = Object.create(Object.getPrototypeOf(event), {
+        composedPath: {
+          configurable: true,
+          get: () => {
+            throw new Error("Inherited composedPath must not run");
+          },
+        },
+        submitter: {
+          configurable: true,
+          get: () => {
+            throw new Error("Inherited submitter must not run");
+          },
+        },
+        target: {
+          configurable: true,
+          get: () => {
+            throw new Error("Inherited target must not run");
+          },
+        },
+        type: {
+          configurable: true,
+          get: () => {
+            throw new Error("Inherited type must not run");
+          },
+        },
+      });
+      Object.setPrototypeOf(event, poisonedPrototype);
+    });
+    const uncaught = vi.fn((event: ErrorEvent) => event.preventDefault());
+    form.addEventListener("submit", poison, { capture: true, once: true });
+    window.addEventListener("error", uncaught);
+    const poisoned = submitEvent();
+    let dispatched = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(poisoned);
+      });
+    } finally {
+      window.removeEventListener("error", uncaught);
+    }
+
+    expect(poison).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(poisoned.defaultPrevented).toBe(true);
+    expect(uncaught).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    const clean = submitEvent();
+    act(() => {
+      dispatched = form.dispatchEvent(clean);
+    });
+    expect(dispatched).toBe(false);
+    expect(clean.defaultPrevented).toBe(true);
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      "https://example.com/canonical.png",
+      "",
+    );
   });
 
   it("suppresses a genuine submit after staged replay rejection and recovers freshly", async () => {

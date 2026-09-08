@@ -651,17 +651,9 @@ const IMAGE_APPLY = Reflect.apply;
 const IMAGE_HAS_INSTANCE = Function.prototype[Symbol.hasInstance];
 const IMAGE_ARRAY_INCLUDES = Array.prototype.includes;
 const IMAGE_HAS_OWN = Object.prototype.hasOwnProperty;
-const IMAGE_NATIVE_EVENT_MEMBERS = Object.freeze([
-  "bubbles",
-  "cancelable",
-  "composedPath",
-  "defaultPrevented",
-  "eventPhase",
-  "preventDefault",
-  "submitter",
-  "target",
-  "type",
-] as const);
+const IMAGE_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const IMAGE_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const IMAGE_OWN_KEYS = Reflect.ownKeys;
 
 function imageUploadErrorText(error: unknown) {
   try {
@@ -887,6 +879,22 @@ interface ImageSubmitProvenance {
   readonly nativeEvent: ImageNativeSubmitIntrinsics;
 }
 
+interface ImageNativePropertySnapshot {
+  readonly key: PropertyKey;
+  readonly kind: "accessor" | "data";
+  readonly configurable: boolean;
+  readonly enumerable: boolean;
+  readonly value: unknown;
+  readonly writable: boolean;
+  readonly get: PropertyDescriptor["get"];
+  readonly set: PropertyDescriptor["set"];
+}
+
+interface ImageNativePrototypeSnapshot {
+  readonly prototype: object;
+  readonly properties: readonly ImageNativePropertySnapshot[];
+}
+
 interface ImageNativeSubmitIntrinsics {
   readonly isEvent: (value: unknown) => value is Event;
   readonly isSubmitEvent: (value: Event) => boolean;
@@ -899,7 +907,8 @@ interface ImageNativeSubmitIntrinsics {
   readonly composedPath: (event: Event) => EventTarget[];
   readonly submitter: (event: Event) => HTMLElement | null;
   readonly preventDefault: (event: Event) => boolean;
-  readonly hasPublicShadow: (event: Event) => boolean;
+  readonly capturePublicSurface: (event: Event) => boolean;
+  readonly publicSurfaceIsCanonical: (event: Event) => boolean;
   readonly stopPropagation: (event: Event) => void;
 }
 
@@ -1261,8 +1270,7 @@ class ImageDismissalListener {
       if (
         !current ||
         current.form !== form ||
-        !current.nativeEvent.isEvent(event) ||
-        !current.nativeEvent.hasPublicShadow(event)
+        current.nativeEvent.publicSurfaceIsCanonical(event)
       ) {
         return;
       }
@@ -2163,8 +2171,121 @@ function captureImageNativeSubmitIntrinsics(
   const EventConstructor = ownerWindow.Event;
   const SubmitEventConstructor = ownerWindow.SubmitEvent;
   const eventPrototype = EventConstructor.prototype;
+  const getOwnPropertyDescriptor = (
+    target: object,
+    property: PropertyKey,
+  ) =>
+    IMAGE_APPLY(IMAGE_GET_OWN_PROPERTY_DESCRIPTOR, null, [
+      target,
+      property,
+    ]) as PropertyDescriptor | undefined;
+  const getPrototypeOf = (target: object) =>
+    IMAGE_APPLY(IMAGE_GET_PROTOTYPE_OF, null, [target]) as object | null;
+  const captureProperties = (
+    target: object,
+  ): readonly ImageNativePropertySnapshot[] | null => {
+    const keys = IMAGE_APPLY(IMAGE_OWN_KEYS, null, [target]) as PropertyKey[];
+    const properties: ImageNativePropertySnapshot[] = [];
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index];
+      const descriptor = getOwnPropertyDescriptor(target, key);
+      if (!descriptor) return null;
+      const data =
+        IMAGE_APPLY(IMAGE_HAS_OWN, descriptor, ["value"]) ||
+        IMAGE_APPLY(IMAGE_HAS_OWN, descriptor, ["writable"]);
+      properties.push(
+        Object.freeze({
+          key,
+          kind: data ? "data" : "accessor",
+          configurable: descriptor.configurable === true,
+          enumerable: descriptor.enumerable === true,
+          value: data ? descriptor.value : undefined,
+          writable: data && descriptor.writable === true,
+          get: data ? undefined : descriptor.get,
+          set: data ? undefined : descriptor.set,
+        }),
+      );
+    }
+    return Object.freeze(properties);
+  };
+  const propertiesMatch = (
+    target: object,
+    expected: readonly ImageNativePropertySnapshot[],
+  ) => {
+    const actual = captureProperties(target);
+    if (!actual || actual.length !== expected.length) return false;
+    for (let index = 0; index < expected.length; index += 1) {
+      const left = actual[index];
+      const right = expected[index];
+      if (
+        left.key !== right.key ||
+        left.kind !== right.kind ||
+        left.configurable !== right.configurable ||
+        left.enumerable !== right.enumerable ||
+        left.value !== right.value ||
+        left.writable !== right.writable ||
+        left.get !== right.get ||
+        left.set !== right.set
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const capturePrototypeChain = (
+    first: object,
+  ): readonly ImageNativePrototypeSnapshot[] | null => {
+    const chain: ImageNativePrototypeSnapshot[] = [];
+    let current: object | null = first;
+    while (current && chain.length < 16) {
+      const properties = captureProperties(current);
+      if (!properties) return null;
+      chain.push(Object.freeze({ prototype: current, properties }));
+      current = getPrototypeOf(current);
+    }
+    return current === null ? Object.freeze(chain) : null;
+  };
+  const eventPrototypeChain = capturePrototypeChain(eventPrototype);
+  const submitEventPrototypeChain =
+    typeof SubmitEventConstructor === "function"
+      ? capturePrototypeChain(SubmitEventConstructor.prototype)
+      : null;
+  if (
+    !eventPrototypeChain ||
+    (typeof SubmitEventConstructor === "function" &&
+      !submitEventPrototypeChain)
+  ) {
+    return null;
+  }
+  const canonicalChain = (event: Event) => {
+    const prototype = getPrototypeOf(event);
+    if (prototype === eventPrototypeChain[0]?.prototype) {
+      return eventPrototypeChain;
+    }
+    if (prototype === submitEventPrototypeChain?.[0]?.prototype) {
+      return submitEventPrototypeChain;
+    }
+    return null;
+  };
+  const prototypeChainMatches = (
+    event: Event,
+    expected: readonly ImageNativePrototypeSnapshot[],
+  ) => {
+    let current: object | null = getPrototypeOf(event);
+    for (let index = 0; index < expected.length; index += 1) {
+      const snapshot = expected[index];
+      if (
+        current !== snapshot.prototype ||
+        !propertiesMatch(current, snapshot.properties)
+      ) {
+        return false;
+      }
+      current = getPrototypeOf(current);
+    }
+    return current === null;
+  };
   const getter = <T,>(property: keyof Event) => {
-    const value = Object.getOwnPropertyDescriptor(eventPrototype, property)?.get;
+    const value = getOwnPropertyDescriptor(eventPrototype, property)?.get;
     return typeof value === "function"
       ? (event: Event) => IMAGE_APPLY(value, event, []) as T
       : null;
@@ -2175,12 +2296,21 @@ function captureImageNativeSubmitIntrinsics(
   const defaultPrevented = getter<boolean>("defaultPrevented");
   const bubbles = getter<boolean>("bubbles");
   const cancelable = getter<boolean>("cancelable");
-  const composedPath = eventPrototype.composedPath;
-  const preventDefault = eventPrototype.preventDefault;
-  const stopPropagation = eventPrototype.stopPropagation;
+  const composedPath = getOwnPropertyDescriptor(
+    eventPrototype,
+    "composedPath",
+  )?.value;
+  const preventDefault = getOwnPropertyDescriptor(
+    eventPrototype,
+    "preventDefault",
+  )?.value;
+  const stopPropagation = getOwnPropertyDescriptor(
+    eventPrototype,
+    "stopPropagation",
+  )?.value;
   const submitter =
     typeof SubmitEventConstructor === "function"
-      ? Object.getOwnPropertyDescriptor(
+      ? getOwnPropertyDescriptor(
           SubmitEventConstructor.prototype,
           "submitter",
         )?.get
@@ -2207,6 +2337,13 @@ function captureImageNativeSubmitIntrinsics(
   const isSubmitEvent = (value: Event) =>
     typeof SubmitEventConstructor === "function" &&
     IMAGE_APPLY(IMAGE_HAS_INSTANCE, SubmitEventConstructor, [value]);
+  let publicSurface:
+    | {
+        readonly event: Event;
+        readonly ownProperties: readonly ImageNativePropertySnapshot[];
+        readonly prototypeChain: readonly ImageNativePrototypeSnapshot[];
+      }
+    | null = null;
   return Object.freeze({
     isEvent,
     isSubmitEvent,
@@ -2226,10 +2363,32 @@ function captureImageNativeSubmitIntrinsics(
       IMAGE_APPLY(preventDefault, event, []);
       return defaultPrevented(event);
     },
-    hasPublicShadow: (event: Event) =>
-      IMAGE_NATIVE_EVENT_MEMBERS.some((member) =>
-        IMAGE_APPLY(IMAGE_HAS_OWN, event, [member]),
-      ),
+    capturePublicSurface: (event: Event) => {
+      publicSurface = null;
+      const prototypeChain = canonicalChain(event);
+      const ownProperties = captureProperties(event);
+      if (
+        !prototypeChain ||
+        !ownProperties ||
+        !prototypeChainMatches(event, prototypeChain)
+      ) {
+        return false;
+      }
+      publicSurface = Object.freeze({
+        event,
+        ownProperties,
+        prototypeChain,
+      });
+      return true;
+    },
+    publicSurfaceIsCanonical: (event: Event) => {
+      const captured = publicSurface;
+      return (
+        captured?.event === event &&
+        prototypeChainMatches(event, captured.prototypeChain) &&
+        propertiesMatch(event, captured.ownProperties)
+      );
+    },
     stopPropagation: (event: Event) => {
       IMAGE_APPLY(stopPropagation, event, []);
     },
@@ -3597,7 +3756,7 @@ function createImagePresentation(
     if (!nativeEvent || !provenance.nativeEvent.preventDefault(nativeEvent)) {
       return;
     }
-    if (!provenance.nativeEvent.hasPublicShadow(nativeEvent)) {
+    if (provenance.nativeEvent.capturePublicSurface(nativeEvent)) {
       capturedSubmit = { nativeEvent, provenance };
     }
   };
@@ -3622,7 +3781,7 @@ function createImagePresentation(
     if (
       !nativeEvent ||
       captured.nativeEvent !== nativeEvent ||
-      provenance.nativeEvent.hasPublicShadow(nativeEvent)
+      !provenance.nativeEvent.publicSurfaceIsCanonical(nativeEvent)
     ) {
       return;
     }
