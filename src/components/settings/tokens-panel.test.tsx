@@ -613,6 +613,33 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(callsFor("POST")).toHaveLength(0);
   });
 
+  it("keeps a manually completed callback ref replay inert without a matching layout replay", async () => {
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    const row = screen.getByTestId("token-row") as HTMLLIElement;
+    const controls = [row, rename.form, rename.input, save, cancel] as const;
+    const refs = controls.map((element) =>
+      reactProp<(value: typeof element | null) => void>(element, "ref"));
+
+    act(() => {
+      controls.forEach((element, index) => {
+        refs[index]?.(null);
+        refs[index]?.(element);
+      });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const currentInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    const rejected = renameEscape(currentInput);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(screen.getByLabelText("Token name")).toBe(currentInput);
+    expect(callsFor("PATCH")).toHaveLength(0);
+    expect(callsFor("POST")).toHaveLength(0);
+  });
+
   it("rejects modified, repeated, composing, non-bubbling, non-cancelable, stopped, prevented, fabricated, and foreign keys", async () => {
     const rename = await showStrictRename();
     const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");

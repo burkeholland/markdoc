@@ -2758,7 +2758,28 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     save: RowActionFacts | null;
     inputEligible: boolean;
   }>;
+  type RowElementRole =
+    | "row"
+    | "header"
+    | "metadata"
+    | "mismatch"
+    | "expired"
+    | "actions"
+    | "rename"
+    | "replace"
+    | "revoke"
+    | "form"
+    | "input"
+    | "save"
+    | "cancel"
+    | "details"
+    | "detailsBody"
+    | "collaborators"
+    | "switchError";
+  type RenameRefRole = "row" | "form" | "input" | "save" | "cancel";
   interface ElementSlot<T extends HTMLElement> {
+    readonly identity: symbol;
+    readonly role: RowElementRole;
     element: T | null;
   }
   interface RowCandidate {
@@ -2837,14 +2858,27 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     reactEvent: object;
     native: TokenRenameKeyboardSnapshot;
   }>;
+  type RenameRefExpectation = Readonly<{
+    role: RenameRefRole;
+    ownerIdentity: symbol;
+    element: HTMLElement;
+  }>;
   interface RenameRefReplay {
+    readonly identity: symbol;
     readonly candidate: RowCandidate;
-    readonly expected: readonly HTMLElement[];
+    readonly expected: readonly RenameRefExpectation[];
     readonly released: Set<HTMLElement>;
     readonly rebound: Set<HTMLElement>;
     successor: RowCandidate | null;
     invalid: boolean;
   }
+  type CompletedRenameRefReplay = Readonly<{
+    identity: symbol;
+    replayIdentity: symbol;
+    target: RowCandidate;
+    bindings: readonly RenameRefExpectation[];
+  }>;
+  type CompletedRenameRefReplayResult = "none" | "matched" | "mismatched";
   type SaveOwner = Readonly<{
     mount: symbol;
     visit: RenameVisit;
@@ -2856,15 +2890,15 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   type FocusIntent = Readonly<{ mount: symbol; visit: RenameVisit; tokenId: string }>;
   type InputOverride = Readonly<{ input: HTMLInputElement; value: string }>;
 
-  const slot = <T extends HTMLElement>(): ElementSlot<T> => ({ element: null });
+  const slot = <T extends HTMLElement>(role: RowElementRole): ElementSlot<T> => ({
+    identity: Symbol(`token-row-${role}-slot`),
+    role,
+    element: null,
+  });
   const [mount] = useState(() => Symbol("token-row-mount"));
   const [renameDraft, setRenameDraft] = useState<RenameDraft | null>(null);
-  const [, setPresentationRevision] = useState(0);
   const activeMount = useRef<symbol | null>(null);
   const activeCommit = useRef<RowCommit | null>(null);
-  const committedCandidates = useRef(new WeakSet<RowCandidate>());
-  const detachedCandidates = useRef(new WeakSet<RowCandidate>());
-  const repairRequestedCandidates = useRef(new WeakSet<RowCandidate>());
   const claimedEvents = useRef(new WeakSet<object>());
   const consumedCommits = useRef(new WeakSet<RowCommit>());
   const dispatchingCommits = useRef(new WeakSet<RowCommit>());
@@ -2874,6 +2908,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const claimedRenameNativeEvents = useRef(new WeakSet<Event>());
   const partialRenameRefElements = useRef(new WeakSet<HTMLElement>());
   const renameRefReplay = useRef<RenameRefReplay | null>(null);
+  const completedRenameRefReplay = useRef<CompletedRenameRefReplay | null>(null);
   const saveOwner = useRef<SaveOwner | null>(null);
   const returnFocus = useRef<FocusIntent | null>(null);
   const focusedRename = useRef<{ visit: RenameVisit; input: HTMLInputElement } | null>(null);
@@ -2943,23 +2978,23 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   });
   const candidate: RowCandidate = Object.freeze({
     facts,
-    row: slot<HTMLLIElement>(),
-    header: slot<HTMLDivElement>(),
-    metadata: slot<HTMLParagraphElement>(),
-    mismatch: slot<HTMLParagraphElement>(),
-    expired: slot<HTMLParagraphElement>(),
-    actions: slot<HTMLDivElement>(),
-    rename: slot<HTMLButtonElement>(),
-    replace: slot<HTMLButtonElement>(),
-    revoke: slot<HTMLButtonElement>(),
-    form: slot<HTMLFormElement>(),
-    input: slot<HTMLInputElement>(),
-    save: slot<HTMLButtonElement>(),
-    cancel: slot<HTMLButtonElement>(),
-    details: slot<HTMLDetailsElement>(),
-    detailsBody: slot<HTMLDivElement>(),
-    collaborators: slot<HTMLButtonElement>(),
-    switchError: slot<HTMLParagraphElement>(),
+    row: slot<HTMLLIElement>("row"),
+    header: slot<HTMLDivElement>("header"),
+    metadata: slot<HTMLParagraphElement>("metadata"),
+    mismatch: slot<HTMLParagraphElement>("mismatch"),
+    expired: slot<HTMLParagraphElement>("expired"),
+    actions: slot<HTMLDivElement>("actions"),
+    rename: slot<HTMLButtonElement>("rename"),
+    replace: slot<HTMLButtonElement>("replace"),
+    revoke: slot<HTMLButtonElement>("revoke"),
+    form: slot<HTMLFormElement>("form"),
+    input: slot<HTMLInputElement>("input"),
+    save: slot<HTMLButtonElement>("save"),
+    cancel: slot<HTMLButtonElement>("cancel"),
+    details: slot<HTMLDetailsElement>("details"),
+    detailsBody: slot<HTMLDivElement>("detailsBody"),
+    collaborators: slot<HTMLButtonElement>("collaborators"),
+    switchError: slot<HTMLParagraphElement>("switchError"),
   });
 
   const retireRenameEscape = (authority: RenameEscapeAuthority) => {
@@ -2979,19 +3014,93 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     if (renameEscape?.commit === commit) retireRenameEscape(renameEscape);
     activeCommit.current = null;
   };
+  const renameRefReplayComplete = (replay: RenameRefReplay) =>
+    replay.expected.length === 5
+    && replay.expected.every(({ element }) =>
+      replay.released.has(element) && replay.rebound.has(element));
+  const renameRefExpectation = (
+    role: RenameRefRole,
+    owner: Readonly<Pick<ElementSlot<HTMLElement>, "identity">>,
+    element: HTMLElement | null,
+  ): RenameRefExpectation | null => element
+    ? Object.freeze({ role, ownerIdentity: owner.identity, element })
+    : null;
+  const quarantineRenameRefReplay = (replay: RenameRefReplay) => {
+    replay.invalid = true;
+    for (const { element } of replay.expected) {
+      partialRenameRefElements.current.add(element);
+    }
+    if (renameRefReplay.current?.identity === replay.identity) {
+      renameRefReplay.current = null;
+    }
+  };
+  const quarantineCompletedRenameRefReplay = (completion: CompletedRenameRefReplay) => {
+    for (const { element } of completion.bindings) {
+      partialRenameRefElements.current.add(element);
+    }
+    if (completedRenameRefReplay.current?.identity === completion.identity) {
+      completedRenameRefReplay.current = null;
+    }
+  };
+  const completeRenameRefReplay = (replay: RenameRefReplay) => {
+    const target = replay.successor ?? replay.candidate;
+    const bindings = replay.expected.map(({ role, element }) =>
+      renameRefExpectation(role, target[role], element))
+      .filter((binding): binding is RenameRefExpectation => binding !== null);
+    if (
+      replay.invalid
+      || !renameRefReplayComplete(replay)
+      || bindings.length !== replay.expected.length
+      || replay.expected.some(({ role, element }) => target[role].element !== element)
+    ) {
+      quarantineRenameRefReplay(replay);
+      return;
+    }
+    const completion = Object.freeze<CompletedRenameRefReplay>({
+      identity: Symbol("completed-token-rename-ref-replay"),
+      replayIdentity: replay.identity,
+      target,
+      bindings: Object.freeze(bindings),
+    });
+    renameRefReplay.current = null;
+    completedRenameRefReplay.current = completion;
+    queueMicrotask(() => {
+      if (completedRenameRefReplay.current?.identity === completion.identity) {
+        quarantineCompletedRenameRefReplay(completion);
+      }
+    });
+  };
+  const consumeCompletedRenameRefReplay = (
+    value: RowCandidate,
+  ): CompletedRenameRefReplayResult => {
+    const completion = completedRenameRefReplay.current;
+    if (!completion) return "none";
+    const exact = completion.target === value
+      && completion.bindings.length === 5
+      && completion.bindings.every(({ role, ownerIdentity, element }) =>
+        value[role].identity === ownerIdentity && value[role].element === element);
+    completedRenameRefReplay.current = null;
+    if (!exact) {
+      for (const { element } of completion.bindings) {
+        partialRenameRefElements.current.add(element);
+      }
+    }
+    return exact ? "matched" : "mismatched";
+  };
   const bindElement = <T extends HTMLElement>(owner: ElementSlot<T>, element: T | null) => {
     const previous = owner.element;
     const renameEscape = activeRenameEscape.current;
     let replay = renameRefReplay.current;
     if (!element && previous && !replay && renameEscape?.candidate === candidate) {
       const expected = [
-        renameEscape.commit.row,
-        renameEscape.form,
-        renameEscape.input,
-        renameEscape.commit.save,
-        renameEscape.commit.cancel,
-      ].filter((entry): entry is HTMLElement => entry !== null);
+        renameRefExpectation("row", candidate.row, renameEscape.commit.row),
+        renameRefExpectation("form", candidate.form, renameEscape.form),
+        renameRefExpectation("input", candidate.input, renameEscape.input),
+        renameRefExpectation("save", candidate.save, renameEscape.commit.save),
+        renameRefExpectation("cancel", candidate.cancel, renameEscape.commit.cancel),
+      ].filter((entry): entry is RenameRefExpectation => entry !== null);
       replay = {
+        identity: Symbol("token-rename-ref-replay"),
         candidate,
         expected: Object.freeze(expected),
         released: new Set(),
@@ -3000,49 +3109,67 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         invalid: expected.length !== 5,
       };
       renameRefReplay.current = replay;
+      const replayIdentity = replay.identity;
+      queueMicrotask(() => {
+        const current = renameRefReplay.current;
+        if (current?.identity !== replayIdentity) return;
+        if (renameRefReplayComplete(current)) renameRefReplay.current = null;
+        else quarantineRenameRefReplay(current);
+      });
     }
-    if (!element && previous && replay?.candidate === candidate && replay.expected.includes(previous)) {
-      if (replay.released.has(previous) || replay.rebound.has(previous)) replay.invalid = true;
-      else replay.released.add(previous);
+    const expectedRole = replay?.expected.find(({ role }) => role === owner.role);
+    const expectedElement = replay?.expected.find((entry) => entry.element === (element ?? previous));
+    if (!element && previous && (expectedRole || expectedElement)) {
+      if (
+        !replay
+        || replay.candidate !== candidate
+        || !expectedRole
+        || expectedRole.ownerIdentity !== owner.identity
+        || expectedRole.element !== previous
+        || expectedElement !== expectedRole
+        || replay.released.has(previous)
+        || replay.rebound.has(previous)
+      ) {
+        if (replay) replay.invalid = true;
+      } else {
+        replay.released.add(previous);
+      }
     }
     if (owner.element !== element) retireCandidate(candidate);
     owner.element = element;
     if (!element) {
-      if (committedCandidates.current.has(candidate)) detachedCandidates.current.add(candidate);
       retireCandidate(candidate);
+      if (replay?.invalid) quarantineRenameRefReplay(replay);
       return;
     }
     replay = renameRefReplay.current;
-    if (replay?.expected.includes(element)) {
+    const reboundRole = replay?.expected.find(({ role }) => role === owner.role);
+    const reboundElement = replay?.expected.find((entry) => entry.element === element);
+    if (replay && (reboundRole || reboundElement)) {
       if (candidate !== replay.candidate) {
         if (!replay.successor) replay.successor = candidate;
         else if (replay.successor !== candidate) replay.invalid = true;
       }
       if (
         (candidate !== replay.candidate && candidate !== replay.successor)
-        || !replay.released.has(element)
+        || !reboundRole
+        || reboundRole.element !== element
+        || reboundElement !== reboundRole
+        || (candidate === replay.candidate
+          ? reboundRole.ownerIdentity !== owner.identity
+          : candidate[reboundRole.role].identity !== owner.identity)
+        || !replay.released.has(reboundRole.element)
         || replay.rebound.has(element)
-        || replay.released.size !== replay.expected.length
       ) {
         replay.invalid = true;
       } else {
         replay.rebound.add(element);
       }
       if (replay.invalid) {
-        for (const expected of replay.expected) partialRenameRefElements.current.add(expected);
-        renameRefReplay.current = null;
-      } else if (replay.rebound.size === replay.expected.length) {
-        renameRefReplay.current = null;
+        quarantineRenameRefReplay(replay);
+      } else if (renameRefReplayComplete(replay)) {
+        completeRenameRefReplay(replay);
       }
-    }
-    if (
-      detachedCandidates.current.has(candidate)
-      && !repairRequestedCandidates.current.has(candidate)
-      && activeMount.current === mount
-      && activeCommit.current === null
-    ) {
-      repairRequestedCandidates.current.add(candidate);
-      setPresentationRevision((current) => current + 1);
     }
   };
   const nodesBelow = (root: Node): readonly Node[] => {
@@ -3486,6 +3613,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       || !commit.facts.inputEligible
       || !commit.facts.cancel?.eligible
       || !ownerWindow?.MutationObserver
+      || renameRefReplay.current !== null
       || partialRenameRefElements.current.has(commit.row)
       || partialRenameRefElements.current.has(form)
       || partialRenameRefElements.current.has(input)
@@ -3780,6 +3908,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       if (current?.facts.mount === mount) retireCandidate(current.candidate);
       const renameEscape = activeRenameEscape.current;
       if (renameEscape?.mount === mount) retireRenameEscape(renameEscape);
+      const replay = renameRefReplay.current;
+      if (replay?.candidate.facts.mount === mount) quarantineRenameRefReplay(replay);
       pendingRenameEscapes.current.clear();
       if (saveOwner.current?.mount === mount) saveOwner.current = null;
       if (returnFocus.current?.mount === mount) returnFocus.current = null;
@@ -3787,9 +3917,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   }, [mount]);
   useLayoutEffect(() => {
     retireCandidate(candidate);
+    const replaySetup = consumeCompletedRenameRefReplay(candidate);
+    if (replaySetup === "mismatched") return;
     const commit = buildCommit();
     if (!commit || !factsAreCurrent(facts)) return;
-    committedCandidates.current.add(candidate);
     activeCommit.current = commit;
     establishRenameEscape(commit);
     return () => {
