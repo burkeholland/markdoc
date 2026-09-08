@@ -865,7 +865,7 @@ interface ImageInsertionOwner {
   readonly src: string;
   readonly alt: string;
   readonly shellClosesSynchronously: boolean;
-  closer: object | null;
+  readonly closer: object;
 }
 
 interface ImageUploadLease {
@@ -1653,7 +1653,8 @@ class ImageAfterCloseAuthority {
   schedule(
     publication: ImagePublication,
     authority: ImageAuthority,
-    shellCloser: object | null = null,
+    closer: object,
+    shellClosesSynchronously: boolean,
   ) {
     const owner: ImageInsertionOwner = {
       identity: Symbol("image-insertion"),
@@ -1665,8 +1666,8 @@ class ImageAfterCloseAuthority {
       onUpload: authority.onUpload,
       src: authority.normalizedSrc,
       alt: authority.normalizedAlt,
-      shellClosesSynchronously: shellCloser !== null,
-      closer: shellCloser,
+      shellClosesSynchronously,
+      closer,
     };
     this.#pending = owner;
     return owner;
@@ -1676,7 +1677,7 @@ class ImageAfterCloseAuthority {
     this.#pending = null;
   }
 
-  authorize(authority: ImageAuthority, closer: object) {
+  authorize(authority: ImageAuthority) {
     const pending = this.#pending;
     if (
       !pending ||
@@ -1690,7 +1691,6 @@ class ImageAfterCloseAuthority {
       this.#pending = null;
       return;
     }
-    pending.closer = closer;
   }
 
   consume(authority: ImageAuthority, closer: object) {
@@ -4722,9 +4722,8 @@ function createImagePresentation(
       afterClose.schedule(
         publication,
         authority,
-        publication.dom.overlay === publication.dom.content
-          ? closeToken
-          : null,
+        closeToken,
+        publication.dom.overlay === publication.dom.content,
       );
     }
     else afterClose.cancel();
@@ -5521,7 +5520,7 @@ export const ImageDialog = memo(function ImageDialog({
       if (deferred?.owner === upload) deferredUploadOutcome.set(null);
     }
     if (current.open) afterClose.cancel();
-    else afterClose.authorize(current, presentation.closeToken);
+    else afterClose.authorize(current);
   }, [
     activeUpload,
     afterClose,

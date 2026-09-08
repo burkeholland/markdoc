@@ -878,6 +878,38 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(onSubmit).toHaveBeenCalledWith("/api/assets/final", "Final Alt");
   });
 
+  it("retains the open close callback through the closed render and consumes it once", async () => {
+    const onSubmit = vi.fn();
+    await renderStrictRoot(
+      <Harness onUpload={vi.fn()} onSubmit={onSubmit} />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/open-close-token.png" },
+    });
+    await act(async () => {});
+    const openClose = reactAncestorHandlers<() => void>(
+      imageForm(),
+      "onClosed",
+    )[0];
+    if (!openClose) throw new Error("Image close callback was not published");
+
+    const submit = submitEvent();
+    act(() => imageForm().dispatchEvent(submit));
+
+    expect(submit.defaultPrevented).toBe(true);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      "https://example.com/open-close-token.png",
+      "",
+    );
+    act(() => openClose());
+    expect(onSubmit).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+    act(() => openClose());
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
   it("claims a repeated Upload chooser event and its file choice once", async () => {
     const upload = deferred<UploadResult>();
     const onUpload = vi.fn(() => upload.promise);
@@ -2827,6 +2859,93 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         currentClose,
         currentSubmit,
         `https://example.com/${relation}-${kind}-recovery.png`,
+      );
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+      expect(rejectedClose).not.toHaveBeenCalled();
+      expect(rejectedSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["ownerDocument", "throwing"],
+    ["ownerDocument", "deceptive"],
+    ["contains", "throwing"],
+    ["contains", "deceptive"],
+  ] as const)(
+    "does not invoke a %s derived %s relation while replaying the shared journal",
+    async (relation, kind) => {
+      const staleClose = vi.fn();
+      const staleSubmit = vi.fn();
+      const rejectedClose = vi.fn();
+      const rejectedSubmit = vi.fn();
+      const currentClose = vi.fn();
+      const currentSubmit = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={staleSubmit}
+        />,
+      );
+      fireEvent.change(screen.getByTestId("image-url"), {
+        target: { value: "https://example.com/derived-provenance.png" },
+      });
+      await act(async () => {});
+      const form = imageForm();
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      const nativePrototype = Object.getPrototypeOf(form) as object;
+      const derivedPrototype = Object.create(nativePrototype) as object;
+      const deceptiveValue = relation === "ownerDocument"
+        ? document
+        : Node.prototype.contains;
+      const readRelation = vi.fn(() => {
+        if (kind === "throwing") {
+          throw new Error(`Instrumented ${relation} must not run`);
+        }
+        return deceptiveValue;
+      });
+      Object.defineProperty(derivedPrototype, relation, {
+        configurable: true,
+        get: readRelation,
+      });
+      Object.setPrototypeOf(form, derivedPrototype);
+      let submit: Event | null = null;
+      let dispatched = true;
+      const later = vi.fn();
+      try {
+        await view.render(
+          <ImageDialog
+            open
+            onOpenChange={rejectedClose}
+            onSubmit={rejectedSubmit}
+          />,
+        );
+        form.addEventListener("submit", later, { once: true });
+        const stagedSubmit = submitEvent();
+        submit = stagedSubmit;
+        act(() => {
+          dispatched = form.dispatchEvent(stagedSubmit);
+        });
+        fireEvent.click(cancel);
+      } finally {
+        Object.setPrototypeOf(form, nativePrototype);
+      }
+
+      expect(readRelation).not.toHaveBeenCalled();
+      expect(dispatched).toBe(false);
+      expect(submit?.defaultPrevented).toBe(true);
+      expect(later).not.toHaveBeenCalled();
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+      expect(rejectedClose).not.toHaveBeenCalled();
+      expect(rejectedSubmit).not.toHaveBeenCalled();
+
+      await submitCleanSuccess(
+        view,
+        currentClose,
+        currentSubmit,
+        `https://example.com/${relation}-${kind}-derived-recovery.png`,
       );
       expect(staleClose).not.toHaveBeenCalled();
       expect(staleSubmit).not.toHaveBeenCalled();
