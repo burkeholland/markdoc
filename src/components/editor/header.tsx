@@ -6932,11 +6932,13 @@ function installMoreMenuDispatchObserver(
     value: observedDispatch,
     writable: true,
   };
+  let restoredByObserver = false;
   const restoreObserved = () => {
     const current = moreMenuOwnDescriptor(target, "dispatchEvent");
     if (current === MORE_MENU_DESCRIPTOR_FAILURE) return false;
+    if (restoredByObserver) return moreMenuDescriptorMatches(current, descriptor);
     if (!moreMenuDescriptorMatches(current, installedDescriptor)) {
-      return moreMenuDescriptorMatches(current, descriptor);
+      return false;
     }
     try {
       if (descriptor) moreMenuDefineProperty(target, "dispatchEvent", descriptor);
@@ -6945,10 +6947,11 @@ function installMoreMenuDispatchObserver(
       return false;
     }
     const restored = moreMenuOwnDescriptor(target, "dispatchEvent");
-    return (
+    restoredByObserver = (
       restored !== MORE_MENU_DESCRIPTOR_FAILURE
       && moreMenuDescriptorMatches(restored, descriptor)
     );
+    return restoredByObserver;
   };
   try {
     moreMenuDefineProperty(target, "dispatchEvent", installedDescriptor);

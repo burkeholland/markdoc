@@ -451,6 +451,118 @@ describe("editor header More menu authority", () => {
     expect(actions.onHistory).toHaveBeenCalledOnce();
   });
 
+  it("treats a foreign deletion before first cleanup as unsafe", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const props = headerProps(session, actions);
+    const view = await renderStrict(header(props));
+    openMenu();
+    const history = item("history");
+    expect(Object.prototype.hasOwnProperty.call(history, "dispatchEvent")).toBe(true);
+    Reflect.deleteProperty(history, "dispatchEvent");
+
+    await view.render(header({ ...props, commentsOpen: true }));
+
+    expect(Object.getOwnPropertyDescriptor(history, "dispatchEvent")).toBeUndefined();
+    fireEvent.click(history);
+    fireEvent.click(item("history"));
+    expect(actions.onHistory).not.toHaveBeenCalled();
+  });
+
+  it.each(["data", "accessor"] as const)(
+    "treats a foreign restoration of the original own %s descriptor as unsafe",
+    async (kind) => {
+      const nativeSetAttribute = Element.prototype.setAttribute;
+      const originalDispatch = function (this: EventTarget, event: Event) {
+        return Reflect.apply(EventTarget.prototype.dispatchEvent, this, [event]) as boolean;
+      };
+      const originalDescriptor: PropertyDescriptor = kind === "data"
+        ? {
+            configurable: true,
+            enumerable: true,
+            value: originalDispatch,
+            writable: false,
+          }
+        : {
+            configurable: true,
+            enumerable: true,
+            get: () => originalDispatch,
+          };
+      const setAttribute = vi.spyOn(Element.prototype, "setAttribute").mockImplementation(
+        function (this: Element, name: string, value: string) {
+          Reflect.apply(nativeSetAttribute, this, [name, value]);
+          if (name === "data-testid" && value === "menu-history") {
+            Object.defineProperty(this, "dispatchEvent", originalDescriptor);
+          }
+        },
+      );
+      const session = createSession();
+      const actions = createActions();
+      const props = headerProps(session, actions);
+      const view = await renderStrict(header(props));
+      openMenu();
+      setAttribute.mockRestore();
+      const history = item("history");
+      Object.defineProperty(history, "dispatchEvent", originalDescriptor);
+
+      await view.render(header({ ...props, commentsOpen: true }));
+
+      expect(Object.getOwnPropertyDescriptor(history, "dispatchEvent")).toEqual(
+        originalDescriptor,
+      );
+      fireEvent.click(history);
+      fireEvent.click(item("history"));
+      expect(actions.onHistory).not.toHaveBeenCalled();
+    },
+  );
+
+  it("treats foreign deletion of an outside-target observer as unsafe", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const props = headerProps(session, actions);
+    let outside: HTMLElement | null = null;
+    const deleteObserver = (event: PointerEvent) => {
+      if (!outside || event.target !== outside) return;
+      document.removeEventListener("pointerdown", deleteObserver);
+      Reflect.deleteProperty(outside, "dispatchEvent");
+    };
+    document.addEventListener("pointerdown", deleteObserver);
+    const view = await renderStrict(header(props, true));
+    const outsideElement = screen.getByRole("button", { name: "Outside menu" });
+    outside = outsideElement;
+    openMenu();
+    item("history").focus();
+    await waitForOutsideListener();
+
+    fireEvent.pointerDown(outsideElement, { button: 0, pointerType: "mouse" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(Object.getOwnPropertyDescriptor(outsideElement, "dispatchEvent")).toBeUndefined();
+    await view.render(header({ ...props, commentsOpen: true }, true));
+    await waitForOutsideListener();
+    fireEvent.pointerDown(outsideElement, { button: 0, pointerType: "mouse" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("keeps a successor wrapper after its predecessor restores itself", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const props = headerProps(session, actions);
+    const view = await renderStrict(header(props));
+    openMenu();
+    const history = item("history");
+    const firstWrapper = history.dispatchEvent;
+
+    await view.render(header({ ...props, commentsOpen: true }));
+    const successorWrapper = history.dispatchEvent;
+    expect(successorWrapper).not.toBe(firstWrapper);
+    await act(async () => Promise.resolve());
+    expect(history.dispatchEvent).toBe(successorWrapper);
+
+    fireEvent.click(history);
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(history.dispatchEvent).toBe(EventTarget.prototype.dispatchEvent);
+  });
+
   it("rejects unadmitted and repeated custom selection without consuming a fresh action", async () => {
     const session = createSession();
     const actions = createActions();
