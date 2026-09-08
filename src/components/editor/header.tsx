@@ -5934,6 +5934,7 @@ interface MoreMenuFocusIntent {
   readonly visit: MoreMenuVisit;
   readonly target: HTMLButtonElement;
   readonly action: MoreMenuActionName | null;
+  readonly modes: readonly EditMode[];
   readonly guard: MoreMenuFocusGuard;
 }
 
@@ -6147,7 +6148,8 @@ class MoreMenuPublicationCoordinator {
       || intent.open !== open
       || this.#active !== publication
       || !publication.isExact()
-      || !intent.events.some((event) => isLiveNativeEvent(event, publication.document))
+      || !intent.events.some((event) =>
+        isLiveMoreMenuNativeEvent(event, publication.document))
     ) {
       return null;
     }
@@ -6200,7 +6202,13 @@ class MoreMenuPublicationCoordinator {
       || this.#claimedActions.has(action)
       || this.#claimedEvents.has(customEvent)
       || this.#claimedEvents.has(intent.nativeEvent)
-      || !isLiveNativeEvent(intent.nativeEvent, publication.document)
+      || !moreMenuNativeClickIsAtRadixSelection(
+        publication,
+        publication.dom.actions[action.name],
+        intent.nativeEvent,
+        intent.target,
+        intent.path,
+      )
       || !publication.isExact()
     ) {
       return null;
@@ -6217,6 +6225,7 @@ class MoreMenuPublicationCoordinator {
     source: MoreMenuPublication,
     target: HTMLButtonElement,
     action: MoreMenuActionName | null,
+    mode: EditMode = source.render.mode,
   ) {
     const previous = this.#focusIntent;
     if (previous) this.#clearFocus(previous);
@@ -6229,6 +6238,9 @@ class MoreMenuPublicationCoordinator {
       visit: source.render.visit,
       target,
       action,
+      modes: Object.freeze(
+        mode === source.render.mode ? [mode] : [source.render.mode, mode],
+      ),
       guard,
     });
     pending = intent;
@@ -6558,6 +6570,24 @@ function nativeEventPath(ownerWindow: Window & typeof globalThis, event: Event) 
   }
 }
 
+function isLiveMoreMenuNativeEvent(event: Event, document: Document) {
+  const ownerWindow = document.defaultView;
+  return Boolean(
+    ownerWindow
+    && event instanceof ownerWindow.Event
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) !== ownerWindow.Event.NONE
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+      event,
+    )
+  );
+}
+
 function exactMoreMenuNativeClick(
   publication: MoreMenuPublication,
   action: MoreMenuAction,
@@ -6629,6 +6659,75 @@ function exactMoreMenuNativeClick(
     path,
     action,
   });
+}
+
+function moreMenuNativeClickIsAtRadixSelection(
+  publication: MoreMenuPublication,
+  item: HTMLElement | null,
+  event: MouseEvent,
+  admittedTarget: Node,
+  admittedPath: readonly EventTarget[],
+) {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  if (
+    !ownerWindow
+    || !item
+    || !content
+    || !(event instanceof ownerWindow.MouseEvent)
+  ) {
+    return false;
+  }
+  const target = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    event,
+  );
+  const currentTarget = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "currentTarget",
+    event,
+  );
+  const path = nativeEventPath(ownerWindow, event);
+  return Boolean(
+    nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event) === "click"
+    && nativeEventGetter<number>(
+      ownerWindow.MouseEvent.prototype,
+      "button",
+      event,
+    ) === 0
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) === false
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) === ownerWindow.Event.BUBBLING_PHASE
+    && target === admittedTarget
+    && target instanceof ownerWindow.Node
+    && target.ownerDocument === publication.document
+    && currentTarget === publication.document.body
+    && item.contains(target)
+    && path.length === admittedPath.length
+    && path.every((entry, index) => entry === admittedPath[index])
+    && path[0] === target
+    && path.indexOf(item) >= 0
+    && path.indexOf(content) > path.indexOf(item)
+    && path.indexOf(publication.document.body) > path.indexOf(content)
+  );
 }
 
 function exactMoreMenuCustomSelect(
@@ -6832,6 +6931,244 @@ function exactMoreMenuGenericCustomSelect(
   );
 }
 
+function moreMenuModeForGenericSelection(
+  publication: MoreMenuPublication,
+  item: HTMLElement,
+): EditMode {
+  if (!publication.render.compact || item.getAttribute("role") !== "menuitemradio") {
+    return publication.render.mode;
+  }
+  const group = item.parentElement;
+  const rows = group ? Array.from(group.children) : [];
+  const modes = ["editing", "suggesting", "viewing"] as const;
+  const labels = ["Editing", "Suggesting", "Viewing"] as const;
+  const index = rows.indexOf(item);
+  if (
+    group?.getAttribute("role") !== "group"
+    || rows.length !== modes.length
+    || index < 0
+    || !rows.every((row, rowIndex) => (
+      row.getAttribute("role") === "menuitemradio"
+      && row.lastElementChild?.tagName === "SPAN"
+      && row.lastElementChild.className === "flex flex-col"
+      && row.lastElementChild.children.length === 1
+      && row.lastElementChild.firstElementChild?.tagName === "SPAN"
+      && row.lastElementChild.firstElementChild.attributes.length === 0
+      && row.lastElementChild.firstElementChild.textContent === labels[rowIndex]
+    ))
+  ) {
+    return publication.render.mode;
+  }
+  return modes[index] ?? publication.render.mode;
+}
+
+function exactMoreMenuEscape(
+  publication: MoreMenuPublication,
+  event: KeyboardEvent,
+) {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  if (!ownerWindow || !content || !(event instanceof ownerWindow.KeyboardEvent)) return false;
+  const target = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    event,
+  );
+  const path = nativeEventPath(ownerWindow, event);
+  return Boolean(
+    nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event) === "keydown"
+    && nativeEventGetter<string>(
+      ownerWindow.KeyboardEvent.prototype,
+      "key",
+      event,
+    ) === "Escape"
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) === publication.document
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) === ownerWindow.Event.CAPTURING_PHASE
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) === false
+    && target instanceof ownerWindow.Node
+    && target.ownerDocument === publication.document
+    && content.contains(target)
+    && path[0] === target
+    && path.indexOf(content) >= 0
+    && path.indexOf(publication.document) > path.indexOf(content)
+  );
+}
+
+interface ExactMoreMenuOutside {
+  readonly originalEvent: Event;
+  readonly rightClick: boolean;
+}
+
+function moreMenuOutsideOriginalEvent(
+  ownerWindow: Window & typeof globalThis,
+  event: CustomEvent<{ originalEvent: Event }>,
+) {
+  const detail = nativeEventGetter<unknown>(
+    ownerWindow.CustomEvent.prototype,
+    "detail",
+    event,
+  );
+  if (
+    typeof detail !== "object"
+    || detail === null
+    || Reflect.ownKeys(detail).length !== 1
+  ) {
+    return null;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(detail, "originalEvent");
+  return descriptor && "value" in descriptor && descriptor.value instanceof ownerWindow.Event
+    ? descriptor.value
+    : null;
+}
+
+function exactMoreMenuOutside(
+  publication: MoreMenuPublication,
+  event: CustomEvent<{ originalEvent: Event }>,
+): ExactMoreMenuOutside | null {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  const trigger = publication.dom.trigger;
+  if (!ownerWindow || !content || !(event instanceof ownerWindow.CustomEvent)) return null;
+  const originalEvent = moreMenuOutsideOriginalEvent(ownerWindow, event);
+  if (!originalEvent) return null;
+  const type = nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event);
+  const target = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    event,
+  );
+  const currentTarget = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "currentTarget",
+    event,
+  );
+  const originalType = nativeEventGetter<string>(
+    ownerWindow.Event.prototype,
+    "type",
+    originalEvent,
+  );
+  const originalTarget = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    originalEvent,
+  );
+  const originalCurrentTarget = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "currentTarget",
+    originalEvent,
+  );
+  const path = nativeEventPath(ownerWindow, event);
+  const originalPath = nativeEventPath(ownerWindow, originalEvent);
+  const pointerOutside = (
+    type === "dismissableLayer.pointerDownOutside"
+    && originalType === "pointerdown"
+    && originalEvent instanceof ownerWindow.PointerEvent
+  );
+  const focusOutside = (
+    type === "dismissableLayer.focusOutside"
+    && originalType === "focusin"
+    && originalEvent instanceof ownerWindow.FocusEvent
+  );
+  if (
+    (!pointerOutside && !focusOutside)
+    || target !== originalTarget
+    || currentTarget !== target
+    || originalCurrentTarget !== publication.document
+    || nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) !== ownerWindow.Event.AT_TARGET
+    || nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      originalEvent,
+    ) !== ownerWindow.Event.BUBBLING_PHASE
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) !== false
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) !== true
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) !== false
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      originalEvent,
+    ) !== true
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      originalEvent,
+    ) !== pointerOutside
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      originalEvent,
+    ) !== false
+    || !(target instanceof ownerWindow.Node)
+    || target.ownerDocument !== publication.document
+    || !target.isConnected
+    || content.contains(target)
+    || trigger.contains(target)
+    || path.length !== originalPath.length
+    || !path.every((entry, index) => entry === originalPath[index])
+    || path[0] !== target
+    || path.indexOf(publication.document) < 0
+  ) {
+    return null;
+  }
+  const button = pointerOutside
+    ? nativeEventGetter<number>(
+        ownerWindow.MouseEvent.prototype,
+        "button",
+        originalEvent,
+      )
+    : undefined;
+  const ctrlKey = pointerOutside
+    ? nativeEventGetter<boolean>(
+        ownerWindow.MouseEvent.prototype,
+        "ctrlKey",
+        originalEvent,
+      )
+    : undefined;
+  if (pointerOutside && (button === undefined || ctrlKey === undefined)) return null;
+  return Object.freeze({
+    originalEvent,
+    rightClick: pointerOutside && (button === 2 || (button === 0 && ctrlKey === true)),
+  });
+}
+
 function createMoreMenuFocusGuard(
   source: MoreMenuPublication,
   target: HTMLButtonElement,
@@ -6944,7 +7281,7 @@ function moreMenuFocusSuccessorIsExact(
     && after.document === before.document
     && after.docId === before.docId
     && after.role === before.role
-    && after.mode === before.mode
+    && intent.modes.includes(after.mode)
     && after.setMode === before.setMode
     && after.compact === before.compact
     && after.linked === before.linked
@@ -7184,14 +7521,25 @@ function createMoreMenuPresentation({
         if (
           !admission
           || coordinator.active() !== publication
-          || !isLiveNativeEvent(admission.nativeEvent, publication.document)
+          || !moreMenuNativeClickIsAtRadixSelection(
+            publication,
+            admission.item,
+            admission.nativeEvent,
+            admission.target,
+            admission.path,
+          )
           || !exactMoreMenuGenericCustomSelect(publication, admission.item, event)
           || !coordinator.claimDisclosure([admission.nativeEvent, event])
         ) {
           return;
         }
         genericSelection = null;
-        close(publication);
+        close(
+          publication,
+          true,
+          null,
+          moreMenuModeForGenericSelection(publication, admission.item),
+        );
       };
       dom.content.addEventListener("click", genericClickListener, { capture: true });
       dom.content.addEventListener(
@@ -7245,7 +7593,7 @@ function createMoreMenuPresentation({
           || bubbles !== false
           || cancelable !== false
           || defaultPrevented !== false
-          || !isLiveNativeEvent(event, publication.document)
+          || !isLiveMoreMenuNativeEvent(event, publication.document)
           || coordinator.active() !== publication
           || !publication.isExact()
           || !coordinator.claimDisclosure([event])
@@ -7298,6 +7646,7 @@ function createMoreMenuPresentation({
     publication: MoreMenuPublication,
     returnFocus = true,
     action: MoreMenuActionName | null = null,
+    mode: EditMode = publication.render.mode,
   ) {
     if (
       !render.open
@@ -7307,7 +7656,9 @@ function createMoreMenuPresentation({
     ) {
       return false;
     }
-    if (returnFocus) coordinator.scheduleFocus(publication, publication.dom.trigger, action);
+    if (returnFocus) {
+      coordinator.scheduleFocus(publication, publication.dom.trigger, action, mode);
+    }
     commitOpen(Object.freeze({ visit: render.visit, open: false }));
     return true;
   }
@@ -7335,7 +7686,7 @@ function createMoreMenuPresentation({
       || nativeEvent.defaultPrevented
       || nativeEvent.button !== 0
       || nativeEvent.ctrlKey
-      || !isLiveNativeEvent(nativeEvent, publication.document)
+      || !isLiveMoreMenuNativeEvent(nativeEvent, publication.document)
       || !nativeEvent.composedPath().includes(trigger)
       || !coordinator.claimDisclosure([nativeEvent])
     ) {
@@ -7365,7 +7716,7 @@ function createMoreMenuPresentation({
       || nativeEvent.target !== target
       || nativeEvent.key !== event.key
       || nativeEvent.defaultPrevented
-      || !isLiveNativeEvent(nativeEvent, publication.document)
+      || !isLiveMoreMenuNativeEvent(nativeEvent, publication.document)
       || !nativeEvent.composedPath().includes(trigger)
       || !coordinator.claimDisclosure([nativeEvent])
     ) {
@@ -7414,23 +7765,9 @@ function createMoreMenuPresentation({
   };
   const onEscapeKeyDown = (event: KeyboardEvent) => {
     const publication = currentPublication();
-    const content = publication?.dom.content;
-    const ownerWindow = publication?.document.defaultView;
-    const target = event.target;
     if (
       !publication
-      || !content
-      || !ownerWindow
-      || !(event instanceof ownerWindow.KeyboardEvent)
-      || event.type !== "keydown"
-      || event.key !== "Escape"
-      || event.currentTarget !== publication.document
-      || event.defaultPrevented
-      || !(target instanceof ownerWindow.Node)
-      || target.ownerDocument !== publication.document
-      || !content.contains(target)
-      || !isLiveNativeEvent(event, publication.document)
-      || !event.composedPath().includes(content)
+      || !exactMoreMenuEscape(publication, event)
       || !coordinator.claimDisclosure([event])
     ) {
       return;
@@ -7439,48 +7776,20 @@ function createMoreMenuPresentation({
   };
   const onOutside = (event: CustomEvent<{ originalEvent: Event }>) => {
     const publication = currentPublication();
-    const content = publication?.dom.content;
-    const trigger = publication?.dom.trigger;
-    const ownerWindow = publication?.document.defaultView;
-    const originalEvent = event.detail?.originalEvent;
-    const target = originalEvent?.target;
-    const pointerOutside = ownerWindow
-      && originalEvent instanceof ownerWindow.PointerEvent
-      && event.type === "dismissableLayer.pointerDownOutside"
-      && originalEvent.type === "pointerdown";
-    const focusOutside = ownerWindow
-      && originalEvent instanceof ownerWindow.FocusEvent
-      && event.type === "dismissableLayer.focusOutside"
-      && originalEvent.type === "focusin";
+    const outside = publication && exactMoreMenuOutside(publication, event);
     if (
       !publication
-      || !content
-      || !trigger
-      || !ownerWindow
-      || !(event instanceof ownerWindow.CustomEvent)
-      || event.defaultPrevented
-      || (!pointerOutside && !focusOutside)
-      || !(target instanceof ownerWindow.Node)
-      || target.ownerDocument !== publication.document
-      || event.target !== target
-      || event.currentTarget !== target
-      || !target.isConnected
-      || content.contains(target)
-      || trigger.contains(target)
-      || !isLiveNativeEvent(event, publication.document)
-      || !isLiveNativeEvent(originalEvent, publication.document)
-      || !event.composedPath().includes(target)
-      || !originalEvent.composedPath().includes(target)
-      || !coordinator.claimDisclosure([event, originalEvent])
+      || !outside
+      || !coordinator.claimDisclosure([event, outside.originalEvent])
     ) {
       return;
     }
-    const rightClick = originalEvent instanceof ownerWindow.PointerEvent
-      && (
-        originalEvent.button === 2
-        || (originalEvent.button === 0 && originalEvent.ctrlKey)
-      );
-    coordinator.publishDisclosure(publication, false, [event, originalEvent], !rightClick);
+    coordinator.publishDisclosure(
+      publication,
+      false,
+      [event, outside.originalEvent],
+      !outside.rightClick,
+    );
   };
   function establish() {
     if (

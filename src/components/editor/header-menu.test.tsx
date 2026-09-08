@@ -239,6 +239,20 @@ function captureOutside() {
   );
 }
 
+function captureFocusOutside() {
+  return captureHandler<OutsideHandler>(
+    screen.getByRole("menu"),
+    "onFocusOutside",
+    "MenuContent",
+  );
+}
+
+function shadowEvent(event: Event, values: Readonly<Record<string, unknown>>) {
+  for (const [name, value] of Object.entries(values)) {
+    Object.defineProperty(event, name, { configurable: true, value });
+  }
+}
+
 function dispatchUnadmittedSelection(element: HTMLElement, select = captureSelect(element)) {
   const event = new CustomEvent("menu.itemSelect", {
     bubbles: true,
@@ -315,6 +329,54 @@ describe("editor header More menu authority", () => {
     fireEvent.click(history);
     act(() => dispatchUnadmittedSelection(history, select));
     expect(actions.onHistory).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a canceled owned click replay before callback or delete confirmation", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(false);
+    actions.onDelete = vi.fn(() => {
+      confirm(`Move “${DOC.title}” to trash? You can restore it from the dashboard for 30 days.`);
+    });
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const deleteItem = item("delete");
+    const select = captureSelect(deleteItem);
+    const canceledClick = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    deleteItem.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, once: true });
+
+    act(() => {
+      deleteItem.dispatchEvent(canceledClick);
+      shadowEvent(canceledClick, {
+        currentTarget: document.body,
+        defaultPrevented: false,
+        eventPhase: Event.BUBBLING_PHASE,
+        target: deleteItem,
+        composedPath: () => [
+          deleteItem,
+          screen.getByRole("menu"),
+          document.body,
+          document.documentElement,
+          document,
+          window,
+        ],
+      });
+      dispatchUnadmittedSelection(deleteItem, select);
+    });
+    expect(actions.onDelete).not.toHaveBeenCalled();
+    expect(confirmDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(deleteItem);
+    expect(actions.onDelete).toHaveBeenCalledOnce();
+    expect(confirmDelete).toHaveBeenCalledOnce();
   });
 
   it("rejects plain and prototype-only public event shells without throwing", async () => {
@@ -598,13 +660,155 @@ describe("editor header More menu authority", () => {
   it("closes a compact Mode selection that changes the current session mode", async () => {
     const session = createSession();
     const actions = createActions();
+    const setMode = vi.spyOn(session, "setMode");
     await renderStrict(header(headerProps(session, actions, { compact: true })));
-    openMenu();
+    const menuTrigger = trigger();
+    menuTrigger.focus();
+    fireEvent.keyDown(menuTrigger, { key: "ArrowDown" });
+    const viewing = await screen.findByRole("menuitemradio", { name: /Viewing/ });
+    viewing.focus();
 
-    fireEvent.click(screen.getByRole("menuitemradio", { name: /Viewing/ }));
+    await userEvent.keyboard("{Enter}");
+    expect(setMode).toHaveBeenCalledExactlyOnceWith("viewing");
     expect(session.mode).toBe("viewing");
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(menuTrigger).toHaveFocus());
   });
+
+  it("rejects a canceled Escape with valid-looking own event fields", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    const handlers: {
+      escape: EscapeHandler | null;
+      close: OpenHandler | null;
+    } = { escape: null, close: null };
+    const intercept = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      document.removeEventListener("keydown", intercept, { capture: true });
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      shadowEvent(event, {
+        currentTarget: document,
+        defaultPrevented: false,
+        eventPhase: Event.CAPTURING_PHASE,
+        composedPath: () => [
+          event.target,
+          screen.getByRole("menu"),
+          document.body,
+          document.documentElement,
+          document,
+          window,
+        ],
+      });
+      if (!handlers.escape || !handlers.close) throw new Error("Escape handlers were not captured");
+      handlers.escape(event);
+      handlers.close(false);
+    };
+    document.addEventListener("keydown", intercept, { capture: true });
+    openMenu();
+    const history = item("history");
+    history.focus();
+    handlers.escape = captureEscape();
+    handlers.close = captureOpenChange();
+
+    fireEvent.keyDown(history, { key: "Escape" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(history).toHaveFocus();
+
+    fireEvent.keyDown(history, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it.each(["pointer", "focus"] as const)(
+    "rejects canceled poisoned %s-outside dismissal and keeps a fresh dismissal usable",
+    async (family) => {
+      const session = createSession();
+      const actions = createActions();
+      await renderStrict(header(headerProps(session, actions), true));
+      const outside = screen.getByRole("button", { name: "Outside menu" });
+      const handlers: {
+        outside: OutsideHandler | null;
+        close: OpenHandler | null;
+      } = { outside: null, close: null };
+      const eventName = family === "pointer" ? "pointerdown" : "focusin";
+      const intercept = (event: Event) => {
+        if (event.target !== outside) return;
+        document.removeEventListener(eventName, intercept);
+        event.stopImmediatePropagation();
+        if (family === "pointer") {
+          event.preventDefault();
+          shadowEvent(event, { defaultPrevented: false });
+        }
+        const outsideEvent = new CustomEvent(
+          family === "pointer"
+            ? "dismissableLayer.pointerDownOutside"
+            : "dismissableLayer.focusOutside",
+          {
+            bubbles: false,
+            cancelable: true,
+            detail: { originalEvent: event },
+          },
+        );
+        outside.addEventListener(outsideEvent.type, (current) => {
+          current.stopImmediatePropagation();
+          if (family === "focus") {
+            current.preventDefault();
+            shadowEvent(current, { defaultPrevented: false });
+          }
+          if (!handlers.outside || !handlers.close) {
+            throw new Error("Outside handlers were not captured");
+          }
+          handlers.outside(current as CustomEvent<{ originalEvent: Event }>);
+          handlers.close(false);
+        }, { once: true });
+        outside.dispatchEvent(outsideEvent);
+      };
+      document.addEventListener(eventName, intercept);
+      openMenu();
+      const history = item("history");
+      history.focus();
+      handlers.outside = family === "pointer" ? captureOutside() : captureFocusOutside();
+      handlers.close = captureOpenChange();
+      if (family === "pointer") await waitForOutsideListener();
+
+      if (family === "pointer") {
+        fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      } else {
+        outside.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      }
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(history).toHaveFocus();
+
+      if (family === "pointer") {
+        await waitForOutsideListener();
+        fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      } else {
+        const freshIntercept = (event: FocusEvent) => {
+          if (event.target !== outside) return;
+          document.removeEventListener("focusin", freshIntercept);
+          event.stopImmediatePropagation();
+          const freshOutside = new CustomEvent("dismissableLayer.focusOutside", {
+            bubbles: false,
+            cancelable: true,
+            detail: { originalEvent: event },
+          });
+          outside.addEventListener(freshOutside.type, (current) => {
+            current.stopImmediatePropagation();
+            if (!handlers.outside || !handlers.close) {
+              throw new Error("Outside handlers were not captured");
+            }
+            handlers.outside(current as CustomEvent<{ originalEvent: Event }>);
+            handlers.close(false);
+          }, { once: true });
+          outside.dispatchEvent(freshOutside);
+        };
+        document.addEventListener("focusin", freshIntercept);
+        outside.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      }
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    },
+  );
 
   it("keeps stale Escape and outside handlers from closing or focusing a reopened visit", async () => {
     const session = createSession();
