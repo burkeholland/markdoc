@@ -387,6 +387,35 @@ function expectWrongTargetDoesNoWork({
   expect(observedControlWork(browser, fixtures, host, focus)).toEqual(before);
 }
 
+async function renderStrictControlsAtAncestorLayout({
+  root,
+  current,
+  browser,
+  onBoundary,
+}: {
+  root: ReturnType<typeof createRoot>;
+  current: Fixture;
+  browser: ReturnType<typeof controlledBrowser>;
+  onBoundary: () => void;
+}) {
+  await act(async () => root.render(
+    <StrictMode>
+      <Boundary current={current} />
+    </StrictMode>,
+  ));
+  const pending = [...browser.frames.values()];
+  expect(pending).toHaveLength(1);
+  browser.frames.clear();
+  await act(async () => {
+    pending[0](0);
+    root.render(
+      <StrictMode>
+        <Boundary current={current} boundary={1} onBoundary={onBoundary} />
+      </StrictMode>,
+    );
+  });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -452,6 +481,104 @@ describe("TableMenu geometry ownership", () => {
       act(() => root.unmount());
     }
   });
+
+  it.each(["mutate-restore", "detach-reinsert"] as const)(
+    "rejects Strict replay after transient committed DOM history: %s",
+    async (change) => {
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let source!: CapturedControl;
+
+      try {
+        await renderStrictControlsAtAncestorLayout({
+          root,
+          current,
+          browser,
+          onBoundary: () => {
+            const menu = screen.getByTestId("table-menu");
+            source = captureControl("table-row-before");
+            if (change === "mutate-restore") {
+              source.element.setAttribute("data-transient", "changed");
+              source.element.removeAttribute("data-transient");
+            } else {
+              const parent = menu.parentNode!;
+              const next = menu.nextSibling;
+              parent.removeChild(menu);
+              parent.insertBefore(menu, next);
+            }
+          },
+        });
+
+        const stalePrevention = vi.fn();
+        mouseDown(source, stalePrevention);
+        click(source);
+        expect(stalePrevention).not.toHaveBeenCalled();
+        expect(current.tableAction).not.toHaveBeenCalled();
+
+        act(() => root.render(
+          <StrictMode>
+            <Boundary current={current} boundary={2} />
+          </StrictMode>,
+        ));
+        click(captureControl("table-row-before"));
+        click(source);
+        expect(current.tableAction.mock.calls).toEqual([["rowBefore"]]);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each(["mousedown", "click"] as const)(
+    "does not replenish claims after a source %s before Strict cleanup",
+    async (interaction) => {
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let source!: CapturedControl;
+
+      try {
+        await renderStrictControlsAtAncestorLayout({
+          root,
+          current,
+          browser,
+          onBoundary: () => {
+            source = captureControl("table-row-before");
+            source.element.dispatchEvent(new MouseEvent(interaction, {
+              bubbles: true,
+              cancelable: true,
+            }));
+          },
+        });
+        expect(current.tableAction).toHaveBeenCalledTimes(interaction === "click" ? 1 : 0);
+
+        fireEvent.click(source.element);
+        expect(current.tableAction).toHaveBeenCalledTimes(interaction === "click" ? 1 : 0);
+
+        act(() => root.render(
+          <StrictMode>
+            <Boundary current={current} boundary={2} />
+          </StrictMode>,
+        ));
+        click(captureControl("table-row-before"));
+        click(source);
+        expect(current.tableAction).toHaveBeenCalledTimes(interaction === "click" ? 2 : 1);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
 
   it("retires exact listeners and frames before parent layout boundaries while current events coalesce", () => {
     const browser = controlledBrowser();

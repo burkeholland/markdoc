@@ -71,9 +71,11 @@ interface TableMenuControlPublication {
   activeSurface: CollabSession["activeSurface"];
   controls: Set<TableMenuControl>;
   controlOrder: TableMenuControl[];
+  mouseDownObserved: boolean;
   root: HTMLDivElement | null;
   bindRoot: (element: HTMLDivElement | null) => void;
   domSnapshot: TableMenuDomSnapshot | null;
+  domMonitor: TableMenuDomMonitor | null;
 }
 
 interface TableMenuControl {
@@ -136,6 +138,12 @@ interface TableMenuReplayCandidate {
 interface TableMenuReplay {
   source: TableMenuControlPublication;
   snapshot: TableMenuDomSnapshot;
+}
+
+interface TableMenuDomMonitor {
+  mutated: boolean;
+  check: () => boolean;
+  disconnect: () => void;
 }
 
 interface TableMenuControlSet {
@@ -219,6 +227,42 @@ function captureDomSnapshot(publication: TableMenuControlPublication): TableMenu
   });
 }
 
+function observeDomSnapshot(
+  snapshot: TableMenuDomSnapshot,
+  onMutation: () => void,
+): TableMenuDomMonitor | null {
+  const parent = snapshot.parent;
+  if (!parent) return null;
+  let mutated = false;
+  const recordMutation = (records: MutationRecord[]) => {
+    if (records.length === 0) return;
+    mutated = true;
+    monitor.mutated = true;
+    onMutation();
+  };
+  const rootObserver = new MutationObserver(recordMutation);
+  const parentObserver = new MutationObserver(recordMutation);
+  rootObserver.observe(snapshot.root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  parentObserver.observe(parent, { childList: true });
+  const monitor: TableMenuDomMonitor = {
+    mutated,
+    check: () => {
+      recordMutation([...rootObserver.takeRecords(), ...parentObserver.takeRecords()]);
+      return !monitor.mutated;
+    },
+    disconnect: () => {
+      rootObserver.disconnect();
+      parentObserver.disconnect();
+    },
+  };
+  return monitor;
+}
+
 function publicationMatchesSnapshot(
   publication: TableMenuControlPublication,
   snapshot: TableMenuDomSnapshot,
@@ -269,15 +313,26 @@ class TableMenuControlCoordinator {
     if (
       !snapshot
       || (replay && (
-        !publicationsMatchForReplay(replay.source, publication)
+        replay.source.mouseDownObserved
+        || replay.source.controlOrder.some((control) => control.claimed)
+        || !replay.source.domMonitor?.check()
+        || !publicationsMatchForReplay(replay.source, publication)
         || !publicationMatchesSnapshot(publication, replay.snapshot, true)
       ))
     ) {
       this.#retire(publication, false);
       return false;
     }
+    const candidate = this.#replayCandidate;
     this.#replayCandidate = null;
+    candidate?.publication.domMonitor?.disconnect();
     this.#replay = null;
+    replay?.source.domMonitor?.disconnect();
+    publication.domMonitor = observeDomSnapshot(snapshot, () => this.#invalidateMutation(publication));
+    if (!publication.domMonitor) {
+      this.#retire(publication, false);
+      return false;
+    }
     publication.domSnapshot = snapshot;
     this.#current = publication;
     this.#container = publication.container;
@@ -295,6 +350,9 @@ class TableMenuControlCoordinator {
     if (
       this.#current
       || !publication.retired
+      || publication.mouseDownObserved
+      || publication.controlOrder.some((control) => control.claimed)
+      || !publication.domMonitor?.check()
       || publication.view.isDestroyed
       || isTableMenuHidden(publication.view.state)
       || !matchesDomSnapshot(candidate.snapshot, true)
@@ -375,13 +433,17 @@ class TableMenuControlCoordinator {
     const candidate = this.#replayCandidate;
     if (!candidate || candidate.publication !== publication) return;
     const ref = candidate.refs.get(key);
-    if (!ref || !matchesDomSnapshot(candidate.snapshot, true)) {
-      this.#replayCandidate = null;
+    if (
+      !ref
+      || !publication.domMonitor?.check()
+      || !matchesDomSnapshot(candidate.snapshot, true)
+    ) {
+      this.#discardReplay(publication);
       return;
     }
     if (!element) {
       if (ref.detached || [...candidate.refs.values()].some((current) => current.attached)) {
-        this.#replayCandidate = null;
+        this.#discardReplay(publication);
         return;
       }
       ref.detached = true;
@@ -392,7 +454,7 @@ class TableMenuControlCoordinator {
       || ref.attached
       || [...candidate.refs.values()].some((current) => !current.detached)
     ) {
-      this.#replayCandidate = null;
+      this.#discardReplay(publication);
       return;
     }
     ref.attached = true;
@@ -401,12 +463,17 @@ class TableMenuControlCoordinator {
   #retire(publication: TableMenuControlPublication | null, allowReplay: boolean) {
     if (!publication || publication.retired) return;
     const snapshot = publication.domSnapshot;
+    const replay = this.#replay;
     this.#replay = null;
+    replay?.source.domMonitor?.disconnect();
     // Strict replay cleans layout effects before replaying refs. A real replacement
     // detaches refs first, so it cannot leave this complete connected candidate.
     this.#replayCandidate = allowReplay
       && this.#current === publication
       && snapshot
+      && !publication.mouseDownObserved
+      && publication.controlOrder.every((control) => !control.claimed)
+      && publication.domMonitor?.check()
       && publicationMatchesSnapshot(publication, snapshot, true)
       ? {
         publication,
@@ -420,6 +487,7 @@ class TableMenuControlCoordinator {
         ]),
       }
       : null;
+    if (!this.#replayCandidate) publication.domMonitor?.disconnect();
     publication.retired = true;
     publication.domSnapshot = null;
     if (this.#current === publication) {
@@ -442,6 +510,28 @@ class TableMenuControlCoordinator {
       control.element = null;
     }
     publication.root = null;
+    const candidate = this.#replayCandidate;
+    if (candidate?.publication === publication) {
+      queueMicrotask(() => {
+        if (this.#replayCandidate === candidate) this.#discardReplay(publication);
+      });
+    }
+  }
+
+  #invalidateMutation(publication: TableMenuControlPublication) {
+    if (
+      this.#current === publication
+      || this.#replayCandidate?.publication === publication
+      || this.#replay?.source === publication
+    ) {
+      this.#discardReplay(publication);
+    }
+  }
+
+  #discardReplay(publication: TableMenuControlPublication) {
+    if (this.#replayCandidate?.publication === publication) this.#replayCandidate = null;
+    if (this.#replay?.source === publication) this.#replay = null;
+    publication.domMonitor?.disconnect();
   }
 }
 
@@ -493,9 +583,11 @@ function createControlPublication({
     activeSurface,
     controls: new Set(),
     controlOrder: [],
+    mouseDownObserved: false,
     root: null,
     bindRoot: () => undefined,
     domSnapshot: null,
+    domMonitor: null,
   };
   publication.bindRoot = (element) => coordinator.bindRoot(publication, element);
   const control = (invoke: () => void): TableMenuControl => {
@@ -731,6 +823,7 @@ function TableMenuControls({
     return !publication.view.isDestroyed && !isTableMenuHidden(publication.view.state);
   };
   const onMouseDown = (control: TableMenuControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+    publication.mouseDownObserved = true;
     if (ownsControl(control, event)) event.preventDefault();
   };
   const onClick = (control: TableMenuControl) => (event: ReactMouseEvent<HTMLButtonElement>) => {
