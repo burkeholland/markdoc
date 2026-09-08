@@ -361,7 +361,7 @@ test.describe("axe: pages", () => {
   // fragment whose element is not focusable. The sticky title follows the logo and shares that target.
   test("reader skip and header-title links focus the article below the sticky header", async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-    const isLoopback = (url: string) => ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname);
+    const isLoopback = (url: string | URL) => ["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname);
     await context.route(/^https?:\/\//, async (route) => {
       if (isLoopback(route.request().url())) await route.continue();
       else await route.abort("blockedbyclient");
