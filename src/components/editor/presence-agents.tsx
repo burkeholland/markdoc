@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useState, type MouseEvent } from "react";
+import { useCallback, useLayoutEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Bot, Loader2, Radio } from "lucide-react";
 import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import { agentDisplayName } from "@/editor/collab/mentions";
@@ -143,20 +143,398 @@ const REQUEST_STATE_CLASS = "block text-xs text-ink-3";
 const REQUEST_CANCEL_CLASS = "btn btn-sm btn-outline h-7 shrink-0 px-2 text-xs";
 const KEEP_AGENT_CLASS = "btn w-full justify-center gap-1.5";
 
-class PresenceElementOwner<T extends HTMLElement> {
+interface PresenceElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+class PresenceElementOwner<T extends HTMLElement> implements PresenceElementOwnerView {
   private current: T | null = null;
   private last: T | null = null;
 
-  constructor(private readonly onReplacement: () => void) {}
+  constructor(
+    private readonly onChange: (
+      owner: PresenceElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
 
   readonly element = () => this.current;
   readonly capture = (element: T | null) => {
     if (this.current === element) return;
-    const replaced = element !== null && this.last !== null && this.last !== element;
+    const previous = this.current;
+    const last = this.last;
     this.current = element;
     if (element) this.last = element;
-    if (replaced || element === null) this.onReplacement();
+    this.onChange(this, element, previous, last);
   };
+}
+
+interface PresenceDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly PresenceDomSnapshot[];
+}
+
+interface PresencePlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface PresenceDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface PresenceExactPublication<Authority> {
+  readonly authority: Authority;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface PresenceReplay<Publication extends PresenceExactPublication<unknown>> {
+  readonly source: Publication;
+  readonly dom: PresenceDomSnapshot;
+  readonly placement: PresencePlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface PresencePublicationCells<Publication extends PresenceExactPublication<unknown>> {
+  readonly active: { current: Publication | null };
+  readonly successorOf: { current: Publication | null };
+  readonly replay: { current: PresenceReplay<Publication> | null };
+  readonly claimedEvents: WeakSet<Event>;
+}
+
+interface PresenceRefReplay {
+  readonly owner: PresenceElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface PresencePublicationRuntime<Publication extends PresenceExactPublication<unknown>> {
+  readonly publication: Publication;
+  readonly publish: () => void;
+  readonly retire: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: PresenceElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly isExactReplay: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly snapshot: () => PresenceDomSnapshot;
+  readonly placement: () => PresencePlacement;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+  readonly claim: (action: object) => boolean;
+}
+
+function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotPresenceDom(node: Node): PresenceDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotPresenceDom)),
+  });
+}
+
+function presenceDomMatches(snapshot: PresenceDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && presenceDomMatches(child));
+}
+
+function capturePresencePlacement(root: HTMLElement): PresencePlacement | null {
+  const parent = root.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: root.ownerDocument,
+    parent,
+    previousSibling: root.previousSibling,
+    nextSibling: root.nextSibling,
+  });
+}
+
+function presencePlacementMatches(root: HTMLElement, placement: PresencePlacement): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.parentNode === placement.parent &&
+    root.previousSibling === placement.previousSibling &&
+    root.nextSibling === placement.nextSibling
+  );
+}
+
+function createPresenceDomGuard(
+  root: HTMLElement,
+  placement: PresencePlacement,
+): PresenceDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList" || record.target !== placement.parent) return false;
+      if (record.previousSibling === root || record.nextSibling === root) return true;
+      return [...record.addedNodes, ...record.removedNodes].some((node) =>
+        node === root || (
+          node.nodeType === 1 &&
+          (node as Element).contains(root)
+        ));
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createPresencePublicationRuntime<Publication extends PresenceExactPublication<unknown>>({
+  publication,
+  cells,
+  root,
+  owners,
+  clearCurrent,
+}: {
+  publication: Publication;
+  cells: PresencePublicationCells<Publication>;
+  root: HTMLElement;
+  owners: readonly PresenceElementOwnerView[];
+  clearCurrent: () => void;
+}): PresencePublicationRuntime<Publication> | null {
+  const placement = capturePresencePlacement(root);
+  if (!placement) return null;
+  const dom = snapshotPresenceDom(root);
+  const guard = createPresenceDomGuard(root, placement);
+  if (!guard) return null;
+  const replayRefs: PresenceRefReplay[] = [];
+  for (const owner of owners) {
+    const element = owner.element();
+    if (!element) {
+      guard.release();
+      return null;
+    }
+    replayRefs.push({ owner, element, detached: false, reattached: false });
+  }
+
+  let retired = false;
+  let layoutRetired = false;
+  let elementRetired = false;
+  let invalidReplay = false;
+  let publicationClaimed = false;
+  const claimedActions = new WeakSet<object>();
+  const retire = () => {
+    if (retired) return false;
+    retired = true;
+    if (cells.active.current === publication) {
+      cells.active.current = null;
+      cells.successorOf.current = publication;
+    }
+    clearCurrent();
+    queueMicrotask(() => {
+      if (cells.replay.current?.source !== publication) guard.release();
+    });
+    return true;
+  };
+  const publishedDomMatches = () =>
+    guard.isClean() &&
+    root === dom.node &&
+    root.isConnected &&
+    presencePlacementMatches(root, placement) &&
+    presenceDomMatches(dom);
+  const refsHaveExactReplay = () =>
+    !invalidReplay &&
+    replayRefs.length > 0 &&
+    replayRefs.every((entry) =>
+      entry.detached &&
+      entry.reattached &&
+      entry.owner.element() === entry.element);
+
+  const runtime: PresencePublicationRuntime<Publication> = Object.freeze({
+    publication,
+    publish: () => {
+      cells.active.current = publication;
+      cells.successorOf.current = null;
+      cells.replay.current = null;
+    },
+    retire,
+    retireForElement: () => {
+      elementRetired = true;
+      retire();
+    },
+    retireForLayout: () => {
+      layoutRetired = true;
+      retire();
+    },
+    noteRef: (
+      owner: PresenceElementOwnerView,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+    ) => {
+      const proof = replayRefs.find((entry) => entry.owner === owner);
+      if (!proof) {
+        invalidReplay = true;
+        return;
+      }
+      if (element === null && previous === proof.element) {
+        proof.detached = true;
+        proof.reattached = false;
+      } else if (
+        element === proof.element &&
+        previous === null &&
+        proof.detached
+      ) {
+        proof.reattached = true;
+      } else if (element !== previous) {
+        invalidReplay = true;
+      }
+    },
+    isRetired: () => retired,
+    isExactReplay: () =>
+      retired &&
+      layoutRetired &&
+      elementRetired &&
+      !publicationClaimed &&
+      refsHaveExactReplay() &&
+      publishedDomMatches(),
+    publishedDomMatches,
+    snapshot: () => dom,
+    placement: () => placement,
+    mutationHistoryIsClean: guard.isClean,
+    release: guard.release,
+    claim: (action: object) => {
+      if (
+        retired ||
+        publicationClaimed ||
+        claimedActions.has(action)
+      ) {
+        return false;
+      }
+      publicationClaimed = true;
+      claimedActions.add(action);
+      return true;
+    },
+  });
+  return runtime;
+}
+
+function isNodeFromDocument(value: EventTarget | null, document: Document): value is Node {
+  const NodeConstructor = document.defaultView?.Node;
+  return Boolean(NodeConstructor && value instanceof NodeConstructor);
+}
+
+function claimPresenceClick<Publication extends PresenceExactPublication<unknown>>({
+  event,
+  button,
+  runtime,
+  publication,
+  action,
+  cells,
+}: {
+  event: ReactMouseEvent<HTMLButtonElement>;
+  button: HTMLButtonElement;
+  runtime: PresencePublicationRuntime<Publication> | null;
+  publication: Publication;
+  action: object;
+  cells: PresencePublicationCells<Publication>;
+}): boolean {
+  if (!runtime || runtime.publication !== publication || typeof event !== "object" || event === null) {
+    return false;
+  }
+  const document = button.ownerDocument;
+  const view = document.defaultView;
+  if (!view) return false;
+  const reactEvent = event as ReactMouseEvent<HTMLButtonElement> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  const nativeEvent = reactEvent.nativeEvent;
+  const source = reactEvent.currentTarget;
+  const target = reactEvent.target;
+  const prototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
+  if (
+    !(nativeEvent instanceof view.MouseEvent) ||
+    !(source instanceof view.HTMLButtonElement) ||
+    !isNodeFromDocument(target, document) ||
+    prototype?.constructor?.name !== "SyntheticBaseEvent" ||
+    reactEvent._reactName !== "onClick" ||
+    typeof reactEvent.isDefaultPrevented !== "function" ||
+    typeof reactEvent.isPropagationStopped !== "function" ||
+    typeof reactEvent.persist !== "function" ||
+    reactEvent.type !== "click" ||
+    reactEvent.button !== 0 ||
+    !reactEvent.bubbles ||
+    nativeEvent.type !== "click" ||
+    nativeEvent.button !== 0 ||
+    nativeEvent.eventPhase === view.Event.NONE ||
+    source !== button ||
+    source.ownerDocument !== document ||
+    !source.isConnected ||
+    source.disabled ||
+    target !== nativeEvent.target ||
+    target.ownerDocument !== document ||
+    !source.contains(target) ||
+    reactEvent.defaultPrevented ||
+    nativeEvent.defaultPrevented ||
+    cells.claimedEvents.has(nativeEvent) ||
+    cells.active.current !== publication ||
+    runtime.isRetired()
+  ) {
+    return false;
+  }
+  if (!runtime.claim(action)) return false;
+  cells.claimedEvents.add(nativeEvent);
+  return true;
 }
 
 interface PresenceRequestRender {
@@ -168,6 +546,15 @@ interface PresenceRequestRender {
   readonly instruction: string;
   readonly claimedBy: string | null;
   readonly claimedByLogin: AgentRequestMirror["claimedByLogin"];
+  readonly result: AgentRequestMirror["result"];
+  readonly resultSuggestions: number | undefined;
+  readonly resultComments: number | undefined;
+  readonly resultSummary: string | undefined;
+  readonly threadId: AgentRequestMirror["threadId"];
+  readonly agent: AgentRequestMirror["agent"];
+  readonly agentLogin: string | undefined;
+  readonly agentSlug: string | undefined;
+  readonly updatedAt: number;
   readonly requester: string | null;
   readonly state: string;
   readonly cancellable: boolean;
@@ -176,8 +563,13 @@ interface PresenceRequestRender {
 interface PresenceRequestsAuthority {
   readonly mount: symbol;
   readonly session: CollabSession;
+  readonly documentId: string;
   readonly user: CollabSession["user"];
   readonly userId: string;
+  readonly userName: string;
+  readonly userColor: string;
+  readonly userColorLight: string;
+  readonly userAvatar: string | null | undefined;
   readonly viewer: string | null;
   readonly role: CollabSession["role"];
   readonly pendingSource: AgentRequestMirror[];
@@ -190,23 +582,30 @@ interface PresenceRequestsAuthority {
 
 interface PresenceRequestsCells {
   readonly active: { current: PresenceRequestsPublication | null };
-  readonly claimedEvents: WeakSet<object>;
+  readonly successorOf: { current: PresenceRequestsPublication | null };
+  readonly replay: { current: PresenceReplay<PresenceRequestsPublication> | null };
+  readonly claimedEvents: WeakSet<Event>;
 }
 
 interface PresenceRequestPublication {
   readonly render: PresenceRequestRender;
   readonly captureRow: (element: HTMLLIElement | null) => void;
   readonly captureCancel: (element: HTMLButtonElement | null) => void;
-  readonly onCancel: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onCancel: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
-interface PresenceRequestsPublication {
+interface PresenceRequestsPublication extends PresenceExactPublication<PresenceRequestsAuthority> {
   readonly authority: PresenceRequestsAuthority;
   readonly rows: readonly PresenceRequestPublication[];
   readonly captureSection: (element: HTMLDivElement | null) => void;
   readonly captureList: (element: HTMLUListElement | null) => void;
-  readonly establish: () => void;
-  readonly retire: () => boolean;
+}
+
+interface PresenceRequestsPublicationSet {
+  readonly rows: readonly PresenceRequestPublication[];
+  readonly captureSection: (element: HTMLDivElement | null) => void;
+  readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly establish: () => void | (() => void);
 }
 
 function createPresenceRequestsAuthority(
@@ -231,6 +630,15 @@ function createPresenceRequestsAuthority(
       instruction: request.instruction,
       claimedBy: request.claimedBy,
       claimedByLogin: request.claimedByLogin,
+      result: request.result,
+      resultSuggestions: request.result?.suggestions,
+      resultComments: request.result?.comments,
+      resultSummary: request.result?.summary,
+      threadId: request.threadId,
+      agent: request.agent,
+      agentLogin: request.agent?.login,
+      agentSlug: request.agent?.slug,
+      updatedAt: request.updatedAt,
       requester,
       state,
       cancellable: !!onCancel && (request.userId === userId || role === "owner"),
@@ -239,8 +647,13 @@ function createPresenceRequestsAuthority(
   return Object.freeze({
     mount,
     session,
+    documentId: session.docId,
     user,
     userId,
+    userName: user.name,
+    userColor: user.color,
+    userColorLight: user.colorLight,
+    userAvatar: user.avatar,
     viewer,
     role,
     pendingSource: pending,
@@ -252,25 +665,122 @@ function createPresenceRequestsAuthority(
   });
 }
 
+function presenceRequestAuthoritiesMatch(
+  previous: PresenceRequestsAuthority,
+  current: PresenceRequestsAuthority,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.session === current.session &&
+    previous.documentId === current.documentId &&
+    previous.user === current.user &&
+    previous.userId === current.userId &&
+    previous.userName === current.userName &&
+    previous.userColor === current.userColor &&
+    previous.userColorLight === current.userColorLight &&
+    previous.userAvatar === current.userAvatar &&
+    previous.viewer === current.viewer &&
+    previous.role === current.role &&
+    previous.pendingSource === current.pendingSource &&
+    previous.nameOf === current.nameOf &&
+    previous.ownerNameOf === current.ownerNameOf &&
+    previous.onCancel === current.onCancel &&
+    previous.pending.length === current.pending.length &&
+    previous.rows.length === current.rows.length &&
+    previous.rows.every((row, index) => {
+      const next = current.rows[index];
+      return (
+        !!next &&
+        previous.pending[index] === current.pending[index] &&
+        row.request === next.request &&
+        row.id === next.id &&
+        row.userId === next.userId &&
+        row.status === next.status &&
+        row.mode === next.mode &&
+        row.instruction === next.instruction &&
+        row.claimedBy === next.claimedBy &&
+        row.claimedByLogin === next.claimedByLogin &&
+        row.result === next.result &&
+        row.resultSuggestions === next.resultSuggestions &&
+        row.resultComments === next.resultComments &&
+        row.resultSummary === next.resultSummary &&
+        row.threadId === next.threadId &&
+        row.agent === next.agent &&
+        row.agentLogin === next.agentLogin &&
+        row.agentSlug === next.agentSlug &&
+        row.updatedAt === next.updatedAt &&
+        row.requester === next.requester &&
+        row.state === next.state &&
+        row.cancellable === next.cancellable
+      );
+    })
+  );
+}
+
 function createPresenceRequestsPublication(
   authority: PresenceRequestsAuthority,
   cells: PresenceRequestsCells,
-): PresenceRequestsPublication {
-  const { mount, session, user, userId, viewer, role, pendingSource, pending, nameOf, ownerNameOf, onCancel } = authority;
+  requestSuccessor: () => void,
+): PresenceRequestsPublicationSet {
+  const {
+    mount,
+    session,
+    documentId,
+    user,
+    userId,
+    userName,
+    userColor,
+    userColorLight,
+    userAvatar,
+    viewer,
+    role,
+    pendingSource,
+    pending,
+    nameOf,
+    ownerNameOf,
+    onCancel,
+  } = authority;
   const renders = authority.rows;
-  const retireForReplacement = () => publication.retire();
-  const sectionOwner = new PresenceElementOwner<HTMLDivElement>(retireForReplacement);
-  const listOwner = new PresenceElementOwner<HTMLUListElement>(retireForReplacement);
-  const rowOwners = renders.map(() => new PresenceElementOwner<HTMLLIElement>(retireForReplacement));
-  const cancelOwners = renders.map(() => new PresenceElementOwner<HTMLButtonElement>(retireForReplacement));
+  let currentRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
+  let lastRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
+  let successorRequested = false;
+  const onElementChange = (
+    owner: PresenceElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      runtime?.retireForElement();
+    }
+  };
+  const sectionOwner = new PresenceElementOwner<HTMLDivElement>(onElementChange);
+  const listOwner = new PresenceElementOwner<HTMLUListElement>(onElementChange);
+  const rowOwners = renders.map(() => new PresenceElementOwner<HTMLLIElement>(onElementChange));
+  const cancelOwners = renders.map(() => new PresenceElementOwner<HTMLButtonElement>(onElementChange));
 
   const factsAreCurrent = () =>
     authority.mount === mount &&
     authority.session === session &&
+    authority.documentId === documentId &&
+    session.docId === documentId &&
     authority.user === user &&
     session.user === user &&
     authority.userId === userId &&
     user.id === userId &&
+    authority.userName === userName &&
+    user.name === userName &&
+    authority.userColor === userColor &&
+    user.color === userColor &&
+    authority.userColorLight === userColorLight &&
+    user.colorLight === userColorLight &&
+    authority.userAvatar === userAvatar &&
+    user.avatar === userAvatar &&
     authority.viewer === viewer &&
     (user.login ?? null) === viewer &&
     authority.role === role &&
@@ -294,43 +804,69 @@ function createPresenceRequestsPublication(
         request.instruction === row.instruction &&
         request.claimedBy === row.claimedBy &&
         request.claimedByLogin === row.claimedByLogin &&
-        row.cancellable === (!!onCancel && (row.userId === userId || role === "owner"))
+        request.result === row.result &&
+        request.result?.suggestions === row.resultSuggestions &&
+        request.result?.comments === row.resultComments &&
+        request.result?.summary === row.resultSummary &&
+        request.threadId === row.threadId &&
+        request.agent === row.agent &&
+        request.agent?.login === row.agentLogin &&
+        request.agent?.slug === row.agentSlug &&
+        request.updatedAt === row.updatedAt &&
+        row.requester === (request.userId === userId ? "you" : nameOf(request.userId)) &&
+        row.state === (
+          `${request.status === "claimed" ? `${claimerName(request, viewer, ownerNameOf)} is on it` : "Waiting for an agent"} · ${describeMode(request.mode)}` +
+          (row.requester ? ` · ${row.requester === "you" ? "asked by you" : `asked by ${row.requester}`}` : "")
+        ) &&
+        row.cancellable === (!!onCancel && (request.userId === userId || role === "owner"))
       );
     });
   const exactDomIsCurrent = () => {
     const section = sectionOwner.element();
     const list = listOwner.element();
+    const document = section?.ownerDocument;
     if (
       !section ||
       !section.isConnected ||
+      !section.parentNode ||
+      !document?.defaultView ||
       section.tagName !== "DIV" ||
       section.className !== REQUEST_SECTION_CLASS ||
       section.dataset.testid !== "presence-requests" ||
       !list ||
       !list.isConnected ||
+      list.ownerDocument !== document ||
       list.tagName !== "UL" ||
       list.className !== REQUEST_LIST_CLASS ||
       list.parentElement !== section ||
       section.children.length !== 2 ||
       section.children.item(1) !== list ||
-      list.children.length !== renders.length
+      list.children.length !== renders.length ||
+      [...section.querySelectorAll<HTMLButtonElement>("button")].length !==
+        renders.filter((render) => render.cancellable).length
     ) {
       return false;
     }
     const title = section.children.item(0);
     if (
       !(title instanceof HTMLDivElement) ||
+      title.ownerDocument !== document ||
       title.className !== REQUEST_TITLE_CLASS ||
-      title.textContent !== "Requests"
+      title.textContent !== "Requests" ||
+      title.childNodes.length !== 1 ||
+      title.firstChild?.nodeType !== document.defaultView.Node.TEXT_NODE
     ) {
       return false;
     }
+    let cancelIndex = 0;
+    const interactive = [...section.querySelectorAll<HTMLButtonElement>("button")];
     return renders.every((render, index) => {
       const row = rowOwners[index]?.element() ?? null;
       const cancel = cancelOwners[index]?.element() ?? null;
       if (
         !row ||
         !row.isConnected ||
+        row.ownerDocument !== document ||
         row.tagName !== "LI" ||
         row.parentElement !== list ||
         list.children.item(index) !== row ||
@@ -345,28 +881,42 @@ function createPresenceRequestsPublication(
       const details = row.children.item(1);
       const instruction = details?.children.item(0);
       const state = details?.children.item(1);
+      const iconGraphic = icon?.children.item(0);
       if (
         !(icon instanceof HTMLSpanElement) ||
+        icon.ownerDocument !== document ||
         icon.className !== cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3") ||
         icon.children.length !== 1 ||
-        icon.children.item(0)?.getAttribute("aria-hidden") !== "true" ||
+        icon.childNodes.length !== 1 ||
+        iconGraphic?.localName !== "svg" ||
+        iconGraphic.getAttribute("aria-hidden") !== "true" ||
+        iconGraphic.getAttribute("width") !== "14" ||
+        iconGraphic.getAttribute("height") !== "14" ||
         !(details instanceof HTMLSpanElement) ||
+        details.ownerDocument !== document ||
         details.className !== REQUEST_DETAILS_CLASS ||
         details.children.length !== 2 ||
+        details.childNodes.length !== 2 ||
         !(instruction instanceof HTMLSpanElement) ||
+        instruction.ownerDocument !== document ||
         instruction.className !== REQUEST_INSTRUCTION_CLASS ||
         instruction.textContent !== render.instruction ||
+        instruction.children.length !== 0 ||
         !(state instanceof HTMLSpanElement) ||
+        state.ownerDocument !== document ||
         state.className !== REQUEST_STATE_CLASS ||
         state.dataset.testid !== "presence-request-state" ||
-        state.textContent !== render.state
+        state.textContent !== render.state ||
+        state.children.length !== 0
       ) {
         return false;
       }
       if (!render.cancellable) return cancel === null;
+      const exactInteractive = interactive[cancelIndex++];
       return (
         !!cancel &&
         cancel.isConnected &&
+        cancel.ownerDocument === document &&
         cancel.tagName === "BUTTON" &&
         cancel.parentElement === row &&
         row.children.item(2) === cancel &&
@@ -375,21 +925,36 @@ function createPresenceRequestsPublication(
         cancel.className === REQUEST_CANCEL_CLASS &&
         cancel.getAttribute("aria-label") === "Cancel request" &&
         cancel.dataset.testid === "presence-request-cancel" &&
-        cancel.textContent?.trim() === "Cancel"
+        cancel.textContent === "Cancel" &&
+        cancel.children.length === 0 &&
+        cancel.childNodes.length === 1 &&
+        exactInteractive === cancel
       );
     });
   };
-  const ownsAuthority = () =>
+  const ownsAuthority = (
+    runtime: PresencePublicationRuntime<PresenceRequestsPublication>,
+    publication: PresenceRequestsPublication,
+  ) =>
+    currentRuntime === runtime &&
     cells.active.current === publication &&
+    runtime.publication === publication &&
     publication.authority === authority &&
+    !runtime.isRetired() &&
     factsAreCurrent() &&
-    exactDomIsCurrent();
-  const ownsCancel = (index: number, button: HTMLButtonElement) => {
+    exactDomIsCurrent() &&
+    runtime.publishedDomMatches();
+  const ownsCancel = (
+    runtime: PresencePublicationRuntime<PresenceRequestsPublication>,
+    publication: PresenceRequestsPublication,
+    index: number,
+    button: HTMLButtonElement,
+  ) => {
     const render = renders[index];
     const row = rowOwners[index]?.element() ?? null;
     return (
       !!render?.cancellable &&
-      ownsAuthority() &&
+      ownsAuthority(runtime, publication) &&
       cancelOwners[index]?.element() === button &&
       button.isConnected &&
       !button.disabled &&
@@ -399,43 +964,131 @@ function createPresenceRequestsPublication(
       listOwner.element()?.children.item(index) === row
     );
   };
-  const claimEvent = (event: object) => {
-    if (cells.claimedEvents.has(event)) return false;
-    cells.claimedEvents.add(event);
-    return true;
+  const requestReplaySuccessor = (
+    runtime: PresencePublicationRuntime<PresenceRequestsPublication>,
+  ) => {
+    if (
+      successorRequested ||
+      cells.successorOf.current !== runtime.publication ||
+      !runtime.isExactReplay() ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: runtime.publication,
+      dom: runtime.snapshot(),
+      placement: runtime.placement(),
+      historyIsClean: runtime.mutationHistoryIsClean,
+      release: runtime.release,
+    });
+    requestSuccessor();
   };
-  const retire = () => {
-    if (cells.active.current !== publication) return false;
-    cells.active.current = null;
-    return true;
-  };
-  const establish = () => {
-    const previous = cells.active.current;
-    if (previous && previous !== publication) previous.retire();
-    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
-    cells.active.current = publication;
-  };
-  const rows = renders.map(
-    (render, index): PresenceRequestPublication =>
-      Object.freeze({
-        render,
-        captureRow: rowOwners[index]!.capture,
-        captureCancel: cancelOwners[index]!.capture,
-        onCancel: (event: MouseEvent<HTMLButtonElement>) => {
-          if (!ownsCancel(index, event.currentTarget) || !claimEvent(event)) return;
-          onCancel!(render.id);
-        },
-      }),
-  );
+  const rowActions = renders.map(() => Object.freeze({ identity: Symbol("presence request cancel") }));
+  let runtimeForPublication: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
+  const rows = renders.map((render, index): PresenceRequestPublication =>
+    Object.freeze({
+      render,
+      captureRow: rowOwners[index]!.capture,
+      captureCancel: cancelOwners[index]!.capture,
+      onCancel: (event: ReactMouseEvent<HTMLButtonElement>) => {
+        const runtime = currentRuntime;
+        const publication = runtime?.publication;
+        const button = cancelOwners[index]?.element() ?? null;
+        if (
+          !runtime ||
+          !publication ||
+          !button ||
+          !ownsCancel(runtime, publication, index, button) ||
+          !claimPresenceClick({
+            event,
+            button,
+            runtime,
+            publication,
+            action: rowActions[index]!,
+            cells,
+          })
+        ) {
+          return;
+        }
+        onCancel!(render.id);
+      },
+    }));
   const publication: PresenceRequestsPublication = Object.freeze({
     authority,
     rows: Object.freeze(rows),
     captureSection: sectionOwner.capture,
     captureList: listOwner.capture,
-    establish,
-    retire,
+    retire: () => runtimeForPublication?.retire() ?? false,
+    isRetired: () => runtimeForPublication?.isRetired() ?? true,
   });
-  return publication;
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        lastRuntime.isExactReplay() &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return undefined;
+    const section = sectionOwner.element();
+    if (!section) return undefined;
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = presenceRequestAuthoritiesMatch(
+        replay.source.authority,
+        authority,
+      );
+      const exactReplay = (
+        sameAuthority &&
+        replay.source.isRetired() &&
+        cells.successorOf.current === replay.source &&
+        replay.historyIsClean() &&
+        section === replay.dom.node &&
+        presencePlacementMatches(section, replay.placement) &&
+        presenceDomMatches(replay.dom)
+      );
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (sameAuthority && !exactReplay) return undefined;
+    }
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.retire();
+    const expectedOwners: PresenceElementOwnerView[] = [
+      sectionOwner,
+      listOwner,
+      ...rowOwners,
+      ...cancelOwners.filter((_, index) => renders[index]?.cancellable),
+    ];
+    const runtime = createPresencePublicationRuntime({
+      publication,
+      cells,
+      root: section,
+      owners: expectedOwners,
+      clearCurrent: () => {
+        if (currentRuntime?.publication === publication) currentRuntime = null;
+      },
+    });
+    if (!runtime) return undefined;
+    runtimeForPublication = runtime;
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    runtime.publish();
+    return runtime.retireForLayout;
+  };
+  return Object.freeze({
+    rows: publication.rows,
+    captureSection: publication.captureSection,
+    captureList: publication.captureList,
+    establish,
+  });
 }
 
 /** The "Requests" section of the presence popover: one row per open request, with Cancel for the requester or the owner. */
@@ -443,16 +1096,21 @@ export function PresenceRequests(props: PresenceRequestsProps) {
   const [mount] = useState(() => Symbol("presence requests"));
   const [cells] = useState<PresenceRequestsCells>(() => ({
     active: { current: null },
-    claimedEvents: new WeakSet<object>(),
+    successorOf: { current: null },
+    replay: { current: null },
+    claimedEvents: new WeakSet<Event>(),
   }));
-  const publication = createPresenceRequestsPublication(createPresenceRequestsAuthority(mount, props), cells);
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const publication = createPresenceRequestsPublication(
+    createPresenceRequestsAuthority(mount, props),
+    cells,
+    requestPublicationSuccessor,
+  );
 
-  useLayoutEffect(() => {
-    publication.establish();
-    return () => {
-      publication.retire();
-    };
-  }, [publication]);
+  useLayoutEffect(() => publication.establish(), [publication]);
   const { captureSection, captureList, rows } = publication;
 
   return (
@@ -493,24 +1151,60 @@ interface KeepAgentAuthority {
 
 interface KeepAgentCells {
   readonly active: { current: KeepAgentPublication | null };
-  readonly claimedEvents: WeakSet<object>;
+  readonly successorOf: { current: KeepAgentPublication | null };
+  readonly replay: { current: PresenceReplay<KeepAgentPublication> | null };
+  readonly claimedEvents: WeakSet<Event>;
 }
 
-interface KeepAgentPublication {
+interface KeepAgentPublication extends PresenceExactPublication<KeepAgentAuthority> {
   readonly authority: KeepAgentAuthority;
   readonly captureButton: (element: HTMLButtonElement | null) => void;
-  readonly establish: () => void;
-  readonly retire: () => boolean;
-  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+interface KeepAgentPublicationSet {
+  readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly establish: () => void | (() => void);
+  readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+function keepAgentAuthoritiesMatch(
+  previous: KeepAgentAuthority,
+  current: KeepAgentAuthority,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.onClick === current.onClick &&
+    previous.primary === current.primary &&
+    previous.className === current.className
+  );
 }
 
 function createKeepAgentPublication(
   authority: KeepAgentAuthority,
   cells: KeepAgentCells,
-): KeepAgentPublication {
+  requestSuccessor: () => void,
+): KeepAgentPublicationSet {
   const { mount, onClick, primary, className } = authority;
-  const retireForReplacement = () => publication.retire();
-  const buttonOwner = new PresenceElementOwner<HTMLButtonElement>(retireForReplacement);
+  let currentRuntime: PresencePublicationRuntime<KeepAgentPublication> | null = null;
+  let lastRuntime: PresencePublicationRuntime<KeepAgentPublication> | null = null;
+  let successorRequested = false;
+  const onElementChange = (
+    owner: PresenceElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      runtime?.retireForElement();
+    }
+  };
+  const buttonOwner = new PresenceElementOwner<HTMLButtonElement>(onElementChange);
   const factsAreCurrent = () =>
     authority.mount === mount &&
     authority.onClick === onClick &&
@@ -519,55 +1213,155 @@ function createKeepAgentPublication(
     className === cn(KEEP_AGENT_CLASS, primary ? "btn-primary" : "btn-outline btn-sm");
   const exactDomIsCurrent = () => {
     const button = buttonOwner.element();
+    const document = button?.ownerDocument;
+    const icon = button?.children.item(0);
+    const label = button?.childNodes.item(1);
     return (
       !!button &&
       button.isConnected &&
+      !!button.parentNode &&
+      !!document?.defaultView &&
       button.tagName === "BUTTON" &&
       button.type === "button" &&
       !button.disabled &&
       button.className === className &&
       button.dataset.testid === "keep-agent-here" &&
       button.children.length === 1 &&
-      button.children.item(0)?.getAttribute("aria-hidden") === "true" &&
-      button.textContent?.trim() === "Keep an agent here"
+      button.childNodes.length === 2 &&
+      icon?.localName === "svg" &&
+      icon.ownerDocument === document &&
+      icon.getAttribute("aria-hidden") === "true" &&
+      icon.getAttribute("width") === "14" &&
+      icon.getAttribute("height") === "14" &&
+      label?.nodeType === document.defaultView.Node.TEXT_NODE &&
+      label.nodeValue === " Keep an agent here" &&
+      button.textContent === " Keep an agent here"
     );
   };
-  const ownsButton = (button: HTMLButtonElement) =>
+  const ownsButton = (
+    runtime: PresencePublicationRuntime<KeepAgentPublication>,
+    publication: KeepAgentPublication,
+    button: HTMLButtonElement,
+  ) =>
+    currentRuntime === runtime &&
     cells.active.current === publication &&
+    runtime.publication === publication &&
     publication.authority === authority &&
+    !runtime.isRetired() &&
     factsAreCurrent() &&
     exactDomIsCurrent() &&
     buttonOwner.element() === button &&
     button.isConnected &&
-    !button.disabled;
-  const claimEvent = (event: object) => {
-    if (cells.claimedEvents.has(event)) return false;
-    cells.claimedEvents.add(event);
-    return true;
+    !button.disabled &&
+    runtime.publishedDomMatches();
+  const requestReplaySuccessor = (
+    runtime: PresencePublicationRuntime<KeepAgentPublication>,
+  ) => {
+    if (
+      successorRequested ||
+      cells.successorOf.current !== runtime.publication ||
+      !runtime.isExactReplay() ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: runtime.publication,
+      dom: runtime.snapshot(),
+      placement: runtime.placement(),
+      historyIsClean: runtime.mutationHistoryIsClean,
+      release: runtime.release,
+    });
+    requestSuccessor();
   };
-  const retire = () => {
-    if (cells.active.current !== publication) return false;
-    cells.active.current = null;
-    return true;
-  };
-  const establish = () => {
-    const previous = cells.active.current;
-    if (previous && previous !== publication) previous.retire();
-    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
-    cells.active.current = publication;
-  };
-  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
-    if (!ownsButton(event.currentTarget) || !claimEvent(event)) return;
-    onClick();
-  };
+  const action = Object.freeze({ identity: Symbol("keep agent here") });
+  let runtimeForPublication: PresencePublicationRuntime<KeepAgentPublication> | null = null;
   const publication: KeepAgentPublication = Object.freeze({
     authority,
     captureButton: buttonOwner.capture,
-    establish,
-    retire,
-    onClick: handleClick,
+    retire: () => runtimeForPublication?.retire() ?? false,
+    isRetired: () => runtimeForPublication?.isRetired() ?? true,
+    onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const runtime = currentRuntime;
+      const button = buttonOwner.element();
+      if (
+        !runtime ||
+        !button ||
+        !ownsButton(runtime, publication, button) ||
+        !claimPresenceClick({
+          event,
+          button,
+          runtime,
+          publication,
+          action,
+          cells,
+        })
+      ) {
+        return;
+      }
+      onClick();
+    },
   });
-  return publication;
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        lastRuntime.isExactReplay() &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return undefined;
+    const button = buttonOwner.element();
+    if (!button) return undefined;
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = keepAgentAuthoritiesMatch(
+        replay.source.authority,
+        authority,
+      );
+      const exactReplay = (
+        sameAuthority &&
+        replay.source.isRetired() &&
+        cells.successorOf.current === replay.source &&
+        replay.historyIsClean() &&
+        button === replay.dom.node &&
+        presencePlacementMatches(button, replay.placement) &&
+        presenceDomMatches(replay.dom)
+      );
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (sameAuthority && !exactReplay) return undefined;
+    }
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.retire();
+    const runtime = createPresencePublicationRuntime({
+      publication,
+      cells,
+      root: button,
+      owners: [buttonOwner],
+      clearCurrent: () => {
+        if (currentRuntime?.publication === publication) currentRuntime = null;
+      },
+    });
+    if (!runtime) return undefined;
+    runtimeForPublication = runtime;
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    runtime.publish();
+    return runtime.retireForLayout;
+  };
+  return Object.freeze({
+    captureButton: buttonOwner.capture,
+    establish,
+    onClick: publication.onClick,
+  });
 }
 
 /** "Keep an agent here" — the popover's way to the dialog with the paste-able sentence. */
@@ -575,22 +1369,27 @@ export function KeepAgentHereButton({ onClick, primary }: { onClick: () => void;
   const [mount] = useState(() => Symbol("keep agent here"));
   const [cells] = useState<KeepAgentCells>(() => ({
     active: { current: null },
-    claimedEvents: new WeakSet<object>(),
+    successorOf: { current: null },
+    replay: { current: null },
+    claimedEvents: new WeakSet<Event>(),
   }));
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const authority: KeepAgentAuthority = Object.freeze({
     mount,
     onClick,
     primary,
     className: cn(KEEP_AGENT_CLASS, primary ? "btn-primary" : "btn-outline btn-sm"),
   });
-  const publication = createKeepAgentPublication(authority, cells);
+  const publication = createKeepAgentPublication(
+    authority,
+    cells,
+    requestPublicationSuccessor,
+  );
 
-  useLayoutEffect(() => {
-    publication.establish();
-    return () => {
-      publication.retire();
-    };
-  }, [publication]);
+  useLayoutEffect(() => publication.establish(), [publication]);
   const { captureButton, onClick: handleClick } = publication;
 
   return (
