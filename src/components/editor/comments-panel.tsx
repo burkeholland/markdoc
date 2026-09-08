@@ -2623,16 +2623,24 @@ interface ReviewCardPresentation {
   readonly render: ReviewCardRender;
   readonly authority: ReviewCardAuthority;
   readonly elements: ReviewCardElements;
+  readonly ownerDocument: Document;
+  readonly dom: ReviewCardDomSnapshot;
+  readonly placement: ReviewCardPlacement;
 }
 
 interface ReviewCardCells {
   readonly active: { current: ReviewCardPresentation | null };
-  readonly claimedEvents: WeakSet<Event>;
-  readonly claimedActions: WeakMap<ReviewCardPresentation, Set<ReviewCardAction>>;
+  readonly successorOf: { current: ReviewCardPresentation | null };
+  readonly replay: { current: ReviewCardReplay | null };
+  readonly retired: WeakSet<ReviewCardPresentation>;
+  readonly claimedPresentations: WeakSet<ReviewCardPresentation>;
+  readonly claimedEvents: WeakSet<object>;
+  readonly claimedActions: WeakSet<ReviewCardAction>;
 }
 
 interface ReviewCardAction {
   readonly identity: symbol;
+  readonly renderIdentity: symbol;
   readonly kind: ReviewCardActionKind;
   readonly index: number | null;
   readonly threadId: string | null;
@@ -2642,6 +2650,7 @@ interface ReviewCardAction {
 }
 
 interface ReviewCardRender {
+  readonly identity: symbol;
   readonly authority: ReviewCardAuthority;
   readonly toggle: ReviewCardAction;
   readonly accept: ReviewCardAction | null;
@@ -2663,24 +2672,187 @@ interface ReviewCardRender {
   readonly onResolve: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
   readonly captureThreadLinks: readonly ((element: HTMLButtonElement | null) => void)[];
   readonly onThreadClicks: readonly ((event: MouseEvent<HTMLButtonElement>) => void)[];
-  readonly establish: () => void;
+  readonly establish: () => void | (() => void);
   readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
 }
 
-class ReviewCardElementOwner<T extends HTMLElement> {
+interface ReviewCardElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface ReviewCardRefReplay {
+  readonly owner: ReviewCardElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface ReviewCardDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly ReviewCardDomSnapshot[];
+}
+
+interface ReviewCardPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface ReviewCardReplay {
+  readonly source: ReviewCardPresentation;
+  readonly dom: ReviewCardDomSnapshot;
+  readonly placement: ReviewCardPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface ReviewCardDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface ReviewCardPublicationRuntime {
+  readonly presentation: ReviewCardPresentation;
+  readonly publish: (owners: readonly ReviewCardElementOwnerView[]) => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly noteRef: (owner: ReviewCardElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+class ReviewCardElementOwner<T extends HTMLElement> implements ReviewCardElementOwnerView {
   private current: T | null = null;
   private last: T | null = null;
 
-  constructor(private readonly onReplacement: () => void) {}
+  constructor(
+    private readonly onChange: (
+      owner: ReviewCardElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
 
   readonly element = () => this.current;
   readonly capture = (element: T | null) => {
     if (this.current === element) return;
-    const replaced = element !== null && this.last !== null && this.last !== element;
+    const previous = this.current;
+    const last = this.last;
     this.current = element;
     if (element) this.last = element;
-    if (replaced || element === null) this.onReplacement();
+    this.onChange(this, element, previous, last);
   };
+}
+
+function reviewCardSnapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotReviewCardDom(node: Node): ReviewCardDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: reviewCardSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotReviewCardDom)),
+  });
+}
+
+function reviewCardDomMatches(snapshot: ReviewCardDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = reviewCardSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) => node.childNodes.item(index) === child.node && reviewCardDomMatches(child))
+  );
+}
+
+function reviewCardDomContains(snapshot: ReviewCardDomSnapshot, target: Node): boolean {
+  return snapshot.node === target || snapshot.children.some((child) => reviewCardDomContains(child, target));
+}
+
+function captureReviewCardPlacement(card: HTMLDivElement): ReviewCardPlacement | null {
+  const parent = card.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: card.ownerDocument,
+    parent,
+    previousSibling: card.previousSibling,
+    nextSibling: card.nextSibling,
+  });
+}
+
+function reviewCardPlacementMatches(card: HTMLDivElement, placement: ReviewCardPlacement): boolean {
+  return (
+    card.ownerDocument === placement.document &&
+    card.parentNode === placement.parent &&
+    card.previousSibling === placement.previousSibling &&
+    card.nextSibling === placement.nextSibling
+  );
+}
+
+function createReviewCardDomGuard(card: HTMLDivElement, placement: ReviewCardPlacement): ReviewCardDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === card || card.contains(record.target)) return true;
+      return record.type === "childList" && record.target === placement.parent;
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(card, { attributes: true, characterData: true, childList: true, subtree: true });
+  observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function reviewCardControlIsEnabled(control: HTMLButtonElement): boolean {
+  if (control.disabled || control.matches(":disabled") || control.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (element.hasAttribute("inert") || element.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  }
+  return true;
 }
 
 function freezeReview(review: ReviewDto): { review: ReviewDto; snapshot: ReviewPrimitiveSnapshot } {
@@ -3048,14 +3220,154 @@ function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingR
     pending.length > 0
       ? currentSuggestionTargets.filter((target): target is CommentSuggestionBatchTarget => target !== null)
       : currentResolveTargets.filter((target): target is CommentResolveBatchTarget => target !== null);
+  const expectedActionRegion =
+    authority.canEdit && pending.length > 0
+      ? "suggestions"
+      : authority.canComment && pending.length === 0 && unresolved.length > 0
+        ? "resolve"
+        : null;
   const matches =
     currentSuggestionTargets.length === suggestionTargetSnapshots.length &&
     suggestionTargetSnapshots.every((target, index) => sameSuggestionTarget(target, currentSuggestionTargets[index] ?? null)) &&
     currentResolveTargets.length === resolveTargetSnapshots.length &&
     resolveTargetSnapshots.every((target, index) => sameResolveTarget(target, currentResolveTargets[index] ?? null)) &&
     (coordinator.batchOwners.get(scope) ?? null) === authority.batchOwner &&
-    isCommentBatchBlocked(coordinator, renderedTargets) === authority.blocked;
+    ((coordinator.batchOwners.get(scope) ?? null) !== null) === authority.busy &&
+    isCommentBatchBlocked(coordinator, renderedTargets) === authority.blocked &&
+    expectedActionRegion === authority.actionRegion &&
+    (currentApplicable.length !== currentPending.length) === authority.partial &&
+    renderedTargets.length === authority.renderedTargets.length &&
+    authority.renderedTargets.every((target, index) => {
+      const current = renderedTargets[index];
+      if (!current || target.kind !== current.kind) return false;
+      if (target.kind === "comment-suggestion" && current.kind === "comment-suggestion") return sameSuggestionTarget(target, current);
+      if (target.kind === "comment-resolve" && current.kind === "comment-resolve") return sameResolveTarget(target, current);
+      return false;
+    });
   return matches;
+}
+
+function sameReviewSnapshots(left: ReviewPrimitiveSnapshot, right: ReviewPrimitiveSnapshot): boolean {
+  return (
+    left.id === right.id &&
+    left.documentId === right.documentId &&
+    left.authorId === right.authorId &&
+    left.authorName === right.authorName &&
+    left.collabAuthorId === right.collabAuthorId &&
+    left.agent === right.agent &&
+    left.verdict === right.verdict &&
+    left.summary === right.summary &&
+    left.createdAt === right.createdAt &&
+    left.threadIds.length === right.threadIds.length &&
+    left.threadIds.every((id, index) => id === right.threadIds[index])
+  );
+}
+
+function sameReviewThreadSnapshots(left: ReviewThreadPrimitiveSnapshot, right: ReviewThreadPrimitiveSnapshot): boolean {
+  return (
+    left.source === right.source &&
+    left.identity === right.identity &&
+    left.id === right.id &&
+    left.quote === right.quote &&
+    left.body === right.body &&
+    left.resolved === right.resolved &&
+    (left.range?.from ?? null) === (right.range?.from ?? null) &&
+    (left.range?.to ?? null) === (right.range?.to ?? null) &&
+    (left.suggestionState ?? null) === (right.suggestionState ?? null) &&
+    left.suggestionLabel === right.suggestionLabel &&
+    left.replies.length === right.replies.length &&
+    left.replies.every((reply, index) => {
+      const current = right.replies[index];
+      return (
+        !!current &&
+        reply.source === current.source &&
+        reply.id === current.id &&
+        reply.body === current.body &&
+        (reply.suggestionState ?? null) === (current.suggestionState ?? null)
+      );
+    })
+  );
+}
+
+function sameReviewSuggestionSnapshots(left: ReviewSuggestionPrimitiveSnapshot, right: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    left.threadSource === right.threadSource &&
+    left.replySource === right.replySource &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.body === right.body &&
+    left.proposed === right.proposed &&
+    left.state === right.state
+  );
+}
+
+function sameReviewTargetSnapshots(left: CommentBatchTarget, right: CommentBatchTarget): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "comment-suggestion" && right.kind === "comment-suggestion") return sameSuggestionTarget(left, right);
+  if (left.kind === "comment-resolve" && right.kind === "comment-resolve") return sameResolveTarget(left, right);
+  return (
+    left.kind === "local-suggestion" &&
+    right.kind === "local-suggestion" &&
+    left.key === right.key &&
+    left.suggestionId === right.suggestionId &&
+    left.before === right.before &&
+    left.after === right.after &&
+    left.memberIds.length === right.memberIds.length &&
+    left.memberIds.every((id, index) => id === right.memberIds[index]) &&
+    left.memberIdentities.length === right.memberIdentities.length &&
+    left.memberIdentities.every((identity, index) => identity === right.memberIdentities[index])
+  );
+}
+
+function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: ReviewCardAuthority): boolean {
+  const sameArray = <T,>(left: readonly T[], right: readonly T[], matches: (a: T, b: T) => boolean) =>
+    left.length === right.length && left.every((value, index) => matches(value, right[index]!));
+  return (
+    previous.mount === current.mount &&
+    previous.position === current.position &&
+    previous.session === current.session &&
+    previous.documentId === current.documentId &&
+    previous.role === current.role &&
+    previous.canEdit === current.canEdit &&
+    previous.canComment === current.canComment &&
+    previous.text === current.text &&
+    previous.reviewSource === current.reviewSource &&
+    sameReviewSnapshots(previous.reviewSnapshot, current.reviewSnapshot) &&
+    sameReviewPrimitives(previous.review, current.reviewSnapshot) &&
+    previous.threadsSource === current.threadsSource &&
+    sameArray(previous.threads, current.threads, (left, right) => left === right) &&
+    sameArray(previous.mine, current.mine, sameReviewThreadSnapshots) &&
+    sameArray(previous.suggestions, current.suggestions, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.pending, current.pending, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.applicable, current.applicable, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.unresolved, current.unresolved, sameReviewThreadSnapshots) &&
+    sameArray(previous.suggestionTargetSnapshots, current.suggestionTargetSnapshots, sameSuggestionTarget) &&
+    sameArray(previous.resolveTargetSnapshots, current.resolveTargetSnapshots, sameResolveTarget) &&
+    sameArray(previous.renderedSuggestionTargets, current.renderedSuggestionTargets, sameSuggestionTarget) &&
+    sameArray(previous.renderedResolveTargets, current.renderedResolveTargets, sameResolveTarget) &&
+    sameArray(previous.renderedTargets, current.renderedTargets, sameReviewTargetSnapshots) &&
+    previous.scope === current.scope &&
+    previous.coordinator === current.coordinator &&
+    previous.batchOwner === current.batchOwner &&
+    previous.busy === current.busy &&
+    previous.blocked === current.blocked &&
+    previous.open === current.open &&
+    previous.actionRegion === current.actionRegion &&
+    previous.partial === current.partial &&
+    previous.verdictLabel === current.verdictLabel &&
+    previous.verdictClass === current.verdictClass &&
+    previous.timestampLabel === current.timestampLabel &&
+    previous.countsLabel === current.countsLabel &&
+    previous.acceptTitle === current.acceptTitle &&
+    previous.resolveTitle === current.resolveTitle &&
+    previous.opsSource === current.opsSource &&
+    previous.ops.acceptSuggestion === current.ops.acceptSuggestion &&
+    previous.ops.rejectSuggestion === current.ops.rejectSuggestion &&
+    previous.ops.resolve === current.ops.resolve &&
+    previous.onToast === current.onToast &&
+    previous.setOpen === current.setOpen &&
+    previous.setActiveComment === current.setActiveComment
+  );
 }
 
 function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): boolean {
@@ -3086,7 +3398,7 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
     toggle.parentElement !== header ||
     toggle.tagName !== "BUTTON" ||
     toggle.type !== "button" ||
-    toggle.disabled ||
+    !reviewCardControlIsEnabled(toggle) ||
     toggle.className !== REVIEW_TOGGLE_CLASS ||
     toggle.dataset.testid !== "review-toggle" ||
     toggle.getAttribute("aria-expanded") !== String(authority.open) ||
@@ -3162,12 +3474,14 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
         reject.parentElement !== actions ||
         accept.type !== "button" ||
         reject.type !== "button" ||
+        accept.disabled === acceptEnabled ||
+        reject.disabled === rejectEnabled ||
+        (acceptEnabled && !reviewCardControlIsEnabled(accept)) ||
+        (rejectEnabled && !reviewCardControlIsEnabled(reject)) ||
         accept.className !== REVIEW_ACCEPT_CLASS ||
         reject.className !== REVIEW_REJECT_CLASS ||
         accept.dataset.testid !== "review-accept-all" ||
         reject.dataset.testid !== "review-reject-all" ||
-        accept.disabled === acceptEnabled ||
-        reject.disabled === rejectEnabled ||
         accept.getAttribute("aria-label") !== authority.acceptTitle ||
         accept.title !== authority.acceptTitle ||
         reject.getAttribute("aria-label") !== "Reject all suggestions" ||
@@ -3194,9 +3508,10 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
         resolve.ownerDocument !== document ||
         resolve.parentElement !== actions ||
         resolve.type !== "button" ||
+        resolve.disabled === resolveEnabled ||
+        (resolveEnabled && !reviewCardControlIsEnabled(resolve)) ||
         resolve.className !== REVIEW_RESOLVE_CLASS ||
         resolve.dataset.testid !== "review-resolve-all" ||
-        resolve.disabled === resolveEnabled ||
         resolve.title !== authority.resolveTitle ||
         resolve.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-resolve" ? "true" : null) ||
         resolve.textContent?.trim() !== (authority.batchOwner?.action === "review-resolve" ? "Resolving…" : "Resolve all")
@@ -3240,7 +3555,7 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
       row.link.parentElement !== row.item ||
       row.link.tagName !== "BUTTON" ||
       row.link.type !== "button" ||
-      row.link.disabled ||
+      !reviewCardControlIsEnabled(row.link) ||
       row.link.className !== REVIEW_THREAD_LINK_CLASS ||
       row.link.dataset.testid !== "review-thread-link" ||
       row.link.dataset.threadId !== thread.id ||
@@ -3262,18 +3577,316 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
   });
 }
 
-function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCardCells): ReviewCardRender {
+function createReviewCardRender(
+  authority: ReviewCardAuthority,
+  cells: ReviewCardCells,
+  requestSuccessor: () => void,
+): ReviewCardRender {
   const render = {} as ReviewCardRender;
-  const retireForReplacement = () => render.retire();
-  const cardOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
-  const headerOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
-  const actionsOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
-  const listOwner = new ReviewCardElementOwner<HTMLUListElement>(retireForReplacement);
-  const rowOwners = authority.mine.map(() => new ReviewCardElementOwner<HTMLLIElement>(retireForReplacement));
+  const identity = Symbol("review-card-render");
+  let currentRuntime: ReviewCardPublicationRuntime | null = null;
+  let lastRuntime: ReviewCardPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+
+  const acceptsSuccessorOf = (presentation: ReviewCardPresentation) =>
+    cells.active.current === null &&
+    cells.successorOf.current === presentation &&
+    cells.retired.has(presentation) &&
+    presentation.render.isRetired() &&
+    !cells.claimedPresentations.has(presentation);
+
+  const requestReplaySuccessor = (runtime: ReviewCardPublicationRuntime) => {
+    const { presentation } = runtime;
+    if (
+      successorRequested ||
+      cells.replay.current !== null ||
+      !acceptsSuccessorOf(presentation) ||
+      !reviewCardFactsAreCurrent(authority, true) ||
+      !exactReviewCardDomIsCurrent(presentation) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    if (!runtime.stageSuccessorHandoff()) return;
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: presentation,
+      dom: presentation.dom,
+      placement: presentation.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: ReviewCardElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.presentation)) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const cardOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const headerOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const actionsOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const listOwner = new ReviewCardElementOwner<HTMLUListElement>(onElementChange);
+  const rowOwners = authority.mine.map(() => new ReviewCardElementOwner<HTMLLIElement>(onElementChange));
   const controlOwners: ReviewCardElementOwner<HTMLButtonElement>[] = [];
 
-  const currentPresentation = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>): { presentation: ReviewCardPresentation; nativeEvent: Event } | null => {
-    const presentation = cells.active.current;
+  const committedElements = (): ReviewCardElements | null => {
+    const card = cardOwner.element();
+    const header = headerOwner.element();
+    const toggleElement = controlOwners[0]?.element() ?? null;
+    const actions = actionsOwner.element();
+    const list = listOwner.element();
+    const actionOffset = 1;
+    const acceptElement = render.accept ? controlOwners[actionOffset]?.element() ?? null : null;
+    const rejectElement = render.reject ? controlOwners[actionOffset + 1]?.element() ?? null : null;
+    const resolveElement = render.resolve ? controlOwners[actionOffset]?.element() ?? null : null;
+    const threadOffset = 1 + (render.accept ? 2 : render.resolve ? 1 : 0);
+    const rowElements = authority.open
+      ? authority.mine.map((_, index) => {
+          const item = rowOwners[index]?.element() ?? null;
+          const link = controlOwners[threadOffset + index]?.element() ?? null;
+          return item && link ? Object.freeze({ item, link }) : null;
+        })
+      : [];
+    if (
+      !card ||
+      !header ||
+      !toggleElement ||
+      (authority.actionRegion !== null) !== !!actions ||
+      (authority.actionRegion === "suggestions" && (!acceptElement || !rejectElement)) ||
+      (authority.actionRegion === "resolve" && !resolveElement) ||
+      authority.open !== !!list ||
+      rowElements.some((row) => row === null)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      card,
+      header,
+      toggle: toggleElement,
+      actions,
+      accept: acceptElement,
+      reject: rejectElement,
+      resolve: resolveElement,
+      list,
+      rows: Object.freeze(rowElements as Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[]),
+    });
+  };
+
+  const expectedOwners = (): readonly ReviewCardElementOwnerView[] => [
+    cardOwner,
+    headerOwner,
+    ...(authority.actionRegion ? [actionsOwner] : []),
+    ...(authority.open ? [listOwner, ...rowOwners] : []),
+    ...controlOwners,
+  ];
+
+  const createRuntime = (
+    presentation: ReviewCardPresentation,
+    replayOwners: ReadonlySet<ReviewCardElementOwnerView>,
+  ): ReviewCardPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let replayRefs: ReviewCardRefReplay[] = [];
+    let domGuard: ReviewCardDomGuard | null = null;
+
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(presentation);
+      if (cells.active.current === presentation) {
+        cells.active.current = null;
+        cells.successorOf.current = presentation;
+      }
+      if (currentRuntime?.presentation === presentation) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== presentation) domGuard?.release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every((entry) => !entry.detached && !entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every((entry) => entry.detached && entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached && entry.reattached && entry.owner.element() === entry.element
+          : !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+        domGuard.isClean() &&
+        presentation.elements.card === presentation.dom.node &&
+        presentation.elements.card.isConnected &&
+        reviewCardPlacementMatches(presentation.elements.card, presentation.placement) &&
+        reviewCardDomMatches(presentation.dom),
+      );
+
+    const runtime: ReviewCardPublicationRuntime = Object.freeze({
+      presentation,
+      publish: (owners: readonly ReviewCardElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        domGuard = createReviewCardDomGuard(presentation.elements.card, presentation.placement);
+        if (!domGuard) return false;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) throw new Error("Cannot publish a review card without every committed ref");
+          return { owner, element, detached: false, reattached: false, handoffDetached: false };
+        });
+        established = true;
+        cells.active.current = presentation;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      noteRef: (owner: ReviewCardElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (element === null && previous === proof.element && !proof.handoffDetached) {
+            proof.handoffDetached = true;
+          } else if (element !== previous) {
+            invalidReplay = true;
+          }
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (element === proof.element && previous === null && proof.detached) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) || (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every((entry) => entry.handoffDetached && entry.owner.element() === null),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release: () => {
+        domGuard?.release();
+      },
+    });
+    return runtime;
+  };
+
+  const nativeClick = (
+    presentation: ReviewCardPresentation,
+    source: HTMLButtonElement,
+    event: MouseEvent<HTMLButtonElement>,
+  ): globalThis.MouseEvent | null => {
+    if (!event || typeof event !== "object") return null;
+    const ownerWindow = presentation.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    const reactEvent = event as MouseEvent<HTMLButtonElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    const reactEventPrototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      !nativeEvent.bubbles ||
+      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      !event.bubbles ||
+      event.defaultPrevented ||
+      nativeEvent.defaultPrevented ||
+      event.currentTarget !== source ||
+      target !== nativeEvent.target ||
+      !(target instanceof ownerWindow.Node) ||
+      target.ownerDocument !== presentation.ownerDocument ||
+      !source.contains(target) ||
+      !nativeEvent.composedPath().includes(source) ||
+      !nativeEvent.composedPath().includes(presentation.elements.card) ||
+      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
+      reactEvent._reactName !== "onClick" ||
+      typeof reactEvent.isDefaultPrevented !== "function" ||
+      typeof reactEvent.isPropagationStopped !== "function" ||
+      typeof reactEvent.persist !== "function" ||
+      !reviewCardDomContains(presentation.dom, target)
+    ) {
+      return null;
+    }
+    return nativeEvent;
+  };
+
+  const currentPresentation = (
+    action: ReviewCardAction,
+    event: MouseEvent<HTMLButtonElement>,
+  ): { presentation: ReviewCardPresentation; nativeEvent: globalThis.MouseEvent } | null => {
+    const runtime = currentRuntime;
+    const presentation = runtime?.presentation;
     const element =
       action.kind === "toggle"
         ? presentation?.elements.toggle
@@ -3286,63 +3899,74 @@ function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCar
               : action.index === null
                 ? null
                 : presentation?.elements.rows[action.index]?.link;
-    const document = element?.ownerDocument;
-    const MouseEventConstructor = document?.defaultView?.MouseEvent;
-    const NodeConstructor = document?.defaultView?.Node;
-    const nativeEvent = event.nativeEvent;
+    const expectedAction =
+      action.kind === "toggle"
+        ? render.toggle
+        : action.kind === "accept"
+          ? render.accept
+          : action.kind === "reject"
+            ? render.reject
+            : action.kind === "resolve"
+              ? render.resolve
+              : action.index === null
+                ? null
+                : render.threadLinks[action.index];
     if (
+      !runtime ||
       !presentation ||
+      runtime.isRetired() ||
       presentation.render !== render ||
       presentation.authority !== authority ||
+      cells.active.current !== presentation ||
+      cells.retired.has(presentation) ||
+      action.renderIdentity !== identity ||
+      expectedAction !== action ||
       !element ||
-      !document ||
-      !MouseEventConstructor ||
-      !NodeConstructor ||
-      event.type !== "click" ||
-      !(nativeEvent instanceof MouseEventConstructor) ||
-      nativeEvent.type !== "click" ||
-      event.currentTarget !== element ||
-      nativeEvent.target !== event.target ||
-      !(event.target instanceof NodeConstructor) ||
-      !element.contains(event.target) ||
       !element.isConnected ||
-      element.disabled ||
+      !reviewCardControlIsEnabled(element) ||
       !action.enabled ||
       !reviewCardFactsAreCurrent(authority) ||
-      !exactReviewCardDomIsCurrent(presentation)
+      !exactReviewCardDomIsCurrent(presentation) ||
+      !runtime.publishedDomMatches()
     ) {
       return null;
     }
-    return { presentation, nativeEvent };
+    const nativeEvent = nativeClick(presentation, element, event);
+    return nativeEvent ? { presentation, nativeEvent } : null;
   };
 
   const reserve = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>) => {
     const current = currentPresentation(action, event);
-    if (!current || cells.claimedEvents.has(current.nativeEvent)) return null;
-    let claims = cells.claimedActions.get(current.presentation);
-    if (!claims) {
-      claims = new Set();
-      cells.claimedActions.set(current.presentation, claims);
+    if (
+      !current ||
+      cells.claimedEvents.has(event) ||
+      cells.claimedEvents.has(current.nativeEvent) ||
+      cells.claimedActions.has(action)
+    ) {
+      return null;
     }
-    if (claims.has(action)) return null;
+    const presentationWasClaimed = cells.claimedPresentations.has(current.presentation);
+    cells.claimedPresentations.add(current.presentation);
+    cells.claimedEvents.add(event);
     cells.claimedEvents.add(current.nativeEvent);
-    claims.add(action);
-    let retained = true;
+    cells.claimedActions.add(action);
+    let pending = true;
     return Object.freeze({
-      presentation: current.presentation,
       rollback: () => {
-        if (!retained) return;
-        retained = false;
+        if (!pending) return;
+        pending = false;
+        cells.claimedEvents.delete(event);
         cells.claimedEvents.delete(current.nativeEvent);
-        claims!.delete(action);
+        cells.claimedActions.delete(action);
+        if (!presentationWasClaimed) cells.claimedPresentations.delete(current.presentation);
       },
       retain: () => {
-        retained = false;
+        pending = false;
       },
       releaseAction: () => {
-        if (!retained) return;
-        retained = false;
-        claims!.delete(action);
+        if (!pending) return;
+        pending = false;
+        cells.claimedActions.delete(action);
       },
     });
   };
@@ -3382,11 +4006,12 @@ function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCar
   };
 
   const action = (kind: ReviewCardActionKind, enabled: boolean, index: number | null = null, threadId: string | null = null) => {
-    const owner = new ReviewCardElementOwner<HTMLButtonElement>(retireForReplacement);
+    const owner = new ReviewCardElementOwner<HTMLButtonElement>(onElementChange);
     controlOwners.push(owner);
     const owned = {} as ReviewCardAction;
     Object.assign(owned, {
       identity: Symbol(`review-card-${kind}`),
+      renderIdentity: identity,
       kind,
       index,
       threadId,
@@ -3395,65 +4020,6 @@ function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCar
       onClick: (event: MouseEvent<HTMLButtonElement>) => invoke(owned, event),
     });
     return Object.freeze(owned);
-  };
-
-  const retire = () => {
-    if (cells.active.current?.render !== render) return false;
-    cells.active.current = null;
-    return true;
-  };
-  const establish = () => {
-    const previous = cells.active.current;
-    if (previous && previous.render !== render) previous.render.retire();
-    const card = cardOwner.element();
-    const header = headerOwner.element();
-    const toggleElement = controlOwners[0]?.element() ?? null;
-    const actions = actionsOwner.element();
-    const list = listOwner.element();
-    const actionOffset = 1;
-    const acceptElement = render.accept ? controlOwners[actionOffset]?.element() ?? null : null;
-    const rejectElement = render.reject ? controlOwners[actionOffset + 1]?.element() ?? null : null;
-    const resolveElement = render.resolve ? controlOwners[actionOffset]?.element() ?? null : null;
-    const threadOffset = 1 + (render.accept ? 2 : render.resolve ? 1 : 0);
-    const rowElements = authority.open
-      ? authority.mine.map((_, index) => {
-          const item = rowOwners[index]?.element() ?? null;
-          const link = controlOwners[threadOffset + index]?.element() ?? null;
-          return item && link ? Object.freeze({ item, link }) : null;
-        })
-      : [];
-    if (
-      !card ||
-      !header ||
-      !toggleElement ||
-      (authority.actionRegion !== null) !== !!actions ||
-      (authority.actionRegion === "suggestions" && (!acceptElement || !rejectElement)) ||
-      (authority.actionRegion === "resolve" && !resolveElement) ||
-      authority.open !== !!list ||
-      rowElements.some((row) => row === null) ||
-      !reviewCardFactsAreCurrent(authority, true)
-    ) {
-      return;
-    }
-    const elements: ReviewCardElements = Object.freeze({
-      card,
-      header,
-      toggle: toggleElement,
-      actions,
-      accept: acceptElement,
-      reject: rejectElement,
-      resolve: resolveElement,
-      list,
-      rows: Object.freeze(rowElements as Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[]),
-    });
-    const presentation: ReviewCardPresentation = Object.freeze({
-      identity: Symbol("review-card-presentation"),
-      render,
-      authority,
-      elements,
-    });
-    if (!exactReviewCardDomIsCurrent(presentation)) return;
-    cells.active.current = presentation;
   };
 
   const toggle = action("toggle", true);
@@ -3468,7 +4034,90 @@ function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCar
   const reject = authority.actionRegion === "suggestions" ? action("reject", rejectEnabled) : null;
   const resolve = authority.actionRegion === "resolve" ? action("resolve", resolveEnabled) : null;
   const threadLinks = authority.open ? authority.mine.map((thread, index) => action("thread", true, index, thread.id)) : [];
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay()) &&
+        acceptsSuccessorOf(lastRuntime.presentation)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (renderRetired || invalidBeforeEstablish) return undefined;
+    if (!reviewCardFactsAreCurrent(authority, true)) return undefined;
+    const elements = committedElements();
+    const placement = elements ? captureReviewCardPlacement(elements.card) : null;
+    if (!elements || !placement) return undefined;
+    const presentation: ReviewCardPresentation = Object.freeze({
+      identity: Symbol("review-card-presentation"),
+      render,
+      authority,
+      elements,
+      ownerDocument: elements.card.ownerDocument,
+      dom: snapshotReviewCardDom(elements.card),
+      placement,
+    });
+    if (!exactReviewCardDomIsCurrent(presentation)) return undefined;
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = reviewCardAuthoritiesMatch(replay.source.authority, authority);
+      const exactReplay =
+        sameAuthority &&
+        replay.source.render.isRetired() &&
+        cells.retired.has(replay.source) &&
+        cells.successorOf.current === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.card === replay.dom.node &&
+        reviewCardPlacementMatches(elements.card, replay.placement) &&
+        reviewCardDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+      if (sameAuthority && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(presentation);
+        return undefined;
+      }
+    }
+
+    const previous = cells.active.current;
+    if (previous && previous !== presentation) previous.render.retire();
+    const transitionSource = cells.successorOf.current;
+    const owners = expectedOwners();
+    const replayOwners = new Set<ReviewCardElementOwnerView>();
+    // On an update, Strict Mode replays only refs for DOM that the update mounted.
+    if (transitionSource?.authority.mount === authority.mount) {
+      for (const owner of owners) {
+        const element = owner.element();
+        if (element && !reviewCardDomContains(transitionSource.dom, element)) replayOwners.add(owner);
+      }
+    }
+    const runtime = createRuntime(presentation, replayOwners);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish(owners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const retire = () => {
+    if (renderRetired) return false;
+    if (currentRuntime) {
+      currentRuntime.retireForAction();
+      return true;
+    }
+    renderRetired = true;
+    return true;
+  };
+
   Object.assign(render, {
+    identity,
     authority,
     toggle,
     accept,
@@ -3492,6 +4141,7 @@ function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCar
     onThreadClicks: Object.freeze(threadLinks.map((link) => link.onClick)),
     establish,
     retire,
+    isRetired: () => renderRetired,
   });
   return Object.freeze(render);
 }
@@ -3502,9 +4152,34 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
   const [mount] = useState(() => Symbol("review-card"));
   const [cells] = useState<ReviewCardCells>(() => ({
     active: { current: null },
-    claimedEvents: new WeakSet<Event>(),
-    claimedActions: new WeakMap<ReviewCardPresentation, Set<ReviewCardAction>>(),
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet<ReviewCardPresentation>(),
+    claimedPresentations: new WeakSet<ReviewCardPresentation>(),
+    claimedEvents: new WeakSet<object>(),
+    claimedActions: new WeakSet<ReviewCardAction>(),
   }));
+  const replayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    replayCleanup.current += 1;
+    return () => {
+      replayCleanup.current += 1;
+      const cleanup = replayCleanup.current;
+      queueMicrotask(() => {
+        // A Strict Mode setup cancels this; a real unmount releases a staged observer.
+        if (replayCleanup.current !== cleanup) return;
+        const replay = cells.replay.current;
+        if (!replay) return;
+        cells.replay.current = null;
+        if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+        replay.release();
+      });
+    };
+  }, [cells]);
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const mine = reviewThreads(review, threads);
   const withSuggestion = commentSuggestionTargets(mine, text);
   const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
@@ -3531,13 +4206,8 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
     open,
     setOpen,
   });
-  const publication = createReviewCardRender(authority, cells);
-  useLayoutEffect(() => {
-    publication.establish();
-    return () => {
-      publication.retire();
-    };
-  }, [publication]);
+  const publication = createReviewCardRender(authority, cells, requestPublicationSuccessor);
+  useLayoutEffect(() => publication.establish(), [publication]);
   const {
     captureCard,
     captureHeader,
