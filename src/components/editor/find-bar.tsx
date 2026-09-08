@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useLayoutEffect,
   useMemo,
   useState,
@@ -72,6 +73,7 @@ interface FindBarAuthority {
   readonly options: FindOptions;
   readonly optionValues: Readonly<FindOptions>;
   readonly matches: FindMatch[];
+  readonly matchValues: readonly Readonly<FindMatch>[];
   readonly query: string;
   readonly replacement: string;
   readonly canEdit: boolean;
@@ -94,22 +96,44 @@ class CurrentCell<T> {
   constructor(public current: T) {}
 }
 
-class ElementOwner<T extends HTMLElement> {
+interface ElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+class ElementOwner<T extends HTMLElement> implements ElementOwnerView {
   private current: T | null = null;
   private lastElement: T | null = null;
 
   constructor(
-    private readonly onReplacement: () => void,
+    private readonly onChange: (
+      owner: ElementOwnerView,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+      last: HTMLElement | null,
+      retireOnDetach: boolean,
+    ) => void,
     private readonly retireOnDetach = true,
   ) {}
 
   readonly element = () => this.current;
   readonly capture = (element: T | null) => {
     if (this.current === element) return;
+    if (
+      element &&
+      this.lastElement &&
+      element !== this.lastElement &&
+      !element.isConnected
+    ) {
+      return;
+    }
+    const previous = this.current;
+    const last = this.lastElement;
     const replaced = element !== null && this.lastElement !== null && this.lastElement !== element;
     this.current = element;
     if (element) this.lastElement = element;
-    if (replaced || (element === null && this.retireOnDetach)) this.onReplacement();
+    if (replaced || element === null || previous !== element) {
+      this.onChange(this, element, previous, last, this.retireOnDetach);
+    }
   };
 }
 
@@ -129,14 +153,18 @@ interface FindControlPublication {
 
 interface FindBarPublication {
   readonly authority: FindBarAuthority;
-  readonly captureBar: (element: HTMLDivElement | null) => void;
-  readonly inputs: Readonly<Record<FindInput, FindInputPublication>>;
-  readonly controls: Readonly<Record<FindControl, FindControlPublication>>;
-  readonly establish: () => void;
   readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
   readonly ownsInput: (kind: FindInput, element: HTMLInputElement) => boolean;
   readonly focusSearch: () => boolean;
   readonly scheduleReplaceFocus: () => boolean;
+}
+
+interface FindBarPublicationSet {
+  readonly captureBar: (element: HTMLDivElement | null) => void;
+  readonly inputs: Readonly<Record<FindInput, FindInputPublication>>;
+  readonly controls: Readonly<Record<FindControl, FindControlPublication>>;
+  readonly establish: () => void | (() => void);
   readonly onBarKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
 
@@ -152,6 +180,8 @@ interface ReplaceFocusOwner {
 
 interface PublicationCells {
   readonly active: CurrentCell<FindBarPublication | null>;
+  readonly successorOf: CurrentCell<FindBarPublication | null>;
+  readonly replay: CurrentCell<FindBarReplay | null>;
   readonly focusRequest: CurrentCell<SearchFocusRequest | null>;
   readonly replaceIntent: CurrentCell<ReplaceFocusIntent | null>;
   readonly replaceFocus: CurrentCell<ReplaceFocusOwner | null>;
@@ -160,38 +190,131 @@ interface PublicationCells {
 }
 
 interface PublicationLifecycle {
-  readonly establish: () => void;
-  readonly retire: () => void;
+  readonly establish: () => void | (() => void);
 }
 
 function createInactivePublication(cells: PublicationCells): PublicationLifecycle {
   return Object.freeze({
     establish: () => {
       cells.active.current?.retire();
+      cells.successorOf.current = null;
+      cells.replay.current = null;
       cells.replaceIntent.current = null;
     },
-    retire: () => {},
   });
 }
 
-function isExactReplaceSuccessor(source: FindBarPublication, candidate: FindBarPublication) {
-  const previous = source.authority;
-  const current = candidate.authority;
+interface FindBarDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly FindBarDomSnapshot[];
+}
+
+interface FindBarReplay {
+  readonly source: FindBarPublication;
+  readonly dom: FindBarDomSnapshot;
+}
+
+interface RefReplay {
+  readonly owner: ElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface FindBarPublicationRuntime {
+  readonly publication: FindBarPublication;
+  readonly publish: (snapshot: FindBarDomSnapshot, owners: readonly ElementOwnerView[]) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly snapshot: () => FindBarDomSnapshot | null;
+}
+
+function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotFindBarDom(node: Node): FindBarDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotFindBarDom)),
+  });
+}
+
+function findBarDomMatches(snapshot: FindBarDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && findBarDomMatches(child));
+}
+
+function authoritiesMatch(
+  previous: FindBarAuthority,
+  current: FindBarAuthority,
+  visibility: "same" | "opened",
+) {
+  const visibilityMatches = visibility === "same"
+    ? previous.replaceVisible === current.replaceVisible &&
+      previous.showReplace === current.showReplace
+    : !previous.replaceVisible &&
+      !previous.showReplace &&
+      current.replaceVisible &&
+      current.showReplace;
   return (
-    !previous.replaceVisible &&
-    current.replaceVisible &&
-    current.showReplace &&
+    visibilityMatches &&
     previous.visit === current.visit &&
     previous.session === current.session &&
     previous.find === current.find &&
     previous.options === current.options &&
+    previous.optionValues.matchCase === current.optionValues.matchCase &&
+    previous.optionValues.wholeWord === current.optionValues.wholeWord &&
+    previous.optionValues.regex === current.optionValues.regex &&
     previous.matches === current.matches &&
+    previous.matchValues.length === current.matchValues.length &&
+    previous.matchValues.every((match, index) => {
+      const candidate = current.matchValues[index];
+      return candidate?.from === match.from && candidate.to === match.to;
+    }) &&
     previous.query === current.query &&
     previous.replacement === current.replacement &&
     previous.canEdit === current.canEdit &&
     previous.total === current.total &&
     previous.active === current.active &&
     previous.focusNonce === current.focusNonce &&
+    previous.focusRequest === current.focusRequest &&
+    previous.invalidRegex === current.invalidRegex &&
+    previous.noMatches === current.noMatches &&
+    previous.actionsDisabled === current.actionsDisabled &&
     previous.methods.setFind === current.methods.setFind &&
     previous.methods.stepFind === current.methods.stepFind &&
     previous.methods.replaceActive === current.methods.replaceActive &&
@@ -202,53 +325,134 @@ function isExactReplaceSuccessor(source: FindBarPublication, candidate: FindBarP
   );
 }
 
+function isExactReplaySuccessor(source: FindBarPublication, authority: FindBarAuthority) {
+  return authoritiesMatch(source.authority, authority, "same");
+}
+
+function isExactReplaceSuccessor(source: FindBarPublication, candidate: FindBarPublication) {
+  const previous = source.authority;
+  const current = candidate.authority;
+  return authoritiesMatch(previous, current, "opened");
+}
+
 function createFindBarPublication({
   authority,
   cells,
   setReplacementDraft,
+  requestSuccessor,
 }: {
   authority: FindBarAuthority;
   cells: PublicationCells;
   setReplacementDraft: Dispatch<SetStateAction<ReplacementDraft>>;
-}): FindBarPublication {
-  const retireOnReplacement = () => publication?.retire();
-  const bar = new ElementOwner<HTMLDivElement>(retireOnReplacement);
-  const searchOwner = new ElementOwner<HTMLInputElement>(retireOnReplacement);
-  const replaceOwner = new ElementOwner<HTMLInputElement>(retireOnReplacement);
+  requestSuccessor: () => void;
+}): FindBarPublicationSet {
+  let currentRuntime: FindBarPublicationRuntime | null = null;
+  let lastRuntime: FindBarPublicationRuntime | null = null;
+  let successorRequested = false;
 
   const factsAreCurrent = () => {
     const current = authority.session.find;
     const values = authority.optionValues;
     return (
+      authority.visit.session === authority.session &&
       current === authority.find &&
       current.options === authority.options &&
       current.matches === authority.matches &&
       current.query === authority.query &&
       current.matches.length === authority.total &&
+      current.matches.length === authority.matchValues.length &&
+      current.matches.every((match, index) => {
+        const expected = authority.matchValues[index];
+        return expected?.from === match.from && expected.to === match.to;
+      }) &&
       current.active === authority.active &&
       current.options.matchCase === values.matchCase &&
       current.options.wholeWord === values.wholeWord &&
       current.options.regex === values.regex &&
-      authority.session.canEdit === authority.canEdit
+      authority.session.canEdit === authority.canEdit &&
+      authority.showReplace === (authority.replaceVisible && authority.canEdit) &&
+      authority.noMatches === (authority.total === 0) &&
+      authority.actionsDisabled === (authority.invalidRegex || authority.noMatches)
     );
   };
-  const ownsIdentity = () =>
-    cells.active.current === publication &&
-    publication.authority.visit.mount === authority.visit.mount;
-  const ownsAuthority = () => ownsIdentity() && factsAreCurrent() && exactDomIsCurrent();
-  const ownsBar = (element: HTMLDivElement) => {
+
+  const requestReplaySuccessor = (runtime: FindBarPublicationRuntime) => {
+    const snapshot = runtime.snapshot();
+    if (
+      successorRequested ||
+      !snapshot ||
+      !cells.successorOf.current ||
+      cells.successorOf.current !== runtime.publication ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: runtime.publication,
+      dom: snapshot,
+    });
+    requestSuccessor();
+  };
+  const onElementChange = (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+    retireOnDetach: boolean,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      (retireOnDetach && element === null) ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+    }
+    if (
+      runtime?.isExactElementReplay() &&
+      cells.successorOf.current === runtime.publication
+    ) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const bar = new ElementOwner<HTMLDivElement>(onElementChange);
+  const searchOwner = new ElementOwner<HTMLInputElement>(onElementChange);
+  const replaceOwner = new ElementOwner<HTMLInputElement>(onElementChange);
+
+  const ownsIdentity = (publication: FindBarPublication) => {
+    const runtime = currentRuntime;
+    return (
+      !!runtime &&
+      runtime.publication === publication &&
+      !runtime.isRetired() &&
+      cells.active.current === publication &&
+      publication.authority.visit.mount === authority.visit.mount
+    );
+  };
+  const ownsAuthority = (publication: FindBarPublication) =>
+    ownsIdentity(publication) &&
+    factsAreCurrent() &&
+    exactDomIsCurrent();
+  const ownsBar = (publication: FindBarPublication, element: HTMLDivElement) => {
     const owned = bar.element();
     return (
-      ownsAuthority() &&
+      ownsAuthority(publication) &&
       owned === element &&
       element.isConnected
     );
   };
   const inputOwner = (kind: FindInput) => kind === "search" ? searchOwner : replaceOwner;
-  const ownsInput = (kind: FindInput, element: HTMLInputElement) => {
+  const ownsInput = (
+    publication: FindBarPublication,
+    kind: FindInput,
+    element: HTMLInputElement,
+  ) => {
     const root = bar.element();
     return (
-      ownsAuthority() &&
+      ownsAuthority(publication) &&
       inputOwner(kind).element() === element &&
       !!root &&
       root.isConnected &&
@@ -261,47 +465,44 @@ function createFindBarPublication({
     cells.claimedActivations.add(event);
     return true;
   };
-  const stillOwnsActivation = () => ownsIdentity();
-  const reveal = (match: FindMatch | null) => {
-    if (match && stillOwnsActivation()) authority.onReveal(match);
+  const reveal = (publication: FindBarPublication, match: FindMatch | null) => {
+    if (match && ownsIdentity(publication)) authority.onReveal(match);
   };
-  const update = (nextQuery: string, nextOptions: FindOptions) => {
+  const update = (
+    publication: FindBarPublication,
+    nextQuery: string,
+    nextOptions: FindOptions,
+  ) => {
     authority.methods.setFind.call(authority.session, nextQuery, nextOptions);
     const result = authority.session.find;
     if (
-      !stillOwnsActivation() ||
+      !ownsIdentity(publication) ||
       !result ||
       result === authority.find ||
       result.query !== nextQuery ||
       result.options !== nextOptions
     ) return;
-    reveal(result.matches[result.active] ?? null);
+    reveal(publication, result.matches[result.active] ?? null);
   };
-  const step = (direction: 1 | -1) => {
+  const step = (publication: FindBarPublication, direction: 1 | -1) => {
     const match = authority.methods.stepFind.call(authority.session, direction);
-    reveal(match);
+    reveal(publication, match);
   };
-  const replaceOne = () => {
+  const replaceOne = (publication: FindBarPublication) => {
     const match = authority.methods.replaceActive.call(authority.session, authority.replacement);
-    reveal(match);
+    reveal(publication, match);
   };
   const replaceAll = () => {
     authority.methods.replaceAll.call(authority.session, authority.replacement);
   };
-  const cancelReplaceFocus = () => {
+  const cancelReplaceFocus = (publication: FindBarPublication) => {
     const owner = cells.replaceFocus.current;
     if (owner?.publication !== publication) return;
     cells.replaceFocus.current = null;
     if (owner.frame !== null) cancelAnimationFrame(owner.frame);
   };
-  const retire = () => {
-    if (cells.active.current !== publication) return false;
-    cells.active.current = null;
-    cancelReplaceFocus();
-    return true;
-  };
-  const close = () => {
-    if (!retire()) return;
+  const close = (publication: FindBarPublication) => {
+    if (!publication.retire()) return;
     authority.onClose();
   };
   const nextOptions = (key: keyof FindOptions): FindOptions =>
@@ -309,6 +510,7 @@ function createFindBarPublication({
 
   const controlOwners = new Map<FindControl, ElementOwner<HTMLButtonElement>>();
   const ownsControl = (
+    publication: FindBarPublication,
     control: FindControlPublication,
     owner: ElementOwner<HTMLButtonElement>,
     element: HTMLButtonElement,
@@ -316,7 +518,7 @@ function createFindBarPublication({
   ) => {
     const root = bar.element();
     return (
-      ownsAuthority() &&
+      ownsAuthority(publication) &&
       owner.element() === element &&
       !!root &&
       root.isConnected &&
@@ -334,24 +536,33 @@ function createFindBarPublication({
     id: FindControl;
     enabled?: boolean;
     keepInputFocus?: boolean;
-    run: () => void;
+    run: (publication: FindBarPublication) => void;
   }): FindControlPublication => {
     // Radix's asChild trigger may detach and reattach its composed ref to the same button.
-    const owner = new ElementOwner<HTMLButtonElement>(retireOnReplacement, false);
+    const owner = new ElementOwner<HTMLButtonElement>(onElementChange, false);
     controlOwners.set(id, owner);
     const control: FindControlPublication = Object.freeze({
       id,
       enabled,
       capture: owner.capture,
       onClick: (event: MouseEvent<HTMLButtonElement>) => {
-        if (!ownsControl(control, owner, event.currentTarget) || !claim(event)) return;
-        run();
+        const publication = currentRuntime?.publication;
+        if (
+          !publication ||
+          !ownsControl(publication, control, owner, event.currentTarget) ||
+          !claim(event)
+        ) {
+          return;
+        }
+        run(publication);
       },
       ...(keepInputFocus
         ? {
             onMouseDown: (event: MouseEvent<HTMLButtonElement>) => {
+              const publication = currentRuntime?.publication;
               if (
-                !ownsControl(control, owner, event.currentTarget) ||
+                !publication ||
+                !ownsControl(publication, control, owner, event.currentTarget) ||
                 cells.claimedMouseDowns.has(event)
               ) return;
               cells.claimedMouseDowns.add(event);
@@ -367,37 +578,37 @@ function createFindBarPublication({
     matchCase: makeControl({
       id: "matchCase",
       keepInputFocus: true,
-      run: () => update(authority.query, nextOptions("matchCase")),
+      run: (publication) => update(publication, authority.query, nextOptions("matchCase")),
     }),
     wholeWord: makeControl({
       id: "wholeWord",
       keepInputFocus: true,
-      run: () => update(authority.query, nextOptions("wholeWord")),
+      run: (publication) => update(publication, authority.query, nextOptions("wholeWord")),
     }),
     regex: makeControl({
       id: "regex",
       keepInputFocus: true,
-      run: () => update(authority.query, nextOptions("regex")),
+      run: (publication) => update(publication, authority.query, nextOptions("regex")),
     }),
     previous: makeControl({
       id: "previous",
       enabled: !authority.actionsDisabled,
       keepInputFocus: true,
-      run: () => step(-1),
+      run: (publication) => step(publication, -1),
     }),
     next: makeControl({
       id: "next",
       enabled: !authority.actionsDisabled,
       keepInputFocus: true,
-      run: () => step(1),
+      run: (publication) => step(publication, 1),
     }),
     toggleReplace: makeControl({
       id: "toggleReplace",
       enabled: authority.canEdit,
       keepInputFocus: true,
-      run: () => {
+      run: (publication) => {
         if (authority.replaceVisible) {
-          cancelReplaceFocus();
+          cancelReplaceFocus(publication);
           authority.onReplaceVisible(false);
           return;
         }
@@ -420,47 +631,64 @@ function createFindBarPublication({
   };
 
   const closeFromKeyboard = (
+    publication: FindBarPublication,
     event: KeyboardEvent<HTMLDivElement> | KeyboardEvent<HTMLInputElement>,
   ) => {
     if (!claim(event)) return;
     event.preventDefault();
     event.stopPropagation();
-    close();
+    close(publication);
   };
   const search: FindInputPublication = Object.freeze({
     capture: searchOwner.capture,
     onChange: (event: ChangeEvent<HTMLInputElement>) => {
-      if (!ownsInput("search", event.currentTarget) || !claim(event)) return;
-      update(event.currentTarget.value, authority.options);
+      const publication = currentRuntime?.publication;
+      if (
+        !publication ||
+        !ownsInput(publication, "search", event.currentTarget) ||
+        !claim(event)
+      ) {
+        return;
+      }
+      update(publication, event.currentTarget.value, authority.options);
     },
     onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
-      if (!ownsInput("search", event.currentTarget)) return;
+      const publication = currentRuntime?.publication;
+      if (!publication || !ownsInput(publication, "search", event.currentTarget)) return;
       if (event.key === "Escape") {
-        closeFromKeyboard(event);
+        closeFromKeyboard(publication, event);
         return;
       }
       if (event.key !== "Enter" || !claim(event)) return;
       event.preventDefault();
-      if (!authority.invalidRegex) step(event.shiftKey ? -1 : 1);
+      if (!authority.invalidRegex) step(publication, event.shiftKey ? -1 : 1);
     },
   });
   const replacement: FindInputPublication = Object.freeze({
     capture: replaceOwner.capture,
     onChange: (event: ChangeEvent<HTMLInputElement>) => {
-      if (!ownsInput("replace", event.currentTarget) || !claim(event)) return;
+      const publication = currentRuntime?.publication;
+      if (
+        !publication ||
+        !ownsInput(publication, "replace", event.currentTarget) ||
+        !claim(event)
+      ) {
+        return;
+      }
       setReplacementDraft({ visit: authority.visit, value: event.currentTarget.value });
     },
     onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
-      if (!ownsInput("replace", event.currentTarget)) return;
+      const publication = currentRuntime?.publication;
+      if (!publication || !ownsInput(publication, "replace", event.currentTarget)) return;
       if (event.key === "Escape") {
-        closeFromKeyboard(event);
+        closeFromKeyboard(publication, event);
         return;
       }
       if (event.key !== "Enter" || !claim(event)) return;
       event.preventDefault();
       if (authority.invalidRegex) return;
-      if (event.shiftKey) step(-1);
-      else replaceOne();
+      if (event.shiftKey) step(publication, -1);
+      else replaceOne(publication);
     },
   });
 
@@ -470,37 +698,263 @@ function createFindBarPublication({
     controls.regex,
     controls.previous,
     controls.next,
-    controls.close,
     ...(authority.canEdit ? [controls.toggleReplace] : []),
+    controls.close,
     ...(authority.showReplace ? [controls.replaceOne, controls.replaceAll] : []),
+  ];
+  const controlTestIds: Readonly<Record<FindControl, string>> = {
+    matchCase: "find-match-case",
+    wholeWord: "find-whole-word",
+    regex: "find-regex",
+    previous: "find-prev",
+    next: "find-next",
+    toggleReplace: "find-toggle-replace",
+    close: "find-close",
+    replaceOne: "replace-one",
+    replaceAll: "replace-all",
+  };
+  const expectedOwners = (): readonly ElementOwnerView[] => [
+    bar,
+    searchOwner,
+    ...expectedControls().map((control) => controlOwners.get(control.id)!),
+    ...(authority.showReplace ? [replaceOwner] : []),
   ];
   const exactDomIsCurrent = () => {
     const root = bar.element();
     const searchElement = searchOwner.element();
     const replaceElement = replaceOwner.element();
+    const controlElements = expectedControls().map((control) =>
+      controlOwners.get(control.id)?.element());
+    const interactiveElements: readonly (HTMLElement | null | undefined)[] = [
+      searchElement,
+      ...controlElements.slice(0, authority.canEdit ? 6 : 5),
+      controlElements[authority.canEdit ? 6 : 5],
+      ...(authority.showReplace
+        ? [replaceElement, ...controlElements.slice(authority.canEdit ? 7 : 6)]
+        : []),
+    ];
+    const ownedInteractiveElements = root
+      ? [...root.querySelectorAll<HTMLElement>("input, button")]
+          .filter((element) => interactiveElements.includes(element))
+      : [];
     return (
       !!root &&
       root.isConnected &&
+      root.tagName === "DIV" &&
+      root.getAttribute("role") === "search" &&
+      root.getAttribute("aria-label") === "Find and replace" &&
+      root.dataset.testid === "find-bar" &&
       !!searchElement &&
       searchElement.isConnected &&
+      searchElement.ownerDocument === root.ownerDocument &&
+      searchElement.tagName === "INPUT" &&
+      searchElement.dataset.testid === "find-input" &&
       root.contains(searchElement) &&
       (authority.showReplace
-        ? !!replaceElement && replaceElement.isConnected && root.contains(replaceElement)
+        ? !!replaceElement &&
+          replaceElement.isConnected &&
+          replaceElement.ownerDocument === root.ownerDocument &&
+          replaceElement.tagName === "INPUT" &&
+          replaceElement.dataset.testid === "replace-input" &&
+          root.contains(replaceElement)
         : replaceElement === null) &&
-      expectedControls().every((control) => {
-        const element = controlOwners.get(control.id)?.element();
-        return !!element && element.isConnected && root.contains(element);
-      })
+      controlElements.every((element, index) =>
+        !!element &&
+        element.isConnected &&
+        element.ownerDocument === root.ownerDocument &&
+        element.tagName === "BUTTON" &&
+        element.type === "button" &&
+        element.dataset.testid === controlTestIds[expectedControls()[index]!.id] &&
+        root.contains(element)) &&
+      interactiveElements.every((element, index) =>
+        element !== null && ownedInteractiveElements[index] === element) &&
+      ownedInteractiveElements.length === interactiveElements.length
     );
   };
+  const focusSearch = (publication: FindBarPublication) => {
+    const element = searchOwner.element();
+    if (!element || !ownsInput(publication, "search", element)) return false;
+    element.focus();
+    if (ownsInput(publication, "search", element)) element.select();
+    return true;
+  };
+  const scheduleReplaceFocus = (publication: FindBarPublication) => {
+    const element = replaceOwner.element();
+    if (!element || !ownsInput(publication, "replace", element)) return false;
+    const owner: ReplaceFocusOwner = { publication, element, frame: null };
+    cells.replaceFocus.current = owner;
+    const frame = requestAnimationFrame(() => {
+      if (
+        owner.frame !== frame ||
+        cells.replaceFocus.current !== owner ||
+        !ownsInput(publication, "replace", owner.element)
+      ) return;
+      cells.replaceFocus.current = null;
+      owner.element.focus();
+    });
+    owner.frame = frame;
+    return true;
+  };
+
+  const createRuntime = (): FindBarPublicationRuntime => {
+    type Retirement = "element" | "layout" | "other";
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let established = false;
+    let domSnapshot: FindBarDomSnapshot | null = null;
+    let replayRefs: RefReplay[] = [];
+    let invalidReplay = false;
+    let layoutRetired = false;
+    const retire = (reason: Retirement) => {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      cancelReplaceFocus(publication);
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      return true;
+    };
+    const publication: FindBarPublication = Object.freeze({
+      authority,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+      ownsInput: (kind: FindInput, element: HTMLInputElement) =>
+        ownsInput(publication, kind, element),
+      focusSearch: () => focusSearch(publication),
+      scheduleReplaceFocus: () => scheduleReplaceFocus(publication),
+    });
+    const publishedDomMatches = () => {
+      const root = bar.element();
+      return Boolean(
+        domSnapshot &&
+        root &&
+        root === domSnapshot.node &&
+        root.isConnected &&
+        findBarDomMatches(domSnapshot)
+      );
+    };
+    const runtime: FindBarPublicationRuntime = Object.freeze({
+      publication,
+      publish: (
+        snapshot: FindBarDomSnapshot,
+        owners: readonly ElementOwnerView[],
+      ) => {
+        established = true;
+        domSnapshot = snapshot;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) throw new Error("Cannot publish a FindBar without every committed ref");
+          return { owner, element, detached: false, reattached: false };
+        });
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      noteRef: (
+        owner: ElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+        if (
+          !retired &&
+          replayRefs.every((entry) => entry.owner.element() === entry.element)
+        ) {
+          for (const entry of replayRefs) {
+            entry.detached = false;
+            entry.reattached = false;
+          }
+          invalidReplay = false;
+        }
+      },
+      isRetired: () => retired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        retired &&
+        retirement === "element" &&
+        layoutRetired &&
+        established &&
+        !invalidReplay &&
+        replayRefs.length > 0 &&
+        replayRefs.every((entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element() === entry.element) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        retired &&
+        retirement === "layout" &&
+        established &&
+        publishedDomMatches(),
+      snapshot: () => domSnapshot,
+    });
+    return runtime;
+  };
+
   const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay()) &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return undefined;
+    const replay = cells.replay.current;
+    const root = bar.element();
+    if (!root) return undefined;
+    if (
+      replay &&
+      (
+        cells.successorOf.current !== replay.source ||
+        !isExactReplaySuccessor(replay.source, authority) ||
+        root !== replay.dom.node ||
+        !findBarDomMatches(replay.dom)
+      )
+    ) {
+      cells.replay.current = null;
+      cells.successorOf.current = null;
+      return undefined;
+    }
+    const runtime = createRuntime();
+    const publication = runtime.publication;
     const previous = cells.active.current;
     if (previous && previous !== publication) previous.retire();
-    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
-    cells.active.current = publication;
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    runtime.publish(snapshotFindBarDom(root), expectedOwners());
     if (
       cells.focusRequest.current !== authority.focusRequest &&
-      focusSearch()
+      publication.focusSearch()
     ) {
       cells.focusRequest.current = authority.focusRequest;
     }
@@ -509,36 +963,15 @@ function createFindBarPublication({
     if (intent && intent.source !== publication) {
       cells.replaceIntent.current = null;
       if (isExactReplaceSuccessor(intent.source, publication)) {
-        scheduleReplaceFocus();
+        publication.scheduleReplaceFocus();
       }
     }
+    return runtime.retireForLayout;
   };
-  const focusSearch = () => {
-    const element = searchOwner.element();
-    if (!element || !ownsInput("search", element)) return false;
-    element.focus();
-    if (ownsInput("search", element)) element.select();
-    return true;
-  };
-  const scheduleReplaceFocus = () => {
-    const element = replaceOwner.element();
-    if (!element || !ownsInput("replace", element)) return false;
-    const owner: ReplaceFocusOwner = { publication, element, frame: null };
-    cells.replaceFocus.current = owner;
-    const frame = requestAnimationFrame(() => {
-      if (
-        owner.frame !== frame ||
-        cells.replaceFocus.current !== owner ||
-        !ownsInput("replace", owner.element)
-      ) return;
-      cells.replaceFocus.current = null;
-      owner.element.focus();
-    });
-    owner.frame = frame;
-    return true;
-  };
+
   const onBarKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (!ownsBar(event.currentTarget)) return;
+    const publication = currentRuntime?.publication;
+    if (!publication || !ownsBar(publication, event.currentTarget)) return;
     const root = bar.element();
     const target = event.target;
     if (
@@ -548,22 +981,16 @@ function createFindBarPublication({
       (target !== root && !root.contains(target)) ||
       event.key !== "Escape"
     ) return;
-    closeFromKeyboard(event);
+    closeFromKeyboard(publication, event);
   };
 
-  const publication: FindBarPublication = Object.freeze({
-    authority,
+  return Object.freeze({
     captureBar: bar.capture,
     inputs: Object.freeze({ search, replace: replacement }),
     controls: Object.freeze(controls),
     establish,
-    retire,
-    ownsInput,
-    focusSearch,
-    scheduleReplaceFocus,
     onBarKeyDown,
   });
-  return publication;
 }
 
 function OptionToggle({
@@ -626,8 +1053,14 @@ export function FindBar({
   const [replacementDraft, setReplacementDraft] = useState<ReplacementDraft>(
     () => ({ visit, value: "" }),
   );
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const [cells] = useState<PublicationCells>(() => ({
     active: new CurrentCell<FindBarPublication | null>(null),
+    successorOf: new CurrentCell<FindBarPublication | null>(null),
+    replay: new CurrentCell<FindBarReplay | null>(null),
     focusRequest: new CurrentCell<SearchFocusRequest | null>(null),
     replaceIntent: new CurrentCell<ReplaceFocusIntent | null>(null),
     replaceFocus: new CurrentCell<ReplaceFocusOwner | null>(null),
@@ -642,7 +1075,7 @@ export function FindBar({
   const noMatches = total === 0;
   const actionsDisabled = invalidRegex || noMatches;
 
-  const publication = find && options
+  const publicationSet = find && options
     ? createFindBarPublication({
         authority: Object.freeze({
           visit,
@@ -655,6 +1088,8 @@ export function FindBar({
             regex: options.regex,
           }),
           matches: find.matches,
+          matchValues: Object.freeze(find.matches.map((match) =>
+            Object.freeze({ from: match.from, to: match.to }))),
           query,
           replacement,
           canEdit,
@@ -679,23 +1114,21 @@ export function FindBar({
         }),
         cells,
         setReplacementDraft,
+        requestSuccessor: requestPublicationSuccessor,
       })
     : null;
-  const lifecycle = publication ?? createInactivePublication(cells);
+  const lifecycle = publicationSet ?? createInactivePublication(cells);
 
-  useLayoutEffect(() => {
-    lifecycle.establish();
-    return lifecycle.retire;
-  }, [lifecycle]);
+  useLayoutEffect(() => lifecycle.establish(), [lifecycle]);
 
-  if (!publication || !options) return null;
+  if (!publicationSet || !options) return null;
 
   const {
     captureBar,
     inputs,
     controls,
     onBarKeyDown,
-  } = publication;
+  } = publicationSet;
   const { search: searchInput, replace: replaceInput } = inputs;
   const {
     matchCase,
