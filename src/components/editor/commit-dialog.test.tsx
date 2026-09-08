@@ -186,6 +186,26 @@ function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
   return fiber.ref as RefCallback<T>;
 }
 
+function reactAncestorProp<T>(element: HTMLElement, name: string): T {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.dataset.testid ?? element.tagName}`);
+  let fiber:
+    | {
+        return?: unknown;
+        memoizedProps?: Record<string, unknown>;
+      }
+    | null = (element as unknown as Record<string, unknown>)[fiberKey] as {
+    return?: unknown;
+    memoizedProps?: Record<string, unknown>;
+  };
+  while (fiber) {
+    const value = fiber.memoizedProps?.[name];
+    if (typeof value === "function") return value as T;
+    fiber = (fiber.return as typeof fiber) ?? null;
+  }
+  throw new Error(`${name} was not attached to a React ancestor of ${element.dataset.testid ?? element.tagName}`);
+}
+
 function nativeSubmit(form: HTMLFormElement, submitter: HTMLButtonElement | null = null) {
   const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
   if (!SubmitEventConstructor) throw new Error("The commit form has no owner-document SubmitEvent");
@@ -329,8 +349,8 @@ describe("CommitDialog visit authority", () => {
     }
   });
 
-  it("hands a pending operation to its exact callback-caused document refresh", async () => {
-    const pending = deferred<void>();
+  it("hands settled success and its timer to the callback-caused document refresh batch", async () => {
+    const publish = deferred<void>();
     const current = actions();
     const doc = repoDocument("doc-refresh", "docs/refresh.md");
     const refreshed = {
@@ -341,7 +361,8 @@ describe("CommitDialog visit authority", () => {
     };
     const { host, root } = createHost();
 
-    current.onCommit.mockImplementationOnce(() => {
+    current.onCommit.mockImplementationOnce(async () => {
+      await publish.promise;
       root.render(
         <StrictMode>
           <CommitBoundary
@@ -351,7 +372,6 @@ describe("CommitDialog visit authority", () => {
           />
         </StrictMode>,
       );
-      return pending.promise;
     });
 
     try {
@@ -363,7 +383,7 @@ describe("CommitDialog visit authority", () => {
       expect(message()).toHaveValue("  Publish refresh  ");
       expect(screen.getByTestId("commit-submit")).toBeDisabled();
 
-      await resolve(pending);
+      await resolve(publish);
       expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
       await advance(900);
       expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
@@ -982,7 +1002,7 @@ describe("CommitDialog visit authority", () => {
     },
   );
 
-  it("keeps one exact outside touch proof through pointerup microtasks and the linked click", async () => {
+  it("requires the exact Radix outside nomination after a complete linked pointer sequence", async () => {
     vi.stubGlobal("PointerEvent", ControlledPointerEvent);
     const current = actions();
     const doc = repoDocument("doc-touch-dismiss", "docs/touch-dismiss.md");
@@ -995,6 +1015,10 @@ describe("CommitDialog visit authority", () => {
       if (!(overlay instanceof HTMLDivElement)) {
         throw new Error("The commit dialog overlay was not rendered");
       }
+      const requestOpenChange = reactAncestorProp<(open: boolean) => void>(
+        overlay,
+        "onOpenChange",
+      );
 
       act(() => {
         overlay.dispatchEvent(
@@ -1007,11 +1031,71 @@ describe("CommitDialog visit authority", () => {
             isPrimary: true,
           }),
         );
+        requestOpenChange(false);
       });
-      await Promise.resolve();
       expect(current.onOpenChange).not.toHaveBeenCalled();
 
       act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerup", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+        requestOpenChange(false);
+      });
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointercancel", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+        requestOpenChange(false);
+      });
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
         overlay.dispatchEvent(
           new ControlledPointerEvent("pointerup", {
             bubbles: true,
@@ -1024,7 +1108,6 @@ describe("CommitDialog visit authority", () => {
         );
       });
       await Promise.resolve();
-      expect(current.onOpenChange).not.toHaveBeenCalled();
 
       act(() => {
         overlay.dispatchEvent(
@@ -1062,16 +1145,15 @@ describe("CommitDialog visit authority", () => {
             isPrimary: true,
           }),
         );
-      });
-      await Promise.resolve();
-
-      act(() => {
         overlay.dispatchEvent(
-          new MouseEvent("click", {
+          new ControlledPointerEvent("click", {
             bubbles: true,
             cancelable: true,
             button: 0,
             detail: 1,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
           }),
         );
       });
@@ -1082,12 +1164,13 @@ describe("CommitDialog visit authority", () => {
     }
   });
 
-  it("rejects an in-flight forged React wrapper before the genuine delegated wrapper closes", async () => {
+  it("seals the genuine React nomination against later body-listener wrapper forgery", async () => {
     const current = actions();
+    const reopened = actions();
     const doc = repoDocument("doc-react-delivery", "docs/react-delivery.md");
     const { host, root } = createHost();
-    let forged: Record<string, unknown> | null = null;
-    let retryForgery: EventListener | null = null;
+    let genuineWrapper: React.MouseEvent<HTMLButtonElement> | null = null;
+    let forgeAfterReact: EventListener | null = null;
 
     try {
       await render(root, { visit: "current", doc, actions: current });
@@ -1102,58 +1185,75 @@ describe("CommitDialog visit authority", () => {
       const directBridge = reactProp<
         (event: React.MouseEvent<HTMLDivElement>) => void
       >(bridge, "onClick");
-      retryForgery = () => {
-        if (!forged) return;
-        forged.currentTarget = bridge;
-        directBridge(forged as unknown as React.MouseEvent<HTMLDivElement>);
-        forged.currentTarget = null;
-      };
-      document.body.addEventListener("click", retryForgery);
       setReactProp(
         cancel,
         "onClick",
         (event: React.MouseEvent<HTMLButtonElement>) => {
-          forged = Object.assign(
-            Object.create(Object.getPrototypeOf(event)) as Record<
-              string,
-              unknown
-            >,
-            {
-              _reactName: "onClick",
-              type: "click",
-              nativeEvent: event.nativeEvent,
-              currentTarget: event.currentTarget,
-              target: event.target,
-              eventPhase: event.eventPhase,
-              bubbles: event.bubbles,
-              cancelable: event.cancelable,
-              defaultPrevented: false,
-              button: event.button,
-              preventDefault: () => undefined,
-              isDefaultPrevented: () => false,
-              isPropagationStopped: () => false,
-              persist: () => undefined,
-            },
-          );
-          genuine(forged as unknown as React.MouseEvent<HTMLButtonElement>);
-          forged.currentTarget = bridge;
-          directBridge(forged as unknown as React.MouseEvent<HTMLDivElement>);
-          forged.currentTarget = null;
-          expect(current.onOpenChange).not.toHaveBeenCalled();
+          genuineWrapper = event;
+          genuine(event);
         },
       );
+      forgeAfterReact = (nativeEvent) => {
+        if (!genuineWrapper) return;
+        const genuineRecord = genuineWrapper as unknown as Record<string, unknown>;
+        genuineRecord.currentTarget = bridge;
+        directBridge(genuineWrapper as unknown as React.MouseEvent<HTMLDivElement>);
+        genuineRecord.currentTarget = null;
 
-      fireEvent.click(cancel);
-      expect(current.onOpenChange).not.toHaveBeenCalled();
+        const forged = Object.assign(
+          Object.create(Object.getPrototypeOf(genuineWrapper)) as Record<
+            string,
+            unknown
+          >,
+          {
+            _reactName: "onClick",
+            type: "click",
+            nativeEvent,
+            currentTarget: cancel,
+            target: cancel,
+            eventPhase: nativeEvent.eventPhase,
+            bubbles: nativeEvent.bubbles,
+            cancelable: nativeEvent.cancelable,
+            defaultPrevented: false,
+            button: 0,
+            altKey: false,
+            ctrlKey: false,
+            metaKey: false,
+            shiftKey: false,
+            preventDefault: () => undefined,
+            isDefaultPrevented: () => false,
+            isPropagationStopped: () => false,
+            persist: () => undefined,
+          },
+        );
+        genuine(forged as unknown as React.MouseEvent<HTMLButtonElement>);
+        forged.currentTarget = bridge;
+        directBridge(forged as unknown as React.MouseEvent<HTMLDivElement>);
+        (forged as Record<string, unknown>).currentTarget = null;
+      };
+      document.body.addEventListener("click", forgeAfterReact);
 
-      document.body.removeEventListener("click", retryForgery);
-      retryForgery = null;
-      setReactProp(cancel, "onClick", genuine);
       fireEvent.click(cancel);
       expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+
+      document.body.removeEventListener("click", forgeAfterReact);
+      forgeAfterReact = null;
+      await render(root, {
+        visit: "closed",
+        doc,
+        actions: current,
+        open: false,
+      });
+      await render(root, {
+        visit: "reopened",
+        doc: { ...doc },
+        actions: reopened,
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(reopened.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     } finally {
-      if (retryForgery) {
-        document.body.removeEventListener("click", retryForgery);
+      if (forgeAfterReact) {
+        document.body.removeEventListener("click", forgeAfterReact);
       }
       await act(async () => root.unmount());
       host.remove();
