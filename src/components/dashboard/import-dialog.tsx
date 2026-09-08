@@ -151,7 +151,7 @@ interface IgnoredImportPublication {
   readonly text: string | null;
 }
 
-interface ImportResultPublication {
+interface ImportResultAuthority {
   readonly mount: symbol;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -163,36 +163,177 @@ interface ImportResultPublication {
   readonly footer: ReactNode;
 }
 
-interface ImportRowElements {
-  item: HTMLLIElement | null;
-  open: HTMLAnchorElement | null;
+type ImportResultActionKind = "open" | "retry";
+
+interface ImportResultActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly controlIdentity: symbol;
+  readonly kind: ImportResultActionKind;
+  readonly rowIndex: number | null;
+}
+
+interface ImportResultControlPublication<T extends HTMLElement> {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly kind: ImportResultActionKind;
+  readonly rowIndex: number | null;
+  readonly element: T;
+  readonly action: ImportResultActionPublication;
+}
+
+interface ImportResultRowPublication {
+  readonly identity: symbol;
+  readonly authority: ImportItemPublication;
+  readonly item: HTMLLIElement;
+  readonly open: ImportResultControlPublication<HTMLAnchorElement> | null;
+}
+
+interface ImportResultDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly ignoredAttributes: readonly string[];
+  readonly children: readonly ImportResultDomSnapshot[];
+}
+
+interface ImportResultPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface ImportResultPublication {
+  readonly identity: symbol;
+  readonly authority: ImportResultAuthority;
+  readonly ownerDocument: Document;
+  readonly dialog: HTMLDivElement;
+  readonly root: HTMLDivElement;
+  readonly list: HTMLUListElement;
+  readonly rows: readonly ImportResultRowPublication[];
+  readonly ignored: HTMLParagraphElement | null;
+  readonly retry: ImportResultControlPublication<HTMLButtonElement> | null;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface ElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+class ElementOwner<T extends HTMLElement> implements ElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: ElementOwnerView,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+      last: HTMLElement | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    if (element && this.last && element !== this.last && !element.isConnected) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+class CurrentCell<T> {
+  constructor(public current: T) {}
+}
+
+interface ImportResultReplay {
+  readonly source: ImportResultPublication;
+  readonly dom: ImportResultDomSnapshot;
+  readonly rootPlacement: ImportResultPlacement;
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface ImportResultCells {
+  readonly active: CurrentCell<ImportResultPublication | null>;
+  readonly successorOf: CurrentCell<ImportResultPublication | null>;
+  readonly replay: CurrentCell<ImportResultReplay | null>;
+  readonly retiredPublications: WeakSet<ImportResultPublication>;
+  readonly retiredRows: WeakSet<ImportResultRowPublication>;
+  readonly retiredControls: WeakSet<ImportResultControlPublication<HTMLElement>>;
+  readonly retiredActions: WeakSet<ImportResultActionPublication>;
+  readonly claimedOpenPublications: WeakSet<ImportResultPublication>;
+  readonly claimedRetryPublications: WeakSet<ImportResultPublication>;
+  readonly claimedRows: WeakSet<ImportResultRowPublication>;
+  readonly claimedControls: WeakSet<ImportResultControlPublication<HTMLElement>>;
+  readonly claimedActions: WeakSet<ImportResultActionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+}
+
+interface RefReplay {
+  readonly owner: ElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
 }
 
 interface ImportResultPublicationRuntime {
-  active: boolean;
-  dialog: HTMLDivElement | null;
-  root: HTMLDivElement | null;
-  list: HTMLUListElement | null;
-  rows: ImportRowElements[];
-  ignored: HTMLParagraphElement | null;
-  retry: HTMLButtonElement | null;
+  readonly publication: ImportResultPublication;
+  readonly publish: (
+    dom: ImportResultDomSnapshot,
+    rootPlacement: ImportResultPlacement,
+    owners: readonly ElementOwnerView[],
+  ) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly replayDomUnchanged: () => boolean;
+  readonly releaseReplayGuard: () => void;
+  readonly snapshot: () => ImportResultDomSnapshot | null;
+  readonly rootPlacement: () => ImportResultPlacement | null;
+}
+
+interface ImportResultPublicationSet {
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly captureIgnored: (element: HTMLParagraphElement | null) => void;
+  readonly captureRetry: (element: HTMLButtonElement | null) => void;
+  readonly rows: readonly {
+    readonly authority: ImportItemPublication;
+    readonly captureItem: (element: HTMLLIElement | null) => void;
+    readonly captureOpen: (element: HTMLAnchorElement | null) => void;
+  }[];
+  readonly establish: () => void | (() => void);
+  readonly onOpen: (
+    row: ImportItemPublication,
+    event: ReactMouseEvent<HTMLAnchorElement>,
+  ) => void;
+  readonly onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
 function ImportResultPublicationBoundary({
   publication,
-  publish,
-  retire,
   children,
 }: {
-  publication: ImportResultPublication;
-  publish: (publication: ImportResultPublication) => void;
-  retire: (publication: ImportResultPublication) => void;
+  publication: ImportResultPublicationSet;
   children: ReactNode;
 }) {
-  useLayoutEffect(() => {
-    publish(publication);
-    return () => retire(publication);
-  }, [publication, publish, retire]);
+  useLayoutEffect(() => publication.establish(), [publication]);
   return children;
 }
 
@@ -213,6 +354,10 @@ function snapshotImportItem(item: ImportItem, index: number): ImportItemPublicat
   });
 }
 
+const IMPORT_DIALOG_TITLE = "Import files";
+const IMPORT_DIALOG_DESCRIPTION =
+  "Each file becomes a new document. Images dropped with a Markdown file are attached to it.";
+
 function ignoredImportText(names: readonly string[]): string | null {
   if (names.length === 0) return null;
   const count = names.length === 1 ? "1 file" : `${names.length} files`;
@@ -221,11 +366,13 @@ function ignoredImportText(names: readonly string[]): string | null {
   return `Skipped ${count} that ${verb} not Markdown, text, HTML or an image: ${names.slice(0, 4).join(", ")}${overflow}`;
 }
 
-function importResultFactsAreCurrent(publication: ImportResultPublication): boolean {
-  const { sourceItems, items } = publication;
+function importResultFactsAreCurrent(authority: ImportResultAuthority): boolean {
+  const { sourceItems, items } = authority;
   if (sourceItems.length !== items.length) return false;
 
-  for (const row of items) {
+  for (let index = 0; index < items.length; index++) {
+    const row = items[index];
+    if (!row || row.index !== index || items[index] !== row) return false;
     const item = sourceItems[row.index];
     if (
       item !== row.source ||
@@ -236,7 +383,8 @@ function importResultFactsAreCurrent(publication: ImportResultPublication): bool
       item.error !== row.error ||
       item.retry !== row.retry ||
       item.warnings !== row.sourceWarnings ||
-      item.warnings.length !== row.warnings.length
+      item.warnings.length !== row.warnings.length ||
+      row.href !== (row.id ? `/d/${row.id}` : null)
     ) {
       return false;
     }
@@ -247,13 +395,13 @@ function importResultFactsAreCurrent(publication: ImportResultPublication): bool
 
   const busy = sourceItems.some((item) => item.status === "uploading");
   const retry = sourceItems.find((item) => item.retry)?.retry;
-  if (busy !== publication.busy || retry !== publication.retry) return false;
+  if (busy !== authority.busy || retry !== authority.retry) return false;
   if (retry) {
     if (sourceItems.some((item) => item.retry && item.retry !== retry)) return false;
     if (!busy && !sourceItems.some((item) => item.status === "error" && item.retry === retry)) return false;
   }
 
-  const { source, names, text } = publication.ignored;
+  const { source, names, text } = authority.ignored;
   if (source.length !== names.length || text !== ignoredImportText(names)) return false;
   for (let index = 0; index < names.length; index++) {
     if (source[index] !== names[index]) return false;
@@ -261,20 +409,982 @@ function importResultFactsAreCurrent(publication: ImportResultPublication): bool
   return true;
 }
 
-function isExactNativeResultClick<T extends HTMLElement>(event: ReactMouseEvent<T>, control: T): boolean {
-  const ownerWindow = control.ownerDocument.defaultView;
-  const target = event.target;
+function importResultAuthoritiesMatch(
+  previous: ImportResultAuthority,
+  current: ImportResultAuthority,
+): boolean {
   return (
-    event.type === "click" &&
-    ownerWindow !== null &&
-    event.nativeEvent instanceof ownerWindow.MouseEvent &&
-    event.nativeEvent.type === "click" &&
-    event.currentTarget === control &&
-    target instanceof ownerWindow.Node &&
-    target === event.nativeEvent.target &&
-    target === control &&
-    control.contains(target)
+    previous.mount === current.mount &&
+    previous.open === current.open &&
+    previous.onOpenChange === current.onOpenChange &&
+    previous.sourceItems === current.sourceItems &&
+    previous.busy === current.busy &&
+    previous.retry === current.retry &&
+    previous.footer === current.footer &&
+    previous.ignored.source === current.ignored.source &&
+    previous.ignored.text === current.ignored.text &&
+    previous.ignored.names.length === current.ignored.names.length &&
+    previous.ignored.names.every((name, index) => current.ignored.names[index] === name) &&
+    previous.items.length === current.items.length &&
+    previous.items.every((row, index) => {
+      const candidate = current.items[index];
+      return Boolean(
+        candidate &&
+          row.index === candidate.index &&
+          row.source === candidate.source &&
+          row.sourceWarnings === candidate.sourceWarnings &&
+          row.name === candidate.name &&
+          row.status === candidate.status &&
+          row.id === candidate.id &&
+          row.title === candidate.title &&
+          row.error === candidate.error &&
+          row.retry === candidate.retry &&
+          row.href === candidate.href &&
+          row.warnings.length === candidate.warnings.length &&
+          row.warnings.every((warning, warningIndex) => candidate.warnings[warningIndex] === warning),
+      );
+    }) &&
+    importResultFactsAreCurrent(previous) &&
+    importResultFactsAreCurrent(current)
   );
+}
+
+function snapshotAttributes(
+  node: Node,
+  ignored: readonly string[] = [],
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .filter(({ name }) => !ignored.includes(name))
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotImportResultDom(
+  node: Node,
+  dialog: HTMLDivElement,
+): ImportResultDomSnapshot {
+  const ignoredAttributes =
+    node === dialog
+      ? Object.freeze(["aria-labelledby", "aria-describedby", "style"])
+      : Object.freeze([] as string[]);
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotAttributes(node, ignoredAttributes),
+    ignoredAttributes,
+    children: Object.freeze(
+      [...node.childNodes].map((child) => snapshotImportResultDom(child, dialog)),
+    ),
+  });
+}
+
+function importResultDomMatches(snapshot: ImportResultDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotAttributes(node, snapshot.ignoredAttributes);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node && importResultDomMatches(child),
+    )
+  );
+}
+
+function captureImportResultPlacement(
+  node: HTMLElement,
+): ImportResultPlacement | null {
+  const parent = node.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: node.ownerDocument,
+    parent,
+    previousSibling: node.previousSibling,
+    nextSibling: node.nextSibling,
+  });
+}
+
+function importResultPlacementMatches(
+  node: HTMLElement,
+  placement: ImportResultPlacement,
+): boolean {
+  return (
+    node.ownerDocument === placement.document &&
+    node.parentNode === placement.parent &&
+    node.previousSibling === placement.previousSibling &&
+    node.nextSibling === placement.nextSibling
+  );
+}
+
+function isEffectivelyEnabled(element: HTMLElement): boolean {
+  if (
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled")?.toLowerCase() === "true" ||
+    element.getAttribute("aria-busy")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+    if (
+      current.hasAttribute("inert") ||
+      current.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function createImportResultPublication(
+  authority: ImportResultAuthority,
+  cells: ImportResultCells,
+  requestSuccessor: () => void,
+): ImportResultPublicationSet {
+  const mount = authority.mount;
+  const open = authority.open;
+  const onOpenChange = authority.onOpenChange;
+  const sourceItems = authority.sourceItems;
+  const items = authority.items;
+  const busy = authority.busy;
+  const retry = authority.retry;
+  const ignoredSource = authority.ignored.source;
+  const ignoredNames = authority.ignored.names;
+  const ignoredText = authority.ignored.text;
+  const footer = authority.footer;
+  let currentRuntime: ImportResultPublicationRuntime | null = null;
+  let lastRuntime: ImportResultPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const factsAreCurrent = () =>
+    Object.isFrozen(authority) &&
+    Object.isFrozen(authority.items) &&
+    Object.isFrozen(authority.ignored) &&
+    Object.isFrozen(authority.ignored.names) &&
+    authority.items.every(
+      (row) => Object.isFrozen(row) && Object.isFrozen(row.warnings),
+    ) &&
+    authority.mount === mount &&
+    authority.open === open &&
+    authority.onOpenChange === onOpenChange &&
+    authority.sourceItems === sourceItems &&
+    authority.items === items &&
+    authority.busy === busy &&
+    authority.retry === retry &&
+    authority.ignored.source === ignoredSource &&
+    authority.ignored.names === ignoredNames &&
+    authority.ignored.text === ignoredText &&
+    authority.footer === footer &&
+    importResultFactsAreCurrent(authority);
+
+  const onElementChange = (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      currentRuntime?.retireForElement();
+    }
+    if (
+      runtime?.isExactElementReplay() &&
+      cells.successorOf.current === runtime.publication
+    ) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+
+  const rootOwner = new ElementOwner<HTMLDivElement>(onElementChange);
+  const listOwner = new ElementOwner<HTMLUListElement>(onElementChange);
+  const ignoredOwner = new ElementOwner<HTMLParagraphElement>(onElementChange);
+  const retryOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
+  const rowOwners = Object.freeze(
+    items.map((row) => {
+      const itemOwner = new ElementOwner<HTMLLIElement>(onElementChange);
+      const openOwner = new ElementOwner<HTMLAnchorElement>(onElementChange);
+      return Object.freeze({
+        authority: row,
+        captureItem: itemOwner.capture,
+        captureOpen: openOwner.capture,
+        itemOwner,
+        openOwner,
+      });
+    }),
+  );
+
+  const expectedOwners = (): readonly ElementOwnerView[] => [
+    rootOwner,
+    listOwner,
+    ...rowOwners.flatMap(({ authority: row, itemOwner, openOwner }) =>
+      row.href ? [itemOwner, openOwner] : [itemOwner],
+    ),
+    ...(ignoredText ? [ignoredOwner] : []),
+    ...(retry ? [retryOwner] : []),
+  ];
+
+  const exactDomIsCurrent = (allowPendingDialogAttributes = false) => {
+    const root = rootOwner.element();
+    const list = listOwner.element();
+    const dialog = root?.parentElement;
+    const ownerDocument = root?.ownerDocument;
+    const ownerWindow = ownerDocument?.defaultView;
+    if (
+      !authority.open ||
+      !factsAreCurrent() ||
+      !root ||
+      !root.isConnected ||
+      !ownerDocument ||
+      !ownerWindow ||
+      !(dialog instanceof ownerWindow.HTMLDivElement) ||
+      !dialog.isConnected ||
+      dialog.ownerDocument !== ownerDocument ||
+      dialog.getAttribute("role") !== "dialog" ||
+      (dialog.style.pointerEvents !== "auto" &&
+        (!allowPendingDialogAttributes || dialog.style.pointerEvents !== "")) ||
+      dialog.children.length !== 2 ||
+      dialog.lastElementChild !== root ||
+      !(root instanceof ownerWindow.HTMLDivElement) ||
+      root.parentElement !== dialog ||
+      root.dataset.testid !== "import-dialog" ||
+      !(list instanceof ownerWindow.HTMLUListElement) ||
+      !list.isConnected ||
+      list.ownerDocument !== ownerDocument ||
+      list.parentElement !== root ||
+      root.firstElementChild !== list ||
+      list.className !== "import-list" ||
+      list.dataset.testid !== "import-list" ||
+      list.children.length !== items.length
+    ) {
+      return false;
+    }
+
+    const labelledBy = dialog.getAttribute("aria-labelledby");
+    const describedBy = dialog.getAttribute("aria-describedby");
+    const title = labelledBy ? ownerDocument.getElementById(labelledBy) : null;
+    const description = describedBy ? ownerDocument.getElementById(describedBy) : null;
+    const header = dialog.firstElementChild;
+    const pendingDialogAttributes =
+      allowPendingDialogAttributes &&
+      labelledBy === null &&
+      describedBy === null &&
+      header?.querySelector("h2")?.textContent === IMPORT_DIALOG_TITLE &&
+      header?.querySelector("p")?.textContent === IMPORT_DIALOG_DESCRIPTION;
+    if (
+      (!pendingDialogAttributes &&
+        (!title ||
+          !dialog.contains(title) ||
+          title.textContent !== IMPORT_DIALOG_TITLE ||
+          !description ||
+          !dialog.contains(description) ||
+          description.textContent !== IMPORT_DIALOG_DESCRIPTION)) ||
+      !(header instanceof ownerWindow.HTMLDivElement) ||
+      header.className !== "mb-4 flex items-start justify-between gap-4" ||
+      header.nextElementSibling !== root
+    ) {
+      return false;
+    }
+
+    let openCount = 0;
+    for (const owned of rowOwners) {
+      const row = owned.authority;
+      const item = owned.itemOwner.element();
+      const anchor = owned.openOwner.element();
+      if (
+        items[row.index] !== row ||
+        !(item instanceof ownerWindow.HTMLLIElement) ||
+        !item.isConnected ||
+        item.ownerDocument !== ownerDocument ||
+        item.parentElement !== list ||
+        list.children.item(row.index) !== item ||
+        item.className !== "import-item" ||
+        item.dataset.testid !== "import-item" ||
+        item.dataset.status !== row.status ||
+        item.children.length !== (row.href ? 3 : 2) ||
+        item.firstElementChild?.getAttribute("aria-label") !==
+          (row.status === "uploading"
+            ? "Importing"
+            : row.status === "done"
+              ? "Imported"
+              : "Failed")
+      ) {
+        return false;
+      }
+      const details = item.children.item(1);
+      const name = details?.querySelector("span[title]");
+      const warnings = details?.querySelectorAll('[data-testid="import-warning"]');
+      if (
+        !(details instanceof ownerWindow.HTMLDivElement) ||
+        details.className !== "min-w-0 flex-1" ||
+        name?.getAttribute("title") !== row.name ||
+        !warnings ||
+        warnings.length !== row.warnings.length ||
+        row.warnings.some(
+          (warning, warningIndex) =>
+            warnings.item(warningIndex).textContent?.trim() !== warning,
+        )
+      ) {
+        return false;
+      }
+
+      if (row.href) {
+        openCount++;
+        if (
+          !(anchor instanceof ownerWindow.HTMLAnchorElement) ||
+          !anchor.isConnected ||
+          anchor.ownerDocument !== ownerDocument ||
+          anchor.parentElement !== item ||
+          item.lastElementChild !== anchor ||
+          anchor.getAttribute("href") !== row.href ||
+          anchor.className !== "import-open" ||
+          anchor.dataset.testid !== "import-open" ||
+          anchor.textContent?.trim() !== "Open" ||
+          !isEffectivelyEnabled(anchor) ||
+          item.querySelectorAll('[data-testid="import-open"]').length !== 1
+        ) {
+          return false;
+        }
+      } else if (
+        anchor !== null ||
+        item.querySelector('[data-testid="import-open"]')
+      ) {
+        return false;
+      }
+    }
+    if (list.querySelectorAll('[data-testid="import-open"]').length !== openCount) {
+      return false;
+    }
+
+    let rootIndex = 1;
+    const ignoredElement = ignoredOwner.element();
+    if (ignoredText) {
+      if (
+        !(ignoredElement instanceof ownerWindow.HTMLParagraphElement) ||
+        !ignoredElement.isConnected ||
+        ignoredElement.ownerDocument !== ownerDocument ||
+        ignoredElement.parentElement !== root ||
+        root.children.item(rootIndex++) !== ignoredElement ||
+        ignoredElement.className !== "mt-3 text-xs text-ink-3" ||
+        ignoredElement.dataset.testid !== "import-ignored" ||
+        ignoredElement.textContent !== ignoredText ||
+        root.querySelectorAll('[data-testid="import-ignored"]').length !== 1
+      ) {
+        return false;
+      }
+    } else if (
+      ignoredElement !== null ||
+      root.querySelector('[data-testid="import-ignored"]')
+    ) {
+      return false;
+    }
+
+    const retryElement = retryOwner.element();
+    if (retry) {
+      if (
+        !(retryElement instanceof ownerWindow.HTMLButtonElement) ||
+        !retryElement.isConnected ||
+        retryElement.ownerDocument !== ownerDocument ||
+        retryElement.parentElement !== root ||
+        root.children.item(rootIndex) !== retryElement ||
+        retryElement.type !== "button" ||
+        retryElement.className !== "btn btn-sm btn-outline mt-4" ||
+        retryElement.disabled !== busy ||
+        retryElement.dataset.testid !== "import-retry" ||
+        retryElement.textContent?.trim() !== "Retry failed" ||
+        (!busy && !isEffectivelyEnabled(retryElement)) ||
+        root.querySelectorAll('[data-testid="import-retry"]').length !== 1
+      ) {
+        return false;
+      }
+    } else if (
+      retryElement !== null ||
+      root.querySelector('[data-testid="import-retry"]')
+    ) {
+      return false;
+    }
+    return true;
+  };
+
+  const publicationWasClaimed = (publication: ImportResultPublication) =>
+    cells.claimedOpenPublications.has(publication) ||
+    cells.claimedRetryPublications.has(publication);
+
+  const requestReplaySuccessor = (runtime: ImportResultPublicationRuntime) => {
+    const dom = runtime.snapshot();
+    const rootPlacement = runtime.rootPlacement();
+    const currentFacts = factsAreCurrent();
+    const currentDom = exactDomIsCurrent(true);
+    const publishedDom = runtime.publishedDomMatches();
+    if (
+      successorRequested ||
+      !dom ||
+      !rootPlacement ||
+      cells.successorOf.current !== runtime.publication ||
+      publicationWasClaimed(runtime.publication) ||
+      !currentFacts ||
+      !currentDom ||
+      !publishedDom
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: runtime.publication,
+      dom,
+      rootPlacement,
+      unchanged: runtime.replayDomUnchanged,
+      release: runtime.releaseReplayGuard,
+    });
+    requestSuccessor();
+  };
+
+  const nativeClick = <T extends HTMLElement>(
+    publication: ImportResultPublication,
+    event: ReactMouseEvent<T>,
+    control: T,
+  ): MouseEvent | null => {
+    if (!event || typeof event !== "object") return null;
+    const ownerWindow = publication.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !ownerWindow ||
+      event.type !== "click" ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      event.currentTarget !== control ||
+      nativeEvent.target !== target ||
+      !(target instanceof ownerWindow.Node) ||
+      target.ownerDocument !== publication.ownerDocument ||
+      target !== control ||
+      !control.isConnected ||
+      !isEffectivelyEnabled(control)
+    ) {
+      return null;
+    }
+    return nativeEvent;
+  };
+
+  const eventsAreUnclaimed = (
+    reactEvent: object,
+    nativeEvent: Event,
+  ) =>
+    !cells.claimedReactEvents.has(reactEvent) &&
+    !cells.claimedNativeEvents.has(nativeEvent);
+
+  const claimOpen = (
+    row: ImportItemPublication,
+    event: ReactMouseEvent<HTMLAnchorElement>,
+  ): ImportResultPublication | null => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const publishedRow =
+      publication && items[row.index] === row
+        ? publication.rows[row.index]
+        : null;
+    const control = publishedRow?.open;
+    const action = control?.action;
+    const source = event?.currentTarget;
+    if (
+      !runtime ||
+      !publication ||
+      runtime.isRetired() ||
+      cells.retiredPublications.has(publication) ||
+      cells.active.current !== publication ||
+      publication.authority !== authority ||
+      publishedRow?.authority !== row ||
+      !control ||
+      !action ||
+      source !== control.element ||
+      cells.retiredRows.has(publishedRow) ||
+      cells.retiredControls.has(control) ||
+      cells.retiredActions.has(action) ||
+      cells.claimedOpenPublications.has(publication) ||
+      cells.claimedRows.has(publishedRow) ||
+      cells.claimedControls.has(control) ||
+      cells.claimedActions.has(action) ||
+      action.publicationIdentity !== publication.identity ||
+      action.controlIdentity !== control.identity ||
+      action.kind !== "open" ||
+      action.rowIndex !== row.index ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return null;
+    }
+    const nativeEvent = nativeClick(publication, event, source);
+    if (!nativeEvent || !eventsAreUnclaimed(event, nativeEvent)) return null;
+    cells.claimedOpenPublications.add(publication);
+    cells.claimedRows.add(publishedRow);
+    cells.claimedControls.add(control);
+    cells.claimedActions.add(action);
+    cells.claimedReactEvents.add(event);
+    cells.claimedNativeEvents.add(nativeEvent);
+    return publication;
+  };
+
+  const claimRetry = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ): (() => void) | null => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const control = publication?.retry;
+    const action = control?.action;
+    const source = event?.currentTarget;
+    if (
+      !runtime ||
+      !publication ||
+      runtime.isRetired() ||
+      cells.retiredPublications.has(publication) ||
+      cells.active.current !== publication ||
+      publication.authority !== authority ||
+      !authority.retry ||
+      authority.busy ||
+      !control ||
+      !action ||
+      source !== control.element ||
+      source.disabled ||
+      cells.retiredControls.has(control) ||
+      cells.retiredActions.has(action) ||
+      cells.claimedRetryPublications.has(publication) ||
+      cells.claimedControls.has(control) ||
+      cells.claimedActions.has(action) ||
+      action.publicationIdentity !== publication.identity ||
+      action.controlIdentity !== control.identity ||
+      action.kind !== "retry" ||
+      action.rowIndex !== null ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return null;
+    }
+    const nativeEvent = nativeClick(publication, event, source);
+    if (!nativeEvent || !eventsAreUnclaimed(event, nativeEvent)) return null;
+    cells.claimedRetryPublications.add(publication);
+    cells.claimedControls.add(control);
+    cells.claimedActions.add(action);
+    cells.claimedReactEvents.add(event);
+    cells.claimedNativeEvents.add(nativeEvent);
+    return authority.retry;
+  };
+
+  const createRuntime = (): ImportResultPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    const root = rootOwner.element();
+    const list = listOwner.element();
+    const dialog = root?.parentElement;
+    const ignoredElement = ignoredOwner.element();
+    const retryElement = retryOwner.element();
+    const rootPlacement = root
+      ? captureImportResultPlacement(root)
+      : null;
+    if (
+      !root ||
+      !list ||
+      !(dialog instanceof HTMLDivElement) ||
+      !rootPlacement ||
+      rowOwners.some(
+        ({ authority: row, itemOwner, openOwner }) =>
+          !itemOwner.element() || (row.href ? !openOwner.element() : Boolean(openOwner.element())),
+      ) ||
+      (ignoredText ? !ignoredElement : Boolean(ignoredElement)) ||
+      (retry ? !retryElement : Boolean(retryElement))
+    ) {
+      return null;
+    }
+
+    const identity = Symbol("import-result-publication");
+    const control = <T extends HTMLElement>(
+      kind: ImportResultActionKind,
+      rowIndex: number | null,
+      element: T,
+    ): ImportResultControlPublication<T> => {
+      const controlIdentity = Symbol(`import-result-${kind}-control`);
+      return Object.freeze({
+        identity: controlIdentity,
+        publicationIdentity: identity,
+        kind,
+        rowIndex,
+        element,
+        action: Object.freeze({
+          identity: Symbol(`import-result-${kind}-action`),
+          publicationIdentity: identity,
+          controlIdentity,
+          kind,
+          rowIndex,
+        }),
+      });
+    };
+    const publishedRows = Object.freeze(
+      rowOwners.map((owned) => {
+        const item = owned.itemOwner.element();
+        const openElement = owned.openOwner.element();
+        if (!item || (owned.authority.href && !openElement)) {
+          throw new Error("Cannot publish an import row without every committed ref");
+        }
+        return Object.freeze({
+          identity: Symbol("import-result-row"),
+          authority: owned.authority,
+          item,
+          open:
+            owned.authority.href && openElement
+              ? control("open", owned.authority.index, openElement)
+              : null,
+        });
+      }),
+    );
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let domChanged = false;
+    let domObserver: MutationObserver | null = null;
+    let domSnapshot: ImportResultDomSnapshot | null = null;
+    let publishedRootPlacement: ImportResultPlacement | null = null;
+    let replayRefs: RefReplay[] = [];
+    let invalidReplay = false;
+    const pendingDialogAttributes = new Set(
+      ["aria-labelledby", "aria-describedby", "style"].filter(
+        (attribute) => dialog.getAttribute(attribute) === null,
+      ),
+    );
+    const publication: ImportResultPublication = Object.freeze({
+      identity,
+      authority,
+      ownerDocument: root.ownerDocument,
+      dialog,
+      root,
+      list,
+      rows: publishedRows,
+      ignored: ignoredElement,
+      retry: retry && retryElement ? control("retry", null, retryElement) : null,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const exactInitialDialogAriaWrite = (record: MutationRecord) => {
+      const attribute = record.attributeName;
+      if (
+        record.type !== "attributes" ||
+        record.target !== dialog ||
+        !attribute ||
+        !pendingDialogAttributes.has(attribute) ||
+        record.oldValue !== null
+      ) {
+        return false;
+      }
+      if (attribute === "style") {
+        if (dialog.style.pointerEvents !== "auto") return false;
+        pendingDialogAttributes.delete(attribute);
+        return true;
+      }
+      const id = dialog.getAttribute(attribute);
+      const referenced = id ? publication.ownerDocument.getElementById(id) : null;
+      const expected =
+        attribute === "aria-labelledby"
+          ? IMPORT_DIALOG_TITLE
+          : IMPORT_DIALOG_DESCRIPTION;
+      if (!referenced || !dialog.contains(referenced) || referenced.textContent !== expected) {
+        return false;
+      }
+      pendingDialogAttributes.delete(attribute);
+      return true;
+    };
+    const mutationIsRelevant = (record: MutationRecord) => {
+      if (exactInitialDialogAriaWrite(record)) return false;
+      if (record.target === dialog || dialog.contains(record.target)) return true;
+      if (
+        record.type === "attributes" &&
+        (record.attributeName === "inert" ||
+          record.attributeName === "aria-disabled" ||
+          record.attributeName === "aria-busy" ||
+          record.attributeName === "disabled")
+      ) {
+        return dialog.contains(record.target) || record.target.contains(dialog);
+      }
+      if (record.type !== "childList") return false;
+      return [...record.addedNodes, ...record.removedNodes].some(
+        (node) => node === dialog || node.contains(dialog),
+      );
+    };
+    const recordMutations = (records: readonly MutationRecord[]) => {
+      const relevant = records.map(mutationIsRelevant);
+      if (!domChanged && relevant.some(Boolean)) domChanged = true;
+      return domChanged;
+    };
+    const releaseReplayGuard = () => {
+      if (!domObserver) return;
+      recordMutations(domObserver.takeRecords());
+      domObserver.disconnect();
+      domObserver = null;
+    };
+    const noteMutations = (records: readonly MutationRecord[]) => {
+      if (recordMutations(records)) retire("element");
+    };
+    const retire = (reason: Retirement) => {
+      if (retired) return false;
+      if (domObserver) recordMutations(domObserver.takeRecords());
+      retired = true;
+      retirement = reason;
+      cells.retiredPublications.add(publication);
+      for (const row of publication.rows) {
+        cells.retiredRows.add(row);
+        if (row.open) {
+          cells.retiredControls.add(row.open);
+          cells.retiredActions.add(row.open.action);
+        }
+      }
+      if (publication.retry) {
+        cells.retiredControls.add(publication.retry);
+        cells.retiredActions.add(publication.retry.action);
+      }
+      const wasActive = cells.active.current === publication;
+      if (wasActive) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "layout") {
+        queueMicrotask(() => {
+          if (!domObserver) return;
+          recordMutations(domObserver.takeRecords());
+          domChanged = true;
+          domObserver.disconnect();
+          domObserver = null;
+        });
+      } else {
+        releaseReplayGuard();
+      }
+      return wasActive;
+    };
+    const publishedDomMatches = () => {
+      if (domObserver) noteMutations(domObserver.takeRecords());
+      return Boolean(
+        !domChanged &&
+          domSnapshot &&
+          publishedRootPlacement &&
+          rootOwner.element() === root &&
+          listOwner.element() === list &&
+          dialog.isConnected &&
+          root.isConnected &&
+          importResultPlacementMatches(root, publishedRootPlacement) &&
+          importResultDomMatches(domSnapshot),
+      );
+    };
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+    const runtime: ImportResultPublicationRuntime = Object.freeze({
+      publication,
+      publish: (
+        dom: ImportResultDomSnapshot,
+        nextRootPlacement: ImportResultPlacement,
+        owners: readonly ElementOwnerView[],
+      ) => {
+        established = true;
+        domSnapshot = dom;
+        publishedRootPlacement = nextRootPlacement;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error("Cannot publish ImportDialog without every committed ref");
+          }
+          return { owner, element, detached: false, reattached: false };
+        });
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        const MutationObserverConstructor =
+          publication.ownerDocument.defaultView?.MutationObserver;
+        if (MutationObserverConstructor) {
+          domObserver = new MutationObserverConstructor((records) => {
+            noteMutations(records);
+          });
+          domObserver.observe(publication.ownerDocument, {
+            attributeOldValue: true,
+            attributes: true,
+            characterData: true,
+            childList: true,
+            subtree: true,
+          });
+        }
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      noteRef: (
+        owner: ElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (
+          element === null &&
+          previous === proof.element &&
+          proof.element.isConnected
+        ) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached &&
+          proof.element.isConnected
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => retired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        retired &&
+        retirement === "element" &&
+        layoutRetired &&
+        established &&
+        refsHaveExactReplay() &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        retired &&
+        retirement === "layout" &&
+        established &&
+        refsHaveExactReplay() &&
+        publishedDomMatches(),
+      replayDomUnchanged: () => {
+        if (!domObserver) return false;
+        recordMutations(domObserver.takeRecords());
+        return Boolean(
+          !domChanged &&
+            domSnapshot &&
+            publishedRootPlacement &&
+            dialog.isConnected &&
+            root.isConnected &&
+            importResultPlacementMatches(root, publishedRootPlacement) &&
+            importResultDomMatches(domSnapshot),
+        );
+      },
+      releaseReplayGuard,
+      snapshot: () => domSnapshot,
+      rootPlacement: () => publishedRootPlacement,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() ||
+          lastRuntime.isExactElementReplay()) &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent() || !exactDomIsCurrent(true)) return undefined;
+    const root = rootOwner.element();
+    const dialog = root?.parentElement;
+    if (!root || !(dialog instanceof HTMLDivElement)) return undefined;
+    const rootPlacement = captureImportResultPlacement(root);
+    if (!rootPlacement) return undefined;
+    const replay = cells.replay.current;
+    if (
+      replay &&
+      (
+        cells.successorOf.current !== replay.source ||
+        publicationWasClaimed(replay.source) ||
+        !importResultAuthoritiesMatch(replay.source.authority, authority) ||
+        replay.dom.node !== dialog ||
+        !importResultPlacementMatches(root, replay.rootPlacement) ||
+        !importResultDomMatches(replay.dom) ||
+        !replay.unchanged()
+      )
+    ) {
+      const exactDomStillCommitted =
+        replay.dom.node === dialog &&
+        importResultPlacementMatches(root, replay.rootPlacement) &&
+        importResultDomMatches(replay.dom) &&
+        replay.unchanged();
+      replay.release();
+      cells.replay.current = null;
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (exactDomStillCommitted) requestSuccessor();
+      return undefined;
+    }
+
+    const runtime = createRuntime();
+    if (!runtime) return undefined;
+    const publication = runtime.publication;
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    runtime.publish(
+      snapshotImportResultDom(dialog, dialog),
+      rootPlacement,
+      expectedOwners(),
+    );
+    replay?.release();
+    return runtime.retireForLayout;
+  };
+
+  const onOpen = (
+    row: ImportItemPublication,
+    event: ReactMouseEvent<HTMLAnchorElement>,
+  ) => {
+    const publication = claimOpen(row, event);
+    if (!publication) return;
+    publication.authority.onOpenChange(false);
+  };
+  const onRetry = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    claimRetry(event)?.();
+  };
+
+  return Object.freeze({
+    captureRoot: rootOwner.capture,
+    captureList: listOwner.capture,
+    captureIgnored: ignoredOwner.capture,
+    captureRetry: retryOwner.capture,
+    rows: rowOwners,
+    establish,
+    onOpen,
+    onRetry,
+  });
 }
 
 function StatusIcon({ status }: { status: ImportItemStatus }) {
@@ -286,13 +1396,29 @@ function StatusIcon({ status }: { status: ImportItemStatus }) {
 /** Per-file progress and "Open" links for an import batch. */
 export function ImportDialog({ open, onOpenChange, items, ignored, footer }: ImportDialogProps) {
   const [mount] = useState(() => Symbol("import-result-dialog"));
-  const activePublicationRef = useRef<ImportResultPublication | null>(null);
-  const publicationRuntimesRef = useRef(new WeakMap<ImportResultPublication, ImportResultPublicationRuntime>());
-  const claimedOpenPublicationsRef = useRef(new WeakSet<ImportResultPublication>());
-  const claimedRetryPublicationsRef = useRef(new WeakSet<ImportResultPublication>());
+  const [cells] = useState<ImportResultCells>(() => ({
+    active: new CurrentCell<ImportResultPublication | null>(null),
+    successorOf: new CurrentCell<ImportResultPublication | null>(null),
+    replay: new CurrentCell<ImportResultReplay | null>(null),
+    retiredPublications: new WeakSet<ImportResultPublication>(),
+    retiredRows: new WeakSet<ImportResultRowPublication>(),
+    retiredControls: new WeakSet<ImportResultControlPublication<HTMLElement>>(),
+    retiredActions: new WeakSet<ImportResultActionPublication>(),
+    claimedOpenPublications: new WeakSet<ImportResultPublication>(),
+    claimedRetryPublications: new WeakSet<ImportResultPublication>(),
+    claimedRows: new WeakSet<ImportResultRowPublication>(),
+    claimedControls: new WeakSet<ImportResultControlPublication<HTMLElement>>(),
+    claimedActions: new WeakSet<ImportResultActionPublication>(),
+    claimedReactEvents: new WeakSet<object>(),
+    claimedNativeEvents: new WeakSet<Event>(),
+  }));
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const publishedItems = Object.freeze(items.map(snapshotImportItem));
   const ignoredNames = Object.freeze([...ignored]);
-  const publication: ImportResultPublication = Object.freeze({
+  const authority: ImportResultAuthority = Object.freeze({
     mount,
     open,
     onOpenChange,
@@ -307,255 +1433,31 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
     }),
     footer,
   });
-
-  const runtimeFor = useCallback((candidate: ImportResultPublication) => {
-    const runtimes = publicationRuntimesRef.current;
-    let runtime = runtimes.get(candidate);
-    if (!runtime) {
-      runtime = {
-        active: false,
-        dialog: null,
-        root: null,
-        list: null,
-        rows: candidate.items.map(() => ({ item: null, open: null })),
-        ignored: null,
-        retry: null,
-      };
-      runtimes.set(candidate, runtime);
-    }
-    return runtime;
-  }, []);
-
-  const retirePublication = useCallback((candidate: ImportResultPublication) => {
-    const runtime = publicationRuntimesRef.current.get(candidate);
-    if (runtime) runtime.active = false;
-    if (activePublicationRef.current === candidate) activePublicationRef.current = null;
-  }, []);
-
-  const bindElement = useCallback(
-    <K extends "root" | "list" | "ignored" | "retry">(
-      candidate: ImportResultPublication,
-      kind: K,
-      element: ImportResultPublicationRuntime[K],
-    ) => {
-      const runtime = runtimeFor(candidate);
-      const existing = runtime[kind];
-      if (!element) {
-        runtime[kind] = null;
-        retirePublication(candidate);
-        return;
-      }
-      if (runtime.active && existing && existing !== element) {
-        retirePublication(candidate);
-        return;
-      }
-      runtime[kind] = element;
-    },
-    [retirePublication, runtimeFor],
+  const publication = createImportResultPublication(
+    authority,
+    cells,
+    requestPublicationSuccessor,
   );
 
-  const bindRowElement = useCallback(
-    <K extends keyof ImportRowElements>(
-      candidate: ImportResultPublication,
-      row: ImportItemPublication,
-      kind: K,
-      element: ImportRowElements[K],
-    ) => {
-      const runtime = runtimeFor(candidate);
-      const elements = runtime.rows[row.index];
-      if (!elements || candidate.items[row.index] !== row) {
-        retirePublication(candidate);
-        return;
-      }
-      const existing = elements[kind];
-      if (!element) {
-        elements[kind] = null;
-        retirePublication(candidate);
-        return;
-      }
-      if (runtime.active && existing && existing !== element) {
-        retirePublication(candidate);
-        return;
-      }
-      elements[kind] = element;
-    },
-    [retirePublication, runtimeFor],
-  );
-
-  const publicationDomIsValid = useCallback(
-    (candidate: ImportResultPublication) => {
-      if (candidate.mount !== mount || !candidate.open || !importResultFactsAreCurrent(candidate)) return false;
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      const dialog = runtime?.dialog;
-      const root = runtime?.root;
-      const list = runtime?.list;
-      if (
-        !runtime ||
-        !(dialog instanceof HTMLDivElement) ||
-        !dialog.isConnected ||
-        dialog.getAttribute("role") !== "dialog" ||
-        !(root instanceof HTMLDivElement) ||
-        !root.isConnected ||
-        root.parentElement !== dialog ||
-        dialog.lastElementChild !== root ||
-        !(list instanceof HTMLUListElement) ||
-        !list.isConnected ||
-        list.parentElement !== root ||
-        root.firstElementChild !== list ||
-        list.children.length !== candidate.items.length ||
-        runtime.rows.length !== candidate.items.length
-      ) {
-        return false;
-      }
-
-      let openCount = 0;
-      for (const row of candidate.items) {
-        const elements = runtime.rows[row.index];
-        const item = elements?.item;
-        const anchor = elements?.open;
-        if (
-          !(item instanceof HTMLLIElement) ||
-          !item.isConnected ||
-          item.parentElement !== list ||
-          list.children.item(row.index) !== item ||
-          item.getAttribute("data-status") !== row.status
-        ) {
-          return false;
-        }
-        if (row.href) {
-          openCount++;
-          if (
-            !(anchor instanceof HTMLAnchorElement) ||
-            !anchor.isConnected ||
-            anchor.parentElement !== item ||
-            item.lastElementChild !== anchor ||
-            anchor.getAttribute("href") !== row.href ||
-            item.querySelectorAll('[data-testid="import-open"]').length !== 1
-          ) {
-            return false;
-          }
-        } else if (anchor !== null || item.querySelector('[data-testid="import-open"]')) {
-          return false;
-        }
-      }
-      if (list.querySelectorAll('[data-testid="import-open"]').length !== openCount) return false;
-
-      const ignoredElement = runtime.ignored;
-      if (candidate.ignored.text) {
-        if (
-          !(ignoredElement instanceof HTMLParagraphElement) ||
-          !ignoredElement.isConnected ||
-          ignoredElement.parentElement !== root ||
-          root.children.item(1) !== ignoredElement ||
-          ignoredElement.textContent !== candidate.ignored.text ||
-          root.querySelectorAll('[data-testid="import-ignored"]').length !== 1
-        ) {
-          return false;
-        }
-      } else if (ignoredElement !== null || root.querySelector('[data-testid="import-ignored"]')) {
-        return false;
-      }
-
-      const retryElement = runtime.retry;
-      if (candidate.retry) {
-        const expectedIndex = candidate.ignored.text ? 2 : 1;
-        if (
-          !(retryElement instanceof HTMLButtonElement) ||
-          !retryElement.isConnected ||
-          retryElement.parentElement !== root ||
-          root.children.item(expectedIndex) !== retryElement ||
-          retryElement.disabled !== candidate.busy ||
-          retryElement.textContent?.trim() !== "Retry failed" ||
-          root.querySelectorAll('[data-testid="import-retry"]').length !== 1
-        ) {
-          return false;
-        }
-      } else if (retryElement !== null || root.querySelector('[data-testid="import-retry"]')) {
-        return false;
-      }
-      return true;
-    },
-    [mount],
-  );
-
-  const publicationIsCurrent = useCallback(
-    (candidate: ImportResultPublication) =>
-      activePublicationRef.current === candidate &&
-      publicationRuntimesRef.current.get(candidate)?.active === true &&
-      publicationDomIsValid(candidate),
-    [publicationDomIsValid],
-  );
-
-  const claimOpen = useCallback(
-    (candidate: ImportResultPublication, row: ImportItemPublication, source: HTMLAnchorElement) => {
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      if (
-        claimedOpenPublicationsRef.current.has(candidate) ||
-        candidate.items[row.index] !== row ||
-        row.href === null ||
-        runtime?.rows[row.index]?.open !== source
-      ) {
-        return false;
-      }
-      if (!publicationIsCurrent(candidate)) {
-        retirePublication(candidate);
-        return false;
-      }
-      claimedOpenPublicationsRef.current.add(candidate);
-      return true;
-    },
-    [publicationIsCurrent, retirePublication],
-  );
-
-  const claimRetry = useCallback(
-    (candidate: ImportResultPublication, source: HTMLButtonElement) => {
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      if (
-        !candidate.retry ||
-        candidate.busy ||
-        source.disabled ||
-        claimedRetryPublicationsRef.current.has(candidate) ||
-        runtime?.retry !== source
-      ) {
-        return null;
-      }
-      if (!publicationIsCurrent(candidate)) {
-        retirePublication(candidate);
-        return null;
-      }
-      claimedRetryPublicationsRef.current.add(candidate);
-      return candidate.retry;
-    },
-    [publicationIsCurrent, retirePublication],
-  );
-
-  const publishPublication = useCallback((candidate: ImportResultPublication) => {
-    const existing = activePublicationRef.current;
-    if (existing && existing !== candidate) retirePublication(existing);
-    const runtime = runtimeFor(candidate);
-    const dialog = runtime.root?.parentElement;
-    runtime.dialog = dialog instanceof HTMLDivElement ? dialog : null;
-    if (!publicationDomIsValid(candidate)) {
-      retirePublication(candidate);
-      return;
-    }
-    runtime.active = true;
-    activePublicationRef.current = candidate;
-  }, [publicationDomIsValid, retirePublication, runtimeFor]);
+  const {
+    captureRoot,
+    captureList,
+    captureIgnored,
+    captureRetry,
+    rows,
+    onOpen,
+    onRetry,
+  } = publication;
 
   return (
-    <Dialog open={publication.open} onOpenChange={(next) => !publication.busy && publication.onOpenChange(next)}>
-      <DialogContent title="Import files" description="Each file becomes a new document. Images dropped with a Markdown file are attached to it.">
-        <ImportResultPublicationBoundary
-          publication={publication}
-          publish={publishPublication}
-          retire={retirePublication}
-        >
-          <div ref={(element) => bindElement(publication, "root", element)} data-testid="import-dialog">
-            <ul ref={(element) => bindElement(publication, "list", element)} className="import-list" data-testid="import-list">
-              {publication.items.map((item) => (
+    <Dialog open={authority.open} onOpenChange={(next) => !authority.busy && authority.onOpenChange(next)}>
+      <DialogContent title={IMPORT_DIALOG_TITLE} description={IMPORT_DIALOG_DESCRIPTION}>
+        <ImportResultPublicationBoundary publication={publication}>
+          <div ref={captureRoot} data-testid="import-dialog">
+          <ul ref={captureList} className="import-list" data-testid="import-list">
+              {rows.map(({ authority: item, captureItem, captureOpen }) => (
                 <li
-                  ref={(element) => bindRowElement(publication, item, "item", element)}
+                  ref={captureItem}
                   key={`${item.name}-${item.index}`}
                   className="import-item"
                   data-testid="import-item"
@@ -579,46 +1481,40 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                   </div>
                   {item.href && (
                     <Link
-                      ref={(element) => bindRowElement(publication, item, "open", element)}
+                      ref={captureOpen}
                       href={item.href}
                       className="import-open"
                       data-testid="import-open"
-                      onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
-                        if (!isExactNativeResultClick(event, event.currentTarget)) return;
-                        if (claimOpen(publication, item, event.currentTarget)) publication.onOpenChange(false);
-                      }}
+                      onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => onOpen(item, event)}
                     >
                       Open
                     </Link>
                   )}
                 </li>
               ))}
-            </ul>
-            {publication.ignored.text && (
+          </ul>
+            {authority.ignored.text && (
               <p
-                ref={(element) => bindElement(publication, "ignored", element)}
+                ref={captureIgnored}
                 className="mt-3 text-xs text-ink-3"
                 data-testid="import-ignored"
               >
-                {publication.ignored.text}
+                {authority.ignored.text}
               </p>
             )}
-            {publication.retry && (
+          {authority.retry && (
               <button
-                ref={(element) => bindElement(publication, "retry", element)}
+                ref={captureRetry}
                 type="button"
                 className="btn btn-sm btn-outline mt-4"
-                disabled={publication.busy}
+                disabled={authority.busy}
                 data-testid="import-retry"
-                onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                  if (!isExactNativeResultClick(event, event.currentTarget)) return;
-                  claimRetry(publication, event.currentTarget)?.();
-                }}
+                onClick={onRetry}
               >
                 Retry failed
               </button>
             )}
-            {publication.footer}
+          {authority.footer}
           </div>
         </ImportResultPublicationBoundary>
       </DialogContent>
