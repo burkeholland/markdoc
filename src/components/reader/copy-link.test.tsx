@@ -15,6 +15,7 @@ import { ReaderCopyLink } from "./copy-link";
 
 const DOC_ID = "doc-919";
 const NEXT_DOC_ID = "doc-920";
+const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C to copy";
 const readerUrl = (docId = DOC_ID) => `${window.location.origin}/p/${docId}`;
 
 interface CopyClickEvent {
@@ -118,8 +119,20 @@ function copyElements(requireFallback = false) {
   if (fallback !== null && !(fallback instanceof HTMLInputElement)) {
     throw new Error("Copy link fallback was not an input");
   }
-  if (requireFallback && !fallback) throw new Error("Copy link fallback was not rendered");
-  return { root, button, fallback };
+  const instruction = screen.queryByTestId("reader-copy-link-instruction");
+  if (instruction !== null && !(instruction instanceof HTMLParagraphElement)) {
+    throw new Error("Copy link instruction was not a paragraph");
+  }
+  if (requireFallback && (!fallback || !instruction)) {
+    throw new Error("Copy link fallback was not rendered completely");
+  }
+  return { root, button, fallback, instruction };
+}
+
+function expectNoManualCopyGuidance() {
+  expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+  expect(screen.queryByTestId("reader-copy-link-instruction")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
 }
 
 async function enabledCopyButton() {
@@ -288,15 +301,36 @@ describe("ReaderCopyLink presentation", () => {
     expect(button).toHaveAccessibleName("Copied");
   });
 
-  it("publishes fallback value, focus, and selection exactly once through the exact input", async () => {
+  it("publishes one described fallback, polite announcement, focus, and selection through the exact Strict Mode input", async () => {
     copyText.mockResolvedValue(false);
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const select = vi.spyOn(HTMLInputElement.prototype, "select");
-    render(<ReaderCopyLink docId={DOC_ID} />);
+    render(
+      <StrictMode>
+        <ReaderCopyLink docId={DOC_ID} />
+      </StrictMode>,
+    );
+    expectNoManualCopyGuidance();
     fireEvent.click(await enabledCopyButton());
 
-    const fallback = await screen.findByRole<HTMLInputElement>("textbox", { name: "Reader link" });
+    const fallback = await screen.findByRole<HTMLInputElement>("textbox", {
+      name: "Reader link",
+      description: MANUAL_COPY_INSTRUCTION,
+    });
+    const instruction = screen.getByTestId("reader-copy-link-instruction");
+    expect(screen.getAllByRole("textbox", { name: "Reader link" })).toEqual([fallback]);
+    expect(screen.getAllByText(MANUAL_COPY_INSTRUCTION)).toEqual([instruction]);
+    expect(screen.getAllByRole("status")).toEqual([instruction]);
     expect(fallback).toHaveValue(readerUrl());
+    expect(fallback).toHaveAttribute("readonly");
+    expect(fallback).toHaveAccessibleDescription(MANUAL_COPY_INSTRUCTION);
+    expect(fallback.getAttribute("aria-describedby")?.trim().split(/\s+/)).toEqual([
+      instruction.id,
+    ]);
+    expect(instruction).toBeVisible();
+    expect(instruction).toHaveAttribute("role", "status");
+    expect(instruction).toHaveAttribute("aria-live", "polite");
+    expect(instruction).toHaveAttribute("aria-atomic", "true");
     expect(fallback).toHaveFocus();
     expect(fallback).toHaveProperty("selectionStart", 0);
     expect(fallback).toHaveProperty("selectionEnd", readerUrl().length);
@@ -324,6 +358,81 @@ describe("ReaderCopyLink presentation", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(select).not.toHaveBeenCalled();
     expect(fallback).toHaveFocus();
+  });
+
+  it("removes the Strict Mode fallback, description, and announcement on the existing two-second cadence", async () => {
+    copyText.mockResolvedValue(false);
+    render(
+      <StrictMode>
+        <ReaderCopyLink docId={DOC_ID} />
+      </StrictMode>,
+    );
+    const button = await enabledCopyButton();
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(button);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const fallback = copyElements(true).fallback!;
+      const instruction = screen.getByRole("status");
+      expect(fallback).toHaveAccessibleDescription(MANUAL_COPY_INSTRUCTION);
+      expect(instruction).toHaveTextContent(MANUAL_COPY_INSTRUCTION);
+
+      act(() => vi.advanceTimersByTime(1999));
+      expect(copyElements(true).instruction).toBe(instruction);
+      act(() => vi.advanceTimersByTime(1));
+      expectNoManualCopyGuidance();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes one fresh Strict Mode announcement for each accepted repeated fallback operation", async () => {
+    const firstAttempt = deferred<boolean>();
+    const secondAttempt = deferred<boolean>();
+    copyText
+      .mockReturnValueOnce(firstAttempt.promise)
+      .mockReturnValueOnce(secondAttempt.promise);
+    const view = createDirectStrictView();
+    const button = await enabledCopyButton();
+    vi.useFakeTimers();
+    try {
+      const firstClick = reactHandler<CopyClick>(button, "onClick");
+      act(() => firstClick(copyClickEvent(button)));
+      await settle(firstAttempt, false);
+
+      const firstFallback = copyElements(true);
+      const firstInstruction = firstFallback.instruction!;
+      const descriptionId = firstInstruction.id;
+      expect(screen.getAllByRole("status")).toEqual([firstInstruction]);
+      expect(firstFallback.fallback).toHaveAccessibleDescription(
+        MANUAL_COPY_INSTRUCTION,
+      );
+
+      act(() => vi.advanceTimersByTime(2000));
+      expectNoManualCopyGuidance();
+      fireEvent.click(button);
+      fireEvent.click(button);
+      fireEvent.click(button);
+      expect(copyText).toHaveBeenCalledTimes(2);
+      expectNoManualCopyGuidance();
+
+      await settle(secondAttempt, false);
+      const secondFallback = copyElements(true);
+      expect(secondFallback.instruction).not.toBe(firstInstruction);
+      expect(secondFallback.instruction).toHaveAttribute("id", descriptionId);
+      expect(screen.getAllByRole("status")).toEqual([secondFallback.instruction]);
+      expect(secondFallback.fallback).toHaveAccessibleDescription(
+        MANUAL_COPY_INSTRUCTION,
+      );
+      act(() => view.root.unmount());
+      directRoots.delete(view.root);
+      expectNoManualCopyGuidance();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("keeps clipboard copy exact after direct Strict Mode replay and claims before reentrant work", async () => {
@@ -369,6 +478,7 @@ describe("ReaderCopyLink presentation", () => {
     });
     expect(copyText).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Copied" })).toBe(button);
+    expectNoManualCopyGuidance();
   });
 
   it("keeps fallback selection exact after direct Strict Mode replay and isolates late A settlement", async () => {
@@ -405,13 +515,15 @@ describe("ReaderCopyLink presentation", () => {
     expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
 
     await settle(oldAttempt, false);
-    expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+    expectNoManualCopyGuidance();
     expect(focus).not.toHaveBeenCalled();
     expect(select).not.toHaveBeenCalled();
 
     await settle(currentAttempt, false);
     const fallback = screen.getByRole<HTMLInputElement>("textbox", { name: "Reader link" });
     expect(fallback).toHaveValue(readerUrl(NEXT_DOC_ID));
+    expect(fallback).toHaveAccessibleDescription(MANUAL_COPY_INSTRUCTION);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
     expect(fallback).toHaveFocus();
     expect(focus).toHaveBeenCalledTimes(1);
     expect(select).toHaveBeenCalledTimes(1);
@@ -505,6 +617,96 @@ describe("ReaderCopyLink presentation", () => {
     expect(copyText).toHaveBeenCalledExactlyOnceWith(readerUrl());
   });
 
+  it.each([
+    "partial fallback ref replay",
+    "root detach and reinsert",
+    "panel replacement and restoration",
+    "instruction reorder and restoration",
+    "instruction mutation and restoration",
+  ] as const)(
+    "does not revive old Strict Mode guidance after %s and document replacement",
+    async (change) => {
+      copyText.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      const view = createDirectStrictView({ instance: "a" });
+      const button = await enabledCopyButton();
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(button);
+        await act(async () => {
+          await Promise.resolve();
+        });
+        const stale = copyElements(true);
+        const fallback = stale.fallback!;
+        const instruction = stale.instruction!;
+        const panel = fallback.parentElement;
+        const staleClick = reactHandler<CopyClick>(stale.button, "onClick");
+        const staleFallbackRef = reactRef(fallback);
+        if (!(panel instanceof HTMLDivElement)) {
+          throw new Error("Manual-copy fallback did not have a panel");
+        }
+
+        if (change === "partial fallback ref replay") {
+          act(() => {
+            staleFallbackRef(null);
+            staleFallbackRef(fallback);
+          });
+        } else if (change === "root detach and reinsert") {
+          const parent = stale.root.parentNode;
+          const nextSibling = stale.root.nextSibling;
+          if (!parent) throw new Error("Copy link root did not have a parent");
+          stale.root.remove();
+          parent.insertBefore(stale.root, nextSibling);
+        } else if (change === "panel replacement and restoration") {
+          const replacement = panel.cloneNode(true);
+          panel.replaceWith(replacement);
+          const replacementParent = replacement.parentNode;
+          if (!replacementParent) {
+            throw new Error("Replacement panel did not have a parent");
+          }
+          replacementParent.replaceChild(panel, replacement);
+        } else if (change === "instruction reorder and restoration") {
+          panel.insertBefore(instruction, fallback);
+          panel.append(instruction);
+        } else {
+          instruction.textContent = "Changed";
+          instruction.textContent = MANUAL_COPY_INSTRUCTION;
+        }
+
+        act(() => staleClick(copyClickEvent(stale.button)));
+        expect(copyText).toHaveBeenCalledTimes(1);
+
+        renderDirectStrict(view.root, {
+          docId: NEXT_DOC_ID,
+          instance: "b",
+        });
+        const current = copyElements();
+        expect(current.button).toBeEnabled();
+        expectNoManualCopyGuidance();
+
+        act(() => {
+          staleFallbackRef(fallback);
+          staleFallbackRef(null);
+          staleClick(copyClickEvent(current.button));
+          vi.advanceTimersByTime(2000);
+        });
+        expect(copyText).toHaveBeenCalledTimes(1);
+        expectNoManualCopyGuidance();
+
+        fireEvent.click(current.button);
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
+        expect(screen.getByRole("button", { name: "Copied" })).toBe(current.button);
+        expectNoManualCopyGuidance();
+        act(() => vi.advanceTimersByTime(1500));
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("retires the idle status handler before copied status and keeps the current control usable", async () => {
     const first = deferred<boolean>();
     const second = deferred<boolean>();
@@ -567,13 +769,15 @@ describe("ReaderCopyLink presentation", () => {
     expect(copyText).toHaveBeenNthCalledWith(2, readerUrl(NEXT_DOC_ID));
 
     await settle(oldAttempt, false);
-    expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+    expectNoManualCopyGuidance();
     expect(focus).not.toHaveBeenCalled();
     expect(select).not.toHaveBeenCalled();
 
     await settle(currentAttempt, false);
     const fallback = screen.getByRole<HTMLInputElement>("textbox", { name: "Reader link" });
     expect(fallback).toHaveValue(readerUrl(NEXT_DOC_ID));
+    expect(fallback).toHaveAccessibleDescription(MANUAL_COPY_INSTRUCTION);
+    expect(screen.getAllByRole("status")).toHaveLength(1);
     expect(fallback).toHaveFocus();
     expect(focus).toHaveBeenCalledTimes(1);
     expect(select).toHaveBeenCalledTimes(1);
@@ -705,9 +909,10 @@ describe("ReaderCopyLink presentation", () => {
     const passiveCleanup = vi.fn();
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const select = vi.spyOn(HTMLInputElement.prototype, "select");
-    const view = createDirectView({ onPassiveCleanup: passiveCleanup });
+    const view = createDirectStrictView({ onPassiveCleanup: passiveCleanup });
     const old = copyElements();
     await waitFor(() => expect(old.button).toBeEnabled());
+    const initialPassiveCleanups = passiveCleanup.mock.calls.length;
     const oldClick = reactHandler<CopyClick>(old.button, "onClick");
     const oldRootRef = reactRef(old.root);
     act(() => oldClick(copyClickEvent(old.button)));
@@ -718,14 +923,15 @@ describe("ReaderCopyLink presentation", () => {
       present: false,
       boundary: 1,
       onLayout: () => {
-        passiveCleanedAtBoundary = passiveCleanup.mock.calls.length > 0;
+        passiveCleanedAtBoundary =
+          passiveCleanup.mock.calls.length > initialPassiveCleanups;
         oldConnectedAtBoundary = old.button.isConnected;
         oldClick(copyClickEvent(old.button));
       },
     });
     expect(passiveCleanedAtBoundary).toBe(false);
     expect(oldConnectedAtBoundary).toBe(false);
-    expect(passiveCleanup).toHaveBeenCalledTimes(1);
+    expect(passiveCleanup).toHaveBeenCalledTimes(initialPassiveCleanups + 1);
     expect(copyText).toHaveBeenCalledTimes(1);
 
     act(() => {
@@ -734,11 +940,11 @@ describe("ReaderCopyLink presentation", () => {
       oldClick(copyClickEvent(old.button));
     });
     await settle(oldAttempt, false);
-    expect(screen.queryByTestId("reader-copy-link-fallback")).not.toBeInTheDocument();
+    expectNoManualCopyGuidance();
     expect(focus).not.toHaveBeenCalled();
     expect(select).not.toHaveBeenCalled();
 
-    renderDirect(view.root, {
+    renderDirectStrict(view.root, {
       docId: NEXT_DOC_ID,
       instance: "b",
       boundary: 2,
