@@ -1,8 +1,9 @@
-import { StateEffect, StateField, type Extension, type Range } from "@codemirror/state";
-import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
+import { StateEffect, StateField, type EditorSelection, type Extension, type Range, type Text } from "@codemirror/state";
+import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import {
   elementEditorRange,
   eventHighlightTarget,
+  isActivatableHighlightKind,
   type HighlightClickHandler,
   type HighlightTarget,
 } from "../highlight-activation";
@@ -63,8 +64,27 @@ function build(highlights: SourceHighlight[], docLength: number): DecorationSet 
   return Decoration.set(ranges, true);
 }
 
-const highlightsField = StateField.define<{ source: SourceHighlight[]; deco: DecorationSet }>({
-  create: () => ({ source: [], deco: Decoration.none }),
+interface SourceHighlightsState {
+  source: SourceHighlight[];
+  deco: DecorationSet;
+  activationVersion: number;
+}
+
+function sameActivationHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
+  const left = a.filter((highlight) => isActivatableHighlightKind(highlight.kind));
+  const right = b.filter((highlight) => isActivatableHighlightKind(highlight.kind));
+  return left.length === right.length && left.every((highlight, index) => {
+    const other = right[index]!;
+    return highlight.from === other.from &&
+      highlight.to === other.to &&
+      highlight.kind === other.kind &&
+      highlight.id === other.id &&
+      highlight.active === other.active;
+  });
+}
+
+const highlightsField = StateField.define<SourceHighlightsState>({
+  create: () => ({ source: [], deco: Decoration.none, activationVersion: 0 }),
   update(value, tr) {
     let source = value.source;
     let changed = false;
@@ -74,8 +94,14 @@ const highlightsField = StateField.define<{ source: SourceHighlight[]; deco: Dec
         changed = true;
       }
     }
-    if (changed) return { source, deco: build(source, tr.newDoc.length) };
-    if (tr.docChanged) return { source, deco: value.deco.map(tr.changes) };
+    if (changed) {
+      return {
+        source,
+        deco: build(source, tr.newDoc.length),
+        activationVersion: value.activationVersion + (sameActivationHighlights(value.source, source) ? 0 : 1),
+      };
+    }
+    if (tr.docChanged) return { source, deco: value.deco.map(tr.changes), activationVersion: value.activationVersion };
     return value;
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
@@ -88,6 +114,8 @@ export function sourceHighlights(): Extension {
 
 export interface PositionedHighlightTarget extends HighlightTarget {
   sourcePosition: number;
+  from: number;
+  to: number;
 }
 
 export function sourceHighlightAtPointer(view: EditorView, event: MouseEvent): PositionedHighlightTarget | null {
@@ -98,39 +126,270 @@ export function sourceHighlightAtPointer(view: EditorView, event: MouseEvent): P
   const range = elementEditorRange(target.element, (node, offset) => view.posAtDOM(node, offset));
   const current = view.state.field(highlightsField, false);
   if (!range || !current) return null;
+  return sourceHighlightOwnsRange(current, { ...target, sourcePosition, ...range })
+    ? { ...target, sourcePosition, ...range }
+    : null;
+}
+
+function sourceHighlightOwnsRange(
+  current: SourceHighlightsState,
+  target: PositionedHighlightTarget,
+): boolean {
   let ownsRange = false;
-  current.deco.between(range.from, range.to, (from, to, decoration) => {
+  current.deco.between(target.from, target.to, (from, to, decoration) => {
     const attributes = decoration.spec.attributes as Record<string, string> | undefined;
     if (
-      from <= range.from &&
-      range.to <= to &&
+      from <= target.from &&
+      target.to <= to &&
       attributes?.["data-highlight-kind"] === target.kind &&
       attributes["data-highlight-id"] === target.id
     ) {
       ownsRange = true;
     }
   });
-  return ownsRange ? { ...target, sourcePosition } : null;
+  return ownsRange;
+}
+
+function sourceHighlightIsCurrent(view: EditorView, target: PositionedHighlightTarget): boolean {
+  const current = view.state.field(highlightsField, false);
+  return !!current && sourceHighlightOwnsRange(current, target);
+}
+
+// Product policy: classify clicks for 750 ms from the first press. A later detail-2
+// gesture cannot undo an activation that has already committed.
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
+const DRAG_TOLERANCE_PX = 4;
+
+interface SourceHighlightPress {
+  down: MouseEvent;
+  startedAt: number;
+  pointerId: number | null;
+  target: PositionedHighlightTarget;
+  doc: Text;
+  activationVersion: number;
+  released: boolean;
+}
+
+interface PendingSourceHighlightActivation {
+  target: PositionedHighlightTarget;
+  doc: Text;
+  activationVersion: number;
+  selection: EditorSelection;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+function isPlainPrimaryEvent(event: MouseEvent): boolean {
+  return event.button === 0 &&
+    event.detail === 1 &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.shiftKey;
+}
+
+function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlightTarget | null): boolean {
+  return !!b &&
+    a.kind === b.kind &&
+    a.id === b.id &&
+    a.sourcePosition === b.sourcePosition &&
+    a.from === b.from &&
+    a.to === b.to;
+}
+
+function movedPastClickTolerance(start: MouseEvent, current: MouseEvent): boolean {
+  return Math.abs(start.clientX - current.clientX) > DRAG_TOLERANCE_PX ||
+    Math.abs(start.clientY - current.clientY) > DRAG_TOLERANCE_PX;
+}
+
+function installSourceHighlightActivation(
+  view: EditorView,
+  onClick: HighlightClickHandler,
+): { update(update: ViewUpdate): void; destroy(): void } {
+  const dom = view.contentDOM;
+  const owner = dom.ownerDocument;
+  const win = owner.defaultView;
+  let press: SourceHighlightPress | null = null;
+  let pending: PendingSourceHighlightActivation | null = null;
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  let nextPointerId: number | null = null;
+  let nextPressStartedAt: number | null = null;
+
+  const currentHighlights = () => view.state.field(highlightsField, false);
+  const pointerId = (event: Event) => {
+    const value = (event as Partial<PointerEvent>).pointerId;
+    return typeof value === "number" ? value : null;
+  };
+  const stopPressTracking = () => {
+    owner.removeEventListener("mousemove", move, true);
+    owner.removeEventListener("mouseup", up, true);
+    owner.removeEventListener("pointerup", pointerUp, true);
+  };
+  const clearPress = () => {
+    stopPressTracking();
+    clearTimeout(releaseTimer);
+    releaseTimer = undefined;
+    press = null;
+  };
+  const clearPending = () => {
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending = null;
+  };
+  const retire = () => {
+    clearPress();
+    clearPending();
+    nextPointerId = null;
+    nextPressStartedAt = null;
+  };
+  const pointerDown = (event: PointerEvent) => {
+    retire();
+    nextPointerId = pointerId(event);
+    nextPressStartedAt = Date.now();
+  };
+  const pointerUp = (event: PointerEvent) => {
+    if (!press) {
+      nextPointerId = null;
+      nextPressStartedAt = null;
+    } else if (press.pointerId !== null && pointerId(event) !== press.pointerId) {
+      clearPress();
+    }
+  };
+  const schedule = (current: SourceHighlightPress) => {
+    clearPending();
+    const activation: PendingSourceHighlightActivation = {
+      target: current.target,
+      doc: current.doc,
+      activationVersion: current.activationVersion,
+      selection: view.state.selection,
+      timer: setTimeout(() => {
+        if (pending !== activation) return;
+        pending = null;
+        if (
+          !dom.isConnected ||
+          activation.doc !== view.state.doc ||
+          activation.activationVersion !== currentHighlights()?.activationVersion ||
+          !activation.selection.eq(view.state.selection) ||
+          !sourceHighlightIsCurrent(view, activation.target)
+        ) {
+          return;
+        }
+        onClick(activation.target.kind, activation.target.id, activation.target.sourcePosition);
+      }, Math.max(0, HIGHLIGHT_ACTIVATION_WINDOW_MS - (Date.now() - current.startedAt))),
+    };
+    pending = activation;
+  };
+  const move = (event: MouseEvent) => {
+    if (!press) return;
+    if (
+      event.buttons !== 1 ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      movedPastClickTolerance(press.down, event)
+    ) {
+      clearPress();
+    }
+  };
+  const up = (event: MouseEvent) => {
+    const current = press;
+    if (
+      !current ||
+      !isPlainPrimaryEvent(event) ||
+      event.buttons !== 0 ||
+      movedPastClickTolerance(current.down, event) ||
+      current.doc !== view.state.doc ||
+      current.activationVersion !== currentHighlights()?.activationVersion ||
+      !samePositionedTarget(current.target, sourceHighlightAtPointer(view, event))
+    ) {
+      clearPress();
+      return;
+    }
+    current.released = true;
+    stopPressTracking();
+    schedule(current);
+    releaseTimer = setTimeout(clearPress, 0);
+  };
+  const down = (event: MouseEvent) => {
+    const currentPointerId = nextPointerId;
+    const startedAt = nextPressStartedAt ?? Date.now();
+    retire();
+    const highlights = currentHighlights();
+    if (event.defaultPrevented || !isPlainPrimaryEvent(event) || event.buttons !== 1 || !highlights) return;
+    const target = sourceHighlightAtPointer(view, event);
+    if (!target) return;
+    press = {
+      down: event,
+      startedAt,
+      pointerId: currentPointerId,
+      target,
+      doc: view.state.doc,
+      activationVersion: highlights.activationVersion,
+      released: false,
+    };
+    owner.addEventListener("mousemove", move, true);
+    owner.addEventListener("mouseup", up, true);
+    owner.addEventListener("pointerup", pointerUp, true);
+  };
+  const click = (event: MouseEvent) => {
+    const current = press;
+    clearPress();
+    if (
+      event.defaultPrevented ||
+      !current?.released ||
+      !isPlainPrimaryEvent(event) ||
+      event.buttons !== 0 ||
+      current.doc !== view.state.doc ||
+      current.activationVersion !== currentHighlights()?.activationVersion ||
+      !samePositionedTarget(current.target, sourceHighlightAtPointer(view, event))
+    ) {
+      clearPending();
+      return;
+    }
+    if (!pending || pending.target !== current.target) {
+      clearPending();
+      return;
+    }
+    pending.selection = view.state.selection;
+  };
+
+  dom.addEventListener("pointerdown", pointerDown, true);
+  dom.addEventListener("pointercancel", retire, true);
+  dom.addEventListener("mousedown", down, true);
+  dom.addEventListener("click", click, true);
+  dom.addEventListener("dblclick", retire, true);
+  dom.addEventListener("blur", retire, true);
+  win?.addEventListener("blur", retire);
+
+  return {
+    update(update) {
+      const highlights = currentHighlights();
+      if (press && (update.docChanged || press.activationVersion !== highlights?.activationVersion)) clearPress();
+      if (
+        pending &&
+        (update.docChanged ||
+          pending.activationVersion !== highlights?.activationVersion ||
+          !pending.selection.eq(update.state.selection) ||
+          (update.focusChanged && !update.view.hasFocus))
+      ) {
+        clearPending();
+      }
+      if (!dom.isConnected) retire();
+    },
+    destroy() {
+      retire();
+      dom.removeEventListener("pointerdown", pointerDown, true);
+      dom.removeEventListener("pointercancel", retire, true);
+      dom.removeEventListener("mousedown", down, true);
+      dom.removeEventListener("click", click, true);
+      dom.removeEventListener("dblclick", retire, true);
+      dom.removeEventListener("blur", retire, true);
+      win?.removeEventListener("blur", retire);
+    },
+  };
 }
 
 /** Hook for clicks on highlighted ranges (for example to open a comment thread). */
 export function highlightClickHandler(onClick: HighlightClickHandler): Extension {
-  return EditorView.domEventHandlers({
-    mousedown(event, view) {
-      if (
-        event.button !== 0 ||
-        event.detail > 1 ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.altKey ||
-        event.shiftKey
-      ) {
-        return false;
-      }
-      const target = sourceHighlightAtPointer(view, event);
-      if (!target) return false;
-      onClick(target.kind, target.id, target.sourcePosition);
-      return false;
-    },
-  });
+  return ViewPlugin.define((view) => installSourceHighlightActivation(view, onClick));
 }

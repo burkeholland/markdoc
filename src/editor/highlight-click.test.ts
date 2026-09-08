@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { EditorState as CodeState } from "@codemirror/state";
 import { EditorView as CodeView } from "@codemirror/view";
 import { EditorState as RichState, TextSelection } from "prosemirror-state";
@@ -13,7 +13,7 @@ import {
   type ActivatableHighlightKind,
   type HighlightClickHandler,
 } from "./highlight-activation";
-import { collectHighlights, richHighlightsPlugin } from "./prosemirror/highlights";
+import { collectHighlights, refreshRichHighlights, richHighlightsPlugin } from "./prosemirror/highlights";
 import { markdownBindingPlugin } from "./sync/markdown-binding";
 
 type Surface = "rich" | "source";
@@ -49,6 +49,7 @@ const KINDS: ActivatableHighlightKind[] = ["comment", "comment-resolved", "sugge
 const GESTURES: Gesture[] = ["primary", "auxiliary", "context", "double"];
 const BOUNDARIES: Boundary[] = ["start", "interior", "end", "after"];
 const MUTATIONS: Mutation[] = ["live", "reanchor-away", "removed", "kind-changed", "range-less", "reanchor-containing"];
+const HIGHLIGHT_ACTIVATION_WINDOW_MS = 750;
 const harnesses: Harness[] = [];
 
 let pointerTarget: HTMLElement | null = null;
@@ -67,11 +68,16 @@ beforeAll(() => {
   });
 });
 
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
 afterEach(() => {
   for (const harness of harnesses.splice(0)) harness.destroy();
   pointerTarget = null;
   caretNode = null;
   caretOffset = 0;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -140,7 +146,8 @@ function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: 
       }),
       parent: host,
     });
-    codeView.dispatch({ effects: setHighlights.of(collectHighlights(session, { from: 0, to: 0 })) });
+    const focus = session.activeSurface === "rich" ? { from: 0, to: 0 } : null;
+    codeView.dispatch({ effects: setHighlights.of(collectHighlights(session, focus)) });
     vi.spyOn(codeView, "posAtCoords").mockImplementation(() => sourcePosition);
     view = codeView;
   } else {
@@ -150,7 +157,7 @@ function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: 
         plugins: [
           markdownBindingPlugin(session.binding),
           richHighlightsPlugin(session, {
-            getFocusSource: () => 0,
+            getFocusSource: () => session.activeSurface === "code" ? 0 : null,
             onHighlightClick: rawClick,
           }),
         ],
@@ -210,6 +217,14 @@ function dispatch(target: HTMLElement, type: string, init: MouseEventInit = {}):
   return event;
 }
 
+function dispatchClickSequence(target: HTMLElement, detail: number) {
+  dispatch(target, "pointerdown", { button: 0, buttons: 1, detail });
+  dispatch(target, "mousedown", { button: 0, buttons: 1, detail });
+  dispatch(target, "pointerup", { button: 0, detail });
+  dispatch(target, "mouseup", { button: 0, detail });
+  dispatch(target, "click", { button: 0, detail });
+}
+
 function viewHasFocus(harness: Harness): boolean {
   return harness.surface === "rich" ? (harness.view as RichView).hasFocus() : (harness.view as CodeView).hasFocus;
 }
@@ -251,24 +266,39 @@ function mutateBeforeRouting(harness: Harness, mutation: Mutation, sourcePositio
   });
 }
 
-function performInteraction(harness: Harness, gesture: Gesture, sourcePosition: number, mutation: Mutation) {
+function performInteraction(
+  harness: Harness,
+  gesture: Gesture,
+  sourcePosition: number,
+  mutation: Mutation,
+  flushActivation = true,
+) {
   harness.view.focus();
   harness.setSourcePosition(sourcePosition);
   const button = gesture === "auxiliary" ? 1 : gesture === "context" ? 2 : 0;
-  const detail = gesture === "double" ? 2 : 1;
-  dispatch(harness.target, "pointerdown", { button, detail });
-  if (harness.surface === "source") mutateBeforeRouting(harness, mutation, sourcePosition);
-  dispatch(harness.target, "mousedown", { button, detail });
-  if (harness.surface === "rich") mutateBeforeRouting(harness, mutation, sourcePosition);
-  if (gesture === "context") {
-    dispatch(harness.target, "contextmenu", { button, detail });
-  } else if (gesture === "auxiliary") {
-    dispatch(harness.target, "auxclick", { button, detail });
-  } else {
-    dispatch(harness.target, "mouseup", { button, detail });
-    dispatch(harness.target, "click", { button, detail });
-    if (gesture === "double") dispatch(harness.target, "dblclick", { button, detail });
+  const buttons = button === 0 ? 1 : button === 1 ? 4 : 2;
+  const sequence = (detail: number, mutate: boolean) => {
+    dispatch(harness.target, "pointerdown", { button, buttons, detail });
+    if (mutate && harness.surface === "source") mutateBeforeRouting(harness, mutation, sourcePosition);
+    dispatch(harness.target, "mousedown", { button, buttons, detail });
+    if (mutate && harness.surface === "rich") mutateBeforeRouting(harness, mutation, sourcePosition);
+    if (gesture === "context") {
+      dispatch(harness.target, "contextmenu", { button, detail });
+    } else if (gesture === "auxiliary") {
+      dispatch(harness.target, "pointerup", { button, detail });
+      dispatch(harness.target, "auxclick", { button, detail });
+    } else {
+      dispatch(harness.target, "pointerup", { button, detail });
+      dispatch(harness.target, "mouseup", { button, detail });
+      dispatch(harness.target, "click", { button, detail });
+    }
+  };
+  sequence(1, true);
+  if (gesture === "double") {
+    sequence(2, false);
+    dispatch(harness.target, "dblclick", { button, detail: 2 });
   }
+  if (flushActivation) vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
   expect(viewHasFocus(harness)).toBe(true);
 }
 
@@ -299,7 +329,7 @@ describe("live highlight click ownership", () => {
         harness.setSourcePosition(sourcePosition);
         const selection = harness.view.state.selection.toJSON();
         dispatch(harness.target, "pointerdown", { button: 0, detail: 1 });
-        if (surface === "rich") dispatch(harness.target, "mousedown", { button: 0, detail: 1 });
+        if (surface === "rich") dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
         if (mutation === "removed") harness.session.suggestions.ymap.delete(member.id);
         else if (mutation === "reanchor-away" || mutation === "range-less") {
           harness.session.suggestions.ymap.set(member.id, {
@@ -312,9 +342,11 @@ describe("live highlight click ownership", () => {
             ...(mutation === "kind-changed" ? { type: other.type } : { groupId: "different-group" }),
           });
         }
-        if (surface === "source") dispatch(harness.target, "mousedown", { button: 0, detail: 1 });
+        if (surface === "source") dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+        dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
         dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
         dispatch(harness.target, "click", { button: 0, detail: 1 });
+        vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
 
         expect(harness.rawClick, mutation).toHaveBeenCalledOnce();
         expect(harness.setActiveComment, mutation).not.toHaveBeenCalled();
@@ -404,6 +436,215 @@ describe("live highlight click ownership", () => {
     expect(harness.panelIsOpen()).toBe(false);
     expect(viewHasFocus(harness)).toBe(true);
   });
+
+  it.each(SURFACES.flatMap((surface) => KINDS.map((kind) => [surface, kind] as const)))(
+    "activates the first %s %s click after its inactive pane takes focus",
+    async (surface, kind) => {
+      const harness = makeHarness(surface, kind);
+      const sourcePosition = ITEM_RANGE.from + 2;
+      harness.session.setActiveSurface(surface === "rich" ? "code" : "rich");
+      await Promise.resolve();
+      if (surface === "source") {
+        (harness.view as CodeView).dispatch({
+          effects: setHighlights.of(collectHighlights(harness.session, { from: 0, to: 0 })),
+        });
+      } else {
+        refreshRichHighlights(harness.view as RichView);
+      }
+      harness.setSourcePosition(sourcePosition);
+      dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+      dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+
+      harness.session.setActiveSurface(surface === "rich" ? "rich" : "code");
+      await Promise.resolve();
+      if (surface === "source") {
+        (harness.view as CodeView).dispatch({
+          effects: setHighlights.of(collectHighlights(harness.session, null)),
+        });
+      } else {
+        refreshRichHighlights(harness.view as RichView);
+      }
+      dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
+      dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+      dispatch(harness.target, "click", { button: 0, detail: 1 });
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+      expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith(kind, harness.id, sourcePosition);
+      const active = kind.startsWith("comment") ? harness.setActiveComment : harness.setActiveSuggestion;
+      const inactive = kind.startsWith("comment") ? harness.setActiveSuggestion : harness.setActiveComment;
+      expect(active).toHaveBeenCalledExactlyOnceWith(harness.id);
+      expect(inactive).not.toHaveBeenCalled();
+      expect(harness.panelIsOpen()).toBe(true);
+      expect(harness.session.ytext.toString()).toBe(TEXT);
+    },
+  );
+
+  it.each(SURFACES.flatMap((surface) => KINDS.map((kind) => [surface, kind] as const)))(
+    "commits one responsive %s %s single click at the 750 ms product boundary",
+    (surface, kind) => {
+      const harness = makeHarness(surface, kind);
+      const sourcePosition = ITEM_RANGE.from + 2;
+      const startedAt = Date.now();
+      harness.view.focus();
+      harness.setSourcePosition(sourcePosition);
+
+      dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+      dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+      vi.advanceTimersByTime(100);
+      dispatch(harness.target, "pointerup", { button: 0, detail: 1 });
+      dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+      dispatch(harness.target, "click", { button: 0, detail: 1 });
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 101);
+      expect(harness.rawClick).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(Date.now() - startedAt).toBe(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(800);
+      expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith(kind, harness.id, sourcePosition);
+      expect(harness.panelIsOpen()).toBe(true);
+
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+      expect(harness.rawClick).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(SURFACES.flatMap((surface) => KINDS.map((kind) => [surface, kind] as const)))(
+    "lets a browser-classified second %s %s press inside 750 ms cancel activation",
+    (surface, kind) => {
+      const harness = makeHarness(surface, kind);
+      const sourcePosition = ITEM_RANGE.from + 2;
+      const selection = harness.view.state.selection.toJSON();
+      harness.view.focus();
+      harness.setSourcePosition(sourcePosition);
+
+      dispatchClickSequence(harness.target, 1);
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 1);
+      dispatchClickSequence(harness.target, 2);
+      const doubleClick = dispatch(harness.target, "dblclick", { button: 0, detail: 2 });
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+      expect(harness.rawClick).not.toHaveBeenCalled();
+      expect(harness.setActiveComment).not.toHaveBeenCalled();
+      expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
+      expect(harness.panelIsOpen()).toBe(false);
+      expect(harness.view.state.selection.toJSON()).toEqual(selection);
+      expect(harness.session.ytext.toString()).toBe(TEXT);
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it.each(SURFACES.flatMap((surface) => KINDS.map((kind) => [surface, kind] as const)))(
+    "does not duplicate a committed %s %s click when detail 2 arrives after 750 ms",
+    (surface, kind) => {
+      const harness = makeHarness(surface, kind);
+      const sourcePosition = ITEM_RANGE.from + 2;
+      harness.view.focus();
+      harness.setSourcePosition(sourcePosition);
+
+      dispatchClickSequence(harness.target, 1);
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS + 1);
+      expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith(kind, harness.id, sourcePosition);
+      expect(harness.panelIsOpen()).toBe(true);
+
+      dispatchClickSequence(harness.target, 2);
+      const doubleClick = dispatch(harness.target, "dblclick", { button: 0, detail: 2 });
+      vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+      const active = kind.startsWith("comment") ? harness.setActiveComment : harness.setActiveSuggestion;
+      const inactive = kind.startsWith("comment") ? harness.setActiveSuggestion : harness.setActiveComment;
+      expect(harness.rawClick).toHaveBeenCalledTimes(1);
+      expect(active).toHaveBeenCalledExactlyOnceWith(harness.id);
+      expect(inactive).not.toHaveBeenCalled();
+      expect(harness.session.ytext.toString()).toBe(TEXT);
+      expect(doubleClick.defaultPrevented).toBe(false);
+    },
+  );
+
+  it.each(SURFACES)("retires drags and later selection movement in the %s editor", (surface) => {
+    const harness = makeHarness(surface, "comment");
+    const sourcePosition = ITEM_RANGE.from + 2;
+    harness.view.focus();
+    harness.setSourcePosition(sourcePosition);
+
+    dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(harness.target, "mousemove", { button: 0, buttons: 1, detail: 1, clientX: 18 });
+    dispatch(harness.target, "pointerup", { button: 0, detail: 1, clientX: 18 });
+    dispatch(harness.target, "mouseup", { button: 0, detail: 1, clientX: 18 });
+    dispatch(harness.target, "click", { button: 0, detail: 1, clientX: 18 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).not.toHaveBeenCalled();
+
+    dispatch(harness.target, "pointerdown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(harness.target, "mousedown", { button: 0, buttons: 1, detail: 1 });
+    dispatch(harness.target, "mousemove", { button: 0, buttons: 1, detail: 1, ctrlKey: true });
+    dispatch(harness.target, "pointercancel", { button: 0, detail: 1 });
+    dispatch(harness.target, "mouseup", { button: 0, detail: 1 });
+    dispatch(harness.target, "click", { button: 0, detail: 1 });
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).not.toHaveBeenCalled();
+
+    performInteraction(harness, "primary", sourcePosition, "live", false);
+    if (surface === "source") {
+      (harness.view as CodeView).dispatch({ selection: { anchor: AWAY_RANGE.from } });
+    } else {
+      const rich = harness.view as RichView;
+      const away = harness.session.binding.getSourceMap().srcToPm(AWAY_RANGE.from + 1);
+      rich.dispatch(rich.state.tr.setSelection(TextSelection.create(rich.state.doc, away)));
+    }
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+    expect(harness.rawClick).not.toHaveBeenCalled();
+    expect(harness.panelIsOpen()).toBe(false);
+    expect(harness.session.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each(SURFACES)(
+    "retires starved replacement and unmount timers before a fresh %s single click",
+    async (surface) => {
+      const harness = makeHarness(surface, "comment");
+      const sourcePosition = ITEM_RANGE.from + 2;
+      performInteraction(harness, "primary", sourcePosition, "live", false);
+      const pendingTimerCount = vi.getTimerCount();
+      expect(harness.rawClick).not.toHaveBeenCalled();
+
+      harness.session.comments.remove(harness.id);
+      const freshId = createItem(harness.session, "comment");
+      if (surface === "source") {
+        (harness.view as CodeView).dispatch({
+          effects: setHighlights.of(collectHighlights(harness.session, { from: 0, to: 0 })),
+        });
+      } else {
+        refreshRichHighlights(harness.view as RichView);
+      }
+      await vi.advanceTimersByTimeAsync(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+
+      expect(harness.rawClick).not.toHaveBeenCalled();
+      expect(harness.panelIsOpen()).toBe(false);
+      expect(harness.session.activeCommentId).toBeNull();
+      expect(vi.getTimerCount()).toBeLessThan(pendingTimerCount);
+
+      harness.id = freshId;
+      harness.target = harness.root.querySelector<HTMLElement>(
+        `[data-highlight-id="${freshId}"][data-highlight-kind="comment"]`,
+      )!;
+      expect(harness.target).not.toBeNull();
+      performInteraction(harness, "primary", sourcePosition, "live");
+      expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith("comment", freshId, sourcePosition);
+      expect(harness.setActiveComment).toHaveBeenCalledExactlyOnceWith(freshId);
+      expect(harness.panelIsOpen()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(20);
+      harness.target = harness.root.querySelector<HTMLElement>(`[data-highlight-id="${freshId}"]`)!;
+      performInteraction(harness, "primary", sourcePosition, "live", false);
+      harness.destroy();
+      harnesses.pop();
+      await vi.advanceTimersByTimeAsync(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+      expect(harness.rawClick).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(harness.session.ytext.toString()).toBe(TEXT);
+    },
+  );
 
   it.each(SURFACES)("routes a nested fragment of an overlapping %s decoration exactly once", (surface) => {
     const harness = makeHarness(surface, "comment", { overlap: true });
