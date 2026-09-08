@@ -6030,6 +6030,7 @@ class MoreMenuPublicationCoordinator {
   #stagedNativeEvents = new WeakSet<Event>();
   #dispatchedSelectionCustomEvent: Event | null = null;
   #selectionCustomEvent: Event | null = null;
+  #selectionTerminalRelease: (() => void) | null = null;
   #dispatchedOutsideCustomEvents = new WeakMap<Event, Event>();
   #outsideCustomEvents = new WeakMap<Event, Event>();
   #taintedOutsideNativeEvents = new WeakSet<Event>();
@@ -6093,9 +6094,7 @@ class MoreMenuPublicationCoordinator {
     this.#successorOf = publication;
     if (this.#disclosureIntent?.publication === publication) this.#disclosureIntent = null;
     if (this.#selectionIntent?.publication === publication) {
-      this.#selectionIntent = null;
-      this.#dispatchedSelectionCustomEvent = null;
-      this.#selectionCustomEvent = null;
+      this.#clearSelection(this.#selectionIntent);
     }
     queueMicrotask(() => {
       if (this.#active !== null || this.#successorOf !== publication) return;
@@ -6207,6 +6206,8 @@ class MoreMenuPublicationCoordinator {
       || this.#claimedEvents.has(nativeEvent)
       || this.#claimedPublications.has(publication)
       || this.#claimedActions.has(action)
+      || this.#selectionIntent !== null
+      || this.#selectionTerminalRelease !== null
     ) {
       return false;
     }
@@ -6220,12 +6221,24 @@ class MoreMenuPublicationCoordinator {
       target,
       path: Object.freeze([...path]),
     });
+    const clearSelection = () => this.#clearSelection(intent);
+    const terminalRelease = installMoreMenuNativeClickTerminal(
+      publication,
+      nativeEvent,
+      target,
+      intent.path,
+      clearSelection,
+      clearSelection,
+    );
+    if (!terminalRelease) return false;
     this.#selectionIntent = intent;
+    this.#selectionTerminalRelease = terminalRelease;
     queueMicrotask(() => {
-      if (this.#selectionIntent === intent) {
-        this.#selectionIntent = null;
-        this.#dispatchedSelectionCustomEvent = null;
-        this.#selectionCustomEvent = null;
+      if (
+        this.#selectionIntent === intent
+        && !isLiveMoreMenuNativeEvent(nativeEvent, publication.document)
+      ) {
+        this.#clearSelection(intent);
       }
     });
     return true;
@@ -6259,9 +6272,7 @@ class MoreMenuPublicationCoordinator {
           && this.#selectionIntent === intent
           && this.#dispatchedSelectionCustomEvent === customEvent
         ) {
-          this.#selectionIntent = null;
-          this.#dispatchedSelectionCustomEvent = null;
-          this.#selectionCustomEvent = null;
+          this.#clearSelection(intent);
         }
       };
       const dispatched = this.#dispatchedSelectionCustomEvent;
@@ -6418,14 +6429,22 @@ class MoreMenuPublicationCoordinator {
     ) {
       return null;
     }
-    this.#selectionIntent = null;
-    this.#dispatchedSelectionCustomEvent = null;
-    this.#selectionCustomEvent = null;
+    this.#clearSelection(intent);
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(action);
     this.#claimedEvents.add(customEvent);
     this.#claimedEvents.add(intent.nativeEvent);
     return intent;
+  }
+
+  #clearSelection(intent: MoreMenuSelectionIntent) {
+    if (this.#selectionIntent !== intent) return;
+    this.#selectionIntent = null;
+    this.#dispatchedSelectionCustomEvent = null;
+    this.#selectionCustomEvent = null;
+    const release = this.#selectionTerminalRelease;
+    this.#selectionTerminalRelease = null;
+    release?.();
   }
 
   bindOutsideCustom(
@@ -7035,6 +7054,118 @@ function isLiveMoreMenuNativeEvent(event: Event, document: Document) {
       "target",
       event,
     )
+  );
+}
+
+function installMoreMenuNativeClickTerminal(
+  publication: MoreMenuPublication,
+  nativeEvent: MouseEvent,
+  admittedTarget: Node,
+  admittedPath: readonly EventTarget[],
+  onTerminal: () => void,
+  onInvalid: () => void,
+) {
+  const ownerWindow = publication.document.defaultView;
+  if (!ownerWindow) return null;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  const nativeAdd = eventTargetPrototype.addEventListener;
+  const nativeRemove = eventTargetPrototype.removeEventListener;
+  let attached = false;
+  const listener = (event: Event) => {
+    if (
+      event === nativeEvent
+      && exactMoreMenuNativeClickTerminal(
+        publication,
+        nativeEvent,
+        admittedTarget,
+        admittedPath,
+      )
+    ) {
+      onTerminal();
+    } else {
+      onInvalid();
+    }
+  };
+  try {
+    Reflect.apply(nativeAdd, ownerWindow, ["click", listener, false]);
+    attached = true;
+  } catch (error) {
+    if (
+      error instanceof TypeError
+      || (
+        typeof error === "object"
+        && error !== null
+        && Reflect.get(error, "name") === "TypeError"
+      )
+    ) {
+      return null;
+    }
+    throw error;
+  }
+  return () => {
+    if (!attached) return;
+    attached = false;
+    Reflect.apply(nativeRemove, ownerWindow, ["click", listener, false]);
+  };
+}
+
+function exactMoreMenuNativeClickTerminal(
+  publication: MoreMenuPublication,
+  event: MouseEvent,
+  admittedTarget: Node,
+  admittedPath: readonly EventTarget[],
+) {
+  const ownerWindow = publication.document.defaultView;
+  if (!ownerWindow || !(event instanceof ownerWindow.MouseEvent)) return false;
+  const path = nativeEventPath(ownerWindow, event);
+  const bodyIndex = path.indexOf(publication.document.body);
+  const documentIndex = path.indexOf(publication.document);
+  return Boolean(
+    nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event) === "click"
+    && nativeEventGetter<number>(
+      ownerWindow.MouseEvent.prototype,
+      "button",
+      event,
+    ) === 0
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+      event,
+    ) === admittedTarget
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) === ownerWindow
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) === ownerWindow.Event.BUBBLING_PHASE
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) === false
+    && admittedTarget.ownerDocument === publication.document
+    && path.length === admittedPath.length
+    && path.every((entry, index) => entry === admittedPath[index])
+    && path[0] === admittedTarget
+    && bodyIndex > 0
+    && documentIndex > bodyIndex
+    && documentIndex === path.length - 2
+    && path[path.length - 1] === ownerWindow
+    && publication.isExact()
   );
 }
 

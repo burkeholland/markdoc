@@ -312,6 +312,48 @@ describe("editor header More menu authority", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it("keeps the exact native selection through a mid-dispatch microtask checkpoint", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+    history.addEventListener("click", () => {
+      vi.runAllTicks();
+    }, { capture: true, once: true });
+
+    try {
+      fireEvent.click(history);
+    } finally {
+      vi.runAllTicks();
+      vi.useRealTimers();
+    }
+
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("retires unconsumed selection authority at the native window boundary", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    const staleSelect = captureSelect(history);
+    history.addEventListener("click", (event) => event.preventDefault(), { once: true });
+
+    fireEvent.click(history);
+    act(() => dispatchUnadmittedSelection(history, staleSelect));
+
+    expect(actions.onHistory).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(history);
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it.each([
     ["history", "onHistory"],
     ["name-version", "onNameVersion"],
