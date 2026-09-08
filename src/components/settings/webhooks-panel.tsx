@@ -9,6 +9,7 @@ import {
   useState,
   type ChangeEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefCallback,
 } from "react";
@@ -248,6 +249,7 @@ interface PanelPublication {
   dom: PanelDomSnapshot | null;
   placement: PanelPlacement | null;
   guard: PanelDomGuard | null;
+  keyboard: FormKeyboardAuthority | null;
   guardExpiryQueued: boolean;
   factsAreCurrent: (() => boolean) | null;
   domIsExact: ((override?: InputDomOverride) => boolean) | null;
@@ -287,6 +289,15 @@ type PanelDomGuard = Readonly<{
   ) => void;
   isClean: () => boolean;
   release: () => void;
+}>;
+
+type FormKeyboardAuthority = Readonly<{
+  form: HTMLFormElement;
+  root: HTMLDivElement;
+  document: Document;
+  targets: readonly HTMLElement[];
+  KeyboardEvent: typeof KeyboardEvent;
+  preventDefault: (this: Event) => void;
 }>;
 
 type PanelReplay = Readonly<{
@@ -334,7 +345,10 @@ class PanelPublicationCoordinator {
       ]);
       for (const publication of publications) {
         publication?.guard?.release();
-        if (publication) publication.guard = null;
+        if (publication) {
+          publication.guard = null;
+          publication.keyboard = null;
+        }
       }
       this.#current = null;
       this.#successorOf = null;
@@ -446,6 +460,13 @@ class PanelPublicationCoordinator {
       guard.release();
       return undefined;
     }
+    const keyboard = candidate.presentation.adding
+      ? captureFormKeyboardAuthority(candidate, root)
+      : null;
+    if (candidate.presentation.adding && !keyboard) {
+      guard.release();
+      return undefined;
+    }
     const predecessor = this.#current ?? this.#successorOf;
     if (
       predecessor &&
@@ -498,6 +519,7 @@ class PanelPublicationCoordinator {
     candidate.dom = snapshotPanelDom(root);
     candidate.placement = placement;
     candidate.guard = guard;
+    candidate.keyboard = keyboard;
     for (const owner of panelButtonSlots(candidate)) {
       owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
     }
@@ -519,6 +541,7 @@ class PanelPublicationCoordinator {
     if (this.#retired.has(candidate)) return false;
     candidate.guard?.isClean();
     this.#retired.add(candidate);
+    candidate.keyboard = null;
     const wasCurrent = this.#current === candidate;
     if (wasCurrent) {
       this.#current = null;
@@ -1185,6 +1208,112 @@ function isNativeReactSubmitEvent(
   ) ? nativeEvent : null;
 }
 
+function captureFormKeyboardAuthority(
+  publication: PanelPublication,
+  root: HTMLDivElement,
+): FormKeyboardAuthority | null {
+  const form = publication.form.element;
+  const document = root.ownerDocument;
+  const ownerWindow = document.defaultView;
+  const preventDefault = ownerWindow
+    ? Object.getOwnPropertyDescriptor(ownerWindow.Event.prototype, "preventDefault")?.value
+    : null;
+  if (
+    !form ||
+    !ownerWindow ||
+    form.ownerDocument !== document ||
+    form.parentElement !== root ||
+    typeof preventDefault !== "function"
+  ) {
+    return null;
+  }
+  const targets = [
+    form,
+    ...[...form.querySelectorAll("*")].filter(
+      (target): target is HTMLElement =>
+        target instanceof ownerWindow.HTMLElement,
+    ),
+  ];
+  return Object.freeze({
+    form,
+    root,
+    document,
+    targets: Object.freeze(targets),
+    KeyboardEvent: ownerWindow.KeyboardEvent,
+    preventDefault: preventDefault as (this: Event) => void,
+  });
+}
+
+function isNativeReactEscapeEvent(
+  event: ReactKeyboardEvent<HTMLFormElement>,
+  authority: FormKeyboardAuthority | null,
+): KeyboardEvent | null {
+  if (!authority) return null;
+  const { document, form, root, targets, KeyboardEvent: KeyboardEventConstructor } = authority;
+  const ownerWindow = document.defaultView;
+  const target = event.target;
+  const nativeEvent = event.nativeEvent;
+  const isDefaultPrevented = event.isDefaultPrevented;
+  const isPropagationStopped = event.isPropagationStopped;
+  if (
+    !ownerWindow ||
+    root.ownerDocument !== document ||
+    form.ownerDocument !== document ||
+    event.currentTarget !== form ||
+    event.type !== "keydown" ||
+    event.key !== "Escape" ||
+    event.code !== "Escape" ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    event.repeat ||
+    !event.bubbles ||
+    !event.cancelable ||
+    event.defaultPrevented ||
+    typeof isDefaultPrevented !== "function" ||
+    Reflect.apply(isDefaultPrevented, event, []) ||
+    typeof isPropagationStopped !== "function" ||
+    Reflect.apply(isPropagationStopped, event, []) ||
+    !(target instanceof ownerWindow.HTMLElement) ||
+    target.ownerDocument !== document ||
+    document.activeElement !== target ||
+    !targets.includes(target) ||
+    !(target === form || form.contains(target)) ||
+    !form.isConnected ||
+    !root.isConnected ||
+    form.parentElement !== root ||
+    !root.contains(form) ||
+    !(nativeEvent instanceof KeyboardEventConstructor) ||
+    nativeEvent.type !== "keydown" ||
+    nativeEvent.key !== event.key ||
+    nativeEvent.code !== event.code ||
+    nativeEvent.altKey !== event.altKey ||
+    nativeEvent.ctrlKey !== event.ctrlKey ||
+    nativeEvent.metaKey !== event.metaKey ||
+    nativeEvent.shiftKey !== event.shiftKey ||
+    nativeEvent.repeat !== event.repeat ||
+    nativeEvent.isComposing ||
+    nativeEvent.keyCode === 229 ||
+    !nativeEvent.bubbles ||
+    !nativeEvent.cancelable ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    nativeEvent.defaultPrevented ||
+    nativeEvent.cancelBubble ||
+    nativeEvent.target !== target
+  ) {
+    return null;
+  }
+  const path = nativeEvent.composedPath();
+  return (
+    path[0] === target &&
+    path.includes(form) &&
+    path.includes(root) &&
+    path.includes(document) &&
+    path.includes(ownerWindow)
+  ) ? nativeEvent : null;
+}
+
 function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
   return {
     key,
@@ -1248,6 +1377,7 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
     dom: null,
     placement: null,
     guard: null,
+    keyboard: null,
     guardExpiryQueued: false,
     factsAreCurrent: null,
     domIsExact: null,
@@ -1903,6 +2033,7 @@ export function WebhooksPanel() {
         !cancelButton.isConnected ||
         form.parentElement !== card ||
         form.dataset.testid !== "webhook-form" ||
+        form.tabIndex !== -1 ||
         form.getAttribute("aria-busy") !== (facts.createOperation ? "true" : null) ||
         form.children.length !== 4 ||
         urlInput.form !== form ||
@@ -2329,6 +2460,38 @@ export function WebhooksPanel() {
     );
   };
 
+  const claimPublishedEscape = (
+    candidate: PanelPublication,
+    action: ActionFacts,
+    event: ReactKeyboardEvent<HTMLFormElement>,
+  ): Readonly<{
+    authority: FormKeyboardAuthority;
+    nativeEvent: KeyboardEvent;
+  }> | null => {
+    const authority = candidate.keyboard;
+    if (!action.eligible || !authority) return null;
+    const nativeEvent = isNativeReactEscapeEvent(event, authority);
+    if (!nativeEvent) return null;
+    publicationCoordinator.prepareControlClaim(candidate);
+    if (
+      candidate.keyboard !== authority ||
+      candidate.form.element !== authority.form ||
+      candidate.card.element !== authority.root ||
+      candidate.presentation.cancel !== action ||
+      !ownsPanel(candidate) ||
+      !publicationCoordinator.claim(
+        candidate,
+        null,
+        action,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return null;
+    }
+    return Object.freeze({ authority, nativeEvent });
+  };
+
   useLayoutEffect(() => {
     return publicationCoordinator.establish(
       publication,
@@ -2428,7 +2591,21 @@ export function WebhooksPanel() {
           ref={bindElement(publication, publication.form)}
           className="m-5 flex flex-col gap-3 rounded-xl border border-line bg-surface-2 p-4"
           data-testid="webhook-form"
+          tabIndex={-1}
           aria-busy={presentation.createOperation !== null || undefined}
+          onKeyDown={(event) => {
+            const action = presentation.cancel;
+            if (!action) return;
+            const claim = claimPublishedEscape(publication, action, event);
+            if (!claim) return;
+            Reflect.apply(
+              claim.authority.preventDefault,
+              claim.nativeEvent,
+              [],
+            );
+            requestPublicationSuccessor();
+            setAdding(false);
+          }}
           onSubmit={(event) => {
             const renderedForm = publication.form.element ?? publication.form.last;
             const renderedCreateButton = publication.create.element ?? publication.create.last;

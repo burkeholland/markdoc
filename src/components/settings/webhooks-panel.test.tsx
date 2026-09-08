@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   type ChangeEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -92,6 +93,7 @@ function optionalReactProp<T>(element: HTMLElement, name: string): T | null {
 type ClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type InputChangeHandler = (event: ChangeEvent<HTMLInputElement>) => void;
 type SubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
+type KeyDownHandler = (event: ReactKeyboardEvent<HTMLFormElement>) => void;
 
 function setNativeProvenance(event: Event, target: EventTarget) {
   const path: EventTarget[] = [];
@@ -220,6 +222,98 @@ function inputEvent(
     defaultPrevented: false,
     preventDefault: vi.fn(),
   } as unknown as ChangeEvent<HTMLInputElement>;
+}
+
+function keyboardEvent(
+  currentTarget: HTMLFormElement,
+  target: HTMLElement,
+  options: {
+    nativeTarget?: EventTarget;
+    KeyboardEventType?: typeof window.KeyboardEvent;
+    wrapperType?: string;
+    nativeType?: string;
+    key?: string;
+    nativeKey?: string;
+    code?: string;
+    nativeCode?: string;
+    altKey?: boolean;
+    nativeAltKey?: boolean;
+    ctrlKey?: boolean;
+    nativeCtrlKey?: boolean;
+    metaKey?: boolean;
+    nativeMetaKey?: boolean;
+    shiftKey?: boolean;
+    nativeShiftKey?: boolean;
+    repeat?: boolean;
+    nativeRepeat?: boolean;
+    isComposing?: boolean;
+    bubbles?: boolean;
+    nativeBubbles?: boolean;
+    cancelable?: boolean;
+    nativeCancelable?: boolean;
+    defaultPrevented?: boolean;
+    propagationStopped?: boolean;
+    eventPhase?: number;
+  } = {},
+) {
+  const KeyboardEventType = options.KeyboardEventType ?? window.KeyboardEvent;
+  const key = options.key ?? "Escape";
+  const code = options.code ?? "Escape";
+  const altKey = options.altKey ?? false;
+  const ctrlKey = options.ctrlKey ?? false;
+  const metaKey = options.metaKey ?? false;
+  const shiftKey = options.shiftKey ?? false;
+  const repeat = options.repeat ?? false;
+  const bubbles = options.bubbles ?? true;
+  const cancelable = options.cancelable ?? true;
+  const nativeEvent = new KeyboardEventType(options.nativeType ?? "keydown", {
+    key: options.nativeKey ?? key,
+    code: options.nativeCode ?? code,
+    altKey: options.nativeAltKey ?? altKey,
+    ctrlKey: options.nativeCtrlKey ?? ctrlKey,
+    metaKey: options.nativeMetaKey ?? metaKey,
+    shiftKey: options.nativeShiftKey ?? shiftKey,
+    repeat: options.nativeRepeat ?? repeat,
+    isComposing: options.isComposing ?? false,
+    bubbles: options.nativeBubbles ?? bubbles,
+    cancelable: options.nativeCancelable ?? cancelable,
+  });
+  setNativeProvenance(
+    nativeEvent,
+    options.nativeTarget ?? target,
+  );
+  if (options.eventPhase !== undefined) {
+    Object.defineProperty(nativeEvent, "eventPhase", {
+      configurable: true,
+      value: options.eventPhase,
+    });
+  }
+  const preventDefault = vi.fn();
+  const defaultPrevented = options.defaultPrevented ?? false;
+  const propagationStopped = options.propagationStopped ?? false;
+  return {
+    event: {
+      type: options.wrapperType ?? "keydown",
+      currentTarget,
+      target,
+      nativeEvent,
+      key,
+      code,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      preventDefault,
+      isDefaultPrevented: () => defaultPrevented,
+      isPropagationStopped: () => propagationStopped,
+    } as unknown as ReactKeyboardEvent<HTMLFormElement>,
+    nativeEvent,
+    preventDefault,
+  };
 }
 
 interface DirectView {
@@ -1878,6 +1972,491 @@ describe("Settings → Webhooks: exact committed controls", () => {
     await waitFor(() => {
       expect(screen.getByTestId("webhook-enable")).toBeEnabled();
       expect(screen.getAllByTestId("webhook-test")[1]).toBeEnabled();
+    });
+  });
+
+  describe("Settings → Webhooks: Escape cancellation", () => {
+    function trackNativePrevention() {
+      const nativePreventDefault = window.Event.prototype.preventDefault;
+      return vi
+        .spyOn(window.Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          Reflect.apply(nativePreventDefault, this, []);
+        });
+    }
+
+    it.each([
+      ["URL field", "webhook-url"],
+      ["document field", "webhook-docs"],
+      ["event checkbox", "webhook-event-request.created"],
+      ["form background", "webhook-form"],
+    ])("cancels once from the current %s without starting other work", async (
+      _label,
+      targetId,
+    ) => {
+      const preventDefault = trackNativePrevention();
+      const confirmMock = vi.fn(() => true);
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("confirm", confirmMock);
+      const navigatorWithClipboard = Object.create(window.navigator) as Navigator;
+      Object.defineProperty(navigatorWithClipboard, "clipboard", {
+        configurable: true,
+        value: { writeText },
+      });
+      vi.stubGlobal("navigator", navigatorWithClipboard);
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const target = within(view.host).getByTestId(targetId) as HTMLElement;
+      const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const escape = keyboardEvent(form, target);
+      target.focus();
+      expect(target.ownerDocument.activeElement).toBe(target);
+      const callsBeforeEscape = fetchMock.mock.calls.length;
+      const locationBeforeEscape = window.location.href;
+
+      act(() => {
+        keyDown(escape.event);
+        keyDown(escape.event);
+      });
+
+      expect(escape.preventDefault).not.toHaveBeenCalled();
+      expect(escape.nativeEvent.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+      expect(fetchMock).toHaveBeenCalledTimes(callsBeforeEscape);
+      expect(confirmMock).not.toHaveBeenCalled();
+      expect(writeText).not.toHaveBeenCalled();
+      expect(window.location.href).toBe(locationBeforeEscape);
+    });
+
+    it("claims before prevention, removes one form, and rejects prevention reentry", async () => {
+      const nativePreventDefault = window.Event.prototype.preventDefault;
+      let keyDown: KeyDownHandler | null = null;
+      let escape: ReturnType<typeof keyboardEvent> | null = null;
+      const preventDefault = vi
+        .spyOn(window.Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          if (keyDown && escape) keyDown(escape.event);
+          Reflect.apply(nativePreventDefault, this, []);
+        });
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const card = within(view.host).getByTestId("webhooks-card");
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const currentKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const currentEscape = keyboardEvent(form, url);
+      keyDown = currentKeyDown;
+      escape = currentEscape;
+      const removedForms: Node[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          removedForms.push(
+            ...[...record.removedNodes].filter(
+              (node) => node === form,
+            ),
+          );
+        }
+      });
+      observer.observe(card, { childList: true });
+      url.focus();
+
+      act(() => currentKeyDown(currentEscape.event));
+      await settle();
+      observer.disconnect();
+
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(removedForms).toEqual([form]);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+    });
+
+    it("preserves the current draft and action error exactly like Cancel", async () => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockImplementation((url, init) =>
+        url === "/api/webhooks" && init?.method === "POST"
+          ? Promise.resolve(response({ error: "Receiver rejected this draft" }, 422))
+          : Promise.resolve(response({ webhooks: [] })));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/escape-draft" },
+      });
+      fireEvent.change(within(view.host).getByTestId("webhook-docs"), {
+        target: { value: "doc-escape" },
+      });
+      fireEvent.click(within(view.host).getByTestId("webhook-event-content.changed"));
+      fireEvent.click(within(view.host).getByTestId("webhook-create"));
+      expect(await within(view.host).findByTestId("webhook-action-error"))
+        .toHaveTextContent("Receiver rejected this draft");
+      await settle();
+
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const docs = within(view.host).getByTestId("webhook-docs") as HTMLInputElement;
+      const callsBeforeEscape = fetchMock.mock.calls.length;
+      docs.focus();
+      const escape = keyboardEvent(form, docs);
+      act(() => reactProp<KeyDownHandler>(form, "onKeyDown")(escape.event));
+
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(callsBeforeEscape);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+      expect(within(view.host).getByTestId("webhook-action-error"))
+        .toHaveTextContent("Receiver rejected this draft");
+
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      expect(within(view.host).getByTestId("webhook-url"))
+        .toHaveValue("https://receiver.example/escape-draft");
+      expect(within(view.host).getByTestId("webhook-docs"))
+        .toHaveValue("doc-escape");
+      expect(within(view.host).getByTestId("webhook-event-content.changed"))
+        .toBeChecked();
+    });
+
+    it("is inert while Create owns the form", async () => {
+      const preventDefault = trackNativePrevention();
+      const create = deferred<Response>();
+      let created = false;
+      fetchMock.mockImplementation((url, init) => {
+        if (url === "/api/webhooks" && init?.method === "POST") {
+          return create.promise;
+        }
+        return Promise.resolve(response({
+          webhooks: created ? [activeWebhook] : [],
+        }));
+      });
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: activeWebhook.url },
+      });
+      fireEvent.click(within(view.host).getByTestId("webhook-create"));
+
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      expect(form).toHaveAttribute("aria-busy", "true");
+      form.focus();
+      const escape = keyboardEvent(form, form);
+      const requestsAtEscape = fetchMock.mock.calls.length;
+      act(() => reactProp<KeyDownHandler>(form, "onKeyDown")(escape.event));
+
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(escape.nativeEvent.defaultPrevented).toBe(false);
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+      expect(fetchMock).toHaveBeenCalledTimes(requestsAtEscape);
+
+      created = true;
+      await act(async () => create.resolve(response({
+        webhook: { ...activeWebhook, secret: "whsec_escape_pending" },
+      })));
+      expect(await within(view.host).findByText(activeWebhook.url)).toBeInTheDocument();
+    });
+
+    it("rejects every ineligible key and event provenance without poisoning the current form", async () => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const docs = within(view.host).getByTestId("webhook-docs") as HTMLInputElement;
+      const add = within(view.host).getByTestId("webhook-add") as HTMLButtonElement;
+      const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const iframe = document.createElement("iframe");
+      const foreignForm = document.createElement("form");
+      foreignRoot.append(iframe, foreignForm);
+      const foreignKeyboardEvent = iframe.contentWindow?.KeyboardEvent;
+      if (!foreignKeyboardEvent) throw new Error("The foreign document has no KeyboardEvent constructor");
+
+      const rejected: Array<{
+        label: string;
+        target: HTMLElement;
+        make: () => ReturnType<typeof keyboardEvent>;
+        focus?: HTMLElement;
+        prepare?: (candidate: ReturnType<typeof keyboardEvent>) => void;
+      }> = [
+        { label: "Alt", target: url, make: () => keyboardEvent(form, url, { altKey: true }) },
+        { label: "Control", target: url, make: () => keyboardEvent(form, url, { ctrlKey: true }) },
+        { label: "Meta", target: url, make: () => keyboardEvent(form, url, { metaKey: true }) },
+        { label: "Shift", target: url, make: () => keyboardEvent(form, url, { shiftKey: true }) },
+        { label: "repeat", target: url, make: () => keyboardEvent(form, url, { repeat: true }) },
+        { label: "composition", target: url, make: () => keyboardEvent(form, url, { isComposing: true }) },
+        { label: "non-bubbling wrapper", target: url, make: () => keyboardEvent(form, url, { bubbles: false, nativeBubbles: true }) },
+        { label: "non-bubbling native event", target: url, make: () => keyboardEvent(form, url, { nativeBubbles: false }) },
+        { label: "non-cancelable wrapper", target: url, make: () => keyboardEvent(form, url, { cancelable: false, nativeCancelable: true }) },
+        { label: "non-cancelable native event", target: url, make: () => keyboardEvent(form, url, { nativeCancelable: false }) },
+        { label: "prevented wrapper", target: url, make: () => keyboardEvent(form, url, { defaultPrevented: true }) },
+        {
+          label: "prevented native event",
+          target: url,
+          make: () => keyboardEvent(form, url),
+          prepare: (candidate) => candidate.nativeEvent.preventDefault(),
+        },
+        { label: "stopped wrapper", target: url, make: () => keyboardEvent(form, url, { propagationStopped: true }) },
+        {
+          label: "stopped native event",
+          target: url,
+          make: () => keyboardEvent(form, url),
+          prepare: (candidate) => Object.defineProperty(candidate.nativeEvent, "cancelBubble", {
+            configurable: true,
+            value: true,
+          }),
+        },
+        { label: "wrong React type", target: url, make: () => keyboardEvent(form, url, { wrapperType: "keyup" }) },
+        { label: "wrong native type", target: url, make: () => keyboardEvent(form, url, { nativeType: "keyup" }) },
+        { label: "other key", target: url, make: () => keyboardEvent(form, url, { key: "Tab", code: "Tab" }) },
+        { label: "Space", target: url, make: () => keyboardEvent(form, url, { key: " ", code: "Space" }) },
+        { label: "Enter", target: url, make: () => keyboardEvent(form, url, { key: "Enter", code: "Enter" }) },
+        { label: "wrong code", target: url, make: () => keyboardEvent(form, url, { code: "KeyE" }) },
+        { label: "crossed native key", target: url, make: () => keyboardEvent(form, url, { nativeKey: "Enter" }) },
+        { label: "crossed native code", target: url, make: () => keyboardEvent(form, url, { nativeCode: "Enter" }) },
+        { label: "crossed native modifier", target: url, make: () => keyboardEvent(form, url, { nativeAltKey: true }) },
+        { label: "crossed native repeat", target: url, make: () => keyboardEvent(form, url, { nativeRepeat: true }) },
+        { label: "undispatched event", target: url, make: () => keyboardEvent(form, url, { eventPhase: Event.NONE }) },
+        {
+          label: "foreign event realm",
+          target: url,
+          make: () => keyboardEvent(form, url, { KeyboardEventType: foreignKeyboardEvent }),
+        },
+        { label: "outside target", target: add, make: () => keyboardEvent(form, add) },
+        {
+          label: "crossed native target",
+          target: url,
+          make: () => keyboardEvent(form, url, { nativeTarget: docs }),
+        },
+        {
+          label: "wrong current form",
+          target: url,
+          make: () => keyboardEvent(foreignForm, url),
+        },
+        {
+          label: "unfocused target",
+          target: url,
+          focus: docs,
+          make: () => keyboardEvent(form, url),
+        },
+        {
+          label: "non-keyboard native event",
+          target: url,
+          make: () => {
+            const candidate = keyboardEvent(form, url);
+            Object.defineProperty(candidate.event, "nativeEvent", {
+              configurable: true,
+              value: new window.Event("keydown", {
+                bubbles: true,
+                cancelable: true,
+              }),
+            });
+            return candidate;
+          },
+        },
+      ];
+
+      for (const candidate of rejected) {
+        const value = candidate.make();
+        candidate.prepare?.(value);
+        (candidate.focus ?? candidate.target).focus();
+        const preventionCalls = preventDefault.mock.calls.length;
+        const requestCalls = fetchMock.mock.calls.length;
+        act(() => keyDown(value.event));
+        expect(
+          preventDefault.mock.calls.length,
+          `${candidate.label} prevention`,
+        ).toBe(preventionCalls);
+        expect(value.preventDefault, `${candidate.label} React prevention`)
+          .not.toHaveBeenCalled();
+        expect(fetchMock.mock.calls.length, `${candidate.label} requests`)
+          .toBe(requestCalls);
+        expect(within(view.host).getByTestId("webhook-form"), candidate.label)
+          .toBe(form);
+      }
+
+      url.focus();
+      const exact = keyboardEvent(form, url);
+      const callsBeforeExact = preventDefault.mock.calls.length;
+      act(() => keyDown(exact.event));
+      expect(preventDefault).toHaveBeenCalledTimes(callsBeforeExact + 1);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+      iframe.remove();
+      foreignForm.remove();
+    });
+
+    it("rejects a stale draft handler and admits only its current successor", async () => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const staleKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      fireEvent.change(url, {
+        target: { value: "https://receiver.example/current-draft" },
+      });
+      await settle();
+      url.focus();
+      const staleEscape = keyboardEvent(form, url);
+      act(() => staleKeyDown(staleEscape.event));
+
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+
+      const currentKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      expect(currentKeyDown).not.toBe(staleKeyDown);
+      const currentEscape = keyboardEvent(form, url);
+      act(() => currentKeyDown(currentEscape.event));
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+    });
+
+    it.each([
+      "detach and restore the form",
+      "detach and restore a control",
+      "replace and restore a control",
+      "reorder and restore the form",
+    ] as const)("permanently rejects restored DOM history after %s and recovers on a keyed mount", async (history) => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(
+        <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
+      );
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const card = within(view.host).getByTestId("webhooks-card");
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      if (history === "detach and restore the form") {
+        const next = form.nextSibling;
+        form.remove();
+        card.insertBefore(form, next);
+      } else if (history === "detach and restore a control") {
+        const parent = url.parentNode;
+        const next = url.nextSibling;
+        if (!parent) throw new Error("The URL input had no parent");
+        url.remove();
+        parent.insertBefore(url, next);
+      } else if (history === "replace and restore a control") {
+        const replacement = url.cloneNode(true);
+        url.replaceWith(replacement);
+        replacement.replaceWith(url);
+      } else {
+        const next = form.nextSibling;
+        card.append(form);
+        card.insertBefore(form, next);
+      }
+      url.focus();
+      const restoredEscape = keyboardEvent(form, url);
+      act(() => keyDown(restoredEscape.event));
+
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+
+      act(() => view.root.render(
+        <StrictMode><BoundaryHarness cardKey={2} /></StrictMode>,
+      ));
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      const currentForm = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const currentUrl = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      currentUrl.focus();
+      const exact = keyboardEvent(currentForm, currentUrl);
+      act(() => reactProp<KeyDownHandler>(currentForm, "onKeyDown")(exact.event));
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+    });
+
+    it("rejects a partial Strict replay and lets a complete keyed successor recover", async () => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(
+        <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
+      );
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const formRef = reactProp<RefCallback<HTMLFormElement>>(form, "ref");
+      act(() => {
+        formRef(null);
+        formRef(form);
+      });
+      url.focus();
+      act(() => keyDown(keyboardEvent(form, url).event));
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+
+      act(() => view.root.render(
+        <StrictMode><BoundaryHarness cardKey={2} /></StrictMode>,
+      ));
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      const successorForm = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const successorChoice = within(view.host)
+        .getByTestId("webhook-event-request.created") as HTMLInputElement;
+      successorChoice.focus();
+      act(() => reactProp<KeyDownHandler>(successorForm, "onKeyDown")(
+        keyboardEvent(successorForm, successorChoice).event,
+      ));
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+    });
+
+    it("releases a removed form's authority and leaves a fresh Strict root usable", async () => {
+      const preventDefault = trackNativePrevention();
+      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
+      const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const staleKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const staleEscape = keyboardEvent(form, url);
+      const callsAtUnmount = fetchMock.mock.calls.length;
+
+      act(() => view.root.unmount());
+      act(() => staleKeyDown(staleEscape.event));
+      await settle();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(callsAtUnmount);
+      expect(view.host).toBeEmptyDOMElement();
+
+      const successor = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      await within(successor.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(successor.host).getByTestId("webhook-add"));
+      const successorForm = within(successor.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      successorForm.focus();
+      act(() => reactProp<KeyDownHandler>(successorForm, "onKeyDown")(
+        keyboardEvent(successorForm, successorForm).event,
+      ));
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(within(successor.host).queryByTestId("webhook-form")).toBeNull();
     });
   });
 
