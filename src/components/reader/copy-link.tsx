@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useState,
   type FocusEvent,
@@ -11,12 +12,15 @@ import {
 import { Check, Link2 } from "lucide-react";
 import { useCopy } from "@/lib/hooks";
 
+const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C to copy";
+
 interface CopySource {
   readonly mount: symbol;
   readonly docId: string;
   readonly origin: string;
   readonly originReady: boolean;
   readonly readerUrl: string;
+  readonly fallbackInstructionId: string;
   readonly status: ReturnType<typeof useCopy>["status"];
   readonly label: string;
   readonly copied: boolean;
@@ -143,6 +147,7 @@ function copyAuthoritiesMatch(
     previous.origin === current.origin &&
     previous.originReady === current.originReady &&
     previous.readerUrl === current.readerUrl &&
+    previous.fallbackInstructionId === current.fallbackInstructionId &&
     previous.status === current.status &&
     previous.label === current.label &&
     previous.copied === current.copied &&
@@ -341,6 +346,8 @@ function createCopyPublication(
       : [];
     const icon = button?.children.item(0);
     const visibleText = button?.children.item(1);
+    const fallbackPanel = fallback?.parentElement;
+    const instruction = fallbackPanel?.children.item(1);
     if (
       !root ||
       !root.isConnected ||
@@ -375,19 +382,44 @@ function createCopyPublication(
       return false;
     }
     if (!fallbackExpected) return fallback === null;
+    const descriptionIds = fallback
+      ?.getAttribute("aria-describedby")
+      ?.trim()
+      .split(/\s+/) ?? [];
+    const matchingDescriptionIds = ownerDocument
+      ? [...ownerDocument.querySelectorAll<HTMLElement>("[id]")]
+          .filter((element) => element.id === authority.fallbackInstructionId)
+      : [];
     return (
       !!fallback &&
       fallback.isConnected &&
       fallback.ownerDocument === ownerDocument &&
       fallback.tagName === "INPUT" &&
-      fallback.parentElement === root &&
-      root.children.item(1) === fallback &&
+      !!fallbackPanel &&
+      fallbackPanel.tagName === "DIV" &&
+      fallbackPanel.parentElement === root &&
+      root.children.item(1) === fallbackPanel &&
+      fallbackPanel.children.length === 2 &&
+      fallbackPanel.children.item(0) === fallback &&
+      fallbackPanel.children.item(1) === instruction &&
       interactiveElements[1] === fallback &&
       fallback.dataset.testid === "reader-copy-link-fallback" &&
       fallback.getAttribute("aria-label") === "Reader link" &&
+      descriptionIds.length === 1 &&
+      descriptionIds[0] === authority.fallbackInstructionId &&
+      matchingDescriptionIds.length === 1 &&
+      matchingDescriptionIds[0] === instruction &&
       fallback.readOnly &&
       fallback.value === authority.readerUrl &&
-      fallback.childNodes.length === 0
+      fallback.childNodes.length === 0 &&
+      instruction?.tagName === "P" &&
+      instruction.id === authority.fallbackInstructionId &&
+      instruction.getAttribute("data-testid") === "reader-copy-link-instruction" &&
+      instruction.getAttribute("role") === "status" &&
+      instruction.getAttribute("aria-live") === "polite" &&
+      instruction.getAttribute("aria-atomic") === "true" &&
+      instruction.textContent === MANUAL_COPY_INSTRUCTION &&
+      root.querySelectorAll('[role="status"]').length === 1
     );
   };
 
@@ -747,6 +779,7 @@ function createCopyPublication(
 /** Copies this document's canonical public URL without pulling the reader shell into the client graph. */
 export function ReaderCopyLink({ docId }: { docId: string }) {
   const [mount] = useState(() => Symbol("reader copy link"));
+  const fallbackInstructionId = `${useId()}-manual-copy-instruction`;
   const [origin, setOrigin] = useState("");
   const [cells] = useState<PublicationCells>(() => ({
     active: { current: null },
@@ -769,6 +802,7 @@ export function ReaderCopyLink({ docId }: { docId: string }) {
     origin,
     originReady: Boolean(origin),
     readerUrl,
+    fallbackInstructionId,
     status: link.status,
     label: link.label,
     copied: link.copied,
@@ -817,15 +851,28 @@ export function ReaderCopyLink({ docId }: { docId: string }) {
         </span>
       </button>
       {link.status === "fallback" && (
-        <input
-          ref={captureFallback}
-          className="input absolute right-0 top-full z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] font-mono text-xs shadow-md"
-          value={readerUrl}
-          readOnly
-          aria-label="Reader link"
-          onFocus={onFallbackFocus}
-          data-testid="reader-copy-link-fallback"
-        />
+        <div className="absolute right-0 top-full z-20 mt-2 w-[min(24rem,calc(100vw-2rem))] rounded-lg bg-surface p-2 shadow-md">
+          <input
+            ref={captureFallback}
+            className="input w-full font-mono text-xs"
+            value={readerUrl}
+            readOnly
+            aria-label="Reader link"
+            aria-describedby={fallbackInstructionId}
+            onFocus={onFallbackFocus}
+            data-testid="reader-copy-link-fallback"
+          />
+          <p
+            id={fallbackInstructionId}
+            className="px-1 pt-1.5 text-xs text-ink-3"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            data-testid="reader-copy-link-instruction"
+          >
+            {MANUAL_COPY_INSTRUCTION}
+          </p>
+        </div>
       )}
     </div>
   );

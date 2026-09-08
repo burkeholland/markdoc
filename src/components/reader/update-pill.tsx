@@ -9,15 +9,19 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 
-const PILL_CLASS_NAME = "reader-pill pointer-events-none fixed inset-x-0 top-16 z-20 flex justify-center";
+const PILL_CLASS_NAME =
+  "reader-pill pointer-events-none fixed inset-x-0 top-16 z-20 flex justify-center gap-1";
 const BUTTON_CLASS_NAME =
   "pointer-events-auto inline-flex items-center gap-2 rounded-full border border-line-2 bg-surface px-3.5 py-1.5 text-sm font-medium text-ink shadow-md hover:bg-surface-2";
+const DISMISS_BUTTON_CLASS_NAME =
+  "pointer-events-auto inline-flex size-8 items-center justify-center rounded-full border border-line-2 bg-surface text-ink-3 shadow-md hover:bg-surface-2 hover:text-ink";
 const UPDATED_CLASS_NAME = "text-ink-3";
 const SEPARATOR_CLASS_NAME = "text-ink-4";
 const ICON_CLASS_NAME = "text-accent";
 const CONTROL_TEXT = "Updated—Refresh";
+const DISMISS_LABEL = "Dismiss update notice";
 
 type DocumentAuthority = Readonly<{
   mount: symbol;
@@ -28,6 +32,12 @@ type DocumentAuthority = Readonly<{
 
 type RefreshPublication = Readonly<{
   document: DocumentAuthority;
+  remoteHash: string;
+}>;
+
+type DismissedUpdate = Readonly<{
+  document: DocumentAuthority;
+  remoteHash: string;
 }>;
 
 type PollingAuthority = Readonly<{
@@ -55,6 +65,7 @@ type RefreshControlRender = Readonly<{
   document: DocumentAuthority;
   polling: PollingAuthority;
   refresh: RefreshPublication;
+  dismiss: (publication: RefreshPublication) => void;
 }>;
 
 type RefreshAction = {
@@ -71,9 +82,11 @@ type RefreshControlPublication = Readonly<{
   render: RefreshControlRender;
   action: RefreshAction;
   pill: HTMLDivElement;
-  button: HTMLButtonElement;
+  refreshButton: HTMLButtonElement;
+  dismissButton: HTMLButtonElement;
   ownerDocument: Document;
-  buttonTargets: readonly Node[];
+  refreshTargets: readonly Node[];
+  dismissTargets: readonly Node[];
   reloadAuthority: ReloadAuthority;
   retire: () => boolean;
   isRetired: () => boolean;
@@ -184,9 +197,11 @@ interface RefreshControlRuntime {
 
 type RefreshControlPublicationSet = Readonly<{
   capturePill: (element: HTMLDivElement | null) => void;
-  captureButton: (element: HTMLButtonElement | null) => void;
+  captureRefreshButton: (element: HTMLButtonElement | null) => void;
+  captureDismissButton: (element: HTMLButtonElement | null) => void;
   establish: () => void | (() => void);
-  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onRefresh: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onDismiss: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }>;
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -335,31 +350,38 @@ function isEffectivelyEnabled(button: HTMLButtonElement): boolean {
 
 function controlHasExpectedPresentation(
   pill: HTMLDivElement,
-  button: HTMLButtonElement,
+  refreshButton: HTMLButtonElement,
+  dismissButton: HTMLButtonElement,
 ): boolean {
-  const updated = button.children.item(0);
-  const separator = button.children.item(1);
-  const icon = button.children.item(2);
-  const refreshText = button.childNodes.item(3);
+  const updated = refreshButton.children.item(0);
+  const separator = refreshButton.children.item(1);
+  const refreshIcon = refreshButton.children.item(2);
+  const refreshText = refreshButton.childNodes.item(3);
+  const dismissIcon = dismissButton.children.item(0);
   return (
     pill.isConnected &&
-    button.isConnected &&
-    pill.ownerDocument === button.ownerDocument &&
+    refreshButton.isConnected &&
+    dismissButton.isConnected &&
+    pill.ownerDocument === refreshButton.ownerDocument &&
+    pill.ownerDocument === dismissButton.ownerDocument &&
     pill.tagName === "DIV" &&
-    button.tagName === "BUTTON" &&
+    refreshButton.tagName === "BUTTON" &&
+    dismissButton.tagName === "BUTTON" &&
     pill.getAttribute("class") === PILL_CLASS_NAME &&
     pill.getAttribute("role") === "status" &&
     pill.dataset.testid === "reader-updated" &&
-    pill.children.length === 1 &&
-    pill.childNodes.length === 1 &&
-    pill.firstElementChild === button &&
-    button.parentElement === pill &&
-    button.getAttribute("type") === "button" &&
-    button.type === "button" &&
-    isEffectivelyEnabled(button) &&
-    button.getAttribute("class") === BUTTON_CLASS_NAME &&
-    button.children.length === 3 &&
-    button.childNodes.length === 4 &&
+    pill.children.length === 2 &&
+    pill.childNodes.length === 2 &&
+    pill.children.item(0) === refreshButton &&
+    pill.children.item(1) === dismissButton &&
+    refreshButton.parentElement === pill &&
+    dismissButton.parentElement === pill &&
+    refreshButton.getAttribute("type") === "button" &&
+    refreshButton.type === "button" &&
+    isEffectivelyEnabled(refreshButton) &&
+    refreshButton.getAttribute("class") === BUTTON_CLASS_NAME &&
+    refreshButton.children.length === 3 &&
+    refreshButton.childNodes.length === 4 &&
     updated?.tagName === "SPAN" &&
     updated.getAttribute("class") === UPDATED_CLASS_NAME &&
     updated.childNodes.length === 1 &&
@@ -371,14 +393,25 @@ function controlHasExpectedPresentation(
     separator.childNodes.length === 1 &&
     separator.firstChild?.nodeType === 3 &&
     separator.firstChild.nodeValue === "—" &&
-    icon?.localName === "svg" &&
-    icon.classList.contains("lucide-refresh-cw") &&
-    icon.classList.contains(ICON_CLASS_NAME) &&
-    icon.getAttribute("width") === "14" &&
-    icon.getAttribute("height") === "14" &&
+    refreshIcon?.localName === "svg" &&
+    refreshIcon.classList.contains("lucide-refresh-cw") &&
+    refreshIcon.classList.contains(ICON_CLASS_NAME) &&
+    refreshIcon.getAttribute("width") === "14" &&
+    refreshIcon.getAttribute("height") === "14" &&
     refreshText?.nodeType === 3 &&
     refreshText.nodeValue === "Refresh" &&
-    button.textContent === CONTROL_TEXT
+    refreshButton.textContent === CONTROL_TEXT &&
+    dismissButton.getAttribute("type") === "button" &&
+    dismissButton.type === "button" &&
+    isEffectivelyEnabled(dismissButton) &&
+    dismissButton.getAttribute("class") === DISMISS_BUTTON_CLASS_NAME &&
+    dismissButton.getAttribute("aria-label") === DISMISS_LABEL &&
+    dismissButton.children.length === 1 &&
+    dismissButton.childNodes.length === 1 &&
+    dismissIcon?.localName === "svg" &&
+    dismissIcon.classList.contains("lucide-x") &&
+    dismissIcon.getAttribute("width") === "14" &&
+    dismissIcon.getAttribute("height") === "14"
   );
 }
 
@@ -428,7 +461,9 @@ function controlAuthoritiesMatch(
     previous.pollMs === current.pollMs &&
     previous.document === current.document &&
     previous.polling === current.polling &&
-    previous.refresh === current.refresh
+    previous.refresh === current.refresh &&
+    previous.refresh.remoteHash === current.refresh.remoteHash &&
+    previous.dismiss === current.dismiss
   );
 }
 
@@ -446,6 +481,7 @@ function createRefreshControlPublication(
   pollingAuthorityRef: React.RefObject<PollingAuthority | null>,
   refreshPublicationRef: React.RefObject<RefreshPublication | null>,
   requestSuccessor: () => void,
+  dismissCurrentPublication: (publication: RefreshPublication) => void,
 ): RefreshControlPublicationSet {
   let currentRuntime: RefreshControlRuntime | null = null;
   let lastRuntime: RefreshControlRuntime | null = null;
@@ -459,6 +495,7 @@ function createRefreshControlPublication(
     render.document === render.polling.document &&
     render.pollMs === render.polling.pollMs &&
     render.document === render.refresh.document &&
+    render.dismiss === dismissCurrentPublication &&
     documentAuthorityRef.current === render.document &&
     pollingAuthorityRef.current === render.polling &&
     refreshPublicationRef.current === render.refresh &&
@@ -486,23 +523,28 @@ function createRefreshControlPublication(
     }
   };
   const pillOwner = new ElementOwner<HTMLDivElement>(onElementChange);
-  const buttonOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
+  const refreshButtonOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
+  const dismissButtonOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
 
   const exactDomIsCurrent = () => {
     const pill = pillOwner.element();
-    const button = buttonOwner.element();
+    const refreshButton = refreshButtonOwner.element();
+    const dismissButton = dismissButtonOwner.element();
     return Boolean(
       pill &&
-        button &&
+        refreshButton &&
+        dismissButton &&
         pill.ownerDocument === render.ownerDocument &&
-        button.ownerDocument === render.ownerDocument &&
-        controlHasExpectedPresentation(pill, button),
+        refreshButton.ownerDocument === render.ownerDocument &&
+        dismissButton.ownerDocument === render.ownerDocument &&
+        controlHasExpectedPresentation(pill, refreshButton, dismissButton),
     );
   };
 
   const expectedOwners = (): readonly ElementOwnerView[] => [
     pillOwner,
-    buttonOwner,
+    refreshButtonOwner,
+    dismissButtonOwner,
   ];
 
   const publicationIsCurrent = (runtime: RefreshControlRuntime) => {
@@ -516,13 +558,12 @@ function createRefreshControlPublication(
       !cells.claimedActions.has(publication.action) &&
       publication.render === render &&
       publication.pill === pillOwner.element() &&
-      publication.button === buttonOwner.element() &&
+      publication.refreshButton === refreshButtonOwner.element() &&
+      publication.dismissButton === dismissButtonOwner.element() &&
+      render.refresh.remoteHash.length > 0 &&
+      render.refresh.remoteHash !== render.initialHash &&
       factsAreCurrent() &&
       exactDomIsCurrent() &&
-      reloadAuthorityIsCurrent(
-        publication.reloadAuthority,
-        publication.ownerDocument,
-      ) &&
       runtime.publishedDomMatches()
     );
   };
@@ -559,7 +600,8 @@ function createRefreshControlPublication(
 
   const createRuntime = (
     pill: HTMLDivElement,
-    button: HTMLButtonElement,
+    refreshButton: HTMLButtonElement,
+    dismissButton: HTMLButtonElement,
     reloadAuthority: ReloadAuthority,
   ): RefreshControlRuntime => {
     type Retirement = "element" | "layout" | "invalid" | "other";
@@ -608,9 +650,11 @@ function createRefreshControlPublication(
       render,
       action,
       pill,
-      button,
+      refreshButton,
+      dismissButton,
       ownerDocument: pill.ownerDocument,
-      buttonTargets: descendantsOf(button),
+      refreshTargets: descendantsOf(refreshButton),
+      dismissTargets: descendantsOf(dismissButton),
       reloadAuthority,
       retire: () => retire("other"),
       isRetired: () => retired,
@@ -622,9 +666,11 @@ function createRefreshControlPublication(
           domGuard &&
           domGuard.isClean() &&
           pillOwner.element() === pill &&
-          buttonOwner.element() === button &&
+          refreshButtonOwner.element() === refreshButton &&
+          dismissButtonOwner.element() === dismissButton &&
           pill.isConnected &&
-          button.isConnected &&
+          refreshButton.isConnected &&
+          dismissButton.isConnected &&
           controlPlacementMatches(pill, placementSnapshot) &&
           controlDomMatches(domSnapshot),
       );
@@ -764,10 +810,19 @@ function createRefreshControlPublication(
     }
     if (!exactDomIsCurrent()) return undefined;
     const pill = pillOwner.element();
-    const button = buttonOwner.element();
+    const refreshButton = refreshButtonOwner.element();
+    const dismissButton = dismissButtonOwner.element();
     const placement = pill ? captureControlPlacement(pill) : null;
     const reloadAuthority = captureReloadAuthority(render.ownerDocument);
-    if (!pill || !button || !placement || !reloadAuthority) return undefined;
+    if (
+      !pill ||
+      !refreshButton ||
+      !dismissButton ||
+      !placement ||
+      !reloadAuthority
+    ) {
+      return undefined;
+    }
 
     const replay = cells.replay.current;
     if (replay) {
@@ -791,7 +846,12 @@ function createRefreshControlPublication(
       if (!exactReplay) return undefined;
     }
 
-    const runtime = createRuntime(pill, button, reloadAuthority);
+    const runtime = createRuntime(
+      pill,
+      refreshButton,
+      dismissButton,
+      reloadAuthority,
+    );
     const previous = cells.active.current;
     if (previous && previous !== runtime.publication) previous.retire();
     currentRuntime = runtime;
@@ -804,10 +864,20 @@ function createRefreshControlPublication(
     return runtime.retireForLayout;
   };
 
-  const onClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+  const claim = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    kind: "refresh" | "dismiss",
+  ) => {
     const runtime = currentRuntime;
     const publication = runtime?.publication;
-    const button = publication?.button;
+    const button =
+      kind === "refresh"
+        ? publication?.refreshButton
+        : publication?.dismissButton;
+    const targets =
+      kind === "refresh"
+        ? publication?.refreshTargets
+        : publication?.dismissTargets;
     const ownerDocument = publication?.ownerDocument;
     const MouseEventConstructor = ownerDocument?.defaultView?.MouseEvent;
     const nativeEvent = event?.nativeEvent;
@@ -816,6 +886,7 @@ function createRefreshControlPublication(
       !runtime ||
       !publication ||
       !button ||
+      !targets ||
       !ownerDocument ||
       !MouseEventConstructor ||
       event.type !== "click" ||
@@ -829,7 +900,7 @@ function createRefreshControlPublication(
       !isNodeFromDocument(target, ownerDocument) ||
       !target.isConnected ||
       !button.contains(target) ||
-      !publication.buttonTargets.includes(target) ||
+      !targets.includes(target) ||
       event.defaultPrevented ||
       nativeEvent.defaultPrevented ||
       cells.claimedReactEvents.has(event) ||
@@ -845,6 +916,16 @@ function createRefreshControlPublication(
       runtime.retireForInvalidation();
       return;
     }
+    if (
+      kind === "refresh" &&
+      !reloadAuthorityIsCurrent(
+        publication.reloadAuthority,
+        publication.ownerDocument,
+      )
+    ) {
+      runtime.retireForInvalidation();
+      return;
+    }
 
     cells.claimedRefreshes.add(render.refresh);
     cells.claimedPublications.add(publication);
@@ -853,19 +934,28 @@ function createRefreshControlPublication(
     cells.claimedNativeEvents.add(nativeEvent);
     publication.action.claimed = true;
     publication.retire();
-    if (refreshPublicationRef.current === render.refresh) {
+    if (
+      kind === "refresh" &&
+      refreshPublicationRef.current === render.refresh
+    ) {
       refreshPublicationRef.current = null;
     }
-    publication.reloadAuthority.reload.call(
-      publication.reloadAuthority.location,
-    );
+    if (kind === "refresh") {
+      publication.reloadAuthority.reload.call(
+        publication.reloadAuthority.location,
+      );
+    } else {
+      render.dismiss(render.refresh);
+    }
   };
 
   return Object.freeze({
     capturePill: pillOwner.capture,
-    captureButton: buttonOwner.capture,
+    captureRefreshButton: refreshButtonOwner.capture,
+    captureDismissButton: dismissButtonOwner.capture,
     establish,
-    onClick,
+    onRefresh: (event) => claim(event, "refresh"),
+    onDismiss: (event) => claim(event, "dismiss"),
   });
 }
 
@@ -882,6 +972,7 @@ function RefreshControl({
   documentAuthorityRef,
   pollingAuthorityRef,
   refreshPublicationRef,
+  dismissCurrentPublication,
 }: {
   mount: symbol;
   ownerDocument: Document;
@@ -895,6 +986,7 @@ function RefreshControl({
   documentAuthorityRef: React.RefObject<DocumentAuthority | null>;
   pollingAuthorityRef: React.RefObject<PollingAuthority | null>;
   refreshPublicationRef: React.RefObject<RefreshPublication | null>;
+  dismissCurrentPublication: (publication: RefreshPublication) => void;
 }) {
   const [, setPublicationRevision] = useState(0);
   const requestPublicationSuccessor = useCallback(() => {
@@ -910,6 +1002,7 @@ function RefreshControl({
     document: documentAuthority,
     polling: pollingAuthority,
     refresh: refreshPublication,
+    dismiss: dismissCurrentPublication,
   });
   const publication = createRefreshControlPublication(
     render,
@@ -918,11 +1011,18 @@ function RefreshControl({
     pollingAuthorityRef,
     refreshPublicationRef,
     requestPublicationSuccessor,
+    dismissCurrentPublication,
   );
 
   useLayoutEffect(() => publication.establish(), [publication]);
 
-  const { capturePill, captureButton, onClick } = publication;
+  const {
+    capturePill,
+    captureRefreshButton,
+    captureDismissButton,
+    onRefresh,
+    onDismiss,
+  } = publication;
   return (
     <div
       ref={capturePill}
@@ -931,10 +1031,10 @@ function RefreshControl({
       data-testid="reader-updated"
     >
       <button
-        ref={captureButton}
+        ref={captureRefreshButton}
         type="button"
         className={BUTTON_CLASS_NAME}
-        onClick={onClick}
+        onClick={onRefresh}
       >
         <span className={UPDATED_CLASS_NAME}>Updated</span>
         <span aria-hidden className={SEPARATOR_CLASS_NAME}>
@@ -942,6 +1042,15 @@ function RefreshControl({
         </span>
         <RefreshCw size={14} className={ICON_CLASS_NAME} />
         Refresh
+      </button>
+      <button
+        ref={captureDismissButton}
+        type="button"
+        className={DISMISS_BUTTON_CLASS_NAME}
+        aria-label={DISMISS_LABEL}
+        onClick={onDismiss}
+      >
+        <X size={14} />
       </button>
     </div>
   );
@@ -982,6 +1091,7 @@ export function UpdatePill({
   const pollingOwnerRef = useRef<PollingOwner | null>(null);
   const requestOwnerRef = useRef<RequestOwner | null>(null);
   const refreshPublicationRef = useRef<RefreshPublication | null>(null);
+  const dismissedUpdateRef = useRef<DismissedUpdate | null>(null);
   const [refreshPublication, setRefreshPublication] =
     useState<RefreshPublication | null>(null);
   const [controlCells] = useState<RefreshControlCells>(() => ({
@@ -1006,8 +1116,33 @@ export function UpdatePill({
       if (refreshPublicationRef.current?.document === documentAuthority) {
         refreshPublicationRef.current = null;
       }
+      if (dismissedUpdateRef.current?.document === documentAuthority) {
+        dismissedUpdateRef.current = null;
+      }
     };
   }, [documentAuthority]);
+
+  const dismissCurrentPublication = useCallback(
+    (publication: RefreshPublication) => {
+      if (
+        documentAuthorityRef.current !== publication.document ||
+        refreshPublicationRef.current !== publication ||
+        publication.remoteHash.length === 0 ||
+        publication.remoteHash === publication.document.initialHash
+      ) {
+        return;
+      }
+      dismissedUpdateRef.current = Object.freeze({
+        document: publication.document,
+        remoteHash: publication.remoteHash,
+      });
+      refreshPublicationRef.current = null;
+      setRefreshPublication((current) =>
+        current === publication ? null : current,
+      );
+    },
+    [],
+  );
 
   useLayoutEffect(() => {
     if (!authority) return;
@@ -1036,6 +1171,8 @@ export function UpdatePill({
     ) {
       return;
     }
+    const resumesDismissedUpdate =
+      dismissedUpdateRef.current?.document === authority.document;
 
     let timer: ReturnType<typeof setInterval> | null = null;
     let retired = false;
@@ -1085,25 +1222,38 @@ export function UpdatePill({
           },
         );
         if (!ownsRequest() || !res.ok) return;
-        const data = (await res.json()) as { contentHash?: string };
+        const data = (await res.json()) as { contentHash?: unknown };
         if (
           !ownsRequest() ||
           pollingDocument.visibilityState !== "visible"
         ) {
           return;
         }
-        if (
-          data.contentHash &&
-          data.contentHash !== authority.document.initialHash
-        ) {
-          changed = true;
-          stopTimer();
-          const publication = Object.freeze<RefreshPublication>({
-            document: authority.document,
-          });
-          refreshPublicationRef.current = publication;
-          setRefreshPublication(publication);
+        const remoteHash = data.contentHash;
+        if (typeof remoteHash !== "string" || remoteHash.length === 0) return;
+        if (remoteHash === authority.document.initialHash) {
+          if (
+            dismissedUpdateRef.current?.document === authority.document
+          ) {
+            dismissedUpdateRef.current = null;
+          }
+          return;
         }
+        const dismissed = dismissedUpdateRef.current;
+        if (
+          dismissed?.document === authority.document &&
+          dismissed.remoteHash === remoteHash
+        ) {
+          return;
+        }
+        changed = true;
+        stopTimer();
+        const publication = Object.freeze<RefreshPublication>({
+          document: authority.document,
+          remoteHash,
+        });
+        refreshPublicationRef.current = publication;
+        setRefreshPublication(publication);
       } catch {
         // Offline or transient error: try again on the next tick.
       } finally {
@@ -1116,7 +1266,7 @@ export function UpdatePill({
         }
       }
     };
-    const start = () => {
+    const start = (checkImmediately = true) => {
       if (
         retired ||
         changed ||
@@ -1125,7 +1275,7 @@ export function UpdatePill({
       ) {
         return;
       }
-      void check();
+      if (checkImmediately) void check();
       if (timer !== null) return;
       timer = setInterval(() => void check(), authority.pollMs);
     };
@@ -1148,7 +1298,7 @@ export function UpdatePill({
     const polling: PollingOwner = { authority, retire };
 
     pollingOwnerRef.current = polling;
-    start();
+    start(!resumesDismissedUpdate);
     pollingDocument.addEventListener("visibilitychange", onVisibility);
     return retire;
   }, [authority, refreshPublication]);
@@ -1156,6 +1306,8 @@ export function UpdatePill({
   const currentPublication =
     documentAuthority &&
     refreshPublication?.document === documentAuthority &&
+    refreshPublication.remoteHash.length > 0 &&
+    refreshPublication.remoteHash !== documentAuthority.initialHash &&
     !controlCells.invalidRefreshes.has(refreshPublication) &&
     !controlCells.claimedRefreshes.has(refreshPublication)
       ? refreshPublication
@@ -1188,6 +1340,7 @@ export function UpdatePill({
       documentAuthorityRef={documentAuthorityRef}
       pollingAuthorityRef={authorityRef}
       refreshPublicationRef={refreshPublicationRef}
+      dismissCurrentPublication={dismissCurrentPublication}
     />
   );
 }

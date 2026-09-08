@@ -203,7 +203,7 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
-  test("anonymous reader is told when the document changed", async ({ browser }) => {
+  test("anonymous reader can dismiss one update and refresh on the next", async ({ browser }) => {
     const owner = await signIn(browser, "reader-owner");
     const id = await createDocument(owner.page, CONTENT, "Reader Title");
     await setLinkAccess(owner.page, id, "view");
@@ -221,8 +221,17 @@ test.describe("reader view", () => {
 
     // The dev server runs with READER_POLL_MS=2000 (playwright.config.ts); the pill shows within 35 s regardless.
     await expect(page.getByTestId("reader-updated")).toBeVisible({ timeout: 35_000 });
-    await page.getByTestId("reader-updated").getByRole("button").click();
+    await page.getByRole("button", { name: "Dismiss update notice" }).click();
+    await expect(page.getByTestId("reader-updated")).toHaveCount(0);
+    await expect(page.getByTestId("reader-body")).not.toContainText("A new closing line.");
+
+    await owner.page.keyboard.type("\nA later closing line.");
+    await expect.poll(() => codeText(owner.page)).toContain("A later closing line.");
+
+    await expect(page.getByTestId("reader-updated")).toBeVisible({ timeout: 35_000 });
+    await page.getByRole("button", { name: /Updated.*Refresh/ }).click();
     await expect(page.getByTestId("reader-body")).toContainText("A new closing line.");
+    await expect(page.getByTestId("reader-body")).toContainText("A later closing line.");
     await expect(page.getByTestId("reader-updated")).toHaveCount(0);
 
     await anon.close();

@@ -218,6 +218,36 @@ function renderDirectActivity(
   act(() => root.render(<ActivityVisitBoundary {...props} />));
 }
 
+function createStrictActivity(
+  props: ComponentProps<typeof ActivityVisitBoundary>,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  directRoots.add(root);
+  act(() =>
+    root.render(
+      <StrictMode>
+        <ActivityVisitBoundary {...props} />
+      </StrictMode>,
+    ),
+  );
+  return { host, root };
+}
+
+function renderStrictActivity(
+  root: Root,
+  props: ComponentProps<typeof ActivityVisitBoundary>,
+) {
+  act(() =>
+    root.render(
+      <StrictMode>
+        <ActivityVisitBoundary {...props} />
+      </StrictMode>,
+    ),
+  );
+}
+
 function row(id: string, actorName: string): ActivityItemDto {
   return {
     id,
@@ -833,6 +863,482 @@ describe("ActivityPanel list recovery", () => {
     expect(screen.queryByTestId("activity-panel")).toBeNull();
     expect(unhandledRejections).toEqual([]);
   });
+});
+
+describe("ActivityPanel manual refresh", () => {
+  it("refreshes the current first page once, replaces its cursor, updates relative time, and sits immediately before Close", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-08T12:01:10.000Z"));
+    const refreshed = deferred<ActivityPageDto>();
+    const nextPage = deferred<ActivityPageDto>();
+    const timedRow = {
+      ...row("timed", "Initial timed editor"),
+      createdAt: "2026-09-08T12:00:00.000Z",
+    };
+    const initialPage = {
+      items: [timedRow],
+      nextBefore: "initial-cursor",
+    };
+    activity
+      .mockResolvedValueOnce(initialPage)
+      .mockResolvedValueOnce(initialPage)
+      .mockReturnValueOnce(refreshed.promise)
+      .mockReturnValueOnce(nextPage.promise);
+
+    createStrictActivity({
+      session: session("manual-success"),
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+
+    expect(activity).toHaveBeenCalledTimes(2);
+    const refresh = screen.getByRole("button", { name: "Refresh activity" });
+    const close = screen.getByRole("button", { name: "Close activity" });
+    expect(refresh.nextElementSibling).toBe(close);
+    expect(screen.getByText("1 minute ago")).toBeInTheDocument();
+
+    act(() => refresh.click());
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(activity).toHaveBeenLastCalledWith("manual-success", { limit: 50 });
+    expect(
+      screen.getByRole("button", { name: "Refreshing activity" }),
+    ).toBeDisabled();
+
+    vi.setSystemTime(new Date("2026-09-08T12:02:10.000Z"));
+    refreshed.resolve({
+      items: [{ ...timedRow, actorName: "Updated timed editor" }],
+      nextBefore: "replacement-cursor",
+    });
+    await act(async () => {});
+
+    expect(screen.getByText("Updated timed editor")).toBeInTheDocument();
+    expect(screen.getByText("2 minutes ago")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    ).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(activity).toHaveBeenCalledTimes(4);
+    expect(activity).toHaveBeenLastCalledWith("manual-success", {
+      before: "replacement-cursor",
+      limit: 50,
+    });
+  });
+
+  it("retains expanded history and its cursor across failure and a de-duplicated retry", async () => {
+    const failedRefresh = deferred<ActivityPageDto>();
+    const successfulRefresh = deferred<ActivityPageDto>();
+    const deeperPage = deferred<ActivityPageDto>();
+    const initialPage = {
+      items: [row("recent", "Recent editor")],
+      nextBefore: "older-cursor",
+    };
+    activity
+      .mockResolvedValueOnce(initialPage)
+      .mockResolvedValueOnce(initialPage)
+      .mockResolvedValueOnce({
+        items: [row("older", "Older editor")],
+        nextBefore: "deep-cursor",
+      })
+      .mockReturnValueOnce(failedRefresh.promise)
+      .mockReturnValueOnce(successfulRefresh.promise)
+      .mockReturnValueOnce(deeperPage.promise);
+
+    createStrictActivity({
+      session: session("manual-expanded"),
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await act(async () => {});
+    expect(screen.getAllByTestId("activity-row")).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh activity" }));
+    expect(activity).toHaveBeenCalledTimes(4);
+    failedRefresh.reject("refresh failed");
+    await act(async () => {});
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Failed to load activity",
+    );
+    expect(screen.getByText("Recent editor")).toBeInTheDocument();
+    expect(screen.getByText("Older editor")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    ).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh activity" }));
+    expect(activity).toHaveBeenCalledTimes(5);
+    successfulRefresh.resolve({
+      items: [
+        row("fresh", "Fresh editor"),
+        row("recent", "Updated recent editor"),
+      ],
+      nextBefore: "ignored-first-page-cursor",
+    });
+    await act(async () => {});
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    const rows = screen.getAllByTestId("activity-row");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("Fresh editor");
+    expect(rows[1]).toHaveTextContent("Updated recent editor");
+    expect(rows[2]).toHaveTextContent("Older editor");
+    expect(screen.queryByText("Recent editor")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(activity).toHaveBeenCalledTimes(6);
+    expect(activity).toHaveBeenLastCalledWith("manual-expanded", {
+      before: "deep-cursor",
+      limit: 50,
+    });
+  });
+
+  it.each(["refresh first", "Retry first"] as const)(
+    "coalesces cadence, repeated manual, and error Retry work when clicked %s",
+    async (order) => {
+      vi.useFakeTimers();
+      const staleInitial = deferred<ActivityPageDto>();
+      const currentInitial = deferred<ActivityPageDto>();
+      const automaticRefresh = deferred<ActivityPageDto>();
+      const retriedRefresh = deferred<ActivityPageDto>();
+      activity
+        .mockReturnValueOnce(staleInitial.promise)
+        .mockReturnValueOnce(currentInitial.promise)
+        .mockReturnValueOnce(automaticRefresh.promise)
+        .mockReturnValueOnce(retriedRefresh.promise);
+
+      createStrictActivity({
+        session: session(`manual-coalesce-${order}`),
+        onClose: vi.fn(),
+      });
+      expect(activity).toHaveBeenCalledTimes(2);
+      expect(
+        screen.queryByRole("button", { name: "Refresh activity" }),
+      ).toBeNull();
+
+      currentInitial.resolve({
+        items: [row("current", "Current editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      const beforeAutomatic = captureControl(
+        screen.getByRole("button", { name: "Refresh activity" }),
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(activity).toHaveBeenCalledTimes(3);
+      const automaticControl = screen.getByRole("button", {
+        name: "Refreshing activity",
+      });
+      expect(automaticControl).toBeDisabled();
+      act(() => {
+        invoke(beforeAutomatic);
+        automaticControl.click();
+      });
+      expect(activity).toHaveBeenCalledTimes(3);
+
+      automaticRefresh.reject("automatic refresh failed");
+      await act(async () => {});
+      const manual = captureControl(
+        screen.getByRole("button", { name: "Refresh activity" }),
+      );
+      const retry = captureControl(
+        screen.getByRole("button", { name: "Retry" }),
+      );
+      const first = order === "refresh first" ? manual : retry;
+      const second = order === "refresh first" ? retry : manual;
+      act(() => {
+        invoke(first);
+        invoke(first);
+        invoke(second);
+      });
+
+      expect(activity).toHaveBeenCalledTimes(4);
+      expect(activity).toHaveBeenLastCalledWith(
+        `manual-coalesce-${order}`,
+        { limit: 50 },
+      );
+      expect(
+        screen.getByRole("button", { name: "Refreshing activity" }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", {
+          name: order === "Retry first" ? "Retrying…" : "Retry",
+        }),
+      ).toBeDisabled();
+
+      retriedRefresh.resolve({
+        items: [row("recovered", "Recovered editor")],
+        nextBefore: null,
+      });
+      staleInitial.resolve({
+        items: [row("stale", "Stale editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.getByText("Recovered editor")).toBeInTheDocument();
+      expect(screen.queryByText("Stale editor")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it("rejects crossed, fabricated, disabled, inert, and restored events until a clean publication succeeds", async () => {
+    const request = deferred<ActivityPageDto>();
+    const initialPage = {
+      items: [row("authority", "Authority editor")],
+      nextBefore: null,
+    };
+    activity
+      .mockResolvedValueOnce(initialPage)
+      .mockResolvedValueOnce(initialPage)
+      .mockReturnValueOnce(request.promise);
+    const stableSession = session("manual-authority");
+    const onClose = vi.fn();
+    const view = createStrictActivity({
+      session: stableSession,
+      onClose,
+    });
+    await act(async () => {});
+    const stale = captureControl(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    );
+    const close = captureControl(
+      screen.getByRole("button", { name: "Close activity" }),
+    );
+    const sibling = document.createElement("button");
+    document.body.append(sibling);
+    const fabricated = {
+      ...capturedMouseEvent(stale),
+      nativeEvent: new Event("click"),
+    };
+    const mismatchedTarget = capturedMouseEvent(
+      stale,
+      stale.element,
+      stale.element,
+      sibling,
+    );
+
+    act(() => {
+      invoke(stale, close.element);
+      stale.click(fabricated);
+      stale.click(mismatchedTarget);
+      stale.element.disabled = true;
+      invoke(stale);
+      stale.element.disabled = false;
+      stale.element.setAttribute("inert", "");
+      invoke(stale);
+      stale.element.removeAttribute("inert");
+      invoke(stale);
+    });
+    expect(activity).toHaveBeenCalledTimes(2);
+    expect(onClose).not.toHaveBeenCalled();
+
+    renderStrictActivity(view.root, {
+      session: stableSession,
+      onClose,
+    });
+    const current = captureControl(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    );
+    const currentEvent = capturedMouseEvent(current);
+    act(() => {
+      invoke(stale, current.element);
+      current.click(currentEvent);
+      current.click(currentEvent);
+    });
+
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(activity).toHaveBeenLastCalledWith("manual-authority", {
+      limit: 50,
+    });
+    expect(
+      screen.getByRole("button", { name: "Refreshing activity" }),
+    ).toBeDisabled();
+  });
+
+  it("keeps a partial ref replay inert and recovers only through its complete clean successor", async () => {
+    const request = deferred<ActivityPageDto>();
+    const initialPage = {
+      items: [row("partial", "Partial replay editor")],
+      nextBefore: null,
+    };
+    activity
+      .mockResolvedValueOnce(initialPage)
+      .mockResolvedValueOnce(initialPage)
+      .mockReturnValueOnce(request.promise);
+
+    createStrictActivity({
+      session: session("manual-partial-replay"),
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const stale = captureControl(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    );
+
+    act(() => {
+      stale.ref(null);
+      invoke(stale);
+    });
+    expect(activity).toHaveBeenCalledTimes(2);
+
+    act(() => stale.ref(stale.element));
+    const current = captureControl(
+      screen.getByRole("button", { name: "Refresh activity" }),
+    );
+    expect(current.element).toBe(stale.element);
+    expect(current.click).not.toBe(stale.click);
+    act(() => {
+      invoke(stale, current.element);
+      invoke(current);
+      invoke(current);
+    });
+
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(activity).toHaveBeenLastCalledWith("manual-partial-replay", {
+      limit: 50,
+    });
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "retires a manual request and stale callback across document replacement before its late %s",
+    async (outcome) => {
+      const lateRequest = deferred<ActivityPageDto>();
+      const documentBRequests: ReturnType<
+        typeof deferred<ActivityPageDto>
+      >[] = [];
+      let documentACalls = 0;
+      activity.mockImplementation((documentId: string) => {
+        if (documentId === "manual-document-A") {
+          documentACalls += 1;
+          if (documentACalls <= 2) {
+            return Promise.resolve({
+              items: [row("document-A", "Document A editor")],
+              nextBefore: null,
+            });
+          }
+          return lateRequest.promise;
+        }
+        if (documentId === "manual-document-B") {
+          const pending = deferred<ActivityPageDto>();
+          documentBRequests.push(pending);
+          return pending.promise;
+        }
+        throw new Error(`Unexpected document: ${documentId}`);
+      });
+      const oldClose = vi.fn();
+      const newClose = vi.fn();
+      const view = createStrictActivity({
+        session: session("manual-document-A"),
+        onClose: oldClose,
+      });
+      await act(async () => {});
+      const stale = captureControl(
+        screen.getByRole("button", { name: "Refresh activity" }),
+      );
+      act(() => invoke(stale));
+      expect(documentACalls).toBe(3);
+
+      renderStrictActivity(view.root, {
+        session: session("manual-document-B"),
+        onClose: newClose,
+        boundary: 1,
+        onBoundary: () => invoke(stale),
+      });
+      expect(documentACalls).toBe(3);
+      expect(documentBRequests.length).toBeGreaterThan(0);
+      for (const pending of documentBRequests) {
+        pending.resolve({
+          items: [row("document-B", "Document B editor")],
+          nextBefore: null,
+        });
+      }
+      await act(async () => {});
+      expect(screen.getByText("Document B editor")).toBeInTheDocument();
+
+      if (outcome === "resolve") {
+        lateRequest.resolve({
+          items: [row("late-A", "Late document A editor")],
+          nextBefore: null,
+        });
+      } else {
+        lateRequest.reject("late document A failure");
+      }
+      await act(async () => {});
+      expect(screen.getByText("Document B editor")).toBeInTheDocument();
+      expect(screen.queryByText("Late document A editor")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(oldClose).not.toHaveBeenCalled();
+      expect(newClose).not.toHaveBeenCalled();
+
+      const callsBeforeRefresh = activity.mock.calls.length;
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh activity" }),
+      );
+      expect(activity).toHaveBeenCalledTimes(callsBeforeRefresh + 1);
+      expect(activity).toHaveBeenLastCalledWith("manual-document-B", {
+        limit: 50,
+      });
+    },
+  );
+
+  it.each([
+    ["Close", "resolve"],
+    ["cleanup", "reject"],
+  ] as const)(
+    "performs no late state work after %s during a manual request that later %ss",
+    async (retirement, outcome) => {
+      vi.useFakeTimers();
+      const lateRequest = deferred<ActivityPageDto>();
+      const initialPage = {
+        items: [row("before-retirement", "Before retirement editor")],
+        nextBefore: null,
+      };
+      activity
+        .mockResolvedValueOnce(initialPage)
+        .mockResolvedValueOnce(initialPage)
+        .mockReturnValueOnce(lateRequest.promise);
+      const onClose = vi.fn();
+      const view = createStrictActivity({
+        session: session(`manual-${retirement}`),
+        onClose,
+      });
+      await act(async () => {});
+      fireEvent.click(
+        screen.getByRole("button", { name: "Refresh activity" }),
+      );
+      expect(activity).toHaveBeenCalledTimes(3);
+
+      if (retirement === "Close") {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Close activity" }),
+        );
+        expect(onClose).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } else {
+        act(() => view.root.unmount());
+        directRoots.delete(view.root);
+        expect(screen.queryByTestId("activity-panel")).toBeNull();
+      }
+
+      if (outcome === "resolve") {
+        lateRequest.resolve({
+          items: [row("late-retirement", "Late retirement editor")],
+          nextBefore: null,
+        });
+      } else {
+        lateRequest.reject("late retirement failure");
+      }
+      await act(async () => {});
+
+      expect(screen.queryByText("Late retirement editor")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(unhandledRejections).toEqual([]);
+    },
+  );
 });
 
 describe("ActivityPanel exact action publications", () => {
