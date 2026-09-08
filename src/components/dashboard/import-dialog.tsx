@@ -261,6 +261,22 @@ function importResultFactsAreCurrent(publication: ImportResultPublication): bool
   return true;
 }
 
+function isExactNativeResultClick<T extends HTMLElement>(event: ReactMouseEvent<T>, control: T): boolean {
+  const ownerWindow = control.ownerDocument.defaultView;
+  const target = event.target;
+  return (
+    event.type === "click" &&
+    ownerWindow !== null &&
+    event.nativeEvent instanceof ownerWindow.MouseEvent &&
+    event.nativeEvent.type === "click" &&
+    event.currentTarget === control &&
+    target instanceof ownerWindow.Node &&
+    target === event.nativeEvent.target &&
+    target === control &&
+    control.contains(target)
+  );
+}
+
 function StatusIcon({ status }: { status: ImportItemStatus }) {
   if (status === "uploading") return <Loader2 size={16} className="animate-spin text-ink-3" aria-label="Importing" />;
   if (status === "done") return <CheckCircle2 size={16} className="text-emerald-600" aria-label="Imported" />;
@@ -568,6 +584,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       className="import-open"
                       data-testid="import-open"
                       onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => {
+                        if (!isExactNativeResultClick(event, event.currentTarget)) return;
                         if (claimOpen(publication, item, event.currentTarget)) publication.onOpenChange(false);
                       }}
                     >
@@ -594,6 +611,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                 disabled={publication.busy}
                 data-testid="import-retry"
                 onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                  if (!isExactNativeResultClick(event, event.currentTarget)) return;
                   claimRetry(publication, event.currentTarget)?.();
                 }}
               >

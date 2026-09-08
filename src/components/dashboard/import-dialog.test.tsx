@@ -66,14 +66,15 @@ function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
 }
 
 interface ResultMouseEvent<T extends HTMLElement> {
+  type: string;
   currentTarget: T;
-  target: T;
+  target: EventTarget;
   defaultPrevented: boolean;
   ctrlKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
-  nativeEvent: { which: number };
+  nativeEvent: unknown;
   preventDefault: ReturnType<typeof vi.fn>;
   stopPropagation: ReturnType<typeof vi.fn>;
 }
@@ -113,19 +114,39 @@ function captureResultRetry(): CapturedResultControl<HTMLButtonElement> {
   return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
 }
 
+interface ResultEventOverrides {
+  type?: string;
+  target?: EventTarget;
+  nativeEvent?: unknown;
+  nativeType?: string;
+  nativeTarget?: HTMLElement;
+}
+
+function resultNativeMouseEvent(target: HTMLElement, type = "click"): MouseEvent {
+  const MouseEventConstructor = target.ownerDocument.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("The result control has no owner-document MouseEvent");
+  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
 function invokeResultControl<T extends HTMLElement>(
   control: CapturedResultControl<T>,
   currentTarget: T = control.element,
+  overrides: ResultEventOverrides = {},
 ): ResultMouseEvent<T> {
+  const nativeEvent =
+    overrides.nativeEvent ?? resultNativeMouseEvent(overrides.nativeTarget ?? currentTarget, overrides.nativeType);
   const event: ResultMouseEvent<T> = {
+    type: overrides.type ?? "click",
     currentTarget,
-    target: currentTarget,
+    target: overrides.target ?? currentTarget,
     defaultPrevented: false,
     ctrlKey: true,
     metaKey: false,
     shiftKey: false,
     altKey: false,
-    nativeEvent: { which: 1 },
+    nativeEvent,
     preventDefault: vi.fn(),
     stopPropagation: vi.fn(),
   };
@@ -397,6 +418,82 @@ describe("ImportDialog result publications", () => {
     expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     expect(screen.queryByTestId("import-dialog")).toBeNull();
   });
+
+  it.each(["Open", "Retry"] as const)(
+    "rejects fabricated or inconsistent native events for %s without poisoning its exact control",
+    (kind) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onOpenChange = vi.fn();
+      const retry = vi.fn();
+
+      try {
+        act(() => {
+          root.render(<ImportDialog open onOpenChange={onOpenChange} items={resultItems(retry)} ignored={[]} />);
+        });
+        const exerciseControl = <T extends HTMLElement>(control: CapturedResultControl<T>) => {
+          const focusOwner = document.createElement("button");
+          const foreignTarget = document.createElement("span");
+          document.body.append(focusOwner);
+          focusOwner.focus();
+
+          const attempts: Array<() => ResultMouseEvent<T>> = [
+            () =>
+              invokeResultControl(control, control.element, {
+                nativeEvent: { type: "click", target: control.element },
+              }),
+            () => invokeResultControl(control, control.element, { type: "pointerup" }),
+            () => invokeResultControl(control, control.element, { nativeType: "mousedown" }),
+            () => invokeResultControl(control, control.element, { nativeTarget: foreignTarget }),
+            () => {
+              const unpublished = document.createElement("span");
+              control.element.append(unpublished);
+              const event = invokeResultControl(control, control.element, {
+                target: unpublished,
+                nativeTarget: unpublished,
+              });
+              unpublished.remove();
+              return event;
+            },
+          ];
+
+          for (const attempt of attempts) {
+            const activeElement = document.activeElement;
+            const markup = document.body.innerHTML;
+            const event = attempt();
+            expect(onOpenChange).not.toHaveBeenCalled();
+            expect(retry).not.toHaveBeenCalled();
+            expect(event.preventDefault).not.toHaveBeenCalled();
+            expect(event.stopPropagation).not.toHaveBeenCalled();
+            expect(document.activeElement).toBe(activeElement);
+            expect(document.body.innerHTML).toBe(markup);
+          }
+
+          const event = invokeResultControl(control);
+          expect(event.nativeEvent).toBeInstanceOf(control.element.ownerDocument.defaultView!.MouseEvent);
+          expect(event.preventDefault).not.toHaveBeenCalled();
+          expect(event.stopPropagation).not.toHaveBeenCalled();
+          if (kind === "Open") {
+            expect(control.element.tagName).toBe("A");
+            expect(control.element).toHaveAttribute("href", "/d/doc-first");
+            expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+            expect(retry).not.toHaveBeenCalled();
+          } else {
+            expect(onOpenChange).not.toHaveBeenCalled();
+            expect(retry).toHaveBeenCalledOnce();
+          }
+          focusOwner.remove();
+        };
+
+        if (kind === "Open") exerciseControl(captureResultOpen());
+        else exerciseControl(captureResultRetry());
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
 
   it("rejects sibling, wrong-row, cross-row and foreign Open controls without poisoning the exact link", () => {
     const onOpenChange = vi.fn();
