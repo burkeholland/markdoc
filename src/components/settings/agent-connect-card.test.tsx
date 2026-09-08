@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   AgentConnectCard,
+  COPILOT_APP_INSTALL,
+  CopyBlock,
   mcpConfigFor,
   mcpHttpConfigFor,
   mcpVsCodeConfigFor,
@@ -131,6 +133,98 @@ function capturePermissionHint(prefix: string): CapturedPermissionHint {
     preRef: reactHandler<ElementRef<HTMLPreElement>>(pre, "ref"),
     buttonRef: reactHandler<ElementRef<HTMLButtonElement>>(button, "ref"),
   };
+}
+
+type CopyBlockProps = ComponentProps<typeof CopyBlock>;
+
+interface CopyBlockEvent {
+  type: string;
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: Event;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+}
+
+type CopyBlockClickHandler = (event: CopyBlockEvent) => void;
+
+interface CapturedCopyBlock {
+  wrapper: HTMLDivElement;
+  pre: HTMLPreElement;
+  button: HTMLButtonElement;
+  click: CopyBlockClickHandler;
+  wrapperRef: ElementRef<HTMLDivElement>;
+  preRef: ElementRef<HTMLPreElement>;
+  buttonRef: ElementRef<HTMLButtonElement>;
+}
+
+function captureCopyBlock(host: HTMLElement, testId: string, copyTestId?: string): CapturedCopyBlock {
+  const scope = within(host);
+  const pre = scope.getByTestId(testId);
+  const wrapper = pre.parentElement;
+  const button = copyTestId ? scope.getByTestId(copyTestId) : wrapper?.querySelector(":scope > button");
+  if (!(wrapper instanceof HTMLDivElement) || !(pre instanceof HTMLPreElement) || !(button instanceof HTMLButtonElement)) {
+    throw new Error("Expected a complete CopyBlock hierarchy");
+  }
+  return {
+    wrapper,
+    pre,
+    button,
+    click: reactHandler<CopyBlockClickHandler>(button, "onClick"),
+    wrapperRef: reactHandler<ElementRef<HTMLDivElement>>(wrapper, "ref"),
+    preRef: reactHandler<ElementRef<HTMLPreElement>>(pre, "ref"),
+    buttonRef: reactHandler<ElementRef<HTMLButtonElement>>(button, "ref"),
+  };
+}
+
+function copyBlockEvent(
+  block: CapturedCopyBlock,
+  currentTarget: EventTarget | null = block.button,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+): CopyBlockEvent {
+  const ownerDocument = currentTarget instanceof Node ? currentTarget.ownerDocument ?? document : document;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor("click", { bubbles: true, cancelable: true, button: 0 });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return {
+    type: "click",
+    currentTarget,
+    target,
+    nativeEvent,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+}
+
+function expectCopyBlockEventUntouched(event: CopyBlockEvent) {
+  expect(event.preventDefault).not.toHaveBeenCalled();
+  expect(event.stopPropagation).not.toHaveBeenCalled();
+}
+
+function CopyBlockBoundary({
+  block,
+  mount = "initial",
+  present = true,
+  passiveVisit = 0,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  block: CopyBlockProps;
+  mount?: "initial" | "replacement";
+  present?: boolean;
+  passiveVisit?: number;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup, passiveVisit]);
+  if (!present) return null;
+  return <CopyBlock key={mount} {...block} />;
 }
 
 interface CapturedActions {
@@ -313,6 +407,460 @@ describe("MCP setup disclosure", () => {
     expect(screen.queryByTestId("agent-connect-allow-line")).toBeNull();
     expect(screen.getByTestId("agent-connect-config")).toHaveTextContent("MARKDOC_TOKEN");
   });
+
+  it("binds simultaneous cards and tab replacements to their exact config, stdio, and install controls", () => {
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const view = renderDirect(
+      <div>
+        <section data-testid="card-a">
+          <AgentConnectCard origin="https://card-a.markdoc.test" hideTokenStep />
+        </section>
+        <section data-testid="card-b">
+          <AgentConnectCard origin="https://card-b.markdoc.test" hideTokenStep />
+        </section>
+      </div>,
+    );
+    const cardAHost = within(view.host).getByTestId("card-a");
+    const cardBHost = within(view.host).getByTestId("card-b");
+    const configA = captureCopyBlock(cardAHost, "agent-connect-config");
+    const stdioA = captureCopyBlock(cardAHost, "agent-connect-config-stdio");
+    const configB = captureCopyBlock(cardBHost, "agent-connect-config");
+
+    act(() => {
+      configA.click(copyBlockEvent(stdioA));
+      stdioA.click(copyBlockEvent(configA));
+      configA.click(copyBlockEvent(configB));
+      configB.click(copyBlockEvent(configA));
+    });
+    expect(copyText).not.toHaveBeenCalled();
+
+    fireEvent.click(configA.button);
+    fireEvent.click(stdioA.button);
+    fireEvent.click(configB.button);
+    expect(copyText.mock.calls.map(([value]) => value)).toEqual([
+      configA.pre.textContent,
+      stdioA.pre.textContent,
+      configB.pre.textContent,
+    ]);
+
+    fireEvent.click(within(cardAHost).getByRole("tab", { name: "Copilot app" }));
+    const install = captureCopyBlock(cardAHost, "agent-connect-app-install");
+    act(() => {
+      configA.click(copyBlockEvent(install));
+      stdioA.click(copyBlockEvent(install));
+      install.click(copyBlockEvent(stdioA));
+    });
+    expect(copyText).toHaveBeenCalledTimes(3);
+    fireEvent.click(install.button);
+    expect(copyText).toHaveBeenLastCalledWith(COPILOT_APP_INSTALL);
+
+    fireEvent.click(within(cardAHost).getByRole("tab", { name: "Copilot CLI" }));
+    const currentConfig = captureCopyBlock(cardAHost, "agent-connect-config");
+    act(() => {
+      install.click(copyBlockEvent(currentConfig));
+      currentConfig.click(copyBlockEvent(stdioA));
+    });
+    expect(copyText).toHaveBeenCalledTimes(4);
+    fireEvent.click(currentConfig.button);
+    expect(copyText).toHaveBeenCalledTimes(5);
+    expect(copyText).toHaveBeenLastCalledWith(currentConfig.pre.textContent);
+    expect(selectContents).not.toHaveBeenCalled();
+  });
+});
+
+describe("CopyBlock exact control publications", () => {
+  const baseBlock: CopyBlockProps = {
+    value: "alpha setup value",
+    label: "alpha setup",
+    testId: "copy-value",
+    copyTestId: "copy-button",
+  };
+
+  it("preserves the rendered block and claims one exact native click before reentrant producer work", async () => {
+    const settlement = deferred<boolean>();
+    const currentRef: { value: CapturedCopyBlock | null } = { value: null };
+    copyText.mockImplementation(() => {
+      const current = currentRef.value;
+      if (!current) throw new Error("The current CopyBlock was not captured");
+      current.click(copyBlockEvent(current));
+      return settlement.promise;
+    });
+    const view = renderDirect(<CopyBlock {...baseBlock} />);
+    const current = captureCopyBlock(view.host, "copy-value", "copy-button");
+    currentRef.value = current;
+    const icon = current.button.firstElementChild;
+    if (!icon) throw new Error("The CopyBlock button has no rendered icon");
+    const event = copyBlockEvent(current, current.button, icon, icon);
+    const observer = observeMutations(view.host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+    expect(current.wrapper.children).toHaveLength(2);
+    expect(current.wrapper.firstElementChild).toBe(current.pre);
+    expect(current.wrapper.lastElementChild).toBe(current.button);
+    expect(current.pre).toHaveTextContent(baseBlock.value);
+    expect(current.button).toHaveAccessibleName(`Copy ${baseBlock.label}`);
+    expect(current.button).toHaveTextContent("Copy");
+
+    observer.takeRecords();
+    act(() => {
+      current.click(event);
+      current.click(event);
+    });
+
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(baseBlock.value);
+    expect(selectContents).not.toHaveBeenCalled();
+    expectCopyBlockEventUntouched(event);
+    expect(focus).not.toHaveBeenCalled();
+    expect(observer.takeRecords()).toHaveLength(0);
+
+    await act(async () => {
+      settlement.resolve(true);
+      await settlement.promise;
+    });
+    expect(within(view.host).getByTestId("copy-button")).toHaveTextContent("Copied");
+  });
+
+  it("rejects fabricated, crossed, foreign, detached, disabled, mismatched, mutated, and injected sources without consuming current work", () => {
+    vi.useFakeTimers();
+    const settlement = deferred<boolean>();
+    copyText.mockReturnValue(settlement.promise);
+    const view = renderDirect(<CopyBlock {...baseBlock} />);
+    const current = captureCopyBlock(view.host, "copy-value", "copy-button");
+    const icon = current.button.firstElementChild;
+    if (!icon) throw new Error("The CopyBlock button has no rendered icon");
+    const foreign = document.createElement("button");
+    const detached = document.createElement("button");
+    const replacement = current.button.cloneNode(true) as HTMLButtonElement;
+    document.body.append(foreign, replacement);
+    const observer = observeMutations(view.host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const events: CopyBlockEvent[] = [
+      { ...copyBlockEvent(current), nativeEvent: new Event("click") },
+      { ...copyBlockEvent(current), type: "pointerdown" },
+      copyBlockEvent(current, current.button, icon, current.button),
+      copyBlockEvent(current, foreign),
+      copyBlockEvent(current, detached),
+      copyBlockEvent(current, replacement),
+    ];
+
+    current.button.disabled = true;
+    const disabled = copyBlockEvent(current);
+    act(() => current.click(disabled));
+    current.button.disabled = false;
+
+    const injected = document.createElement("span");
+    current.button.append(injected);
+    const injectedEvent = copyBlockEvent(current, current.button, injected, injected);
+    observer.takeRecords();
+    act(() => {
+      for (const event of events) current.click(event);
+      current.click(injectedEvent);
+    });
+
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(focus).not.toHaveBeenCalled();
+    expect(observer.takeRecords()).toHaveLength(0);
+    for (const event of [disabled, injectedEvent, ...events]) expectCopyBlockEventUntouched(event);
+
+    injected.remove();
+    current.pre.textContent = "wrong setup value";
+    const wrongValue = copyBlockEvent(current);
+    observer.takeRecords();
+    act(() => current.click(wrongValue));
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(observer.takeRecords()).toHaveLength(0);
+    expectCopyBlockEventUntouched(wrongValue);
+
+    act(() => view.root.render(<CopyBlock {...baseBlock} value="restoring setup value" />));
+    act(() => view.root.render(<CopyBlock {...baseBlock} />));
+    const recovered = captureCopyBlock(view.host, "copy-value", "copy-button");
+    fireEvent.click(recovered.button);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(baseBlock.value);
+
+    foreign.remove();
+    replacement.remove();
+  });
+
+  it.each([
+    [
+      "value",
+      baseBlock,
+      { ...baseBlock, value: "beta setup value" },
+    ],
+    [
+      "label",
+      baseBlock,
+      { ...baseBlock, label: "beta setup" },
+    ],
+    [
+      "pre test ID",
+      baseBlock,
+      { ...baseBlock, testId: "copy-value-b" },
+    ],
+    [
+      "button test ID",
+      baseBlock,
+      { ...baseBlock, copyTestId: "copy-button-b" },
+    ],
+    [
+      "copy method on an equal-prop rerender",
+      baseBlock,
+      { ...baseBlock },
+    ],
+  ] satisfies [string, CopyBlockProps, CopyBlockProps][])(
+    "retires the prior %s publication before parent layout work",
+    (_name, blockA, blockB) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      let passiveCleanups = 0;
+      const view = renderDirect(
+        <CopyBlockBoundary block={blockA} onPassiveCleanup={() => passiveCleanups++} />,
+      );
+      const stale = captureCopyBlock(view.host, blockA.testId!, blockA.copyTestId);
+      let currentAtBoundary!: CapturedCopyBlock;
+      let staleEvent!: CopyBlockEvent;
+
+      act(() => {
+        view.root.render(
+          <CopyBlockBoundary
+            block={blockB}
+            passiveVisit={1}
+            boundary={1}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              currentAtBoundary = captureCopyBlock(view.host, blockB.testId!, blockB.copyTestId);
+              expect(currentAtBoundary.wrapper).toBe(stale.wrapper);
+              expect(currentAtBoundary.pre).toBe(stale.pre);
+              expect(currentAtBoundary.button).toBe(stale.button);
+              staleEvent = copyBlockEvent(currentAtBoundary);
+              stale.click(staleEvent);
+            }}
+          />,
+        );
+      });
+
+      expect(passiveCleanups).toBe(1);
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectCopyBlockEventUntouched(staleEvent);
+
+      const current = captureCopyBlock(view.host, blockB.testId!, blockB.copyTestId);
+      fireEvent.click(current.button);
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(blockB.value);
+    },
+  );
+
+  it.each(["crosses-before-current", "current-before-crosses"] as const)(
+    "keeps simultaneous config, stdio, and install blocks independent with %s",
+    (order) => {
+      const values = {
+        config: "http config",
+        stdio: "stdio config",
+        install: "app install",
+      };
+      const view = renderDirect(
+        <div>
+          <section data-testid="direct-config">
+            <CopyBlock value={values.config} label="config" testId="config-value" copyTestId="config-copy" />
+          </section>
+          <section data-testid="direct-stdio">
+            <CopyBlock value={values.stdio} label="stdio" testId="stdio-value" copyTestId="stdio-copy" />
+          </section>
+          <section data-testid="direct-install">
+            <CopyBlock value={values.install} label="install" testId="install-value" copyTestId="install-copy" />
+          </section>
+        </div>,
+      );
+      const config = captureCopyBlock(within(view.host).getByTestId("direct-config"), "config-value", "config-copy");
+      const stdio = captureCopyBlock(within(view.host).getByTestId("direct-stdio"), "stdio-value", "stdio-copy");
+      const install = captureCopyBlock(within(view.host).getByTestId("direct-install"), "install-value", "install-copy");
+      const rejectCrosses = () => {
+        config.click(copyBlockEvent(stdio));
+        stdio.click(copyBlockEvent(install));
+        install.click(copyBlockEvent(config));
+      };
+      const acceptCurrent = () => {
+        fireEvent.click(config.button);
+        fireEvent.click(stdio.button);
+        fireEvent.click(install.button);
+      };
+
+      if (order === "crosses-before-current") {
+        act(rejectCrosses);
+        acceptCurrent();
+      } else {
+        acceptCurrent();
+        act(rejectCrosses);
+      }
+
+      expect(copyText.mock.calls.map(([value]) => value)).toEqual([
+        values.config,
+        values.stdio,
+        values.install,
+      ]);
+      expect(selectContents).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retires copy methods across fallback, copied, and timer-driven idle presentations", async () => {
+    vi.useFakeTimers();
+    const attempts = [deferred<boolean>(), deferred<boolean>(), deferred<boolean>()];
+    copyText.mockImplementation(() => attempts[copyText.mock.calls.length - 1]!.promise);
+    const view = renderDirect(<CopyBlock {...baseBlock} />);
+    const idle = captureCopyBlock(view.host, "copy-value", "copy-button");
+
+    fireEvent.click(idle.button);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(baseBlock.value);
+
+    await act(async () => {
+      attempts[0].reject(new Error("clipboard unavailable"));
+      await Promise.resolve();
+    });
+    expect(selectContents).toHaveBeenCalledExactlyOnceWith(idle.pre);
+    expect(within(view.host).getByTestId("copy-button")).toHaveTextContent("Select & press Ctrl+C");
+    expect(vi.getTimerCount()).toBe(1);
+
+    const fallback = captureCopyBlock(view.host, "copy-value", "copy-button");
+    act(() => idle.click(copyBlockEvent(fallback)));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    fireEvent.click(fallback.button);
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => {
+      attempts[1].resolve(true);
+      await attempts[1].promise;
+    });
+    expect(within(view.host).getByTestId("copy-button")).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    const copied = captureCopyBlock(view.host, "copy-value", "copy-button");
+    act(() => fallback.click(copyBlockEvent(copied)));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(1500));
+    expect(within(view.host).getByTestId("copy-button")).toHaveTextContent("Copy");
+
+    const restored = captureCopyBlock(view.host, "copy-value", "copy-button");
+    fireEvent.click(restored.button);
+    expect(copyText).toHaveBeenCalledTimes(3);
+    expect(copyText).toHaveBeenLastCalledWith(baseBlock.value);
+  });
+
+  it.each(["wrapper", "pre", "button"] as const)(
+    "retires the publication when its committed %s ref is replaced",
+    (role) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      const view = renderDirect(<CopyBlock {...baseBlock} />);
+      const stale = captureCopyBlock(view.host, "copy-value", "copy-button");
+      const replacement = stale[role].cloneNode(true) as HTMLElement;
+      view.host.append(replacement);
+      const exactEvent = copyBlockEvent(stale);
+      const replacementEvent = copyBlockEvent(
+        stale,
+        role === "button" ? replacement : stale.button,
+      );
+
+      act(() => {
+        if (role === "wrapper") stale.wrapperRef(replacement as HTMLDivElement);
+        else if (role === "pre") stale.preRef(replacement as HTMLPreElement);
+        else stale.buttonRef(replacement as HTMLButtonElement);
+        stale.click(exactEvent);
+        stale.click(replacementEvent);
+      });
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectCopyBlockEventUntouched(exactEvent);
+      expectCopyBlockEventUntouched(replacementEvent);
+      replacement.remove();
+    },
+  );
+
+  it.each(["stale-before-current", "current-before-stale"] as const)(
+    "isolates equal-looking keyed remounts and late refs in %s order",
+    async (order) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      let passiveCleanups = 0;
+      const view = renderDirect(
+        <CopyBlockBoundary block={baseBlock} onPassiveCleanup={() => passiveCleanups++} />,
+      );
+      const stale = captureCopyBlock(view.host, "copy-value", "copy-button");
+      let currentAtBoundary!: CapturedCopyBlock;
+
+      act(() => {
+        view.root.render(
+          <CopyBlockBoundary
+            block={baseBlock}
+            mount="replacement"
+            passiveVisit={1}
+            boundary={1}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(passiveCleanups).toBe(0);
+              currentAtBoundary = captureCopyBlock(view.host, "copy-value", "copy-button");
+              expect(currentAtBoundary.wrapper).not.toBe(stale.wrapper);
+              expect(stale.wrapper.isConnected).toBe(false);
+            }}
+          />,
+        );
+      });
+
+      expect(passiveCleanups).toBe(1);
+      const current = captureCopyBlock(view.host, "copy-value", "copy-button");
+      act(() => {
+        stale.wrapperRef(current.wrapper);
+        stale.preRef(current.pre);
+        stale.buttonRef(current.button);
+        stale.wrapperRef(null);
+        stale.preRef(null);
+        stale.buttonRef(null);
+      });
+      const rejectCrosses = () => {
+        stale.click(copyBlockEvent(current));
+        current.click(copyBlockEvent(stale));
+      };
+      if (order === "stale-before-current") {
+        act(rejectCrosses);
+        fireEvent.click(current.button);
+      } else {
+        fireEvent.click(current.button);
+        act(rejectCrosses);
+      }
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(baseBlock.value);
+
+      act(() => {
+        view.root.render(
+          <CopyBlockBoundary
+            block={baseBlock}
+            mount="replacement"
+            present={false}
+            passiveVisit={2}
+            boundary={2}
+            onPassiveCleanup={() => passiveCleanups++}
+            onBoundary={() => {
+              expect(current.wrapper.isConnected).toBe(false);
+              current.click(copyBlockEvent(current));
+            }}
+          />,
+        );
+      });
+      expect(copyText).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        settlement.reject(new Error("late clipboard rejection"));
+        await Promise.resolve();
+      });
+      expect(selectContents).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("Copilot permission exact copy control", () => {
