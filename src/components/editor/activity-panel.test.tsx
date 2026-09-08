@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ComponentProps } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CollabSession } from "@/editor/collab/session";
 import type { ActivityItemDto, ActivityPageDto } from "@/lib/api";
@@ -819,6 +819,119 @@ describe("ActivityPanel list recovery", () => {
 });
 
 describe("ActivityPanel exact action publications", () => {
+  it("keeps current actions usable after Strict Mode replay while retired refs and handlers stay inert", async () => {
+    const loadPage = deferred<ActivityPageDto>();
+    activity.mockImplementation((documentId: string, options: { before?: string }) => {
+      if (documentId === "strict-close") {
+        return Promise.resolve({ items: [], nextBefore: null });
+      }
+      if (documentId === "strict-retry") {
+        return Promise.reject("offline");
+      }
+      if (documentId === "strict-load") {
+        return options.before
+          ? loadPage.promise
+          : Promise.resolve({
+              items: [row("strict-row", "Strict editor")],
+              nextBefore: "strict-cursor",
+            });
+      }
+      throw new Error(`Unexpected document: ${documentId}`);
+    });
+    const closeSession = session("strict-close");
+    const retrySession = session("strict-retry");
+    const loadSession = session("strict-load");
+    const retiredClose = vi.fn();
+    const currentClose = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    const renderPanels = (instance: string, onClose: () => void) => (
+      <StrictMode>
+        <section key={instance}>
+          <ActivityPanel session={closeSession} onClose={onClose} />
+          <ActivityPanel session={retrySession} onClose={() => {}} />
+          <ActivityPanel session={loadSession} onClose={() => {}} />
+        </section>
+      </StrictMode>
+    );
+
+    act(() => root.render(renderPanels("A", retiredClose)));
+    await act(async () => {});
+    const retiredPanels = screen.getAllByTestId("activity-panel");
+    const retiredCloseControl = captureControl(
+      within(retiredPanels[0]!).getByRole("button", { name: "Close activity" }),
+    );
+    const retiredRetryControl = captureControl(
+      within(retiredPanels[1]!).getByRole("button", { name: "Retry" }),
+    );
+    const retiredLoadControl = captureControl(
+      within(retiredPanels[2]!).getByRole("button", { name: "Load more" }),
+    );
+
+    act(() => root.render(renderPanels("B", currentClose)));
+    await act(async () => {});
+    const currentPanels = screen.getAllByTestId("activity-panel");
+    const currentCloseControl = captureControl(
+      within(currentPanels[0]!).getByRole("button", { name: "Close activity" }),
+    );
+    const currentRetryControl = captureControl(
+      within(currentPanels[1]!).getByRole("button", { name: "Retry" }),
+    );
+    const currentLoadControl = captureControl(
+      within(currentPanels[2]!).getByRole("button", { name: "Load more" }),
+    );
+    expect(currentCloseControl.element).not.toBe(retiredCloseControl.element);
+    expect(currentRetryControl.element).not.toBe(retiredRetryControl.element);
+    expect(currentLoadControl.element).not.toBe(retiredLoadControl.element);
+    expect(currentCloseControl.ref).not.toBe(retiredCloseControl.ref);
+    expect(currentRetryControl.ref).not.toBe(retiredRetryControl.ref);
+    expect(currentLoadControl.ref).not.toBe(retiredLoadControl.ref);
+    const callsBeforeActions = activity.mock.calls.length;
+
+    act(() => {
+      retiredCloseControl.ref(currentCloseControl.element);
+      retiredRetryControl.ref(currentRetryControl.element);
+      retiredLoadControl.ref(currentLoadControl.element);
+      retiredLoadControl.ref(null);
+      retiredRetryControl.ref(null);
+      retiredCloseControl.ref(null);
+      invoke(retiredCloseControl, currentCloseControl.element);
+      invoke(retiredRetryControl, currentRetryControl.element);
+      invoke(retiredLoadControl, currentLoadControl.element);
+      invoke(currentCloseControl, retiredCloseControl.element);
+      invoke(currentRetryControl, retiredRetryControl.element);
+      invoke(currentLoadControl, retiredLoadControl.element);
+    });
+    expect(activity).toHaveBeenCalledTimes(callsBeforeActions);
+    expect(retiredClose).not.toHaveBeenCalled();
+    expect(currentClose).not.toHaveBeenCalled();
+
+    const closeEvent = capturedMouseEvent(currentCloseControl);
+    const retryEvent = capturedMouseEvent(currentRetryControl);
+    const loadEvent = capturedMouseEvent(currentLoadControl);
+    act(() => {
+      currentCloseControl.click(closeEvent);
+      currentCloseControl.click(closeEvent);
+      currentRetryControl.click(retryEvent);
+      currentRetryControl.click(retryEvent);
+      currentLoadControl.click(loadEvent);
+      currentLoadControl.click(loadEvent);
+    });
+
+    expect(retiredClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
+    expect(activity).toHaveBeenCalledTimes(callsBeforeActions + 2);
+    expect(activity).toHaveBeenNthCalledWith(callsBeforeActions + 1, "strict-retry", {
+      limit: 50,
+    });
+    expect(activity).toHaveBeenNthCalledWith(callsBeforeActions + 2, "strict-load", {
+      before: "strict-cursor",
+      limit: 50,
+    });
+  });
+
   it("rejects foreign, detached, disabled, replaced, wrong-action, and fabricated sources before exact controls claim once", async () => {
     const retryRequest = deferred<ActivityPageDto>();
     const pageRequest = deferred<ActivityPageDto>();

@@ -91,12 +91,11 @@ interface ActivityPresentation {
 
 interface ActivityPublication {
   readonly presentation: ActivityPresentation;
-  readonly establish: () => void;
   readonly retire: () => boolean;
 }
 
 interface ActivityPublicationSet {
-  readonly publication: ActivityPublication;
+  readonly establish: () => (() => void) | undefined;
   readonly capturePanel: (element: HTMLElement | null) => void;
   readonly captureHeader: (element: HTMLDivElement | null) => void;
   readonly captureClose: (element: HTMLButtonElement | null) => void;
@@ -113,6 +112,17 @@ interface ActivityPublicationSet {
   readonly loadMore: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
+interface ActivityPublicationRuntime {
+  readonly publication: ActivityPublication;
+  readonly publish: (snapshot: ActivityDomSnapshot) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+}
+
 interface ActivityDomSnapshot {
   readonly node: Node;
   readonly nodeValue: string | null;
@@ -122,6 +132,7 @@ interface ActivityDomSnapshot {
 
 class ActivityPublicationCoordinator {
   #active: ActivityPublication | null = null;
+  #successorOf: ActivityPublication | null = null;
   #claimedEvents = new WeakSet<Event>();
 
   active() {
@@ -130,10 +141,17 @@ class ActivityPublicationCoordinator {
 
   publish(publication: ActivityPublication) {
     this.#active = publication;
+    this.#successorOf = null;
   }
 
   retire(publication: ActivityPublication) {
-    if (this.#active === publication) this.#active = null;
+    if (this.#active !== publication) return;
+    this.#active = null;
+    this.#successorOf = publication;
+  }
+
+  acceptsSuccessorOf(publication: ActivityPublication) {
+    return this.#active === null && this.#successorOf === publication;
   }
 
   hasClaimed(event: Event) {
@@ -544,6 +562,7 @@ function createActivityPublication({
   retireVisit,
   refresh,
   requestMore,
+  requestSuccessor,
 }: {
   presentation: ActivityPresentation;
   coordinator: ActivityPublicationCoordinator;
@@ -551,10 +570,12 @@ function createActivityPublication({
   retireVisit: (visit: ActivityVisit) => void;
   refresh: (visit: ActivityVisit, isRetry: boolean) => void;
   requestMore: (visit: ActivityVisit, cursor: string) => void;
+  requestSuccessor: () => void;
 }): ActivityPublicationSet {
   let layoutPassed = false;
-  let retired = false;
-  let domSnapshot: ActivityDomSnapshot | null = null;
+  let currentRuntime: ActivityPublicationRuntime | null = null;
+  let lastRuntime: ActivityPublicationRuntime | null = null;
+  let successorRequested = false;
   const claimedActions = new Set<ActivityActionKind>();
   const retireForElementChange = (
     element: HTMLElement | null,
@@ -562,7 +583,19 @@ function createActivityPublication({
     last: HTMLElement | null,
   ) => {
     if (element === null || (layoutPassed && element !== previous) || (element && last && element !== last)) {
-      publication.retire();
+      currentRuntime?.retireForElement();
+    }
+    // Strict Mode can replay a newly mounted callback ref after layout effects.
+    const runtime = lastRuntime;
+    if (
+      !successorRequested &&
+      runtime?.isExactElementReplay() &&
+      coordinator.acceptsSuccessorOf(runtime.publication) &&
+      factsAreCurrent() &&
+      exactDomIsCurrent()
+    ) {
+      successorRequested = true;
+      requestSuccessor();
     }
   };
   const panel = new ActivityElementOwner<HTMLElement>(retireForElementChange);
@@ -582,7 +615,6 @@ function createActivityPublication({
   const factsAreCurrent = () => {
     const { source, visit } = presentation;
     return (
-      !retired &&
       presentation.session === visit.session &&
       presentation.documentId === visit.documentId &&
       presentation.onClose === visit.onClose &&
@@ -742,8 +774,19 @@ function createActivityPublication({
   const claim = (
     kind: ActivityActionKind,
     event: ReactMouseEvent<HTMLButtonElement>,
-  ) => {
-    if (!event || typeof event !== "object" || claimedActions.has(kind)) return false;
+  ): ActivityPublication | null => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    if (
+      !runtime ||
+      !publication ||
+      runtime.isRetired() ||
+      !event ||
+      typeof event !== "object" ||
+      claimedActions.has(kind)
+    ) {
+      return null;
+    }
     const element = kind === "close"
       ? close.element()
       : kind === "retry"
@@ -768,17 +811,16 @@ function createActivityPublication({
       coordinator.active() !== publication ||
       !factsAreCurrent() ||
       !exactDomIsCurrent() ||
-      !domSnapshot ||
-      !activityDomMatches(domSnapshot) ||
+      !runtime.publishedDomMatches() ||
       coordinator.hasClaimed(nativeEvent)
     ) {
-      return false;
+      return null;
     }
     if (
       kind === "retry" &&
       (!presentation.listError || presentation.retrying || current.hasRefresh(presentation.visit))
     ) {
-      return false;
+      return null;
     }
     if (
       kind === "load-more" &&
@@ -787,37 +829,85 @@ function createActivityPublication({
         current.cursor(presentation.visit) !== presentation.nextBefore ||
         current.hasLoadMore(presentation.visit))
     ) {
-      return false;
+      return null;
     }
     coordinator.claim(nativeEvent);
     claimedActions.add(kind);
-    return true;
+    return publication;
   };
 
-  const retire = () => {
-    if (retired) return false;
-    retired = true;
-    domSnapshot = null;
-    coordinator.retire(publication);
-    return true;
+  const createRuntime = (): ActivityPublicationRuntime => {
+    type Retirement = "element" | "layout" | "other";
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let established = false;
+    let domSnapshot: ActivityDomSnapshot | null = null;
+    const retire = (reason: Retirement) => {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      coordinator.retire(publication);
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      return true;
+    };
+    const publication: ActivityPublication = Object.freeze({
+      presentation,
+      retire: () => retire("other"),
+    });
+    const publishedDomMatches = () => {
+      const panelElement = panel.element();
+      return Boolean(
+        domSnapshot &&
+        panelElement &&
+        panelElement === domSnapshot.node &&
+        panelElement.isConnected &&
+        activityDomMatches(domSnapshot)
+      );
+    };
+    const runtime: ActivityPublicationRuntime = Object.freeze({
+      publication,
+      publish: (snapshot: ActivityDomSnapshot) => {
+        established = true;
+        domSnapshot = snapshot;
+        coordinator.publish(publication);
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      isRetired: () => retired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        retired && retirement === "element" && established && publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        retired && retirement === "layout" && established && publishedDomMatches(),
+    });
+    return runtime;
   };
 
-  const publication: ActivityPublication = Object.freeze({
-    presentation,
+  return Object.freeze({
     establish: () => {
       layoutPassed = true;
-      if (!factsAreCurrent() || !exactDomIsCurrent()) return;
+      if (
+        (lastRuntime && !lastRuntime.isExactLayoutReplay()) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent()
+      ) {
+        return undefined;
+      }
       const panelElement = panel.element();
-      if (!panelElement) return;
+      if (!panelElement) return undefined;
+      const runtime = createRuntime();
+      const publication = runtime.publication;
       const previous = coordinator.active();
       if (previous && previous !== publication) previous.retire();
-      domSnapshot = snapshotActivityDom(panelElement);
-      coordinator.publish(publication);
+      currentRuntime = runtime;
+      lastRuntime = runtime;
+      runtime.publish(snapshotActivityDom(panelElement));
+      return runtime.retireForLayout;
     },
-    retire,
-  });
-  return Object.freeze({
-    publication,
     capturePanel: panel.capture,
     captureHeader: header.capture,
     captureClose: close.capture,
@@ -830,7 +920,8 @@ function createActivityPublication({
     captureRow: (index: number) => rows[index]?.capture ?? (() => {}),
     captureLoadMore: loadMore.capture,
     close: (event: ReactMouseEvent<HTMLButtonElement>) => {
-      if (!claim("close", event)) return;
+      const publication = claim("close", event);
+      if (!publication) return;
       publication.retire();
       retireVisit(presentation.visit);
       presentation.onClose();
@@ -874,6 +965,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [mount] = useState(() => Symbol("activity-panel"));
   const [coordinator] = useState(() => new ActivityPublicationCoordinator());
   const [current] = useState(() => new ActivityCurrent());
+  const [, setPublicationRevision] = useState(0);
   const [stateVisit, setStateVisit] = useState(visit);
   const [items, setItems] = useState<ActivityItemDto[] | null>(null);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -882,6 +974,9 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
   const [retrying, setRetrying] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
 
   const clearCadence = useCallback((operation: CadenceOperation) => {
     if (operation.cleared) return;
@@ -1023,9 +1118,10 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     retireVisit,
     refresh,
     requestMore: loadMore,
+    requestSuccessor: requestPublicationSuccessor,
   });
   const {
-    publication,
+    establish,
     capturePanel,
     captureHeader,
     captureClose,
@@ -1042,12 +1138,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     loadMore: requestMore,
   } = publicationSet;
 
-  useLayoutEffect(() => {
-    publication.establish();
-    return () => {
-      publication.retire();
-    };
-  }, [publication]);
+  useLayoutEffect(() => establish(), [establish]);
 
   return (
     <aside ref={capturePanel} className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="activity-panel">
