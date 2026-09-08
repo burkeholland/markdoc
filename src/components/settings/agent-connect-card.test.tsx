@@ -2310,6 +2310,7 @@ describe("AgentConnectCard exact keyboard publication", () => {
 
   it("rejects partial ref replay and leaves no keyboard work after cleanup", async () => {
     const realQueueMicrotask = globalThis.queueMicrotask.bind(globalThis);
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const view = renderDirect(
@@ -2320,10 +2321,8 @@ describe("AgentConnectCard exact keyboard publication", () => {
     await act(async () => {});
     vi.useFakeTimers();
     const setTimeout = vi.spyOn(window, "setTimeout");
-    const clearTimeout = vi.spyOn(window, "clearTimeout");
     expect(vi.getTimerCount()).toBe(0);
     setTimeout.mockClear();
-    clearTimeout.mockClear();
     const source = tab("Copilot CLI");
     const sourceRef = reactHandler<ElementRef<HTMLButtonElement>>(source, "ref");
     act(() => {
