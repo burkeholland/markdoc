@@ -144,6 +144,7 @@ type PanelPresentation = Readonly<{
 
 interface ElementSlot<T extends HTMLElement> {
   element: T | null;
+  mouseTargets: readonly Node[] | null;
 }
 
 interface RowElements {
@@ -186,6 +187,7 @@ class PanelPublicationCoordinator {
     element: T | null,
   ) {
     if (candidate.active && owner.element !== element) this.retire(candidate);
+    if (owner.element !== element) owner.mouseTargets = null;
     owner.element = element;
     if (!element) this.retire(candidate);
   }
@@ -228,6 +230,7 @@ interface SecretPublication {
   root: HTMLDivElement;
   code: HTMLElement;
   button: HTMLButtonElement;
+  mouseTargets: readonly Node[];
   claimed: boolean;
 }
 
@@ -340,14 +343,30 @@ function createdMatchesSnapshot(created: CreatedWebhook | null, snapshot: Create
     : snapshot === null;
 }
 
-function isNativeReactMouseEvent(event: ReactMouseEvent<HTMLButtonElement>): boolean {
+function snapshotMouseTargets(control: HTMLButtonElement): readonly Node[] {
+  return Object.freeze([control, ...Array.from(control.querySelectorAll("*"))]);
+}
+
+function isNativeReactMouseEvent(
+  event: ReactMouseEvent<HTMLButtonElement>,
+  control: HTMLButtonElement | null,
+  mouseTargets: readonly Node[] | null,
+): boolean {
+  const ownerWindow = control?.ownerDocument.defaultView;
+  const target = event.target;
   return (
+    !!control &&
+    !!ownerWindow &&
+    event.currentTarget === control &&
     event.type === "click" &&
     !event.defaultPrevented &&
-    typeof window !== "undefined" &&
-    event.nativeEvent instanceof window.MouseEvent &&
+    event.nativeEvent instanceof ownerWindow.MouseEvent &&
     event.nativeEvent.type === "click" &&
-    !event.nativeEvent.defaultPrevented
+    !event.nativeEvent.defaultPrevented &&
+    event.nativeEvent.target === target &&
+    target instanceof ownerWindow.Node &&
+    control.contains(target) &&
+    mouseTargets?.includes(target) === true
   );
 }
 
@@ -363,7 +382,7 @@ function isNativeReactSubmitEvent(event: FormEvent<HTMLFormElement>): boolean {
 }
 
 function slot<T extends HTMLElement>(): ElementSlot<T> {
-  return { element: null };
+  return { element: null, mouseTargets: null };
 }
 
 function createPanelPublication(presentation: PanelPresentation): PanelPublication {
@@ -447,7 +466,14 @@ function SecretField({
     const code = codeOwnerRef.current?.render === render ? codeOwnerRef.current.element : null;
     const button = buttonOwnerRef.current?.render === render ? buttonOwnerRef.current.element : null;
     if (!root || !code || !button) return;
-    const publication: SecretPublication = { render, root, code, button, claimed: false };
+    const publication: SecretPublication = {
+      render,
+      root,
+      code,
+      button,
+      mouseTargets: snapshotMouseTargets(button),
+      claimed: false,
+    };
     activePublicationRef.current = publication;
     return () => retire(publication);
   });
@@ -510,9 +536,13 @@ function SecretField({
         type="button"
         className="btn btn-outline btn-sm shrink-0 gap-1.5"
         onClick={(event) => {
-          if (!isNativeReactMouseEvent(event)) return;
           const publication = currentPublication(event.currentTarget);
-          if (!publication) return;
+          if (
+            !publication ||
+            !isNativeReactMouseEvent(event, publication.button, publication.mouseTargets)
+          ) {
+            return;
+          }
           publication.claimed = true;
           render.copy();
         }}
@@ -1230,6 +1260,17 @@ export function WebhooksPanel() {
       publicationCoordinator.retire(publication);
       return;
     }
+    const publishMouseTargets = (owner: ElementSlot<HTMLButtonElement>) => {
+      owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
+    };
+    publishMouseTargets(publication.add);
+    publishMouseTargets(publication.cancel);
+    publishMouseTargets(publication.retry);
+    for (const row of publication.rows) {
+      publishMouseTargets(row.enable);
+      publishMouseTargets(row.test);
+      publishMouseTargets(row.delete);
+    }
     publicationCoordinator.publish(publication);
     return () => publicationCoordinator.retire(publication);
   });
@@ -1252,7 +1293,7 @@ export function WebhooksPanel() {
           className="btn btn-outline btn-sm ml-auto gap-1.5"
           onClick={(event) => {
             if (
-              !isNativeReactMouseEvent(event) ||
+              !isNativeReactMouseEvent(event, publication.add.element, publication.add.mouseTargets) ||
               !ownsPanelAction(publication, presentation.add, event.currentTarget, publication.add) ||
               !claimAction(presentation.add)
             ) {
@@ -1412,7 +1453,7 @@ export function WebhooksPanel() {
               onClick={(event) => {
                 if (
                   !presentation.cancel ||
-                  !isNativeReactMouseEvent(event) ||
+                  !isNativeReactMouseEvent(event, publication.cancel.element, publication.cancel.mouseTargets) ||
                   !ownsPanelAction(publication, presentation.cancel, event.currentTarget, publication.cancel) ||
                   !claimAction(presentation.cancel)
                 ) {
@@ -1448,7 +1489,7 @@ export function WebhooksPanel() {
             onClick={(event) => {
               if (
                 !presentation.retry ||
-                !isNativeReactMouseEvent(event) ||
+                !isNativeReactMouseEvent(event, publication.retry.element, publication.retry.mouseTargets) ||
                 !ownsPanelAction(publication, presentation.retry, event.currentTarget, publication.retry) ||
                 !claimAction(presentation.retry)
               ) {
@@ -1543,7 +1584,7 @@ export function WebhooksPanel() {
                     onClick={(event) => {
                       if (
                         !row.enable ||
-                        !isNativeReactMouseEvent(event) ||
+                        !isNativeReactMouseEvent(event, rowElements.enable.element, rowElements.enable.mouseTargets) ||
                         !ownsPanelAction(publication, row.enable, event.currentTarget, rowElements.enable) ||
                         !claimAction(row.enable)
                       ) {
@@ -1563,7 +1604,7 @@ export function WebhooksPanel() {
                   className="btn btn-outline btn-sm gap-1.5"
                   onClick={(event) => {
                     if (
-                      !isNativeReactMouseEvent(event) ||
+                      !isNativeReactMouseEvent(event, rowElements.test.element, rowElements.test.mouseTargets) ||
                       !ownsPanelAction(publication, row.test, event.currentTarget, rowElements.test) ||
                       !claimAction(row.test)
                     ) {
@@ -1582,7 +1623,7 @@ export function WebhooksPanel() {
                   className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
                   onClick={(event) => {
                     if (
-                      !isNativeReactMouseEvent(event) ||
+                      !isNativeReactMouseEvent(event, rowElements.delete.element, rowElements.delete.mouseTargets) ||
                       !ownsPanelAction(publication, row.delete, event.currentTarget, rowElements.delete) ||
                       deleteEventsRef.current.has(event) ||
                       deleteClaimsRef.current.has(row.delete)
