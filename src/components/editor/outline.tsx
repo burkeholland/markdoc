@@ -1065,7 +1065,7 @@ const OutlineList = memo(function OutlineList({
     if (!destination) return;
     republish();
     event.preventDefault();
-    destination.focus();
+    destination.focus({ preventScroll: true });
   };
 
   return (

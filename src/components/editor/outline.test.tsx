@@ -49,6 +49,12 @@ const OVERLAPPING_SOURCE = [
   "## Shared third",
 ].join("\n");
 
+const LONG_SOURCE = Array.from({ length: 24 }, (_, index) => [
+  `${index === 0 ? "#" : "##"} Heading ${index + 1}`,
+  "",
+  `Section ${index + 1}.`,
+]).flat().join("\n");
+
 function reactHandler<T>(element: HTMLElement, name: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
@@ -140,6 +146,7 @@ describe("OutlinePanel active heading reveal", () => {
     cleanup();
     for (const current of sessions) current.destroy();
     document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
     if (originalScrollIntoView) {
       Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
     } else {
@@ -570,6 +577,72 @@ describe("OutlinePanel active heading reveal", () => {
     expect(focus).toHaveBeenCalledOnce();
     foreignList.remove();
     foreignButton.remove();
+  });
+
+  it("preserves every scroll position with preventScroll across edge wraps and a middle move", () => {
+    const headings = loadHeadings(session, LONG_SOURCE);
+    session.localCursor.rich = headings[0].from;
+    const onToggle = vi.fn();
+    const onSelect = vi.fn();
+    const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    render(
+      <StrictMode>
+        <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+      </StrictMode>,
+    );
+    const nav = screen.getByRole("navigation", { name: "Document outline" });
+    const buttons = within(nav).getAllByRole<HTMLButtonElement>("button");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const cursor = session.cursorSource;
+    buttons[0].focus();
+    nav.scrollTop = 91;
+    document.documentElement.scrollTop = 73;
+    document.body.scrollTop = 37;
+    const scrollPositions = {
+      outline: nav.scrollTop,
+      documentElement: document.documentElement.scrollTop,
+      body: document.body.scrollTop,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      pageXOffset: window.pageXOffset,
+      pageYOffset: window.pageYOffset,
+    };
+    const expectScrollPositions = () => {
+      expect({
+        outline: nav.scrollTop,
+        documentElement: document.documentElement.scrollTop,
+        body: document.body.scrollTop,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        pageXOffset: window.pageXOffset,
+        pageYOffset: window.pageYOffset,
+      }).toEqual(scrollPositions);
+    };
+    const move = (source: HTMLButtonElement, key: "ArrowDown" | "ArrowUp", destination: HTMLButtonElement) => {
+      focus.mockClear();
+      const nativeKey = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      const preventDefault = vi.spyOn(nativeKey, "preventDefault");
+
+      act(() => source.dispatchEvent(nativeKey));
+
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(destination).toHaveFocus();
+      expectScrollPositions();
+    };
+
+    move(buttons[0], "ArrowUp", buttons.at(-1)!);
+    move(buttons.at(-1)!, "ArrowDown", buttons[0]);
+    move(buttons[0], "ArrowDown", buttons[1]);
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(documentScroll).not.toHaveBeenCalled();
+    expect(session.cursorSource).toBe(cursor);
+    expect(screen.getByTestId("outline")).toBeVisible();
+    expect(buttons[0]).toHaveAttribute("aria-current", "location");
+    expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([buttons[0]]);
   });
 
   it.each(["ArrowDown", "ArrowUp"] as const)("keeps a one-heading outline stable on %s", (key) => {

@@ -188,35 +188,73 @@ test.describe("single user editing", () => {
 
   test("outline lists headings, selects on click and moves focus with arrow keys", async ({ browser }) => {
     const user = await signIn(browser, "solo");
-    const id = await createDocument(user.page, "# First\n\nIntro.\n\n## Second\n\nMore.\n\n## Third\n\nEnd.\n");
+    const source = [
+      "# First",
+      "",
+      "Intro.",
+      "",
+      "## Second",
+      "",
+      "More.",
+      "",
+      ...Array.from({ length: 20 }, (_, index) => [`## Filler ${index + 1}`, "", `Filler section ${index + 1}.`, ""]).flat(),
+      "## Third",
+      "",
+      "End.",
+    ].join("\n");
+    const id = await createDocument(user.page, source);
     await openDocument(user.page, id);
     const { page } = user;
-    const items = page.getByTestId("outline").getByRole("button", { name: /First|Second|Third/ });
-    await expect(items).toHaveCount(3);
-    await expect(items).toHaveText(["First", "Second", "Third"]);
+    const outline = page.getByRole("navigation", { name: "Document outline" });
+    const items = outline.getByRole("button");
+    const first = outline.getByRole("button", { name: "First" });
+    const second = outline.getByRole("button", { name: "Second" });
+    const third = outline.getByRole("button", { name: "Third" });
+    await expect(items).toHaveCount(23);
 
     // Clicking the third heading reveals it in the code pane and marks it current.
-    await items.nth(2).click();
+    await third.click();
     await expect(page.locator(".cm-activeLine")).toContainText("## Third");
-    await expect(items.nth(2)).toHaveAttribute("aria-current", "location");
-    await expect(items.nth(0)).not.toHaveAttribute("aria-current", /.+/);
+    await expect(third).toHaveAttribute("aria-current", "location");
+    await expect(first).not.toHaveAttribute("aria-current", /.+/);
 
     // Roving tabindex: arrows wrap at both ends, while Home/End still jump directly.
-    await items.nth(0).focus();
+    await first.focus();
+    const outlineScrollTop = await outline.evaluate((element) => {
+      element.scrollTop = Math.min(80, element.scrollHeight - element.clientHeight);
+      return element.scrollTop;
+    });
+    expect(outlineScrollTop).toBeGreaterThan(0);
+    const scrollPositions = async () => page.evaluate(() => ({
+      outline: document.querySelector<HTMLElement>('[aria-label="Document outline"]')?.scrollTop,
+      documentElement: document.documentElement.scrollTop,
+      body: document.body.scrollTop,
+      scrollX: window.scrollX,
+      scrollY: window.scrollY,
+      pageXOffset: window.pageXOffset,
+      pageYOffset: window.pageYOffset,
+    }));
+    const beforeMoves = await scrollPositions();
+
     await page.keyboard.press("ArrowUp");
-    await expect(items.nth(2)).toBeFocused();
+    await expect(third).toBeFocused();
     await expect(page.locator(".cm-activeLine")).toContainText("## Third");
+    expect(await scrollPositions()).toEqual(beforeMoves);
+
     await page.keyboard.press("ArrowDown");
-    await expect(items.nth(0)).toBeFocused();
+    await expect(first).toBeFocused();
     await expect(page.locator(".cm-activeLine")).toContainText("## Third");
+    expect(await scrollPositions()).toEqual(beforeMoves);
+
     await page.keyboard.press("ArrowDown");
-    await expect(items.nth(1)).toBeFocused();
+    await expect(second).toBeFocused();
+    await expect(page.locator(".cm-activeLine")).toContainText("## Third");
+    expect(await scrollPositions()).toEqual(beforeMoves);
+
     await page.keyboard.press("End");
-    await expect(items.nth(2)).toBeFocused();
-    await page.keyboard.press("ArrowUp");
-    await expect(items.nth(1)).toBeFocused();
+    await expect(third).toBeFocused();
     await page.keyboard.press("Home");
-    await expect(items.nth(0)).toBeFocused();
+    await expect(first).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.locator(".cm-activeLine")).toContainText("# First");
     await user.context.close();
