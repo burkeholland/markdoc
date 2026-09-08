@@ -651,6 +651,7 @@ class NotificationPublicationCoordinator {
       this.#dismissEvents.has(event) ||
       event.currentTarget !== document ||
       !isNodeFromDocument(event.target, document) ||
+      !content.contains(event.target) ||
       !this.matches(publication) ||
       !publication.open
     ) {
@@ -698,9 +699,20 @@ class NotificationPublicationCoordinator {
     event: ReactMouseEvent<HTMLButtonElement>,
   ) {
     const element = action.element;
+    const document = element?.ownerDocument;
+    const MouseEventConstructor = document?.defaultView?.MouseEvent;
+    const nativeEvent = event.nativeEvent;
     if (
       !element ||
+      !document ||
+      !MouseEventConstructor ||
+      event.type !== "click" ||
+      !(nativeEvent instanceof MouseEventConstructor) ||
+      nativeEvent.type !== "click" ||
       event.currentTarget !== element ||
+      nativeEvent.target !== event.target ||
+      !isNodeFromDocument(event.target, document) ||
+      !element.contains(event.target) ||
       action.claimed ||
       publication.rowClaimed ||
       !publication.open ||

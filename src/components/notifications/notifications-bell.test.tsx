@@ -63,9 +63,10 @@ interface BellState {
 }
 
 interface CapturedMouseEvent {
+  type: string;
   currentTarget: EventTarget | null;
   target: EventTarget | null;
-  nativeEvent: MouseEvent;
+  nativeEvent: Event;
   defaultPrevented: boolean;
 }
 
@@ -175,17 +176,27 @@ function captureActions() {
   };
 }
 
-function invoke(control: CapturedControl, source: EventTarget | null = control.element, target: EventTarget | null = source) {
+function capturedMouseEvent(
+  control: CapturedControl,
+  source: EventTarget | null = control.element,
+  target: EventTarget | null = source,
+  nativeTarget: EventTarget | null = target,
+): CapturedMouseEvent {
   const ownerDocument = source instanceof Node ? source.ownerDocument ?? document : document;
   const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
   const nativeEvent = new MouseEventConstructor("click", { bubbles: true });
-  Object.defineProperty(nativeEvent, "target", { configurable: true, value: target });
-  control.click({
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return {
+    type: "click",
     currentTarget: source,
     target,
     nativeEvent,
     defaultPrevented: false,
-  });
+  };
+}
+
+function invoke(control: CapturedControl, source: EventTarget | null = control.element, target: EventTarget | null = source) {
+  control.click(capturedMouseEvent(control, source, target));
 }
 
 function BellBoundary({
@@ -270,6 +281,16 @@ function outsideEvent(target: Node) {
     detail: { originalEvent },
   });
   Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function escapeEvent(target: Node) {
+  const ownerDocument = target.ownerDocument ?? document;
+  const view = ownerDocument.defaultView;
+  if (!view) throw new Error("Escape target has no window");
+  const event = new view.KeyboardEvent("keydown", { key: "Escape", bubbles: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  Object.defineProperty(event, "currentTarget", { configurable: true, value: ownerDocument });
   return event;
 }
 
@@ -456,7 +477,7 @@ describe("Radix disclosure provenance", () => {
   it("accepts actual Escape and outside dismissal while rejecting stale content provenance", async () => {
     const root = createBellRoot(state, { currentDocId: "document-one", onOpen: vi.fn() });
     openCurrentBell();
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(screen.getByTestId("notification-item"), { key: "Escape" });
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
 
     openCurrentBell();
@@ -479,6 +500,37 @@ describe("Radix disclosure provenance", () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     fireEvent.pointerDown(outside);
     fireEvent.click(outside);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    outside.remove();
+  });
+
+  it("rejects same-document Escape outside the exact content without spending its close proof", () => {
+    const onOpen = vi.fn();
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const content = latestContentCallbacks();
+    const openChange = latestOpenChange();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const focused = document.activeElement;
+    const event = escapeEvent(outside);
+
+    act(() => {
+      content.escape?.(event);
+      openChange(false);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(focused);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
+    const row = screen.getByTestId("notification-item");
+    fireEvent.keyDown(row, { key: "Escape" });
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
     outside.remove();
   });
@@ -590,6 +642,71 @@ describe("exact notification controls", () => {
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
     expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
     foreign.remove();
+  });
+
+  it("requires an exact native click and target provenance before claiming captured action handlers", () => {
+    const onOpen = vi.fn();
+    createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const actions = captureActions();
+    const readRetry = actions.readRetry!;
+    const loadRetry = actions.loadRetry!;
+    const readAllTarget = actions.readAll.element.firstElementChild;
+    if (!readAllTarget) throw new Error("The read-all control has no rendered descendant");
+    const unpublishedControl = document.createElement("button");
+    const unpublishedDescendant = document.createElement("span");
+    unpublishedControl.append(unpublishedDescendant);
+    document.body.append(unpublishedControl);
+    const focused = document.activeElement;
+    const fabricated = {
+      ...capturedMouseEvent(readRetry),
+      nativeEvent: new Event("click"),
+    };
+    const wrongType = {
+      ...capturedMouseEvent(loadRetry),
+      type: "pointerdown",
+    };
+    const mismatched = capturedMouseEvent(
+      actions.readAll,
+      actions.readAll.element,
+      readAllTarget,
+      actions.readAll.element,
+    );
+    const unpublished = capturedMouseEvent(
+      actions.rows[0]!,
+      actions.rows[0]!.element,
+      unpublishedDescendant,
+    );
+
+    act(() => {
+      readRetry.click(fabricated);
+      loadRetry.click(wrongType);
+      actions.readAll.click(mismatched);
+      actions.rows[0]!.click(unpublished);
+    });
+
+    expect(fabricated.defaultPrevented).toBe(false);
+    expect(wrongType.defaultPrevented).toBe(false);
+    expect(mismatched.defaultPrevented).toBe(false);
+    expect(unpublished.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(focused);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
+    fireEvent.click(readRetry.element);
+    fireEvent.click(loadRetry.element);
+    fireEvent.click(actions.readAll.element);
+    fireEvent.click(actions.rows[0]!.element);
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    unpublishedControl.remove();
   });
 
   it("rejects a replacement ref and publishes a successor without mutating the established owner", () => {
