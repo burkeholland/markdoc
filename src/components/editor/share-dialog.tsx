@@ -291,6 +291,12 @@ interface ShareCopyOperation {
   retired: boolean;
 }
 
+interface ShareCopyHandoff {
+  readonly operation: ShareCopyOperation;
+  readonly predecessor: SharePresentation;
+  successor: SharePresentation | null;
+}
+
 interface ShareAgentExpansion {
   readonly visit: ShareVisit;
   readonly expanded: boolean;
@@ -1043,6 +1049,7 @@ export const ShareDialog = memo(function ShareDialog({
   const [actionError, setActionError] = useState<{ operation: PermissionOperation; message: string } | null>(null);
   const liveFactsRef = useRef<ShareLiveFacts | null>(null);
   const copyOperationRef = useRef<ShareCopyOperation | null>(null);
+  const copyHandoffRef = useRef<ShareCopyHandoff | null>(null);
   const copyFeedbackRef = useRef<ShareCopyFeedback | null>(null);
   const copyFeedbackTimersRef = useRef(new WeakMap<ShareCopyFeedback, number>());
   const claimedControlActionsRef = useRef(new WeakSet<object>());
@@ -1092,7 +1099,17 @@ export const ShareDialog = memo(function ShareDialog({
   const retireCopyOperation = useCallback((expected?: SharePresentation) => {
     const operation = copyOperationRef.current;
     if (!operation || (expected && operation.action.presentation !== expected)) return;
+    if (copyHandoffRef.current?.operation === operation) copyHandoffRef.current = null;
     operation.retired = true;
+    copyOperationRef.current = null;
+  }, []);
+
+  const retireCopyHandoff = useCallback((failed?: SharePresentation) => {
+    const handoff = copyHandoffRef.current;
+    if (!handoff || (failed && handoff.successor !== failed)) return;
+    copyHandoffRef.current = null;
+    if (copyOperationRef.current !== handoff.operation) return;
+    handoff.operation.retired = true;
     copyOperationRef.current = null;
   }, []);
 
@@ -1567,6 +1584,15 @@ export const ShareDialog = memo(function ShareDialog({
         presentationLineagesRef.current.set(candidate, lineage);
         runtime = runtimeFor(candidate, predecessor);
       }
+      const handoff = copyHandoffRef.current;
+      if (
+        handoff &&
+        handoff.successor === null &&
+        source !== handoff.predecessor &&
+        candidate !== handoff.predecessor
+      ) {
+        handoff.successor = candidate;
+      }
       return { candidate, runtime };
     },
     [lineageFor, runtimeFor],
@@ -1574,6 +1600,31 @@ export const ShareDialog = memo(function ShareDialog({
 
   const retirePresentation = useCallback((candidate: SharePresentation) => {
     const runtime = presentationRuntimesRef.current.get(candidate);
+    const operation = copyOperationRef.current;
+    if (
+      operation?.action.presentation === candidate &&
+      !operation.retired &&
+      !operation.settled
+    ) {
+      const handoff = copyHandoffRef.current;
+      if (handoff?.operation === operation && handoff.predecessor === candidate) {
+        // Repeated ref/layout cleanup belongs to the same one-hop handoff.
+      } else if (
+        operation.phase === "pending" &&
+        runtime?.active &&
+        !runtime.retired &&
+        activePresentationRef.current === candidate &&
+        handoff === null
+      ) {
+        copyHandoffRef.current = {
+          operation,
+          predecessor: candidate,
+          successor: null,
+        };
+      } else {
+        retireCopyOperation(candidate);
+      }
+    }
     if (runtime && !runtime.retired) {
       runtime.active = false;
       runtime.retired = true;
@@ -1589,7 +1640,7 @@ export const ShareDialog = memo(function ShareDialog({
       }
     }
     if (activePresentationRef.current === candidate) activePresentationRef.current = null;
-  }, []);
+  }, [retireCopyOperation]);
 
   const retirePresentationLineage = useCallback(
     (candidate: SharePresentation) => {
@@ -2431,7 +2482,15 @@ export const ShareDialog = memo(function ShareDialog({
     }
 
     const settle = (ok: boolean) => {
-      if (!copyOperationIsCurrent(operation)) return;
+      if (!copyOperationIsCurrent(operation)) {
+        if (copyOperationRef.current === operation) {
+          if (copyHandoffRef.current?.operation === operation) copyHandoffRef.current = null;
+          operation.settled = true;
+          operation.retired = true;
+          copyOperationRef.current = null;
+        }
+        return;
+      }
       operation.settled = true;
       copyOperationRef.current = null;
       const feedback: ShareCopyFeedback = Object.freeze({
@@ -2521,6 +2580,7 @@ export const ShareDialog = memo(function ShareDialog({
     const operation = copyOperationRef.current;
     if (!operation || operation.action.presentation === candidate) return;
     const previous = operation.action.presentation;
+    const handoff = copyHandoffRef.current;
     const previousRuntime = presentationRuntimesRef.current.get(previous);
     if (previousRuntime) drainPresentationMutations(previousRuntime);
     const ownerDocument = runtime.root?.ownerDocument;
@@ -2529,6 +2589,9 @@ export const ShareDialog = memo(function ShareDialog({
       operation.retired ||
       operation.settled ||
       operation.phase !== "pending" ||
+      handoff?.operation !== operation ||
+      handoff.predecessor !== previous ||
+      handoff.successor !== candidate ||
       !previousRuntime ||
       !previousRuntime.retired ||
       !previousRuntime.claims.has("copy-link") ||
@@ -2559,6 +2622,7 @@ export const ShareDialog = memo(function ShareDialog({
       control: operation.action.control,
     });
     operation.action = action;
+    copyHandoffRef.current = null;
     runtime.claims.add("copy-link");
     claimedControlActionsRef.current.add(action);
     claimedControlElementsRef.current.set(action.control, action);
@@ -2683,10 +2747,23 @@ export const ShareDialog = memo(function ShareDialog({
   const publishPresentation = useCallback(
     (source: SharePresentation, expected?: SharePresentation) => {
       const candidate = currentPresentation(source);
-      if (expected && candidate !== expected) return null;
+      const handoff = copyHandoffRef.current;
+      if (
+        handoff &&
+        handoff.successor === null &&
+        source !== handoff.predecessor &&
+        candidate !== handoff.predecessor
+      ) {
+        handoff.successor = candidate;
+      }
+      if (expected && candidate !== expected) {
+        retireCopyHandoff(candidate);
+        return null;
+      }
       const existing = activePresentationRef.current;
       const runtime = presentationRuntimesRef.current.get(candidate);
       if (!runtime || runtime.retired || (runtime.predecessor && existing && existing !== runtime.predecessor)) {
+        retireCopyHandoff(candidate);
         if (runtime) retirePresentationLineage(candidate);
         return null;
       }
@@ -2698,6 +2775,7 @@ export const ShareDialog = memo(function ShareDialog({
         ? snapshotSharePlacement(runtime.root, runtime.root.ownerDocument)
         : null;
       if (!placement) {
+        retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
         return null;
       }
@@ -2714,22 +2792,25 @@ export const ShareDialog = memo(function ShareDialog({
           !sharePlacementsAreExactReplay(previousRuntime.placement, placement) ||
           !stopPresentationObservation(previousRuntime)
         ) {
+          retireCopyHandoff(candidate);
           retirePresentationLineage(candidate);
           return null;
         }
       }
       if (!presentationFactsAreCurrent(candidate)) {
+        retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
         return null;
       }
       if (existing && existing !== candidate) retirePresentationLineage(existing);
       if (!presentationDomIsValid(candidate)) {
+        retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
         return null;
       }
       runtime.placement = placement;
       if (!startPresentationObservation(runtime)) {
-        retireCopyOperation();
+        retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
         return null;
       }
@@ -2737,7 +2818,7 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.published = true;
       activePresentationRef.current = candidate;
       if (!startCloseCapture(candidate, runtime)) {
-        retireCopyOperation();
+        retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
         return null;
       }
@@ -2748,7 +2829,7 @@ export const ShareDialog = memo(function ShareDialog({
       currentPresentation,
       presentationDomIsValid,
       presentationFactsAreCurrent,
-      retireCopyOperation,
+      retireCopyHandoff,
       retirePresentationLineage,
       startCloseCapture,
       startPresentationObservation,

@@ -598,6 +598,39 @@ describe("ShareDialog exact control publications", () => {
     expect(screen.getByTestId("copy-link")).toHaveTextContent("Select & press Ctrl+C");
   });
 
+  it("retires a pending copy across a failed intermediate publication and recovers fresh", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const input = screen.getByTestId("share-login");
+    const done = screen.getByRole("button", { name: "Done" }) as HTMLButtonElement;
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    done.disabled = true;
+    fireEvent.change(input, { target: { value: "invalid-publication" } });
+
+    act(() => settle?.(true));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+
+    done.disabled = false;
+    fireEvent.change(input, { target: { value: "restored-publication" } });
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${DOC_ID}`);
+  });
+
   it("owns each setup expand and collapse transition after direct-root Strict Mode replay", async () => {
     render(
       <StrictMode>
