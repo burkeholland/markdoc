@@ -9,6 +9,7 @@ import { createDocument, devLogin, uniqueLogin } from "./helpers";
 import {
   MATRIX_AXES,
   MATRIX_ROWS,
+  assertMatrixDelayedResourceContract,
   assertMatrixNetworkRoutingContract,
   completeMatrixTraffic,
   completeLateFont,
@@ -245,8 +246,25 @@ async function assertContextFailureCleanup() {
   }
 }
 
+function assertRowDelayedResourceContract() {
+  const source = runRow.toString();
+  const resourceSetup = source.search(/setupLateResources/);
+  const navigation = source.search(/await\s+openMatrixDocument/);
+  const completion = source.search(/await\s+completeLateImage/);
+  if (
+    resourceSetup < 0 ||
+    navigation <= resourceSetup ||
+    completion <= navigation ||
+    /releaseImage/.test(source)
+  ) {
+    throw new Error("matrix-row-delayed-resource-order-contract");
+  }
+}
+
 assertMatrixContextFactoryPolicy();
 assertMatrixNetworkRoutingContract();
+assertMatrixDelayedResourceContract();
+assertRowDelayedResourceContract();
 await assertContextFailureCleanup();
 
 // Fullscreen is intentionally not a browser axis: Markdoc has no reachable

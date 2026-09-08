@@ -507,7 +507,7 @@ export async function openMatrixDocument(
       localStorage.setItem("markdoc:layout", "rich");
     }
   });
-  await page.goto(`/d/${documentId}`);
+  await page.goto(`/d/${documentId}`, { waitUntil: "domcontentloaded" });
   await waitForEditor(page);
   await page
     .getByTestId("save-state")
@@ -660,6 +660,33 @@ export async function setupLateResources(
     releaseFont: fontRelease.resolve,
     releaseAll,
   };
+}
+
+export function assertMatrixDelayedResourceContract() {
+  const navigationSource = openMatrixDocument.toString();
+  const resourceSource = setupLateResources.toString();
+  const completionSource = completeLateImage.toString();
+  const navigationCalls = navigationSource.match(/\.goto\(/g)?.length ?? 0;
+  const navigationWait = navigationSource.search(
+    /waitUntil\s*:\s*["']domcontentloaded["']/,
+  );
+  const routeWait = resourceSource.search(/await\s+imageRelease\.promise/);
+  const routeFulfill = resourceSource.search(/await\s+route\.fulfill/);
+  const requestWait = completionSource.search(
+    /await\s+waitForSignal\(resources\.imageRequested/,
+  );
+  const completionRelease = completionSource.search(
+    /resources\.releaseImage\(\)/,
+  );
+  if (navigationCalls !== 1 || navigationWait < 0) {
+    throw new Error("matrix-navigation-load-milestone-contract");
+  }
+  if (routeWait < 0 || routeFulfill <= routeWait) {
+    throw new Error("matrix-late-image-pending-route-contract");
+  }
+  if (requestWait < 0 || completionRelease <= requestWait) {
+    throw new Error("matrix-late-image-completion-release-contract");
+  }
 }
 
 async function nextFrame(page: Page) {
