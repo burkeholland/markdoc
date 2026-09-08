@@ -169,10 +169,13 @@ interface CopyBlockDomSnapshot {
 }
 
 interface CopyBlockPlacement {
+  readonly node: Node;
   readonly parent: Node | null;
   readonly previousSibling: Node | null;
   readonly nextSibling: Node | null;
 }
+
+type CopyBlockPlacementChain = readonly CopyBlockPlacement[];
 
 interface CopyBlockAction {
   readonly identity: symbol;
@@ -195,7 +198,7 @@ interface CopyBlockPublicationFacts {
   readonly pre: HTMLPreElement;
   readonly button: HTMLButtonElement;
   readonly bindings: Readonly<Record<CopyBlockElementRole, CopyBlockBinding>>;
-  readonly placement: CopyBlockPlacement;
+  readonly placement: CopyBlockPlacementChain;
   readonly dom: CopyBlockDomSnapshot;
   readonly buttonTargets: readonly Node[];
   readonly action: CopyBlockAction;
@@ -261,6 +264,66 @@ function copyBlockDomMatches(snapshot: CopyBlockDomSnapshot): boolean {
   return node.childNodes.length === snapshot.children.length &&
     snapshot.children.every((child, index) =>
       node.childNodes.item(index) === child.node && copyBlockDomMatches(child));
+}
+
+function snapshotCopyBlockPlacement(
+  node: Node,
+  ownerDocument: Document,
+): CopyBlockPlacementChain | null {
+  const placements: CopyBlockPlacement[] = [];
+  let current: Node | null = node;
+  while (current) {
+    placements.push(Object.freeze({
+      node: current,
+      parent: current.parentNode,
+      previousSibling: current.previousSibling,
+      nextSibling: current.nextSibling,
+    }));
+    if (current === ownerDocument) return Object.freeze(placements);
+    current = current.parentNode;
+  }
+  return null;
+}
+
+function copyBlockPlacementMatches(
+  ownerDocument: Document,
+  placements: CopyBlockPlacementChain,
+): boolean {
+  if (placements.length === 0) return false;
+  for (let index = 0; index < placements.length; index++) {
+    const placement = placements[index]!;
+    const next = placements[index + 1];
+    if (
+      placement.node.parentNode !== placement.parent ||
+      placement.node.previousSibling !== placement.previousSibling ||
+      placement.node.nextSibling !== placement.nextSibling ||
+      (next && placement.parent !== next.node)
+    ) {
+      return false;
+    }
+  }
+  const last = placements.at(-1)!;
+  return (
+    last.node === ownerDocument &&
+    last.parent === null &&
+    last.previousSibling === null &&
+    last.nextSibling === null
+  );
+}
+
+function copyBlockMutationTouchesPlacement(
+  placements: CopyBlockPlacementChain,
+  mutation: MutationRecord,
+): boolean {
+  if (mutation.type !== "childList") return false;
+  return placements.some(({ node, parent }) =>
+    parent === mutation.target &&
+    (
+      mutation.previousSibling === node ||
+      mutation.nextSibling === node ||
+      [...mutation.addedNodes].includes(node) ||
+      [...mutation.removedNodes].includes(node)
+    ));
 }
 
 function copyBlockNodes(element: HTMLElement): readonly Node[] {
@@ -706,7 +769,7 @@ class CopyBlockCoordinator {
     draft: CopyBlockDraft,
     target: RefObject<HTMLPreElement | null>,
     expectedDom?: CopyBlockDomSnapshot,
-    expectedPlacement?: CopyBlockPlacement,
+    expectedPlacement?: CopyBlockPlacementChain,
   ): CopyBlockPublication | null {
     const { generation, render } = draft;
     const { wrapper, pre, button } = generation.elements;
@@ -731,11 +794,9 @@ class CopyBlockCoordinator {
       return null;
     }
     const ownerDocument = wrapper.ownerDocument;
-    const placement = expectedPlacement ?? Object.freeze({
-      parent: wrapper.parentNode,
-      previousSibling: wrapper.previousSibling,
-      nextSibling: wrapper.nextSibling,
-    });
+    const placement = expectedPlacement ??
+      snapshotCopyBlockPlacement(wrapper, ownerDocument);
+    if (!placement) return null;
     const action = Object.freeze({
       identity: Symbol("copy-block-action"),
       generation,
@@ -787,8 +848,8 @@ class CopyBlockCoordinator {
     this.#current = publication;
     const MutationObserverConstructor = facts.ownerDocument.defaultView?.MutationObserver;
     if (MutationObserverConstructor) {
-      const observer = new MutationObserverConstructor(() => {
-        publication.mutated = true;
+      const observer = new MutationObserverConstructor((records) => {
+        this.#recordMutations(publication, records);
       });
       observer.observe(facts.wrapper, {
         attributes: true,
@@ -796,8 +857,12 @@ class CopyBlockCoordinator {
         childList: true,
         subtree: true,
       });
-      if (facts.placement.parent) {
-        observer.observe(facts.placement.parent, { childList: true });
+      const observedParents = new Set<Node>();
+      for (const { parent } of facts.placement) {
+        if (parent && !observedParents.has(parent)) {
+          observedParents.add(parent);
+          observer.observe(parent, { childList: true });
+        }
       }
       publication.observer = observer;
     }
@@ -838,8 +903,20 @@ class CopyBlockCoordinator {
   }
 
   #mutationFree(publication: CopyBlockPublication): boolean {
-    return !publication.mutated &&
-      (publication.observer?.takeRecords().length ?? 0) === 0;
+    const records = publication.observer?.takeRecords();
+    if (records?.length) this.#recordMutations(publication, records);
+    return !publication.mutated;
+  }
+
+  #recordMutations(
+    publication: CopyBlockPublication,
+    records: readonly MutationRecord[],
+  ) {
+    if (publication.mutated) return;
+    const { facts } = publication;
+    publication.mutated = records.some((record) =>
+      facts.wrapper.contains(record.target) ||
+      copyBlockMutationTouchesPlacement(facts.placement, record));
   }
 
   #ownsBinding(binding: CopyBlockBinding): boolean {
@@ -877,7 +954,7 @@ class CopyBlockCoordinator {
     render: CopyBlockRender,
     target: RefObject<HTMLPreElement | null>,
     expectedDom?: CopyBlockDomSnapshot,
-    expectedPlacement?: CopyBlockPlacement,
+    expectedPlacement?: CopyBlockPlacementChain,
   ): boolean {
     const { wrapper, pre, button } = generation.elements;
     const wrapperBinding = generation.bindings.wrapper;
@@ -946,9 +1023,8 @@ class CopyBlockCoordinator {
       icon.getAttribute("aria-hidden") !== "true" ||
       (expectedDom && wrapper !== expectedDom.node) ||
       (expectedDom && !copyBlockDomMatches(expectedDom)) ||
-      (expectedPlacement && wrapper.parentNode !== expectedPlacement.parent) ||
-      (expectedPlacement && wrapper.previousSibling !== expectedPlacement.previousSibling) ||
-      (expectedPlacement && wrapper.nextSibling !== expectedPlacement.nextSibling)
+      (expectedPlacement && expectedPlacement[0]?.node !== wrapper) ||
+      (expectedPlacement && !copyBlockPlacementMatches(ownerDocument, expectedPlacement))
     ) {
       return false;
     }
@@ -981,9 +1057,8 @@ class CopyBlockCoordinator {
       facts.bindings.wrapper === facts.generation.bindings.wrapper &&
       facts.bindings.pre === facts.generation.bindings.pre &&
       facts.bindings.button === facts.generation.bindings.button &&
-      facts.wrapper.parentNode === facts.placement.parent &&
-      facts.wrapper.previousSibling === facts.placement.previousSibling &&
-      facts.wrapper.nextSibling === facts.placement.nextSibling &&
+      facts.placement[0]?.node === facts.wrapper &&
+      copyBlockPlacementMatches(facts.ownerDocument, facts.placement) &&
       this.#mutationFree(publication) &&
       this.#hierarchyIsCurrent(
         facts.generation,

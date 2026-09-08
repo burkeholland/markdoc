@@ -673,6 +673,100 @@ describe("CopyBlock exact control publications", () => {
     },
   );
 
+  it.each(
+    [
+      {
+        family: "HTTP config",
+        value: "HTTP MCP configuration",
+        label: "MCP configuration",
+        testId: "ancestor-config-value",
+        copyTestId: "ancestor-config-copy",
+      },
+      {
+        family: "stdio config",
+        value: "stdio MCP configuration",
+        label: "stdio MCP configuration",
+        testId: "ancestor-stdio-value",
+        copyTestId: "ancestor-stdio-copy",
+      },
+      {
+        family: "install command",
+        value: COPILOT_APP_INSTALL,
+        label: "Copilot app install command",
+        testId: "ancestor-command-value",
+        copyTestId: "ancestor-command-copy",
+      },
+    ].flatMap((block) =>
+      (["immediate parent", "higher wrapper"] as const).map((ancestor) => ({
+        ...block,
+        ancestor,
+      }))),
+  )(
+    "permanently retires the $family publication after restored $ancestor placement",
+    async ({ family, ancestor, ...block }) => {
+      vi.useFakeTimers();
+      const strictBlock = (key: string) => (
+        <StrictMode>
+          <div key={key} data-testid="copy-ancestor-outer">
+            <span data-testid="copy-distant-sibling">unrelated</span>
+            <span>adjacent</span>
+            <div data-testid="copy-higher-wrapper">
+              <section data-testid="copy-immediate-parent">
+                <CopyBlock {...block} />
+              </section>
+            </div>
+          </div>
+        </StrictMode>
+      );
+      const view = renderDirect(strictBlock("stale"));
+      const stale = captureCopyBlock(view.host, block.testId, block.copyTestId);
+      const immediateParent = stale.wrapper.parentNode;
+      const higherWrapper = immediateParent?.parentNode;
+      const detached = ancestor === "immediate parent" ? immediateParent : higherWrapper;
+      const parent = detached?.parentNode;
+      const nextSibling = detached?.nextSibling ?? null;
+      if (!detached || !parent) throw new Error(`The ${family} ${ancestor} is not connected`);
+
+      parent.removeChild(detached);
+      parent.insertBefore(detached, nextSibling);
+      const staleEvent = copyBlockEvent(stale);
+      act(() => {
+        stale.click(staleEvent);
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(stale.button).toHaveTextContent("Copy");
+      expectCopyBlockEventUntouched(staleEvent);
+
+      act(() => view.root.render(strictBlock("fresh")));
+      const current = captureCopyBlock(view.host, block.testId, block.copyTestId);
+      expect(current.wrapper).not.toBe(stale.wrapper);
+      const outer = within(view.host).getByTestId("copy-ancestor-outer");
+      const distant = within(view.host).getByTestId("copy-distant-sibling");
+      outer.removeChild(distant);
+      outer.insertBefore(distant, outer.firstChild);
+
+      fireEvent.click(current.button);
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(block.value);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(current.button).toHaveTextContent("Copied");
+      expect(vi.getTimerCount()).toBe(1);
+
+      act(() => {
+        stale.click(copyBlockEvent(stale));
+        vi.advanceTimersByTime(1500);
+      });
+      expect(copyText).toHaveBeenCalledOnce();
+      expect(current.button).toHaveTextContent("Copy");
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it.each(["wrapper", "pre", "button"] as const)(
     "rejects repeated partial Strict Mode %s ref replay without authorizing it",
     (role) => {
