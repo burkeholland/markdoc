@@ -106,6 +106,68 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+interface CapturedReviewMouseEvent {
+  type: string;
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: Event;
+}
+
+type ReviewMouseHandler = (event: CapturedReviewMouseEvent) => void;
+type ReviewElementRef<T extends HTMLElement> = (element: T | null) => void;
+
+interface CapturedReviewControl {
+  element: HTMLButtonElement;
+  click: ReviewMouseHandler;
+  ref: ReviewElementRef<HTMLButtonElement>;
+}
+
+function reactProperty<T>(element: HTMLElement, property: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached while capturing ${property}`);
+  const props = (element as unknown as Record<string, Record<string, unknown>>)[propsKey];
+  const value = props[property];
+  if (!value) throw new Error(`React did not publish ${property}`);
+  return value as T;
+}
+
+function captureReviewControl(element: HTMLElement): CapturedReviewControl {
+  if (!(element instanceof HTMLButtonElement)) throw new Error("The review control was not a button");
+  return {
+    element,
+    click: reactProperty<ReviewMouseHandler>(element, "onClick"),
+    ref: reactProperty<ReviewElementRef<HTMLButtonElement>>(element, "ref"),
+  };
+}
+
+function reviewMouseEvent(
+  control: CapturedReviewControl,
+  currentTarget: EventTarget | null = control.element,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+  type = "click",
+): CapturedReviewMouseEvent {
+  const ownerDocument = currentTarget instanceof Node ? currentTarget.ownerDocument ?? document : document;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return { type, currentTarget, target, nativeEvent };
+}
+
+function invokeReviewControl(
+  control: CapturedReviewControl,
+  currentTarget: EventTarget | null = control.element,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+) {
+  control.click(reviewMouseEvent(control, currentTarget, target, nativeTarget));
+}
+
+function dispatchReviewClick(element: HTMLElement, event?: MouseEvent) {
+  const MouseEventConstructor = element.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  element.dispatchEvent(event ?? new MouseEventConstructor("click", { bubbles: true, cancelable: true }));
+}
+
 function reviewSession(docId: string) {
   const user = makeCollabUser("alice", "Alice");
   const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
@@ -1639,6 +1701,314 @@ describe("CommentsPanel", () => {
       expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
       await settleBatch(request, "resolve");
       expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
+    });
+
+    it("accepts only an exact owner-document review action event and leaves the control usable after every rejected source", async () => {
+      const fixture = makeBatchSession("review-event-provenance");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-accept-all")).toHaveLength(2));
+      const accept = captureReviewControl(reviewControl("r1", "review-accept-all"));
+      const reject = captureReviewControl(reviewControl("r1", "review-reject-all"));
+      const sibling = captureReviewControl(reviewControl("r2", "review-accept-all"));
+      const foreign = document.createElement("button");
+      const foreignChild = document.createElement("span");
+      foreign.append(foreignChild);
+      document.body.append(foreign);
+      const otherDocument = document.implementation.createHTMLDocument("foreign");
+      const otherDocumentButton = otherDocument.createElement("button");
+      otherDocument.body.append(otherDocumentButton);
+      const clone = accept.element.cloneNode(true) as HTMLButtonElement;
+      document.body.append(clone);
+      const icon = accept.element.firstElementChild!;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+      act(() => {
+        invokeReviewControl(accept, sibling.element);
+        invokeReviewControl(accept, reject.element);
+        invokeReviewControl(accept, foreign, foreignChild);
+        invokeReviewControl(accept, otherDocumentButton);
+        invokeReviewControl(accept, clone);
+        accept.element.disabled = true;
+        invokeReviewControl(accept);
+        accept.element.disabled = false;
+        accept.click(reviewMouseEvent(accept, accept.element, icon, accept.element));
+        accept.click(reviewMouseEvent(accept, accept.element, accept.element, accept.element, "pointerdown"));
+        accept.click({
+          ...reviewMouseEvent(accept),
+          nativeEvent: new Event("click", { bubbles: true }),
+        });
+      });
+
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      act(() => {
+        dispatchReviewClick(accept.element, event);
+        dispatchReviewClick(accept.element, event);
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[0],
+        replyId: undefined,
+        decision: "accept",
+      });
+      foreign.remove();
+      clone.remove();
+    });
+
+    it("binds toggle and ordered thread links to their one exact card publication", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-toggle-links", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      render(batchPanel(fixture.session));
+      const toggleA = captureReviewControl(await screen.findByTestId("review-toggle"));
+
+      act(() => dispatchReviewClick(toggleA.element));
+      const toggleB = captureReviewControl(screen.getByTestId("review-toggle"));
+      expect(toggleB.element).toHaveAttribute("aria-expanded", "true");
+      expect(toggleB.element).toBe(toggleA.element);
+      act(() => invokeReviewControl(toggleA, toggleB.element));
+      expect(toggleB.element).toHaveAttribute("aria-expanded", "true");
+
+      const links = screen.getAllByTestId("review-thread-link").map(captureReviewControl);
+      const rows = screen.getAllByTestId("review-thread-row");
+      const list = screen.getByTestId("review-threads");
+      act(() => invokeReviewControl(links[0], links[1].element));
+      expect(active).not.toHaveBeenCalled();
+      list.append(rows[0]);
+      act(() => invokeReviewControl(links[0]));
+      expect(active).not.toHaveBeenCalled();
+      list.insertBefore(rows[0], rows[1]);
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      act(() => {
+        dispatchReviewClick(links[0].element, event);
+        dispatchReviewClick(links[0].element, event);
+      });
+      expect(active).toHaveBeenCalledOnce();
+      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
+
+      act(() => dispatchReviewClick(links[0].element));
+      expect(active).toHaveBeenCalledTimes(2);
+      expect(active).toHaveBeenLastCalledWith(fixture.threadIds[0]);
+
+      act(() => dispatchReviewClick(toggleB.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("rejects exact-card DOM replacement and reorder until the published hierarchy is restored", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-dom-replacement", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      render(batchPanel(fixture.session));
+      const toggle = captureReviewControl(await screen.findByTestId("review-toggle"));
+      const card = reviewCard("r1");
+      const header = within(card).getByTestId("review-header");
+      const actions = within(card).getByTestId("review-actions");
+
+      for (const replaced of [card, header, actions, toggle.element]) {
+        const clone = replaced.cloneNode(true) as HTMLElement;
+        replaced.replaceWith(clone);
+        act(() => invokeReviewControl(toggle));
+        expect(within(card).getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+        clone.replaceWith(replaced);
+      }
+      card.append(header);
+      act(() => invokeReviewControl(toggle));
+      expect(toggle.element).toHaveAttribute("aria-expanded", "false");
+      card.insertBefore(header, card.firstChild);
+      act(() => dispatchReviewClick(toggle.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+
+      const link = captureReviewControl(screen.getAllByTestId("review-thread-link")[0]);
+      const list = screen.getByTestId("review-threads");
+      const row = screen.getAllByTestId("review-thread-row")[0];
+      for (const replaced of [list, row, link.element]) {
+        const clone = replaced.cloneNode(true) as HTMLElement;
+        replaced.replaceWith(clone);
+        act(() => invokeReviewControl(link));
+        expect(active).not.toHaveBeenCalled();
+        clone.replaceWith(replaced);
+      }
+      act(() => dispatchReviewClick(link.element));
+      expect(active).toHaveBeenCalledOnce();
+      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
+    });
+
+    it("retires text and operation publications while preserving the current same-DOM control", async () => {
+      const fixture = makeBatchSession("review-fact-replacement");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const rendered = render(batchPanel(fixture.session));
+      const staleToggle = captureReviewControl(await screen.findByTestId("review-toggle"));
+
+      act(() => {
+        fixture.session.ytext.insert(fixture.session.ytext.length, "!");
+        rendered.rerender(batchPanel(fixture.session));
+      });
+      const currentToggle = captureReviewControl(screen.getByTestId("review-toggle"));
+      expect(currentToggle.element).toBe(staleToggle.element);
+      act(() => invokeReviewControl(staleToggle, currentToggle.element));
+      expect(currentToggle.element).toHaveAttribute("aria-expanded", "false");
+      act(() => dispatchReviewClick(currentToggle.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
+      const staleReject = captureReviewControl(screen.getByTestId("review-reject-all"));
+      vi.spyOn(fixture.session, "commentsViaApi", "get").mockReturnValue(false);
+      rendered.rerender(batchPanel(fixture.session));
+      const currentReject = captureReviewControl(screen.getByTestId("review-reject-all"));
+      expect(currentReject.element).toBe(staleReject.element);
+      act(() => invokeReviewControl(staleReject, currentReject.element));
+      expect(fixture.session.comments.get(fixture.threadIds[0])?.suggestionState).toBeFalsy();
+      act(() => dispatchReviewClick(currentReject.element));
+      expect(fixture.session.comments.get(fixture.threadIds[0])?.suggestionState).toBe("rejected");
+    });
+
+    it.each(["review", "thread", "permission"] as const)(
+      "re-reads mutable %s primitives before a batch claim without poisoning the restored control",
+      async (mutation) => {
+        const fixture = makeBatchSession(`review-mutable-${mutation}`);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        render(batchPanel(fixture.session));
+        const control = captureReviewControl(await screen.findByTestId("review-reject-all"));
+        const storedThread = fixture.session.comments.ymap.get(fixture.threadIds[0]) as Y.Map<unknown>;
+
+        if (mutation === "review") review.summary = "Mutated in place";
+        if (mutation === "permission") (fixture.session as unknown as { role: string }).role = "viewer";
+
+        act(() => {
+          if (mutation === "thread") storedThread.set("body", "Mutated in place");
+          invokeReviewControl(control);
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          if (mutation === "review") review.summary = "Review r1.";
+          if (mutation === "thread") storedThread.set("body", "Finding 1.\n\n```suggestion\nALPHA\n```");
+          if (mutation === "permission") (fixture.session as unknown as { role: string }).role = "owner";
+          invokeReviewControl(control);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["stale-before-current", "current-before-stale"] as const)(
+      "retires an equal-looking remount before parent layout and keeps the current control usable %s",
+      async (order) => {
+        const fixture = makeBatchSession(`review-remount-${order}`, 1, undefined, false);
+        const review = reviewDto("same-review", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        let passiveCleanups = 0;
+        try {
+          await act(async () => {
+            root.render(<ComposerBoundary session={fixture.session} visit="A" />);
+          });
+          const stale = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          let checkedAtBoundary = false;
+          await act(async () => {
+            root.render(
+              <ComposerBoundary
+                session={fixture.session}
+                visit="B"
+                boundary={1}
+                onBoundary={() => {
+                  stale.click(reviewMouseEvent(stale));
+                  expect(stale.element.isConnected).toBe(false);
+                  expect(host.querySelector('[data-testid="review-toggle"]')).toBeNull();
+                  expect(passiveCleanups).toBe(0);
+                  checkedAtBoundary = true;
+                }}
+                onPassiveCleanup={() => {
+                  passiveCleanups += 1;
+                }}
+              />,
+            );
+          });
+          expect(checkedAtBoundary).toBe(true);
+          await waitFor(() => expect(host.querySelector('[data-testid="review-toggle"]')).toBeInTheDocument());
+          const current = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          act(() => {
+            if (order === "stale-before-current") {
+              invokeReviewControl(stale, current.element);
+              dispatchReviewClick(current.element);
+            } else {
+              dispatchReviewClick(current.element);
+              invokeReviewControl(stale, current.element);
+            }
+          });
+          expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "true");
+          act(() => {
+            stale.ref(current.element);
+            stale.ref(null);
+          });
+          const currentAfterLateRefs = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          act(() => dispatchReviewClick(currentAfterLateRefs.element));
+          expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "false");
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("retires a removed card before parent layout and late old refs cannot clear its replacement", async () => {
+      const fixture = makeBatchSession("review-removal-layout", 1, undefined, false);
+      const review = reviewDto("same-review", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      try {
+        await act(async () => {
+          root.render(<ComposerBoundary session={fixture.session} visit="A" />);
+        });
+        const stale = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+        let checkedAtBoundary = false;
+        act(() =>
+          root.render(
+            <ComposerBoundary
+              session={fixture.session}
+              visit="B"
+              present={false}
+              boundary={1}
+              onBoundary={() => {
+                invokeReviewControl(stale);
+                expect(passiveCleanups).toBe(0);
+                checkedAtBoundary = true;
+              }}
+              onPassiveCleanup={() => {
+                passiveCleanups += 1;
+              }}
+            />,
+          ),
+        );
+        expect(checkedAtBoundary).toBe(true);
+        await act(async () => {
+          root.render(<ComposerBoundary session={fixture.session} visit="C" />);
+        });
+        const current = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+        act(() => {
+          stale.ref(current.element);
+          stale.ref(null);
+          dispatchReviewClick(current.element);
+        });
+        expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "true");
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
     });
   });
 

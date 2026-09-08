@@ -671,7 +671,7 @@ interface CommentBatchOwner {
 }
 
 function reviewIdentitySignature(review: ReviewDto): string {
-  return JSON.stringify([review.id, review.documentId, review.authorId, review.collabAuthorId, review.agent, review.verdict, review.summary, review.threadIds, review.createdAt]);
+  return JSON.stringify([review.id, review.documentId, review.authorId, review.authorName, review.collabAuthorId, review.agent, review.verdict, review.summary, review.threadIds, review.createdAt]);
 }
 
 interface CommentRowActionOwner {
@@ -2425,7 +2425,7 @@ function commentBatchResult(owner: CommentBatchOwner, done: number, failed: numb
 async function executeCommentBatch(
   coordinator: CommentRowActionCoordinator,
   owner: CommentBatchOwner,
-  ops: ReturnType<typeof useCommentOps>,
+  ops: Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">,
   onToast?: CommentsPanelProps["onToast"],
 ) {
   let done = 0;
@@ -2505,11 +2505,1006 @@ async function executeCommentBatch(
   onToast?.(result.message, result.kind);
 }
 
-/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
-const ReviewCard = memo(function ReviewCard({ review, threads, session, text, ops, coordinator, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"] }) {
-  const [open, setOpen] = useState(false);
+const REVIEW_CARD_CLASS = "review-card";
+const REVIEW_HEADER_CLASS = "flex items-start gap-2.5";
+const REVIEW_TOGGLE_CLASS = "icon-btn h-7 w-7 shrink-0";
+const REVIEW_SUGGESTION_ACTIONS_CLASS = "@container mt-2 grid grid-cols-2 gap-2";
+const REVIEW_RESOLVE_ACTIONS_CLASS = "mt-2 flex";
+const REVIEW_ACCEPT_CLASS = "btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2";
+const REVIEW_REJECT_CLASS = "btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2";
+const REVIEW_RESOLVE_CLASS = "btn btn-sm btn-outline gap-1.5 whitespace-nowrap";
+const REVIEW_THREADS_CLASS = "mt-2 flex flex-col gap-1 border-t border-line pt-2";
+const REVIEW_THREAD_LINK_CLASS = "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2";
+
+interface ReviewPrimitiveSnapshot {
+  readonly id: string;
+  readonly documentId: string;
+  readonly authorId: string;
+  readonly authorName: string;
+  readonly collabAuthorId: string;
+  readonly agent: string | null;
+  readonly verdict: ReviewDto["verdict"];
+  readonly summary: string;
+  readonly threadIds: readonly string[];
+  readonly createdAt: string;
+}
+
+interface ReviewReplyPrimitiveSnapshot {
+  readonly source: CommentReply;
+  readonly id: string;
+  readonly body: string;
+  readonly suggestionState: CommentReply["suggestionState"];
+}
+
+interface ReviewThreadPrimitiveSnapshot {
+  readonly source: CommentThread;
+  readonly identity: object;
+  readonly id: string;
+  readonly quote: string;
+  readonly body: string;
+  readonly resolved: boolean;
+  readonly range: Readonly<{ from: number; to: number }> | null;
+  readonly suggestionState: CommentThread["suggestionState"];
+  readonly replies: readonly ReviewReplyPrimitiveSnapshot[];
+  readonly suggestionLabel: string | null;
+}
+
+interface ReviewSuggestionPrimitiveSnapshot {
+  readonly threadSource: CommentThread;
+  readonly replySource: CommentReply | null;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly body: string;
+  readonly proposed: string;
+  readonly state: CommentSuggestionState;
+}
+
+type ReviewCardActionKind = "toggle" | "accept" | "reject" | "resolve" | "thread";
+
+interface ReviewCardAuthority {
+  readonly mount: symbol;
+  readonly position: number;
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly role: CollabSession["role"];
+  readonly canEdit: boolean;
+  readonly canComment: boolean;
+  readonly text: string;
+  readonly reviewSource: ReviewDto;
+  readonly review: ReviewDto;
+  readonly reviewSnapshot: ReviewPrimitiveSnapshot;
+  readonly threadsSource: CommentThread[];
+  readonly threads: readonly CommentThread[];
+  readonly mine: readonly ReviewThreadPrimitiveSnapshot[];
+  readonly suggestions: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly pending: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly applicable: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly unresolved: readonly ReviewThreadPrimitiveSnapshot[];
+  readonly suggestionTargetSnapshots: readonly (CommentSuggestionBatchTarget | null)[];
+  readonly resolveTargetSnapshots: readonly (CommentResolveBatchTarget | null)[];
+  readonly renderedSuggestionTargets: readonly CommentSuggestionBatchTarget[];
+  readonly renderedResolveTargets: readonly CommentResolveBatchTarget[];
+  readonly renderedTargets: readonly CommentBatchTarget[];
+  readonly scope: string;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly batchOwner: CommentBatchOwner | null;
+  readonly busy: boolean;
+  readonly blocked: boolean;
+  readonly open: boolean;
+  readonly actionRegion: "suggestions" | "resolve" | null;
+  readonly partial: boolean;
+  readonly verdictLabel: string;
+  readonly verdictClass: string;
+  readonly timestampLabel: string;
+  readonly countsLabel: string;
+  readonly acceptTitle: string;
+  readonly resolveTitle: string;
+  readonly opsSource: ReturnType<typeof useCommentOps>;
+  readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
+  readonly onToast: CommentsPanelProps["onToast"];
+  readonly setOpen: (open: boolean) => void;
+  readonly setActiveComment: CollabSession["setActiveComment"];
+}
+
+interface ReviewCardElements {
+  readonly card: HTMLDivElement;
+  readonly header: HTMLDivElement;
+  readonly toggle: HTMLButtonElement;
+  readonly actions: HTMLDivElement | null;
+  readonly accept: HTMLButtonElement | null;
+  readonly reject: HTMLButtonElement | null;
+  readonly resolve: HTMLButtonElement | null;
+  readonly list: HTMLUListElement | null;
+  readonly rows: readonly Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[];
+}
+
+interface ReviewCardPresentation {
+  readonly identity: symbol;
+  readonly render: ReviewCardRender;
+  readonly authority: ReviewCardAuthority;
+  readonly elements: ReviewCardElements;
+}
+
+interface ReviewCardCells {
+  readonly active: { current: ReviewCardPresentation | null };
+  readonly claimedEvents: WeakSet<Event>;
+  readonly claimedActions: WeakMap<ReviewCardPresentation, Set<ReviewCardAction>>;
+}
+
+interface ReviewCardAction {
+  readonly identity: symbol;
+  readonly kind: ReviewCardActionKind;
+  readonly index: number | null;
+  readonly threadId: string | null;
+  readonly enabled: boolean;
+  readonly capture: (element: HTMLButtonElement | null) => void;
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+interface ReviewCardRender {
+  readonly authority: ReviewCardAuthority;
+  readonly toggle: ReviewCardAction;
+  readonly accept: ReviewCardAction | null;
+  readonly reject: ReviewCardAction | null;
+  readonly resolve: ReviewCardAction | null;
+  readonly threadLinks: readonly ReviewCardAction[];
+  readonly captureCard: (element: HTMLDivElement | null) => void;
+  readonly captureHeader: (element: HTMLDivElement | null) => void;
+  readonly captureActions: (element: HTMLDivElement | null) => void;
+  readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly captureRows: readonly ((element: HTMLLIElement | null) => void)[];
+  readonly captureToggle: (element: HTMLButtonElement | null) => void;
+  readonly onToggle: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureReject: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onReject: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureResolve: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onResolve: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureThreadLinks: readonly ((element: HTMLButtonElement | null) => void)[];
+  readonly onThreadClicks: readonly ((event: MouseEvent<HTMLButtonElement>) => void)[];
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+}
+
+class ReviewCardElementOwner<T extends HTMLElement> {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(private readonly onReplacement: () => void) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const replaced = element !== null && this.last !== null && this.last !== element;
+    this.current = element;
+    if (element) this.last = element;
+    if (replaced || element === null) this.onReplacement();
+  };
+}
+
+function freezeReview(review: ReviewDto): { review: ReviewDto; snapshot: ReviewPrimitiveSnapshot } {
+  const threadIds = [...review.threadIds];
+  Object.freeze(threadIds);
+  const snapshot: ReviewPrimitiveSnapshot = Object.freeze({
+    id: review.id,
+    documentId: review.documentId,
+    authorId: review.authorId,
+    authorName: review.authorName,
+    collabAuthorId: review.collabAuthorId,
+    agent: review.agent,
+    verdict: review.verdict,
+    summary: review.summary,
+    threadIds,
+    createdAt: review.createdAt,
+  });
+  const frozen: ReviewDto = {
+    id: snapshot.id,
+    documentId: snapshot.documentId,
+    authorId: snapshot.authorId,
+    authorName: snapshot.authorName,
+    collabAuthorId: snapshot.collabAuthorId,
+    agent: snapshot.agent,
+    verdict: snapshot.verdict,
+    summary: snapshot.summary,
+    threadIds,
+    createdAt: snapshot.createdAt,
+  };
+  return { review: Object.freeze(frozen), snapshot };
+}
+
+function sameReviewPrimitives(review: ReviewDto, snapshot: ReviewPrimitiveSnapshot): boolean {
+  return (
+    review.id === snapshot.id &&
+    review.documentId === snapshot.documentId &&
+    review.authorId === snapshot.authorId &&
+    review.authorName === snapshot.authorName &&
+    review.collabAuthorId === snapshot.collabAuthorId &&
+    review.agent === snapshot.agent &&
+    review.verdict === snapshot.verdict &&
+    review.summary === snapshot.summary &&
+    review.createdAt === snapshot.createdAt &&
+    review.threadIds.length === snapshot.threadIds.length &&
+    snapshot.threadIds.every((id, index) => review.threadIds[index] === id)
+  );
+}
+
+function suggestionLabel(targets: readonly ReviewSuggestionPrimitiveSnapshot[]): string | null {
+  const pending = targets.filter((target) => target.state === "pending" || target.state === "outdated");
+  return targets.length === 1 ? targets[0]!.state : pending.length > 0 ? `${pending.length} pending` : targets.length > 0 ? "all decided" : null;
+}
+
+function snapshotReviewThread(
+  session: CollabSession,
+  thread: CommentThread,
+  targets: readonly ReviewSuggestionPrimitiveSnapshot[],
+): ReviewThreadPrimitiveSnapshot | null {
+  const identity = storedCommentTargetIdentity(session, thread.id, null)?.thread;
+  if (!identity) return null;
+  return Object.freeze({
+    source: thread,
+    identity,
+    id: thread.id,
+    quote: thread.quote,
+    body: thread.body,
+    resolved: thread.resolved,
+    range: thread.range ? Object.freeze({ from: thread.range.from, to: thread.range.to }) : null,
+    suggestionState: thread.suggestionState,
+    replies: Object.freeze(
+      thread.replies.map((reply) =>
+        Object.freeze({
+          source: reply,
+          id: reply.id,
+          body: reply.body,
+          suggestionState: reply.suggestionState,
+        }),
+      ),
+    ),
+    suggestionLabel: suggestionLabel(targets),
+  });
+}
+
+function sameThreadPrimitives(thread: CommentThread, snapshot: ReviewThreadPrimitiveSnapshot, requireSource: boolean): boolean {
+  return (
+    (!requireSource || thread === snapshot.source) &&
+    thread.id === snapshot.id &&
+    thread.quote === snapshot.quote &&
+    thread.body === snapshot.body &&
+    thread.resolved === snapshot.resolved &&
+    (thread.suggestionState ?? null) === (snapshot.suggestionState ?? null) &&
+    (thread.range?.from ?? null) === (snapshot.range?.from ?? null) &&
+    (thread.range?.to ?? null) === (snapshot.range?.to ?? null) &&
+    thread.replies.length === snapshot.replies.length &&
+    snapshot.replies.every((reply, index) => {
+      const current = thread.replies[index];
+      return (
+        !!current &&
+        (!requireSource || current === reply.source) &&
+        current.id === reply.id &&
+        current.body === reply.body &&
+        (current.suggestionState ?? null) === (reply.suggestionState ?? null)
+      );
+    })
+  );
+}
+
+function sameSuggestionPrimitives(target: CommentSuggestionTarget, snapshot: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    target.thread === snapshot.threadSource &&
+    target.reply === snapshot.replySource &&
+    target.thread.id === snapshot.threadId &&
+    (target.reply?.id ?? null) === snapshot.replyId &&
+    (target.reply?.body ?? target.thread.body) === snapshot.body &&
+    target.block.text === snapshot.proposed &&
+    target.state === snapshot.state
+  );
+}
+
+function sameLiveSuggestionPrimitives(target: CommentSuggestionTarget, snapshot: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    target.thread.id === snapshot.threadId &&
+    (target.reply?.id ?? null) === snapshot.replyId &&
+    (target.reply?.body ?? target.thread.body) === snapshot.body &&
+    target.block.text === snapshot.proposed &&
+    target.state === snapshot.state
+  );
+}
+
+function sameSuggestionTarget(left: CommentSuggestionBatchTarget | null, right: CommentSuggestionBatchTarget | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.kind === right.kind &&
+    left.key === right.key &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.identity.thread === right.identity.thread &&
+    left.identity.reply === right.identity.reply &&
+    left.body === right.body &&
+    left.proposed === right.proposed &&
+    left.initiallyOutdated === right.initiallyOutdated
+  );
+}
+
+function sameResolveTarget(left: CommentResolveBatchTarget | null, right: CommentResolveBatchTarget | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.kind === right.kind &&
+    left.key === right.key &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.identity.thread === right.identity.thread &&
+    left.identity.reply === right.identity.reply
+  );
+}
+
+function createReviewCardAuthority({
+  mount,
+  position,
+  review,
+  threads,
+  session,
+  text,
+  ops,
+  coordinator,
+  onToast,
+  open,
+  setOpen,
+}: {
+  mount: symbol;
+  position: number;
+  review: ReviewDto;
+  threads: CommentThread[];
+  session: CollabSession;
+  text: string;
+  ops: ReturnType<typeof useCommentOps>;
+  coordinator: CommentRowActionCoordinator;
+  onToast?: CommentsPanelProps["onToast"];
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}): ReviewCardAuthority {
   const canEdit = session.role === "owner" || session.role === "editor";
   const canComment = session.canComment;
+  const mineSources = reviewThreads(review, threads);
+  const sourceSuggestions = commentSuggestionTargets(mineSources, text);
+  const suggestions = Object.freeze(
+    sourceSuggestions.map((target) =>
+      Object.freeze({
+        threadSource: target.thread,
+        replySource: target.reply,
+        threadId: target.thread.id,
+        replyId: target.reply?.id ?? null,
+        body: target.reply?.body ?? target.thread.body,
+        proposed: target.block.text,
+        state: target.state,
+      }),
+    ),
+  );
+  const mine = mineSources.map((thread) => snapshotReviewThread(session, thread, suggestions.filter((target) => target.threadId === thread.id)));
+  const validMine = mine.filter((thread): thread is ReviewThreadPrimitiveSnapshot => thread !== null);
+  const pendingIndexes = suggestions.flatMap((target, index) => (target.state === "pending" || target.state === "outdated" ? [index] : []));
+  const pending = Object.freeze(pendingIndexes.map((index) => suggestions[index]!));
+  const applicable = Object.freeze(pending.filter((target) => target.state === "pending"));
+  const unresolved = Object.freeze(validMine.filter((thread) => !thread.resolved));
+  const pendingSourceTargets = pendingIndexes.map((index) => sourceSuggestions[index]!);
+  const suggestionTargetSnapshots = Object.freeze(pendingSourceTargets.map((target) => snapshotCommentSuggestionTarget(session, target)));
+  const resolveTargetSnapshots = Object.freeze(unresolved.map((thread) => snapshotCommentResolveTarget(session, thread.source)));
+  const renderedSuggestionTargets = Object.freeze(suggestionTargetSnapshots.filter((target): target is CommentSuggestionBatchTarget => target !== null));
+  const renderedResolveTargets = Object.freeze(resolveTargetSnapshots.filter((target): target is CommentResolveBatchTarget => target !== null));
+  const renderedTargets: readonly CommentBatchTarget[] = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
+  const scope = reviewBatchScope(review.id);
+  const batchOwner = coordinator.batchOwners.get(scope) ?? null;
+  const blocked = isCommentBatchBlocked(coordinator, renderedTargets);
+  const partial = applicable.length !== pending.length;
+  const { review: frozenReview, snapshot: reviewSnapshot } = freezeReview(review);
+  const actionRegion = canEdit && pending.length > 0 ? "suggestions" : canComment && pending.length === 0 && unresolved.length > 0 ? "resolve" : null;
+  const opsSnapshot = Object.freeze({
+    acceptSuggestion: ops.acceptSuggestion,
+    rejectSuggestion: ops.rejectSuggestion,
+    resolve: ops.resolve,
+  });
+
+  return Object.freeze({
+    mount,
+    position,
+    session,
+    documentId: session.docId,
+    role: session.role,
+    canEdit,
+    canComment,
+    text,
+    reviewSource: review,
+    review: frozenReview,
+    reviewSnapshot,
+    threadsSource: threads,
+    threads: Object.freeze([...threads]),
+    mine: Object.freeze(validMine),
+    suggestions,
+    pending,
+    applicable,
+    unresolved,
+    suggestionTargetSnapshots,
+    resolveTargetSnapshots,
+    renderedSuggestionTargets,
+    renderedResolveTargets,
+    renderedTargets: Object.freeze([...renderedTargets]),
+    scope,
+    coordinator,
+    batchOwner,
+    busy: batchOwner !== null,
+    blocked,
+    open,
+    actionRegion,
+    partial,
+    verdictLabel: reviewVerdictLabel(review.authorName, review.verdict),
+    verdictClass: cn("text-[13px] font-semibold", verdictTone(review.verdict)),
+    timestampLabel: relativeTime(new Date(review.createdAt).getTime()),
+    countsLabel: `${reviewSummaryLabel(validMine.length, suggestions.length)}${suggestions.length > 0 && pending.length === 0 ? " · all decided" : ""}`,
+    acceptTitle: partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions",
+    resolveTitle: `Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`,
+    opsSource: ops,
+    ops: opsSnapshot,
+    onToast,
+    setOpen,
+    setActiveComment: session.setActiveComment,
+  });
+}
+
+function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingReviewPublication = false): boolean {
+  const {
+    session,
+    reviewSource,
+    reviewSnapshot,
+    threadsSource,
+    threads,
+    mine,
+    suggestions,
+    pending,
+    applicable,
+    unresolved,
+    suggestionTargetSnapshots,
+    resolveTargetSnapshots,
+    coordinator,
+    scope,
+  } = authority;
+  if (
+    session.docId !== authority.documentId ||
+    session.role !== authority.role ||
+    (session.role === "owner" || session.role === "editor") !== authority.canEdit ||
+    session.canComment !== authority.canComment ||
+    session.ytext.toString() !== authority.text ||
+    session.setActiveComment !== authority.setActiveComment ||
+    !sameReviewPrimitives(reviewSource, reviewSnapshot) ||
+    authority.review.documentId !== authority.documentId ||
+    threadsSource !== authority.threadsSource ||
+    threadsSource.length !== threads.length ||
+    !threads.every((thread, index) => threadsSource[index] === thread) ||
+    authority.opsSource.acceptSuggestion !== authority.ops.acceptSuggestion ||
+    authority.opsSource.rejectSuggestion !== authority.ops.rejectSuggestion ||
+    authority.opsSource.resolve !== authority.ops.resolve ||
+    coordinator.session !== session ||
+    coordinator.documentId !== authority.documentId ||
+    !coordinator.mounted ||
+    (!allowPendingReviewPublication || coordinator.reviewSignatures.has(reviewSnapshot.id)) &&
+      coordinator.reviewSignatures.get(reviewSnapshot.id) !== reviewIdentitySignature(authority.review)
+  ) {
+    return false;
+  }
+
+  const currentMineSources = reviewThreads(reviewSource, threadsSource);
+  if (
+    currentMineSources.length !== mine.length ||
+    !mine.every((thread, index) => {
+      const source = currentMineSources[index];
+      const current = session.comments.get(thread.id);
+      return (
+        !!source &&
+        !!current &&
+        source === thread.source &&
+        sameThreadPrimitives(source, thread, true) &&
+        sameThreadPrimitives(current, thread, false) &&
+        storedCommentTargetIdentity(session, thread.id, null)?.thread === thread.identity
+      );
+    })
+  ) {
+    return false;
+  }
+
+  const sourceSuggestions = commentSuggestionTargets(currentMineSources, authority.text);
+  const liveThreads = mine.map((thread) => session.comments.get(thread.id)).filter((thread): thread is CommentThread => thread !== null);
+  const liveSuggestions = commentSuggestionTargets(liveThreads, authority.text);
+  if (
+    sourceSuggestions.length !== suggestions.length ||
+    liveSuggestions.length !== suggestions.length ||
+    !suggestions.every(
+      (suggestion, index) =>
+        sameSuggestionPrimitives(sourceSuggestions[index]!, suggestion) &&
+        sameLiveSuggestionPrimitives(liveSuggestions[index]!, suggestion),
+    )
+  ) {
+    return false;
+  }
+
+  const currentPending = suggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const currentApplicable = currentPending.filter((target) => target.state === "pending");
+  const currentUnresolved = mine.filter((thread) => !thread.resolved);
+  if (
+    currentPending.length !== pending.length ||
+    !pending.every((target, index) => currentPending[index] === target) ||
+    currentApplicable.length !== applicable.length ||
+    !applicable.every((target, index) => currentApplicable[index] === target) ||
+    currentUnresolved.length !== unresolved.length ||
+    !unresolved.every((thread, index) => currentUnresolved[index] === thread)
+  ) {
+    return false;
+  }
+
+  const livePending = liveSuggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const currentSuggestionTargets = livePending.map((target) => snapshotCommentSuggestionTarget(session, target));
+  const currentResolveTargets = currentUnresolved.map((thread) => {
+    const live = session.comments.get(thread.id);
+    return live ? snapshotCommentResolveTarget(session, live) : null;
+  });
+  const renderedTargets: readonly CommentBatchTarget[] =
+    pending.length > 0
+      ? currentSuggestionTargets.filter((target): target is CommentSuggestionBatchTarget => target !== null)
+      : currentResolveTargets.filter((target): target is CommentResolveBatchTarget => target !== null);
+  const matches =
+    currentSuggestionTargets.length === suggestionTargetSnapshots.length &&
+    suggestionTargetSnapshots.every((target, index) => sameSuggestionTarget(target, currentSuggestionTargets[index] ?? null)) &&
+    currentResolveTargets.length === resolveTargetSnapshots.length &&
+    resolveTargetSnapshots.every((target, index) => sameResolveTarget(target, currentResolveTargets[index] ?? null)) &&
+    (coordinator.batchOwners.get(scope) ?? null) === authority.batchOwner &&
+    isCommentBatchBlocked(coordinator, renderedTargets) === authority.blocked;
+  return matches;
+}
+
+function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): boolean {
+  const { authority, elements } = presentation;
+  const { card, header, toggle, actions, accept, reject, resolve, list, rows } = elements;
+  const document = card.ownerDocument;
+  const NodeConstructor = document.defaultView?.Node;
+  if (
+    !NodeConstructor ||
+    !card.isConnected ||
+    card.tagName !== "DIV" ||
+    card.className !== REVIEW_CARD_CLASS ||
+    card.dataset.testid !== "review-card" ||
+    card.dataset.reviewId !== authority.reviewSnapshot.id ||
+    card.dataset.verdict !== authority.reviewSnapshot.verdict ||
+    !card.parentElement ||
+    card.parentElement.dataset.testid !== "review-cards" ||
+    card.parentElement.children.item(authority.position) !== card ||
+    !header.isConnected ||
+    header.ownerDocument !== document ||
+    header.parentElement !== card ||
+    header.className !== REVIEW_HEADER_CLASS ||
+    header.dataset.testid !== "review-header" ||
+    header.children.length !== 3 ||
+    header.children.item(2) !== toggle ||
+    !toggle.isConnected ||
+    toggle.ownerDocument !== document ||
+    toggle.parentElement !== header ||
+    toggle.tagName !== "BUTTON" ||
+    toggle.type !== "button" ||
+    toggle.disabled ||
+    toggle.className !== REVIEW_TOGGLE_CLASS ||
+    toggle.dataset.testid !== "review-toggle" ||
+    toggle.getAttribute("aria-expanded") !== String(authority.open) ||
+    toggle.getAttribute("aria-label") !== (authority.open ? "Collapse review" : "Expand review")
+  ) {
+    return false;
+  }
+
+  const details = header.children.item(1);
+  const heading = details?.children.item(0);
+  const verdict = heading?.children.item(0);
+  const timestamp = heading?.children.item(1);
+  const counts = details?.children.item(1);
+  const summary = details?.children.item(2);
+  if (
+    !(details instanceof NodeConstructor) ||
+    details?.children.length !== (authority.reviewSnapshot.summary ? 3 : 2) ||
+    !(verdict instanceof NodeConstructor) ||
+    !(timestamp instanceof NodeConstructor) ||
+    !(counts instanceof NodeConstructor) ||
+    (verdict as HTMLElement).dataset.testid !== "review-verdict" ||
+    (verdict as HTMLElement).className !== authority.verdictClass ||
+    verdict.textContent !== authority.verdictLabel ||
+    (timestamp as HTMLElement).dataset.testid !== "comment-timestamp" ||
+    timestamp.textContent !== authority.timestampLabel ||
+    (counts as HTMLElement).dataset.testid !== "review-counts" ||
+    counts.textContent !== authority.countsLabel ||
+    (authority.reviewSnapshot.summary
+      ? (summary as HTMLElement | null)?.dataset.testid !== "comment-body"
+      : summary !== null)
+  ) {
+    return false;
+  }
+
+  const expectedChildren: Element[] = [header];
+  if (authority.actionRegion) expectedChildren.push(actions!);
+  if (authority.open) expectedChildren.push(list!);
+  if (card.children.length !== expectedChildren.length || !expectedChildren.every((element, index) => card.children.item(index) === element)) return false;
+
+  if (authority.actionRegion === null) {
+    if (actions || accept || reject || resolve) return false;
+  } else {
+    const suggestionActions = authority.actionRegion === "suggestions";
+    if (
+      !actions ||
+      !actions.isConnected ||
+      actions.ownerDocument !== document ||
+      actions.parentElement !== card ||
+      actions.dataset.testid !== "review-actions" ||
+      actions.className !== (suggestionActions ? REVIEW_SUGGESTION_ACTIONS_CLASS : REVIEW_RESOLVE_ACTIONS_CLASS)
+    ) {
+      return false;
+    }
+    if (suggestionActions) {
+      const acceptEnabled =
+        !authority.busy &&
+        !authority.blocked &&
+        authority.renderedSuggestionTargets.length === authority.pending.length &&
+        authority.applicable.length > 0;
+      const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
+      if (
+        !accept ||
+        !reject ||
+        resolve !== null ||
+        actions.children.length !== 2 ||
+        actions.children.item(0) !== accept ||
+        actions.children.item(1) !== reject ||
+        !accept.isConnected ||
+        !reject.isConnected ||
+        accept.ownerDocument !== document ||
+        reject.ownerDocument !== document ||
+        accept.parentElement !== actions ||
+        reject.parentElement !== actions ||
+        accept.type !== "button" ||
+        reject.type !== "button" ||
+        accept.className !== REVIEW_ACCEPT_CLASS ||
+        reject.className !== REVIEW_REJECT_CLASS ||
+        accept.dataset.testid !== "review-accept-all" ||
+        reject.dataset.testid !== "review-reject-all" ||
+        accept.disabled === acceptEnabled ||
+        reject.disabled === rejectEnabled ||
+        accept.getAttribute("aria-label") !== authority.acceptTitle ||
+        accept.title !== authority.acceptTitle ||
+        reject.getAttribute("aria-label") !== "Reject all suggestions" ||
+        reject.title !== "Reject all suggestions" ||
+        accept.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-accept" ? "true" : null) ||
+        reject.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-reject" ? "true" : null) ||
+        accept.textContent?.trim() !==
+          (authority.batchOwner?.action === "review-accept"
+            ? "Accepting…"
+            : `Accept all${authority.partial ? `(${authority.applicable.length} of ${authority.pending.length})` : ""}`) ||
+        reject.textContent?.trim() !== (authority.batchOwner?.action === "review-reject" ? "Rejecting…" : "Reject all")
+      ) {
+        return false;
+      }
+    } else {
+      const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
+      if (
+        accept !== null ||
+        reject !== null ||
+        !resolve ||
+        actions.children.length !== 1 ||
+        actions.children.item(0) !== resolve ||
+        !resolve.isConnected ||
+        resolve.ownerDocument !== document ||
+        resolve.parentElement !== actions ||
+        resolve.type !== "button" ||
+        resolve.className !== REVIEW_RESOLVE_CLASS ||
+        resolve.dataset.testid !== "review-resolve-all" ||
+        resolve.disabled === resolveEnabled ||
+        resolve.title !== authority.resolveTitle ||
+        resolve.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-resolve" ? "true" : null) ||
+        resolve.textContent?.trim() !== (authority.batchOwner?.action === "review-resolve" ? "Resolving…" : "Resolve all")
+      ) {
+        return false;
+      }
+    }
+  }
+
+  if (!authority.open) return list === null && rows.length === 0;
+  if (
+    !list ||
+    !list.isConnected ||
+    list.ownerDocument !== document ||
+    list.parentElement !== card ||
+    list.tagName !== "UL" ||
+    list.className !== REVIEW_THREADS_CLASS ||
+    list.dataset.testid !== "review-threads" ||
+    rows.length !== authority.mine.length ||
+    list.children.length !== (authority.mine.length || 1)
+  ) {
+    return false;
+  }
+  if (authority.mine.length === 0) {
+    return list.children.item(0)?.textContent === "The comments of this review were deleted.";
+  }
+  return authority.mine.every((thread, index) => {
+    const row = rows[index];
+    if (
+      !row ||
+      !row.item.isConnected ||
+      !row.link.isConnected ||
+      row.item.ownerDocument !== document ||
+      row.link.ownerDocument !== document ||
+      row.item.parentElement !== list ||
+      list.children.item(index) !== row.item ||
+      row.item.tagName !== "LI" ||
+      row.item.dataset.testid !== "review-thread-row" ||
+      row.item.children.length !== 1 ||
+      row.item.children.item(0) !== row.link ||
+      row.link.parentElement !== row.item ||
+      row.link.tagName !== "BUTTON" ||
+      row.link.type !== "button" ||
+      row.link.disabled ||
+      row.link.className !== REVIEW_THREAD_LINK_CLASS ||
+      row.link.dataset.testid !== "review-thread-link" ||
+      row.link.dataset.threadId !== thread.id ||
+      row.link.children.length !== (thread.suggestionLabel ? 3 : 2)
+    ) {
+      return false;
+    }
+    const icon = row.link.children.item(0);
+    const quote = row.link.children.item(1);
+    const state = row.link.children.item(2);
+    return (
+      icon?.getAttribute("aria-label") === (thread.resolved ? "Resolved" : null) &&
+      quote?.getAttribute("title") === thread.quote &&
+      quote?.textContent === (thread.quote || "(comment)") &&
+      (thread.suggestionLabel
+        ? state?.className === "suggestion-badge shrink-0" && state.textContent === thread.suggestionLabel
+        : state === null)
+    );
+  });
+}
+
+function createReviewCardRender(authority: ReviewCardAuthority, cells: ReviewCardCells): ReviewCardRender {
+  const render = {} as ReviewCardRender;
+  const retireForReplacement = () => render.retire();
+  const cardOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
+  const headerOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
+  const actionsOwner = new ReviewCardElementOwner<HTMLDivElement>(retireForReplacement);
+  const listOwner = new ReviewCardElementOwner<HTMLUListElement>(retireForReplacement);
+  const rowOwners = authority.mine.map(() => new ReviewCardElementOwner<HTMLLIElement>(retireForReplacement));
+  const controlOwners: ReviewCardElementOwner<HTMLButtonElement>[] = [];
+
+  const currentPresentation = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>): { presentation: ReviewCardPresentation; nativeEvent: Event } | null => {
+    const presentation = cells.active.current;
+    const element =
+      action.kind === "toggle"
+        ? presentation?.elements.toggle
+        : action.kind === "accept"
+          ? presentation?.elements.accept
+          : action.kind === "reject"
+            ? presentation?.elements.reject
+            : action.kind === "resolve"
+              ? presentation?.elements.resolve
+              : action.index === null
+                ? null
+                : presentation?.elements.rows[action.index]?.link;
+    const document = element?.ownerDocument;
+    const MouseEventConstructor = document?.defaultView?.MouseEvent;
+    const NodeConstructor = document?.defaultView?.Node;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !presentation ||
+      presentation.render !== render ||
+      presentation.authority !== authority ||
+      !element ||
+      !document ||
+      !MouseEventConstructor ||
+      !NodeConstructor ||
+      event.type !== "click" ||
+      !(nativeEvent instanceof MouseEventConstructor) ||
+      nativeEvent.type !== "click" ||
+      event.currentTarget !== element ||
+      nativeEvent.target !== event.target ||
+      !(event.target instanceof NodeConstructor) ||
+      !element.contains(event.target) ||
+      !element.isConnected ||
+      element.disabled ||
+      !action.enabled ||
+      !reviewCardFactsAreCurrent(authority) ||
+      !exactReviewCardDomIsCurrent(presentation)
+    ) {
+      return null;
+    }
+    return { presentation, nativeEvent };
+  };
+
+  const reserve = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>) => {
+    const current = currentPresentation(action, event);
+    if (!current || cells.claimedEvents.has(current.nativeEvent)) return null;
+    let claims = cells.claimedActions.get(current.presentation);
+    if (!claims) {
+      claims = new Set();
+      cells.claimedActions.set(current.presentation, claims);
+    }
+    if (claims.has(action)) return null;
+    cells.claimedEvents.add(current.nativeEvent);
+    claims.add(action);
+    let retained = true;
+    return Object.freeze({
+      presentation: current.presentation,
+      rollback: () => {
+        if (!retained) return;
+        retained = false;
+        cells.claimedEvents.delete(current.nativeEvent);
+        claims!.delete(action);
+      },
+      retain: () => {
+        retained = false;
+      },
+      releaseAction: () => {
+        if (!retained) return;
+        retained = false;
+        claims!.delete(action);
+      },
+    });
+  };
+
+  const invoke = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>) => {
+    const claim = reserve(action, event);
+    if (!claim) return;
+    if (action.kind === "toggle") {
+      claim.retain();
+      render.retire();
+      authority.setOpen(!authority.open);
+      return;
+    }
+    if (action.kind === "thread") {
+      try {
+        authority.setActiveComment.call(authority.session, action.threadId!);
+      } finally {
+        claim.releaseAction();
+      }
+      return;
+    }
+
+    const targets = action.kind === "resolve" ? authority.renderedResolveTargets : authority.renderedSuggestionTargets;
+    const owner = claimCommentBatch(authority.coordinator, {
+      scope: authority.scope,
+      review: authority.review,
+      authorName: authority.reviewSnapshot.authorName,
+      action: action.kind === "accept" ? "review-accept" : action.kind === "reject" ? "review-reject" : "review-resolve",
+      targets,
+    });
+    if (!owner) {
+      claim.rollback();
+      return;
+    }
+    claim.retain();
+    void executeCommentBatch(authority.coordinator, owner, authority.ops, authority.onToast);
+  };
+
+  const action = (kind: ReviewCardActionKind, enabled: boolean, index: number | null = null, threadId: string | null = null) => {
+    const owner = new ReviewCardElementOwner<HTMLButtonElement>(retireForReplacement);
+    controlOwners.push(owner);
+    const owned = {} as ReviewCardAction;
+    Object.assign(owned, {
+      identity: Symbol(`review-card-${kind}`),
+      kind,
+      index,
+      threadId,
+      enabled,
+      capture: owner.capture,
+      onClick: (event: MouseEvent<HTMLButtonElement>) => invoke(owned, event),
+    });
+    return Object.freeze(owned);
+  };
+
+  const retire = () => {
+    if (cells.active.current?.render !== render) return false;
+    cells.active.current = null;
+    return true;
+  };
+  const establish = () => {
+    const previous = cells.active.current;
+    if (previous && previous.render !== render) previous.render.retire();
+    const card = cardOwner.element();
+    const header = headerOwner.element();
+    const toggleElement = controlOwners[0]?.element() ?? null;
+    const actions = actionsOwner.element();
+    const list = listOwner.element();
+    const actionOffset = 1;
+    const acceptElement = render.accept ? controlOwners[actionOffset]?.element() ?? null : null;
+    const rejectElement = render.reject ? controlOwners[actionOffset + 1]?.element() ?? null : null;
+    const resolveElement = render.resolve ? controlOwners[actionOffset]?.element() ?? null : null;
+    const threadOffset = 1 + (render.accept ? 2 : render.resolve ? 1 : 0);
+    const rowElements = authority.open
+      ? authority.mine.map((_, index) => {
+          const item = rowOwners[index]?.element() ?? null;
+          const link = controlOwners[threadOffset + index]?.element() ?? null;
+          return item && link ? Object.freeze({ item, link }) : null;
+        })
+      : [];
+    if (
+      !card ||
+      !header ||
+      !toggleElement ||
+      (authority.actionRegion !== null) !== !!actions ||
+      (authority.actionRegion === "suggestions" && (!acceptElement || !rejectElement)) ||
+      (authority.actionRegion === "resolve" && !resolveElement) ||
+      authority.open !== !!list ||
+      rowElements.some((row) => row === null) ||
+      !reviewCardFactsAreCurrent(authority, true)
+    ) {
+      return;
+    }
+    const elements: ReviewCardElements = Object.freeze({
+      card,
+      header,
+      toggle: toggleElement,
+      actions,
+      accept: acceptElement,
+      reject: rejectElement,
+      resolve: resolveElement,
+      list,
+      rows: Object.freeze(rowElements as Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[]),
+    });
+    const presentation: ReviewCardPresentation = Object.freeze({
+      identity: Symbol("review-card-presentation"),
+      render,
+      authority,
+      elements,
+    });
+    if (!exactReviewCardDomIsCurrent(presentation)) return;
+    cells.active.current = presentation;
+  };
+
+  const toggle = action("toggle", true);
+  const acceptEnabled =
+    !authority.busy &&
+    !authority.blocked &&
+    authority.renderedSuggestionTargets.length === authority.pending.length &&
+    authority.applicable.length > 0;
+  const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
+  const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
+  const accept = authority.actionRegion === "suggestions" ? action("accept", acceptEnabled) : null;
+  const reject = authority.actionRegion === "suggestions" ? action("reject", rejectEnabled) : null;
+  const resolve = authority.actionRegion === "resolve" ? action("resolve", resolveEnabled) : null;
+  const threadLinks = authority.open ? authority.mine.map((thread, index) => action("thread", true, index, thread.id)) : [];
+  Object.assign(render, {
+    authority,
+    toggle,
+    accept,
+    reject,
+    resolve,
+    threadLinks: Object.freeze(threadLinks),
+    captureCard: cardOwner.capture,
+    captureHeader: headerOwner.capture,
+    captureActions: actionsOwner.capture,
+    captureList: listOwner.capture,
+    captureRows: Object.freeze(rowOwners.map((owner) => owner.capture)),
+    captureToggle: toggle.capture,
+    onToggle: toggle.onClick,
+    captureAccept: accept?.capture ?? null,
+    onAccept: accept?.onClick ?? null,
+    captureReject: reject?.capture ?? null,
+    onReject: reject?.onClick ?? null,
+    captureResolve: resolve?.capture ?? null,
+    onResolve: resolve?.onClick ?? null,
+    captureThreadLinks: Object.freeze(threadLinks.map((link) => link.capture)),
+    onThreadClicks: Object.freeze(threadLinks.map((link) => link.onClick)),
+    establish,
+    retire,
+  });
+  return Object.freeze(render);
+}
+
+/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
+const ReviewCard = memo(function ReviewCard({ position, review, threads, session, text, ops, coordinator, onToast }: { position: number; review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"] }) {
+  const [open, setOpen] = useState(false);
+  const [mount] = useState(() => Symbol("review-card"));
+  const [cells] = useState<ReviewCardCells>(() => ({
+    active: { current: null },
+    claimedEvents: new WeakSet<Event>(),
+    claimedActions: new WeakMap<ReviewCardPresentation, Set<ReviewCardAction>>(),
+  }));
   const mine = reviewThreads(review, threads);
   const withSuggestion = commentSuggestionTargets(mine, text);
   const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
@@ -2521,41 +3516,49 @@ const ReviewCard = memo(function ReviewCard({ review, threads, session, text, op
   const scope = reviewBatchScope(review.id);
   const batchState = useCommentBatchState(coordinator, scope, renderedTargets);
   const busy = batchState.owner !== null;
-
-  /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
-  const decideAll = (accept: boolean) => {
-    const targets = pending.map((target) => snapshotCommentSuggestionTarget(session, target));
-    if (targets.some((target) => target === null)) return;
-    const owner = claimCommentBatch(coordinator, {
-      scope,
-      review,
-      authorName: review.authorName,
-      action: accept ? "review-accept" : "review-reject",
-      targets: targets as CommentSuggestionBatchTarget[],
-    });
-    if (owner) void executeCommentBatch(coordinator, owner, ops, onToast);
-  };
-
-  /** Resolves every open thread of the review so a fully decided review can leave the Open tab (it lists under Resolved). */
-  const resolveAll = () => {
-    const targets = unresolved.map((thread) => snapshotCommentResolveTarget(session, thread));
-    if (targets.some((target) => target === null)) return;
-    const owner = claimCommentBatch(coordinator, {
-      scope,
-      review,
-      authorName: review.authorName,
-      action: "review-resolve",
-      targets: targets as CommentResolveBatchTarget[],
-    });
-    if (owner) void executeCommentBatch(coordinator, owner, ops, onToast);
-  };
-
   const partial = applicable.length !== pending.length;
   const acceptTitle = partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions";
+  const authority = createReviewCardAuthority({
+    mount,
+    position,
+    review,
+    threads,
+    session,
+    text,
+    ops,
+    coordinator,
+    onToast,
+    open,
+    setOpen,
+  });
+  const publication = createReviewCardRender(authority, cells);
+  useLayoutEffect(() => {
+    publication.establish();
+    return () => {
+      publication.retire();
+    };
+  }, [publication]);
+  const {
+    captureCard,
+    captureHeader,
+    captureActions,
+    captureList,
+    captureRows,
+    captureToggle,
+    onToggle,
+    captureAccept,
+    onAccept,
+    captureReject,
+    onReject,
+    captureResolve,
+    onResolve,
+    captureThreadLinks,
+    onThreadClicks,
+  } = publication;
 
   return (
-    <div className="review-card" data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
-      <div className="flex items-start gap-2.5">
+    <div ref={captureCard} className={REVIEW_CARD_CLASS} data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
+      <div ref={captureHeader} className={REVIEW_HEADER_CLASS} data-testid="review-header">
         <AuthorAvatar id={review.collabAuthorId} name={review.authorName} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
@@ -2572,20 +3575,21 @@ const ReviewCard = memo(function ReviewCard({ review, threads, session, text, op
           </div>
           {review.summary && <MentionBody body={review.summary} className="mt-1 text-[13px] leading-5 text-ink-2" />}
         </div>
-        <button type="button" className="icon-btn h-7 w-7 shrink-0" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
+        <button ref={captureToggle} type="button" className={REVIEW_TOGGLE_CLASS} onClick={onToggle} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
           {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         </button>
       </div>
       {/* Two equal columns, single-line labels at every panel width (280–720 px). The "(n of m)" count only
           shows once the row is wide enough for it; the tooltip always carries the full wording. */}
-      {canEdit && pending.length > 0 && (
-        <div className="@container mt-2 grid grid-cols-2 gap-2">
+      {authority.actionRegion === "suggestions" && (
+        <div ref={captureActions} className={REVIEW_SUGGESTION_ACTIONS_CLASS} data-testid="review-actions">
           <button
+            ref={captureAccept}
             type="button"
-            className="btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2"
+            className={REVIEW_ACCEPT_CLASS}
             disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length || applicable.length === 0}
             aria-busy={batchState.owner?.action === "review-accept" || undefined}
-            onClick={() => decideAll(true)}
+            onClick={onAccept!}
             title={acceptTitle}
             aria-label={acceptTitle}
             data-testid="review-accept-all"
@@ -2595,11 +3599,12 @@ const ReviewCard = memo(function ReviewCard({ review, threads, session, text, op
             {partial && <span className="hidden text-[11px] opacity-80 @min-[18rem]:inline">({applicable.length} of {pending.length})</span>}
           </button>
           <button
+            ref={captureReject}
             type="button"
-            className="btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2"
+            className={REVIEW_REJECT_CLASS}
             disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length}
             aria-busy={batchState.owner?.action === "review-reject" || undefined}
-            onClick={() => decideAll(false)}
+            onClick={onReject!}
             title="Reject all suggestions"
             aria-label="Reject all suggestions"
             data-testid="review-reject-all"
@@ -2610,14 +3615,15 @@ const ReviewCard = memo(function ReviewCard({ review, threads, session, text, op
         </div>
       )}
       {/* Every suggestion decided but comments still open: one click clears the review from Open. */}
-      {canComment && pending.length === 0 && unresolved.length > 0 && (
-        <div className="mt-2 flex">
+      {authority.actionRegion === "resolve" && (
+        <div ref={captureActions} className={REVIEW_RESOLVE_ACTIONS_CLASS} data-testid="review-actions">
           <button
+            ref={captureResolve}
             type="button"
-            className="btn btn-sm btn-outline gap-1.5 whitespace-nowrap"
+            className={REVIEW_RESOLVE_CLASS}
             disabled={busy || batchState.blocked || renderedResolveTargets.length !== unresolved.length}
             aria-busy={batchState.owner?.action === "review-resolve" || undefined}
-            onClick={resolveAll}
+            onClick={onResolve!}
             title={`Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`}
             data-testid="review-resolve-all"
           >
@@ -2627,17 +3633,18 @@ const ReviewCard = memo(function ReviewCard({ review, threads, session, text, op
         </div>
       )}
       {open && (
-        <ul className="mt-2 flex flex-col gap-1 border-t border-line pt-2" data-testid="review-threads">
-          {mine.map((t) => {
+        <ul ref={captureList} className={REVIEW_THREADS_CLASS} data-testid="review-threads">
+          {mine.map((t, index) => {
             const targets = withSuggestion.filter((target) => target.thread.id === t.id);
             const pendingTargets = targets.filter((target) => target.state === "pending" || target.state === "outdated");
             const state = targets.length === 1 ? targets[0].state : pendingTargets.length > 0 ? `${pendingTargets.length} pending` : targets.length > 0 ? "all decided" : null;
             return (
-              <li key={t.id}>
+              <li ref={captureRows[index]} key={t.id} data-testid="review-thread-row">
                 <button
+                  ref={captureThreadLinks[index]}
                   type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2"
-                  onClick={() => session.setActiveComment(t.id)}
+                  className={REVIEW_THREAD_LINK_CLASS}
+                  onClick={onThreadClicks[index]}
                   data-testid="review-thread-link"
                   data-thread-id={t.id}
                 >
@@ -3089,8 +4096,8 @@ export function CommentsPanel({
         )}
         {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
-            {openReviews.map((r) => (
-             <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
+            {openReviews.map((r, index) => (
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
@@ -3174,8 +4181,8 @@ export function CommentsPanel({
           ))}
         {tab === "resolved" && resolvedReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
-            {resolvedReviews.map((r) => (
-             <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
+            {resolvedReviews.map((r, index) => (
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
