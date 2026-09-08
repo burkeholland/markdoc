@@ -62,16 +62,36 @@ type ListOperationIntent = "refresh" | "retry";
 type ListRequestAuthority = Readonly<{ identity: symbol }>;
 type ListRequestCallback = (operation: ListOperation) => void;
 
+type ListOperationBinding = Readonly<{
+  activation: PanelPublication;
+  action: ActionFacts;
+  root: HTMLDivElement;
+  document: Document;
+  placement: PanelPlacement;
+}>;
+
+type ListOperationAuthority = Readonly<{
+  read: () => ListOperationBinding | null;
+  release: () => void;
+}>;
+
+class RetiredListOperationAbort extends DOMException {
+  readonly authority: ListOperationAuthority;
+
+  constructor(authority: ListOperationAuthority) {
+    super("The retired Webhooks list request was aborted.", "AbortError");
+    this.authority = authority;
+  }
+}
+
 interface ListOperation extends Operation {
   readonly intent: ListOperationIntent;
   readonly requestSequence: number;
-  readonly activation: PanelPublication;
-  readonly action: ActionFacts;
   readonly request: ListRequestAuthority;
   readonly route: "/api/webhooks";
-  readonly root: HTMLDivElement;
-  readonly document: Document;
-  readonly placement: PanelPlacement;
+  readonly controller: AbortController;
+  readonly abortReason: RetiredListOperationAbort;
+  readonly authority: ListOperationAuthority;
 }
 
 type DraftInputFacts = Readonly<{
@@ -525,26 +545,28 @@ class PanelPublicationCoordinator {
   ownsListOperation(operation: ListOperation) {
     const candidate = this.#current;
     const root = candidate?.card.element;
+    const authority = operation.authority.read();
     return Boolean(
       candidate &&
       root &&
+      authority &&
       this.owns(candidate) &&
       candidate.presentation.listOperation === operation &&
       candidate.presentation.requestList === operation.request &&
       candidate.presentation.generation === operation.generation &&
-      operation.activation.presentation.generation === operation.generation &&
-      operation.activation.presentation.requestList === operation.request &&
-      operation.action === (
+      authority.activation.presentation.generation === operation.generation &&
+      authority.activation.presentation.requestList === operation.request &&
+      authority.action === (
         operation.intent === "refresh"
-          ? operation.activation.presentation.refresh
-          : operation.activation.presentation.retry
+          ? authority.activation.presentation.refresh
+          : authority.activation.presentation.retry
       ) &&
-      operation.action.kind === operation.intent &&
-      operation.action.route === operation.route &&
-      root === operation.root &&
-      root.ownerDocument === operation.document &&
-      operation.placement.document === operation.document &&
-      panelPlacementMatches(root, operation.placement) &&
+      authority.action.kind === operation.intent &&
+      authority.action.route === operation.route &&
+      root === authority.root &&
+      root.ownerDocument === authority.document &&
+      authority.placement.document === authority.document &&
+      panelPlacementMatches(root, authority.placement) &&
       candidate.factsAreCurrent?.() === true &&
       candidate.domIsExact?.() === true
     );
@@ -1173,6 +1195,18 @@ function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
   };
 }
 
+function createListOperationAuthority(
+  binding: ListOperationBinding,
+): ListOperationAuthority {
+  let current: ListOperationBinding | null = Object.freeze(binding);
+  return Object.freeze({
+    read: () => current,
+    release: () => {
+      current = null;
+    },
+  });
+}
+
 function createPanelPublication(presentation: PanelPresentation): PanelPublication {
   const publication: PanelPublication = {
     presentation,
@@ -1331,6 +1365,23 @@ export function WebhooksPanel() {
   const [copySecret] = useState<() => void>(
     () => () => copyCallbackRef.current?.(),
   );
+  const retireListOperation = useCallback((
+    expected: ListOperation | null = listOwner.current,
+    updateState = true,
+  ) => {
+    const operation = listOwner.current;
+    if (!operation || operation !== expected) return false;
+    listOwner.current = null;
+    listRequest.current += 1;
+    operation.authority.release();
+    if (!operation.controller.signal.aborted) {
+      operation.controller.abort(operation.abortReason);
+    }
+    if (updateState) {
+      setListOperation((current) => (current === operation ? null : current));
+    }
+    return true;
+  }, []);
 
   useLayoutEffect(() => {
     copyCallbackRef.current = currentCopySecret;
@@ -1349,23 +1400,19 @@ export function WebhooksPanel() {
       publicationCoordinator.scheduleTeardown();
       if (activeMountRef.current !== mountGeneration) return;
       activeMountRef.current = null;
-      listRequest.current += 1;
-      if (listOwner.current?.generation === mountGeneration) listOwner.current = null;
+      const operation = listOwner.current;
+      if (!operation || operation.generation !== mountGeneration) {
+        listRequest.current += 1;
+      } else {
+        retireListOperation(operation, false);
+      }
       if (createOwner.current?.generation === mountGeneration) createOwner.current = null;
       for (const [webhookId, operation] of owners) {
         if (operation.generation === mountGeneration) owners.delete(webhookId);
       }
       if (feedbackOwner.current?.generation === mountGeneration) feedbackOwner.current = null;
     };
-  }, [mountGeneration, publicationCoordinator]);
-
-  const retireListOperation = useCallback(() => {
-    const operation = listOwner.current;
-    if (!operation) return;
-    listOwner.current = null;
-    listRequest.current += 1;
-    setListOperation((current) => (current === operation ? null : current));
-  }, []);
+  }, [mountGeneration, publicationCoordinator, retireListOperation]);
 
   const load = useCallback(async (continuationIsCurrent: () => boolean = () => true) => {
     const generation = activeMountRef.current;
@@ -1426,18 +1473,29 @@ export function WebhooksPanel() {
       operation.requestSequence === listRequest.current &&
       listOwner.current === operation &&
       publicationCoordinator.ownsListOperation(operation);
+    const finishCurrentRequest = () => {
+      if (listOwner.current !== operation) return false;
+      listOwner.current = null;
+      operation.authority.release();
+      setListOperation((current) => (current === operation ? null : current));
+      return true;
+    };
     void (async () => {
       try {
-        const res = await request<{ webhooks: WebhookRow[] }>(operation.route);
-        if (!ownsRequest()) return;
-        listOwner.current = null;
-        setListOperation((current) => (current === operation ? null : current));
+        const res = await request<{ webhooks: WebhookRow[] }>(operation.route, {
+          signal: operation.controller.signal,
+        });
+        if (!ownsRequest() || !finishCurrentRequest()) return;
         setHooks(res.webhooks);
         setListError(null);
       } catch (e) {
-        if (!ownsRequest()) return;
-        listOwner.current = null;
-        setListOperation((current) => (current === operation ? null : current));
+        const exactRetiredAbort =
+          operation.controller.signal.aborted &&
+          operation.controller.signal.reason === operation.abortReason &&
+          e === operation.abortReason &&
+          operation.authority.read() === null &&
+          listOwner.current !== operation;
+        if (exactRetiredAbort || !ownsRequest() || !finishCurrentRequest()) return;
         setListError(apiErrorText(e, "Failed to load webhooks"));
       }
     })();
@@ -1527,10 +1585,16 @@ export function WebhooksPanel() {
     const placement = candidate.placement;
     if (
       listOwner.current ||
+      createOwner.current ||
+      rowOwners.current.size > 0 ||
       !root ||
       !placement ||
+      !action.eligible ||
       action.kind !== intent ||
       action.route !== "/api/webhooks" ||
+      candidate.presentation.createOperation !== null ||
+      candidate.presentation.rowOperationsSource.size > 0 ||
+      candidate.presentation.listOperation !== null ||
       candidate.presentation.requestList !== listRequestCallback ||
       candidate.presentation.generation !== activeMountRef.current ||
       root.ownerDocument !== placement.document ||
@@ -1540,17 +1604,23 @@ export function WebhooksPanel() {
     }
     const operation = nextOperation();
     if (!operation) return;
+    const controller = new AbortController();
+    const authority = createListOperationAuthority({
+      activation: candidate,
+      action,
+      root,
+      document: root.ownerDocument,
+      placement,
+    });
     const listOwnerOperation = Object.freeze<ListOperation>({
       ...operation,
       intent,
       requestSequence: ++listRequest.current,
-      activation: candidate,
-      action,
       request: listRequestCallback,
       route: "/api/webhooks",
-      root,
-      document: root.ownerDocument,
-      placement,
+      controller,
+      abortReason: new RetiredListOperationAbort(authority),
+      authority,
     });
     listOwner.current = listOwnerOperation;
     setListOperation(listOwnerOperation);
@@ -1659,6 +1729,10 @@ export function WebhooksPanel() {
           url: created.url,
         })
       : null;
+    const listOperationEligible =
+      createOperation === null &&
+      rowOperations.size === 0 &&
+      listOperation === null;
     return Object.freeze({
       identity: Symbol("webhooks-presentation"),
       revision: publicationRevision,
@@ -1681,7 +1755,9 @@ export function WebhooksPanel() {
       add: Object.freeze({ kind: "add", eligible: createOperation === null, route: null }),
       refresh: Object.freeze({
         kind: "refresh",
-        eligible: (hooks !== null || listError !== null) && listOperation === null,
+        eligible:
+          (hooks !== null || listError !== null) &&
+          listOperationEligible,
         route: "/api/webhooks",
       }),
       create: adding
@@ -1697,7 +1773,7 @@ export function WebhooksPanel() {
       retry: listError
         ? Object.freeze({
             kind: "retry",
-            eligible: listOperation === null,
+            eligible: listOperationEligible,
             route: "/api/webhooks",
           })
         : null,
@@ -2232,6 +2308,7 @@ export function WebhooksPanel() {
     event: ReactMouseEvent<HTMLButtonElement>,
     owner: ElementSlot<HTMLButtonElement>,
   ) => {
+    if (!action.eligible || event.currentTarget.disabled) return false;
     const nativeEvent = isNativeReactMouseEvent(
       event,
       owner.element,

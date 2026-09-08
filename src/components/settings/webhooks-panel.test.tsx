@@ -246,6 +246,27 @@ async function settle() {
   });
 }
 
+function retiredListAuthority(signal: AbortSignal): unknown {
+  const reason: unknown = signal.reason;
+  if (
+    !reason ||
+    typeof reason !== "object" ||
+    !("authority" in reason)
+  ) {
+    throw new Error("The retired list abort did not publish its authority");
+  }
+  const authority: unknown = reason.authority;
+  if (
+    !authority ||
+    typeof authority !== "object" ||
+    !("read" in authority) ||
+    typeof authority.read !== "function"
+  ) {
+    throw new Error("The retired list abort authority was invalid");
+  }
+  return Reflect.apply(authority.read, authority, []);
+}
+
 const disabledWebhook = {
   id: "disabled-hook",
   url: "https://receiver.example/disabled",
@@ -432,6 +453,234 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
     fireEvent.click(currentRefresh);
     await waitFor(() => expect(fetchMock.mock.calls.length)
       .toBe(callsBeforeRefresh + 1));
+  });
+
+  it.each([
+    {
+      label: "Enable",
+      hook: disabledWebhook,
+      control: "webhook-enable",
+      actionUrl: "/api/webhooks/disabled-hook/enable",
+      actionResponse: response({
+        webhook: { ...disabledWebhook, active: true, failures: 0 },
+      }),
+      reloaded: [{ ...disabledWebhook, active: true, failures: 0 }],
+    },
+    {
+      label: "Send test",
+      hook: activeWebhook,
+      control: "webhook-test",
+      actionUrl: "/api/webhooks/active-hook/test",
+      actionResponse: response({ ok: true }),
+      reloaded: [activeWebhook],
+    },
+    {
+      label: "Delete",
+      hook: activeWebhook,
+      control: "webhook-delete",
+      actionUrl: "/api/webhooks/active-hook",
+      actionResponse: response({ ok: true }),
+      reloaded: [],
+    },
+  ])("blocks Refresh while $label owns its row, then admits a fresh request", async ({
+    hook,
+    control,
+    actionUrl,
+    actionResponse,
+    reloaded,
+  }) => {
+    const action = deferred<Response>();
+    let phase: "initial" | "pending" | "reload" | "fresh" = "initial";
+    fetchMock.mockImplementation((url, init) => {
+      if (url === actionUrl) return action.promise;
+      if (url === "/api/webhooks" && !init?.method) {
+        if (phase === "initial") {
+          return Promise.resolve(response({ webhooks: [hook] }));
+        }
+        if (phase === "pending") {
+          return Promise.resolve(response({ webhooks: [] }));
+        }
+        return Promise.resolve(response({
+          webhooks: phase === "reload" ? reloaded : [otherDisabledWebhook],
+        }));
+      }
+      return Promise.resolve(response({ error: "Unexpected request" }, 500));
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+
+    await within(view.host).findByTestId(control);
+    await settle();
+    const listCallsBeforeAction = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    ).length;
+    phase = "pending";
+    fireEvent.click(within(view.host).getByTestId(control));
+    const refresh = within(view.host)
+      .getByTestId("webhook-refresh") as HTMLButtonElement;
+    expect(refresh).toBeDisabled();
+    const rejectedEvent = mouseEvent(refresh);
+    act(() => reactProp<ClickHandler>(refresh, "onClick")(rejectedEvent));
+
+    expect(rejectedEvent.preventDefault).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeAction);
+    expect(within(view.host).getByTestId("webhook-row")).toBeInTheDocument();
+
+    phase = "reload";
+    await act(async () => action.resolve(actionResponse));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeAction + 1));
+    if (reloaded.length === 0) {
+      await within(view.host).findByTestId("webhooks-empty");
+    } else {
+      await within(view.host).findByTestId("webhook-row");
+    }
+    await waitFor(() => expect(
+      within(view.host).getByTestId("webhook-refresh"),
+    ).toBeEnabled());
+
+    phase = "fresh";
+    fireEvent.click(within(view.host).getByTestId("webhook-refresh"));
+    expect(await within(view.host).findByText(otherDisabledWebhook.url))
+      .toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeAction + 2);
+  });
+
+  it("blocks both Refresh and Retry while a row operation owns settlement", async () => {
+    const testRequest = deferred<Response>();
+    let phase: "initial" | "failure" | "pending" | "reload" | "fresh" = "initial";
+    fetchMock.mockImplementation((url, init) => {
+      if (url === "/api/webhooks/active-hook/test") return testRequest.promise;
+      if (url === "/api/webhooks" && !init?.method) {
+        if (phase === "initial") {
+          return Promise.resolve(response({ webhooks: [activeWebhook] }));
+        }
+        if (phase === "failure") {
+          return Promise.resolve(response({ error: "List unavailable" }, 503));
+        }
+        if (phase === "pending") {
+          return Promise.resolve(response({ webhooks: [] }));
+        }
+        return Promise.resolve(response({
+          webhooks: phase === "reload" ? [activeWebhook] : [otherDisabledWebhook],
+        }));
+      }
+      return Promise.resolve(response({ error: "Unexpected request" }, 500));
+    });
+    const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+
+    await within(view.host).findByText(activeWebhook.url);
+    await settle();
+    phase = "failure";
+    fireEvent.click(within(view.host).getByTestId("webhook-refresh"));
+    await within(view.host).findByTestId("webhooks-list-error");
+    const listCallsBeforeRow = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    ).length;
+
+    phase = "pending";
+    fireEvent.click(within(view.host).getByTestId("webhook-test"));
+    const refresh = within(view.host)
+      .getByTestId("webhook-refresh") as HTMLButtonElement;
+    const retry = within(view.host)
+      .getByRole("button", { name: "Retry" }) as HTMLButtonElement;
+    expect(refresh).toBeDisabled();
+    expect(retry).toBeDisabled();
+    const refreshEvent = mouseEvent(refresh);
+    const retryEvent = mouseEvent(retry);
+    act(() => {
+      reactProp<ClickHandler>(refresh, "onClick")(refreshEvent);
+      reactProp<ClickHandler>(retry, "onClick")(retryEvent);
+    });
+
+    expect(refreshEvent.preventDefault).not.toHaveBeenCalled();
+    expect(retryEvent.preventDefault).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeRow);
+    expect(within(view.host).getByTestId("webhooks-list-error"))
+      .toHaveTextContent("List unavailable");
+
+    phase = "reload";
+    await act(async () => testRequest.resolve(response({ ok: true })));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeRow + 1));
+    await waitFor(() => {
+      expect(within(view.host).getByTestId("webhook-refresh")).toBeEnabled();
+      expect(within(view.host).queryByTestId("webhooks-list-error")).toBeNull();
+    });
+
+    phase = "fresh";
+    fireEvent.click(within(view.host).getByTestId("webhook-refresh"));
+    expect(await within(view.host).findByText(otherDisabledWebhook.url))
+      .toBeInTheDocument();
+  });
+
+  it("blocks Refresh while Create owns settlement, then admits a fresh request", async () => {
+    const create = deferred<Response>();
+    const createdWebhook = {
+      ...activeWebhook,
+      id: "create-before-refresh",
+      url: "https://receiver.example/create-before-refresh",
+    };
+    let phase: "initial" | "pending" | "reload" | "fresh" = "initial";
+    fetchMock.mockImplementation((url, init) => {
+      if (url === "/api/webhooks" && init?.method === "POST") {
+        return create.promise;
+      }
+      if (url === "/api/webhooks" && !init?.method) {
+        if (phase === "initial") return Promise.resolve(response({ webhooks: [] }));
+        if (phase === "pending") return Promise.resolve(response({
+          webhooks: [otherDisabledWebhook],
+        }));
+        return Promise.resolve(response({
+          webhooks: phase === "reload" ? [createdWebhook] : [otherDisabledWebhook],
+        }));
+      }
+      return Promise.resolve(response({ error: "Unexpected request" }, 500));
+    });
+    const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+
+    await within(view.host).findByTestId("webhooks-empty");
+    await settle();
+    const listCallsBeforeCreate = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    ).length;
+    fireEvent.click(within(view.host).getByTestId("webhook-add"));
+    fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+      target: { value: createdWebhook.url },
+    });
+    phase = "pending";
+    fireEvent.click(within(view.host).getByTestId("webhook-create"));
+
+    const refresh = within(view.host)
+      .getByTestId("webhook-refresh") as HTMLButtonElement;
+    expect(refresh).toBeDisabled();
+    act(() => reactProp<ClickHandler>(refresh, "onClick")(mouseEvent(refresh)));
+    expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeCreate);
+
+    phase = "reload";
+    await act(async () => create.resolve(response({
+      webhook: { ...createdWebhook, secret: "whsec_create_before_refresh" },
+    })));
+    expect(await within(view.host).findByText(createdWebhook.url))
+      .toBeInTheDocument();
+    await waitFor(() => expect(
+      within(view.host).getByTestId("webhook-refresh"),
+    ).toBeEnabled());
+
+    phase = "fresh";
+    fireEvent.click(within(view.host).getByTestId("webhook-refresh"));
+    expect(await within(view.host).findByText(otherDisabledWebhook.url))
+      .toBeInTheDocument();
   });
 
   it("publishes one busy Refresh and atomically replaces the current rows on success", async () => {
@@ -634,13 +883,25 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
   it("retires an older Refresh when a row operation starts", async () => {
     const refresh = deferred<Response>();
     const testRequest = deferred<Response>();
+    const refreshSignals: AbortSignal[] = [];
+    let aborts = 0;
     let refreshing = false;
     fetchMock.mockImplementation((url, init) => {
       if (url === "/api/webhooks/active-hook/test") return testRequest.promise;
       if (url === "/api/webhooks" && !init?.method) {
-        return refreshing
-          ? refresh.promise
-          : Promise.resolve(response({ webhooks: [activeWebhook] }));
+        if (refreshing) {
+          const signal = init?.signal;
+          if (!signal) {
+            return Promise.resolve(response({ error: "Missing signal" }, 500));
+          }
+          refreshSignals.push(signal);
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            refresh.reject(signal.reason);
+          }, { once: true });
+          return refresh.promise;
+        }
+        return Promise.resolve(response({ webhooks: [activeWebhook] }));
       }
       return Promise.resolve(response({ error: "Unexpected request" }, 500));
     });
@@ -653,23 +914,41 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
     expect(screen.getByRole("button", { name: "Refreshing webhooks" }))
       .toBeDisabled();
     fireEvent.click(screen.getByTestId("webhook-test"));
-    expect(screen.getByRole("button", { name: "Refresh webhooks" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh webhooks" })).toBeDisabled();
+    expect(refreshSignals).toHaveLength(1);
+    expect(refreshSignals[0].aborted).toBe(true);
+    expect(refreshSignals[0].reason).toMatchObject({ name: "AbortError" });
+    expect(retiredListAuthority(refreshSignals[0])).toBeNull();
+    expect(aborts).toBe(1);
 
-    await act(async () => refresh.resolve(response({
+    refresh.resolve(response({
       webhooks: [otherDisabledWebhook],
-    })));
+    }));
+    await settle();
     expect(screen.getByText(activeWebhook.url)).toBeInTheDocument();
     expect(screen.queryByText(otherDisabledWebhook.url)).toBeNull();
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
 
     refreshing = false;
     await act(async () => testRequest.resolve(response({ ok: true })));
     await waitFor(() => expect(screen.getByTestId("webhook-test")).toBeEnabled());
     expect(screen.getByText(activeWebhook.url)).toBeInTheDocument();
+    expect(aborts).toBe(1);
+
+    const listCallsBeforeFresh = fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    ).length;
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(
+      ([url, init]) => url === "/api/webhooks" && !init?.method,
+    )).toHaveLength(listCallsBeforeFresh + 1));
   });
 
   it("retires an older Refresh when Create starts and preserves Create settlement", async () => {
     const refresh = deferred<Response>();
     const create = deferred<Response>();
+    const refreshSignals: AbortSignal[] = [];
+    let aborts = 0;
     const createdWebhook = {
       ...activeWebhook,
       id: "crossed-created-hook",
@@ -681,7 +960,18 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
         return create.promise;
       }
       if (url === "/api/webhooks" && !init?.method) {
-        if (listMode === "refresh") return refresh.promise;
+        if (listMode === "refresh") {
+          const signal = init?.signal;
+          if (!signal) {
+            return Promise.resolve(response({ error: "Missing signal" }, 500));
+          }
+          refreshSignals.push(signal);
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            refresh.reject(signal.reason);
+          }, { once: true });
+          return refresh.promise;
+        }
         return Promise.resolve(response({
           webhooks: listMode === "created" ? [createdWebhook] : [],
         }));
@@ -699,11 +989,16 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
     listMode = "refresh";
     fireEvent.click(screen.getByTestId("webhook-refresh"));
     fireEvent.click(screen.getByTestId("webhook-create"));
-    expect(screen.getByRole("button", { name: "Refresh webhooks" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh webhooks" })).toBeDisabled();
+    expect(refreshSignals).toHaveLength(1);
+    expect(refreshSignals[0].aborted).toBe(true);
+    expect(retiredListAuthority(refreshSignals[0])).toBeNull();
+    expect(aborts).toBe(1);
 
-    await act(async () => refresh.resolve(response({
+    refresh.resolve(response({
       webhooks: [otherDisabledWebhook],
-    })));
+    }));
+    await settle();
     expect(screen.queryByText(otherDisabledWebhook.url)).toBeNull();
     expect(screen.getByTestId("webhook-form")).toBeInTheDocument();
 
@@ -714,41 +1009,80 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
     expect(await screen.findByText(createdWebhook.url)).toBeInTheDocument();
     expect(screen.getByTestId("webhook-secret"))
       .toHaveTextContent("whsec_crossed_create");
+    expect(aborts).toBe(1);
   });
 
   it("retires Refresh on cleanup and leaves a clean remount usable", async () => {
     const retiredRefresh = deferred<Response>();
-    let listMode: "normal" | "retired" | "successor" = "normal";
+    const retiredSignals: AbortSignal[] = [];
+    let aborts = 0;
+    let listMode: "initial" | "created" | "retired" | "successor" = "initial";
     fetchMock.mockImplementation((url, init) => {
+      if (url === "/api/webhooks" && init?.method === "POST") {
+        return Promise.resolve(response({
+          webhook: { ...activeWebhook, secret: "whsec_cleanup_release" },
+        }));
+      }
       if (url !== "/api/webhooks" || init?.method) {
         return Promise.resolve(response({ error: "Unexpected request" }, 500));
       }
-      if (listMode === "retired") return retiredRefresh.promise;
+      if (listMode === "retired") {
+        const signal = init?.signal;
+        if (!signal) {
+          return Promise.resolve(response({ error: "Missing signal" }, 500));
+        }
+        retiredSignals.push(signal);
+        signal.addEventListener("abort", () => {
+          aborts += 1;
+          retiredRefresh.reject(signal.reason);
+        }, { once: true });
+        return retiredRefresh.promise;
+      }
       return Promise.resolve(response({
         webhooks: listMode === "successor"
           ? [otherDisabledWebhook]
-          : [activeWebhook],
+          : listMode === "created"
+            ? [activeWebhook]
+            : [],
       }));
     });
     const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
 
-    await screen.findByText(activeWebhook.url);
+    await within(view.host).findByTestId("webhooks-empty");
     await settle();
+    fireEvent.click(within(view.host).getByTestId("webhook-add"));
+    fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+      target: { value: activeWebhook.url },
+    });
+    listMode = "created";
+    fireEvent.click(within(view.host).getByTestId("webhook-create"));
+    expect(await within(view.host).findByTestId("webhook-secret"))
+      .toHaveTextContent("whsec_cleanup_release");
+    await within(view.host).findByText(activeWebhook.url);
+    await settle();
+
     listMode = "retired";
-    const refreshButton = screen.getByTestId("webhook-refresh") as HTMLButtonElement;
+    const refreshButton = within(view.host)
+      .getByTestId("webhook-refresh") as HTMLButtonElement;
     const refreshHandler = reactProp<ClickHandler>(refreshButton, "onClick");
     const refreshEvent = mouseEvent(refreshButton);
     act(() => refreshHandler(refreshEvent));
     const callsAtUnmount = fetchMock.mock.calls.length;
     act(() => view.root.unmount());
     act(() => refreshHandler(refreshEvent));
-    await act(async () => retiredRefresh.resolve(response({
+    expect(retiredSignals).toHaveLength(1);
+    expect(retiredSignals[0].aborted).toBe(true);
+    expect(retiredSignals[0].reason).toMatchObject({ name: "AbortError" });
+    expect(retiredListAuthority(retiredSignals[0])).toBeNull();
+    expect(aborts).toBe(1);
+    retiredRefresh.resolve(response({
       webhooks: [otherDisabledWebhook],
-    })));
+    }));
     await settle();
 
     expect(view.host).toBeEmptyDOMElement();
     expect(fetchMock).toHaveBeenCalledTimes(callsAtUnmount);
+    expect(aborts).toBe(1);
 
     listMode = "successor";
     const successor = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
@@ -758,6 +1092,31 @@ describe("Settings → Webhooks: manual refresh ownership", () => {
     fireEvent.click(within(successor.host).getByTestId("webhook-refresh"));
     expect(within(successor.host).getByText(otherDisabledWebhook.url))
       .toBeInTheDocument();
+  });
+
+  it("surfaces an unrelated current AbortError instead of treating its name as retirement", async () => {
+    const unrelatedAbort = new DOMException(
+      "The upstream request aborted unexpectedly.",
+      "AbortError",
+    );
+    let abortCurrentRequest = false;
+    fetchMock.mockImplementation(() =>
+      abortCurrentRequest
+        ? Promise.reject(unrelatedAbort)
+        : Promise.resolve(response({ webhooks: [activeWebhook] })));
+    const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+
+    await within(view.host).findByText(activeWebhook.url);
+    await settle();
+    const callsBeforeRefresh = fetchMock.mock.calls.length;
+    abortCurrentRequest = true;
+    fireEvent.click(within(view.host).getByTestId("webhook-refresh"));
+
+    expect(await within(view.host).findByTestId("webhooks-list-error"))
+      .toHaveTextContent("Failed to load webhooks");
+    const signal = fetchMock.mock.calls[callsBeforeRefresh]?.[1]?.signal;
+    expect(signal?.aborted).toBe(false);
+    expect(within(view.host).getByText(activeWebhook.url)).toBeInTheDocument();
   });
 
   it("rejects settlement after document replacement without affecting a clean successor", async () => {
