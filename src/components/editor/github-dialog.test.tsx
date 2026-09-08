@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   type ChangeEvent,
+  type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -269,6 +270,18 @@ function directPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
     nativeEvent,
     defaultPrevented: false,
   } as unknown as ChangeEvent<T>);
+}
+
+function dispatchPickerSubmit(form: HTMLFormElement, submitter: HTMLButtonElement) {
+  const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+  if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
+  form.dispatchEvent(
+    new SubmitEventConstructor("submit", {
+      bubbles: true,
+      cancelable: true,
+      submitter,
+    }),
+  );
 }
 
 // The empty state of the GitHub picker for an account without a GitHub token (#162): it used to be a
@@ -904,6 +917,128 @@ describe("GitHubPicker list recovery", () => {
 });
 
 describe("GitHubPicker exact control publication", () => {
+  it("uses one stable radio group per link picker and switches both destinations independently", async () => {
+    render(
+      <>
+        <section data-testid="link-picker-a">
+          <GitHubPicker mode="link" doc={documentDto("doc-a", "Document A")} githubAvailable githubConfigured />
+        </section>
+        <section data-testid="link-picker-b">
+          <GitHubPicker mode="link" doc={documentDto("doc-b", "Document B")} githubAvailable githubConfigured />
+        </section>
+      </>,
+    );
+    const pickerA = within(screen.getByTestId("link-picker-a"));
+    const pickerB = within(screen.getByTestId("link-picker-b"));
+    const createA = pickerA.getByRole("radio", { name: "Create a new gist" }) as HTMLInputElement;
+    const existingA = pickerA.getByRole("radio", { name: "Use an existing gist" }) as HTMLInputElement;
+    const createB = pickerB.getByRole("radio", { name: "Create a new gist" }) as HTMLInputElement;
+    const existingB = pickerB.getByRole("radio", { name: "Use an existing gist" }) as HTMLInputElement;
+
+    expect(createA.name).toBe(existingA.name);
+    expect(createB.name).toBe(existingB.name);
+    expect(createA.name).not.toBe(createB.name);
+
+    fireEvent.click(existingA);
+    expect(existingA).toBeChecked();
+    expect(createA).not.toBeChecked();
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(await pickerA.findByTestId("gist-list")).toBeInTheDocument();
+
+    fireEvent.click(createA);
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(pickerA.queryByTestId("gist-list")).toBeNull();
+
+    fireEvent.click(existingB);
+    expect(existingB).toBeChecked();
+    expect(createB).not.toBeChecked();
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+    expect(await pickerB.findByTestId("gist-list")).toBeInTheDocument();
+
+    fireEvent.click(createB);
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+  });
+
+  it("accepts the exact repository submit in a secondary document after rejecting foreign forms", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const secondaryDocument = frame.contentDocument;
+    if (!secondaryDocument?.defaultView) throw new Error("The test iframe has no browsing context");
+    const pickerHost = secondaryDocument.createElement("div");
+    const foreignHost = secondaryDocument.createElement("div");
+    secondaryDocument.body.append(pickerHost, foreignHost);
+    const pickerView = render(
+      <GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured />,
+      { container: pickerHost },
+    );
+    const picker = within(pickerHost);
+
+    try {
+      fireEvent.click(picker.getByTestId("picker-tab-repo"));
+      fireEvent.click(await picker.findByTestId("repo-item"));
+      const path = (await picker.findByTestId("repo-path")) as HTMLInputElement;
+      const form = path.form;
+      const submit = picker.getByTestId("repo-link") as HTMLButtonElement;
+      if (!form) throw new Error("The repository path is not attached to its form");
+      fireEvent.change(path, { target: { value: "docs/secondary.md" } });
+      const submitHandler = reactProp<(event: FormEvent<HTMLFormElement>) => void>(form, "onSubmit");
+
+      const sameDocumentForeignView = render(
+        <form onSubmit={submitHandler}>
+          <button type="submit">Foreign submit</button>
+        </form>,
+        { container: foreignHost },
+      );
+      const crossDocumentForeignView = render(
+        <form onSubmit={submitHandler}>
+          <button type="submit">Cross-document submit</button>
+        </form>,
+      );
+      try {
+        const sameDocumentForeignForm = foreignHost.querySelector("form");
+        const sameDocumentForeignSubmit = foreignHost.querySelector("button");
+        const crossDocumentForeignForm = crossDocumentForeignView.container.querySelector("form");
+        const crossDocumentForeignSubmit = crossDocumentForeignView.getByRole("button");
+        if (
+          !sameDocumentForeignForm ||
+          !sameDocumentForeignSubmit ||
+          !crossDocumentForeignForm ||
+          !(crossDocumentForeignSubmit instanceof HTMLButtonElement)
+        ) {
+          throw new Error("A foreign submit fixture was not mounted");
+        }
+
+        act(() => dispatchPickerSubmit(sameDocumentForeignForm, sameDocumentForeignSubmit));
+        act(() => dispatchPickerSubmit(crossDocumentForeignForm, crossDocumentForeignSubmit));
+        expect(linkDocument).not.toHaveBeenCalled();
+        expect(path).toHaveValue("docs/secondary.md");
+
+        act(() => dispatchPickerSubmit(form, submit));
+        expect(linkDocument).toHaveBeenCalledExactlyOnceWith(documentDto().id, {
+          storage: "repo",
+          owner: currentRepo.owner,
+          repo: currentRepo.name,
+          branch: "main",
+          path: "docs/secondary.md",
+        });
+      } finally {
+        sameDocumentForeignView.unmount();
+        crossDocumentForeignView.unmount();
+      }
+    } finally {
+      pickerView.unmount();
+      frame.remove();
+    }
+  });
+
   it("rejects in-place gist mutation and DOM reorder without poisoning the restored exact row", async () => {
     const first = gist("gist-first", "first.md");
     const second = gist("gist-second", "second.md");

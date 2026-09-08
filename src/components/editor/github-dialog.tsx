@@ -6,6 +6,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -347,6 +348,7 @@ interface GitHubPickerPresentation {
   readonly githubConfigured: boolean;
   readonly tab: Tab;
   readonly filter: string;
+  readonly gistChoiceName: string;
   readonly newGist: boolean;
   readonly gistName: string;
   readonly gistPublic: boolean;
@@ -745,6 +747,8 @@ function pickerPresentationDomIsExact(
         !belongs(existingGist) ||
         newGist.type !== "radio" ||
         existingGist.type !== "radio" ||
+        newGist.name !== presentation.gistChoiceName ||
+        existingGist.name !== presentation.gistChoiceName ||
         newGist.disabled !== presentation.busy ||
         existingGist.disabled !== presentation.busy ||
         (changing !== "newGist" &&
@@ -1134,6 +1138,7 @@ function GitHubPickerVisit({
   githubConfigured,
 }: GitHubPickerProps) {
   const [mount] = useState(() => Symbol("github-picker"));
+  const gistChoiceName = useId();
   const [tab, setTab] = useState<Tab>("gist");
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyOperation, setBusyOperation] = useState<GitHubPickerOperation | null>(null);
@@ -1292,6 +1297,7 @@ function GitHubPickerVisit({
     githubConfigured,
     tab,
     filter,
+    gistChoiceName,
     newGist,
     gistName,
     gistPublic,
@@ -1377,6 +1383,7 @@ function GitHubPickerVisit({
       presentation.githubConfigured !== githubConfigured ||
       presentation.tab !== tab ||
       presentation.filter !== filter ||
+      presentation.gistChoiceName !== gistChoiceName ||
       presentation.newGist !== newGist ||
       presentation.gistName !== gistName ||
       presentation.gistPublic !== gistPublic ||
@@ -1415,6 +1422,7 @@ function GitHubPickerVisit({
     gistList,
     gistName,
     gistPublic,
+    gistChoiceName,
     mode,
     mount,
     newGist,
@@ -1450,6 +1458,7 @@ function GitHubPickerVisit({
       candidate.githubConfigured !== githubConfigured ||
       candidate.tab !== tab ||
       candidate.filter !== filter ||
+      candidate.gistChoiceName !== gistChoiceName ||
       candidate.newGist !== newGist ||
       candidate.gistName !== gistName ||
       candidate.gistPublic !== gistPublic ||
@@ -1520,11 +1529,13 @@ function GitHubPickerVisit({
     const runtime = presentationRuntimesRef.current.get(candidate);
     const form = runtime?.elements.pathForm;
     const submit = runtime?.elements.pathSubmit;
+    const ownerWindow = form?.ownerDocument.defaultView;
     if (
       !runtime ||
       runtime.claimed ||
-      !(form instanceof HTMLFormElement) ||
-      !(submit instanceof HTMLButtonElement) ||
+      !ownerWindow ||
+      !(form instanceof ownerWindow.HTMLFormElement) ||
+      !(submit instanceof ownerWindow.HTMLButtonElement) ||
       !exactPickerSubmit(event, form, submit)
     ) {
       return null;
@@ -1751,6 +1762,7 @@ function GitHubPickerVisit({
                 <input
                   ref={(element) => bindElement(presentation, "newGist", element)}
                   type="radio"
+                  name={presentation.gistChoiceName}
                   checked={presentation.newGist}
                   disabled={presentation.busy}
                   onChange={(event) => {
@@ -1855,6 +1867,7 @@ function GitHubPickerVisit({
                 <input
                   ref={(element) => bindElement(presentation, "existingGist", element)}
                   type="radio"
+                  name={presentation.gistChoiceName}
                   checked={!presentation.newGist}
                   disabled={presentation.busy}
                   onChange={(event) => {
