@@ -171,6 +171,7 @@ type NotificationNativeGetters<Field extends string> = Readonly<
 interface NotificationKeyboardAuthority {
   readonly ownerDocument: Document;
   readonly ownerWindow: Window;
+  readonly Object: ObjectConstructor;
   readonly Event: typeof Event;
   readonly KeyboardEvent: typeof KeyboardEvent;
   readonly Node: typeof Node;
@@ -183,6 +184,12 @@ interface NotificationKeyboardAuthority {
   readonly focus: HTMLElement["focus"];
   readonly addEventListener: EventTarget["addEventListener"];
   readonly removeEventListener: EventTarget["removeEventListener"];
+  readonly getOwnPropertyDescriptor: ObjectConstructor["getOwnPropertyDescriptor"];
+}
+
+interface NotificationEventTrust {
+  readonly getter: NotificationNativeGetter;
+  readonly value: true;
 }
 
 interface NotificationKeyboardSnapshot {
@@ -208,6 +215,7 @@ interface NotificationKeyboardSnapshot {
   readonly timeStamp: number;
   readonly detail: number;
   readonly view: Window | null;
+  readonly trust: NotificationEventTrust;
 }
 
 interface NotificationKeyboardClaim {
@@ -406,6 +414,9 @@ function captureNotificationKeyboardAuthority(
   const removeEventListener = captureNotificationMethod<
     EventTarget["removeEventListener"]
   >(ownerWindow.EventTarget.prototype, "removeEventListener");
+  const getOwnPropertyDescriptor = captureNotificationMethod<
+    ObjectConstructor["getOwnPropertyDescriptor"]
+  >(ownerWindow.Object, "getOwnPropertyDescriptor");
   if (
     !event ||
     !keyboard ||
@@ -415,13 +426,15 @@ function captureNotificationKeyboardAuthority(
     !preventDefault ||
     !focus ||
     !addEventListener ||
-    !removeEventListener
+    !removeEventListener ||
+    !getOwnPropertyDescriptor
   ) {
     return null;
   }
   return Object.freeze({
     ownerDocument,
     ownerWindow,
+    Object: ownerWindow.Object,
     Event: ownerWindow.Event,
     KeyboardEvent: ownerWindow.KeyboardEvent,
     Node: ownerWindow.Node,
@@ -434,6 +447,7 @@ function captureNotificationKeyboardAuthority(
     focus,
     addEventListener,
     removeEventListener,
+    getOwnPropertyDescriptor,
   });
 }
 
@@ -459,6 +473,30 @@ function notificationEventPath(
   event: Event,
 ): EventTarget[] {
   return notificationReflectApply(authority.composedPath, event, []) as EventTarget[];
+}
+
+function captureNotificationEventTrust(
+  authority: NotificationKeyboardAuthority,
+  event: Event,
+): NotificationEventTrust | null {
+  const descriptor = notificationReflectApply(
+    authority.getOwnPropertyDescriptor,
+    authority.Object,
+    [event, "isTrusted"],
+  ) as PropertyDescriptor | undefined;
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined ||
+    "value" in descriptor ||
+    "writable" in descriptor ||
+    notificationReflectApply(descriptor.get, event, []) !== true
+  ) {
+    return null;
+  }
+  return Object.freeze({ getter: descriptor.get, value: true });
 }
 
 function freezeNotification(notification: NotificationDto): NotificationDto {
@@ -1492,9 +1530,12 @@ class NotificationPublicationCoordinator {
     ) {
       return false;
     }
+    const trust = captureNotificationEventTrust(authority, event);
     const { event: eventGetters, keyboard, ui } = authority;
     const path = notificationEventPath(authority, event);
     return (
+      trust?.getter === snapshot.trust.getter &&
+      trust.value === snapshot.trust.value &&
       notificationNativeValue<string>(eventGetters.type, event) === "keydown" &&
       notificationNativeValue<number>(eventGetters.eventPhase, event) ===
         authority.Event.BUBBLING_PHASE &&
@@ -1546,6 +1587,8 @@ class NotificationPublicationCoordinator {
     ) {
       return;
     }
+    const trust = captureNotificationEventTrust(authority, event);
+    if (!trust) return;
     const { event: eventGetters, keyboard, ui } = authority;
     const key = notificationNativeValue<string>(keyboard.key, event);
     const rowIndex = action.rowIndex;
@@ -1645,6 +1688,7 @@ class NotificationPublicationCoordinator {
       timeStamp: notificationNativeValue<number>(eventGetters.timeStamp, event),
       detail: notificationNativeValue<number>(ui.detail, event),
       view,
+      trust,
     });
     const delivery: NotificationKeyboardDelivery = {
       snapshot,
@@ -1688,6 +1732,7 @@ class NotificationPublicationCoordinator {
         event.metaKey === snapshot.metaKey &&
         event.bubbles === snapshot.bubbles &&
         event.cancelable === snapshot.cancelable &&
+        event.isTrusted === snapshot.trust.value &&
         !event.defaultPrevented &&
         event.timeStamp === snapshot.timeStamp &&
         reactEvent._reactName === "onKeyDown" &&

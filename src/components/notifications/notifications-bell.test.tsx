@@ -229,10 +229,46 @@ function dispatchKeyWithHandlers(
   };
   properties[propsKey] = wrapped;
   try {
-    return fireEvent.keyDown(control.element, init);
+    const view = control.element.ownerDocument.defaultView;
+    if (!view) throw new Error("The keyboard target has no owner window");
+    const event = new view.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    markJsdomEventTrusted(event);
+    return fireEvent(control.element, event);
   } finally {
     if (properties[propsKey] === wrapped) properties[propsKey] = props;
   }
+}
+
+function markJsdomEventTrusted(event: Event) {
+  // jsdom has no hardware input; set its internal slot so accepted-path tests model browser input.
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
 }
 
 function cloneSyntheticClick(
@@ -1358,6 +1394,7 @@ describe("notification row keyboard browsing", () => {
       cancelable: true,
       ...init,
     });
+    markJsdomEventTrusted(event);
     fireEvent(element, event);
     return event;
   }
@@ -1397,6 +1434,46 @@ describe("notification row keyboard browsing", () => {
       expect(actions.rows.map(({ element }) => element.tabIndex)).toEqual([0, 0, 0]);
       expect(actions.readAll.element.tabIndex).toBe(0);
       expectNoKeyboardActions(onOpen);
+    },
+  );
+
+  it.each([
+    ["ArrowDown", 2],
+    ["ArrowUp", 0],
+    ["Home", 0],
+    ["End", 2],
+  ] as const)(
+    "rejects a same-realm constructed %s before accepting trusted input",
+    (key, destinationIndex) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const { onOpen, actions } = openStrictKeyboardBell();
+      const source = actions.rows[1]!.element;
+      const view = source.ownerDocument.defaultView!;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const synthetic = new view.KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+
+      fireEvent(source, synthetic);
+
+      expect(synthetic.isTrusted).toBe(false);
+      expect(synthetic.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoKeyboardActions(onOpen);
+
+      const trusted = nativeKey(source, key);
+      expect(trusted.isTrusted).toBe(true);
+      expect(trusted.defaultPrevented).toBe(true);
+      expect(actions.rows[destinationIndex]!.element).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
     },
   );
 
@@ -1523,6 +1600,7 @@ describe("notification row keyboard browsing", () => {
       bubbles: true,
       cancelable: true,
     });
+    markJsdomEventTrusted(event);
     event.preventDefault();
     source.focus();
     focus.mockClear();
@@ -1671,6 +1749,7 @@ describe("notification row keyboard browsing", () => {
       bubbles: true,
       cancelable: true,
     });
+    markJsdomEventTrusted(event);
     Object.defineProperty(event, "preventDefault", {
       configurable: true,
       value: dynamicPreventDefault,
