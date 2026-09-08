@@ -6200,6 +6200,16 @@ class MoreMenuPublicationCoordinator {
     target: Node,
     path: readonly EventTarget[],
   ) {
+    const previousIntent = this.#selectionIntent;
+    if (
+      previousIntent
+      && !isLiveMoreMenuNativeEvent(
+        previousIntent.nativeEvent,
+        previousIntent.publication.document,
+      )
+    ) {
+      this.#clearSelection(previousIntent);
+    }
     if (
       this.#active !== publication
       || this.#stagedNativeEvents.has(nativeEvent)
