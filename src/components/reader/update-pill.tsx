@@ -22,6 +22,12 @@ const SEPARATOR_CLASS_NAME = "text-ink-4";
 const ICON_CLASS_NAME = "text-accent";
 const CONTROL_TEXT = "Updated—Refresh";
 const DISMISS_LABEL = "Dismiss update notice";
+const FAILURE_MESSAGE = "Couldn't check for updates.";
+const RETRY_TEXT = "Retry now";
+const FAILURE_NOTICE_CLASS_NAME =
+  "pointer-events-auto inline-flex items-center gap-2 rounded-full border border-line-2 bg-surface px-3.5 py-1.5 text-sm font-medium text-ink shadow-md";
+const RETRY_BUTTON_CLASS_NAME =
+  "rounded-full text-accent hover:opacity-80 disabled:cursor-wait disabled:opacity-60";
 
 type DocumentAuthority = Readonly<{
   mount: symbol;
@@ -47,13 +53,37 @@ type PollingAuthority = Readonly<{
 
 type PollingOwner = {
   authority: PollingAuthority;
+  retry: (attempt: FailureCheckAttempt) => boolean;
   retire: () => void;
 };
 
 type RequestOwner = {
   authority: PollingAuthority;
   controller: AbortController;
+  failureAttempt: FailureCheckAttempt | null;
 };
+
+type FailurePublication = Readonly<{
+  identity: symbol;
+  authority: PollingAuthority;
+}>;
+
+type FailureCheckAttempt = Readonly<{
+  identity: symbol;
+  authority: PollingAuthority;
+  failure: FailurePublication;
+  source: "poll" | "retry";
+  control: Readonly<{
+    ready: Promise<void>;
+    publish: () => void;
+    release: () => void;
+  }>;
+}>;
+
+type FailureState = Readonly<{
+  publication: FailurePublication;
+  attempt: FailureCheckAttempt | null;
+}>;
 
 type RefreshControlRender = Readonly<{
   identity: symbol;
@@ -128,6 +158,86 @@ type RefreshControlReplay = Readonly<{
   placement: RefreshControlPlacement;
   historyIsClean: () => boolean;
   release: () => void;
+}>;
+
+type FailureControlRender = Readonly<{
+  identity: symbol;
+  mount: symbol;
+  ownerDocument: Document;
+  docId: string;
+  initialHash: string;
+  pollMs: number;
+  document: DocumentAuthority;
+  polling: PollingAuthority;
+  failure: FailurePublication;
+  attempt: FailureCheckAttempt | null;
+  retry: (attempt: FailureCheckAttempt) => boolean;
+}>;
+
+type RetryAction = {
+  claimed: boolean;
+};
+
+type FailureControlPublication = Readonly<{
+  render: FailureControlRender;
+  action: RetryAction;
+  pill: HTMLDivElement;
+  retryButton: HTMLButtonElement;
+  ownerDocument: Document;
+  retryTargets: readonly Node[];
+  retire: () => boolean;
+  isRetired: () => boolean;
+  settlementIsCurrent: () => boolean;
+}>;
+
+type FailureControlCells = {
+  active: CurrentCell<FailureControlPublication | null>;
+  successorOf: CurrentCell<FailureControlPublication | null>;
+  replay: CurrentCell<FailureControlReplay | null>;
+  invalidFailures: WeakSet<FailurePublication>;
+  claimedPublications: WeakSet<FailureControlPublication>;
+  claimedActions: WeakSet<RetryAction>;
+  claimedReactEvents: WeakSet<object>;
+  claimedNativeEvents: WeakSet<Event>;
+};
+
+type FailureControlReplay = Readonly<{
+  source: FailureControlPublication;
+  dom: RefreshControlDomSnapshot;
+  placement: RefreshControlPlacement;
+  historyIsClean: () => boolean;
+  release: () => void;
+}>;
+
+interface FailureControlRuntime {
+  readonly publication: FailureControlPublication;
+  readonly publish: (
+    snapshot: RefreshControlDomSnapshot,
+    placement: RefreshControlPlacement,
+    owners: readonly ElementOwnerView[],
+  ) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForInvalidation: () => void;
+  readonly noteRef: (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly snapshot: () => RefreshControlDomSnapshot | null;
+  readonly placement: () => RefreshControlPlacement | null;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+type FailureControlPublicationSet = Readonly<{
+  capturePill: (element: HTMLDivElement | null) => void;
+  captureRetryButton: (element: HTMLButtonElement | null) => void;
+  establish: () => void | (() => void);
+  onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }>;
 
 interface ElementOwnerView {
@@ -317,6 +427,33 @@ function descendantsOf(element: HTMLElement): readonly Node[] {
   return Object.freeze(descendants);
 }
 
+function createFailureCheckAttempt(
+  authority: PollingAuthority,
+  failure: FailurePublication,
+  source: FailureCheckAttempt["source"],
+): FailureCheckAttempt {
+  let release!: () => void;
+  let released = false;
+  const ready = new Promise<void>((resolve) => {
+    release = () => {
+      if (released) return;
+      released = true;
+      resolve();
+    };
+  });
+  return Object.freeze({
+    identity: Symbol(`reader-update-${source}-attempt`),
+    authority,
+    failure,
+    source,
+    control: Object.freeze({
+      ready,
+      publish: release,
+      release,
+    }),
+  });
+}
+
 function isNodeFromDocument(
   value: EventTarget | null,
   ownerDocument: Document,
@@ -412,6 +549,47 @@ function controlHasExpectedPresentation(
     dismissIcon.classList.contains("lucide-x") &&
     dismissIcon.getAttribute("width") === "14" &&
     dismissIcon.getAttribute("height") === "14"
+  );
+}
+
+function failureControlHasExpectedPresentation(
+  pill: HTMLDivElement,
+  retryButton: HTMLButtonElement,
+  retryPending: boolean,
+): boolean {
+  const notice = pill.children.item(0);
+  const message = notice?.children.item(0);
+  return (
+    pill.isConnected &&
+    retryButton.isConnected &&
+    pill.ownerDocument === retryButton.ownerDocument &&
+    pill.tagName === "DIV" &&
+    pill.getAttribute("class") === PILL_CLASS_NAME &&
+    pill.getAttribute("role") === "status" &&
+    pill.dataset.testid === "reader-update-error" &&
+    pill.children.length === 1 &&
+    pill.childNodes.length === 1 &&
+    notice?.tagName === "DIV" &&
+    notice.getAttribute("class") === FAILURE_NOTICE_CLASS_NAME &&
+    notice.children.length === 2 &&
+    notice.childNodes.length === 2 &&
+    message?.tagName === "SPAN" &&
+    message.childNodes.length === 1 &&
+    message.firstChild?.nodeType === 3 &&
+    message.firstChild.nodeValue === FAILURE_MESSAGE &&
+    retryButton.parentElement === notice &&
+    retryButton.tagName === "BUTTON" &&
+    retryButton.getAttribute("type") === "button" &&
+    retryButton.type === "button" &&
+    retryButton.getAttribute("class") === RETRY_BUTTON_CLASS_NAME &&
+    retryButton.children.length === 0 &&
+    retryButton.childNodes.length === 1 &&
+    retryButton.firstChild?.nodeType === 3 &&
+    retryButton.firstChild.nodeValue === RETRY_TEXT &&
+    retryButton.textContent === RETRY_TEXT &&
+    retryButton.disabled === retryPending &&
+    retryButton.matches(":disabled") === retryPending &&
+    (retryPending || isEffectivelyEnabled(retryButton))
   );
 }
 
@@ -959,6 +1137,601 @@ function createRefreshControlPublication(
   });
 }
 
+function failureControlAuthoritiesMatch(
+  previous: FailureControlRender,
+  current: FailureControlRender,
+): boolean {
+  return (
+    previous.identity !== current.identity &&
+    previous.mount === current.mount &&
+    previous.ownerDocument === current.ownerDocument &&
+    previous.docId === current.docId &&
+    previous.initialHash === current.initialHash &&
+    previous.pollMs === current.pollMs &&
+    previous.document === current.document &&
+    previous.polling === current.polling &&
+    previous.failure === current.failure &&
+    previous.attempt === current.attempt &&
+    previous.retry === current.retry
+  );
+}
+
+function retireInactiveFailureControl(cells: FailureControlCells) {
+  cells.active.current?.retire();
+  cells.replay.current?.release();
+  cells.replay.current = null;
+  cells.successorOf.current = null;
+}
+
+function failureControlSettlementIsCurrent(
+  cells: FailureControlCells,
+  attempt: FailureCheckAttempt,
+): boolean {
+  const publication = cells.active.current;
+  return Boolean(
+    publication &&
+      publication.render.attempt === attempt &&
+      publication.render.failure === attempt.failure &&
+      publication.render.polling === attempt.authority &&
+      publication.settlementIsCurrent(),
+  );
+}
+
+function createFailureControlPublication(
+  render: FailureControlRender,
+  cells: FailureControlCells,
+  documentAuthorityRef: React.RefObject<DocumentAuthority | null>,
+  pollingAuthorityRef: React.RefObject<PollingAuthority | null>,
+  failurePublicationRef: React.RefObject<FailurePublication | null>,
+  failureAttemptRef: React.RefObject<FailureCheckAttempt | null>,
+  requestSuccessor: () => void,
+): FailureControlPublicationSet {
+  let currentRuntime: FailureControlRuntime | null = null;
+  let lastRuntime: FailureControlRuntime | null = null;
+  let successorRequested = false;
+
+  const factsAreCurrent = () =>
+    render.mount === render.document.mount &&
+    render.ownerDocument === render.document.ownerDocument &&
+    render.docId === render.document.docId &&
+    render.initialHash === render.document.initialHash &&
+    render.document === render.polling.document &&
+    render.pollMs === render.polling.pollMs &&
+    render.failure.authority === render.polling &&
+    (render.attempt === null ||
+      (render.attempt.authority === render.polling &&
+        render.attempt.failure === render.failure)) &&
+    documentAuthorityRef.current === render.document &&
+    pollingAuthorityRef.current === render.polling &&
+    failurePublicationRef.current === render.failure &&
+    failureAttemptRef.current === render.attempt &&
+    !cells.invalidFailures.has(render.failure);
+
+  const onElementChange = (
+    owner: ElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null) {
+      currentRuntime?.retireForElement();
+    } else if (last !== null && element !== last) {
+      currentRuntime?.retireForInvalidation();
+    }
+    if (
+      runtime?.isExactElementReplay() &&
+      cells.successorOf.current === runtime.publication
+    ) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const pillOwner = new ElementOwner<HTMLDivElement>(onElementChange);
+  const retryButtonOwner = new ElementOwner<HTMLButtonElement>(onElementChange);
+
+  const exactDomIsCurrent = () => {
+    const pill = pillOwner.element();
+    const retryButton = retryButtonOwner.element();
+    return Boolean(
+      pill &&
+        retryButton &&
+        pill.ownerDocument === render.ownerDocument &&
+        retryButton.ownerDocument === render.ownerDocument &&
+        failureControlHasExpectedPresentation(
+          pill,
+          retryButton,
+          render.attempt !== null,
+        ),
+    );
+  };
+
+  const expectedOwners = (): readonly ElementOwnerView[] => [
+    pillOwner,
+    retryButtonOwner,
+  ];
+
+  const publicationIsCurrent = (runtime: FailureControlRuntime) => {
+    const publication = runtime.publication;
+    return (
+      currentRuntime === runtime &&
+      cells.active.current === publication &&
+      !publication.isRetired() &&
+      !publication.action.claimed &&
+      !cells.claimedPublications.has(publication) &&
+      !cells.claimedActions.has(publication.action) &&
+      publication.render === render &&
+      publication.pill === pillOwner.element() &&
+      publication.retryButton === retryButtonOwner.element() &&
+      factsAreCurrent() &&
+      exactDomIsCurrent() &&
+      runtime.publishedDomMatches()
+    );
+  };
+
+  const requestReplaySuccessor = (runtime: FailureControlRuntime) => {
+    const snapshot = runtime.snapshot();
+    const placement = runtime.placement();
+    const publication = runtime.publication;
+    if (
+      successorRequested ||
+      !snapshot ||
+      !placement ||
+      cells.successorOf.current !== publication ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: publication,
+      dom: snapshot,
+      placement,
+      historyIsClean: runtime.historyIsClean,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const createRuntime = (
+    pill: HTMLDivElement,
+    retryButton: HTMLButtonElement,
+  ): FailureControlRuntime => {
+    type Retirement = "element" | "layout" | "invalid" | "other";
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let domSnapshot: RefreshControlDomSnapshot | null = null;
+    let placementSnapshot: RefreshControlPlacement | null = null;
+    let domGuard: RefreshControlDomGuard | null = null;
+    let replayRefs: RefReplay[] = [];
+    let invalidReplay = false;
+    let runtime: FailureControlRuntime;
+
+    const retire = (reason: Retirement) => {
+      if (retired) return false;
+      if (
+        reason === "invalid" ||
+        (reason === "element" && domGuard && !domGuard.isClean())
+      ) {
+        cells.invalidFailures.add(render.failure);
+        render.attempt?.control.release();
+      }
+      retired = true;
+      retirement = reason;
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) {
+          domGuard?.release();
+        }
+        if (
+          reason === "element" &&
+          cells.active.current === null &&
+          cells.successorOf.current === publication &&
+          cells.replay.current?.source !== publication
+        ) {
+          cells.invalidFailures.add(render.failure);
+          render.attempt?.control.release();
+        }
+      });
+      return true;
+    };
+    const action: RetryAction = { claimed: false };
+    const publication: FailureControlPublication = Object.freeze({
+      render,
+      action,
+      pill,
+      retryButton,
+      ownerDocument: pill.ownerDocument,
+      retryTargets: descendantsOf(retryButton),
+      retire: () => retire("other"),
+      isRetired: () => retired,
+      settlementIsCurrent: () => {
+        if (render.attempt === null) return false;
+        const current = publicationIsCurrent(runtime);
+        if (
+          !current &&
+          !retired &&
+          cells.active.current === publication &&
+          factsAreCurrent()
+        ) {
+          runtime.retireForInvalidation();
+        }
+        return current;
+      },
+    });
+    const publishedDomMatches = () =>
+      Boolean(
+        domSnapshot &&
+          placementSnapshot &&
+          domGuard &&
+          domGuard.isClean() &&
+          pillOwner.element() === pill &&
+          retryButtonOwner.element() === retryButton &&
+          pill.isConnected &&
+          retryButton.isConnected &&
+          controlPlacementMatches(pill, placementSnapshot) &&
+          controlDomMatches(domSnapshot),
+      );
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every(
+        (entry) =>
+          !entry.detached &&
+          !entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+
+    runtime = Object.freeze({
+      publication,
+      publish: (
+        snapshot: RefreshControlDomSnapshot,
+        placement: RefreshControlPlacement,
+        owners: readonly ElementOwnerView[],
+      ) => {
+        established = true;
+        domSnapshot = snapshot;
+        placementSnapshot = placement;
+        domGuard = createControlDomGuard(pill, placement);
+        if (!domGuard) {
+          throw new Error(
+            "Cannot publish UpdatePill failure without a DOM mutation observer",
+          );
+        }
+        replayRefs = owners.map((owner: ElementOwnerView) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish UpdatePill failure without every committed ref",
+            );
+          }
+          return { owner, element, detached: false, reattached: false };
+        });
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        if (render.attempt) {
+          queueMicrotask(() => {
+            if (publication.settlementIsCurrent()) {
+              render.attempt?.control.publish();
+            }
+          });
+        }
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForInvalidation: () => {
+        retire("invalid");
+      },
+      noteRef: (
+        owner: ElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (
+          element === null &&
+          previous === proof.element &&
+          proof.element.isConnected
+        ) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached &&
+          proof.element.isConnected
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isExactElementReplay: () =>
+        retired &&
+        retirement === "element" &&
+        layoutRetired &&
+        established &&
+        refsHaveExactReplay() &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        retired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      publishedDomMatches,
+      snapshot: () => domSnapshot,
+      placement: () => placementSnapshot,
+      historyIsClean: () => domGuard?.isClean() ?? false,
+      release: () => {
+        domGuard?.release();
+      },
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() ||
+          lastRuntime.isExactElementReplay()) &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent()) {
+      if (
+        !successorRequested &&
+        documentAuthorityRef.current === render.document &&
+        pollingAuthorityRef.current !== render.polling &&
+        failurePublicationRef.current === render.failure &&
+        exactDomIsCurrent()
+      ) {
+        successorRequested = true;
+        requestSuccessor();
+      }
+      return undefined;
+    }
+    if (!exactDomIsCurrent()) {
+      if (factsAreCurrent()) {
+        cells.invalidFailures.add(render.failure);
+        render.attempt?.control.release();
+      }
+      return undefined;
+    }
+    const pill = pillOwner.element();
+    const retryButton = retryButtonOwner.element();
+    const placement = pill ? captureControlPlacement(pill) : null;
+    if (!pill || !retryButton || !placement) {
+      cells.invalidFailures.add(render.failure);
+      render.attempt?.control.release();
+      return undefined;
+    }
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const exactReplay =
+        failureControlAuthoritiesMatch(replay.source.render, render) &&
+        replay.source.isRetired() &&
+        cells.successorOf.current === replay.source &&
+        replay.historyIsClean() &&
+        pill === replay.dom.node &&
+        controlPlacementMatches(pill, replay.placement) &&
+        controlDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (!exactReplay) {
+        cells.invalidFailures.add(render.failure);
+        render.attempt?.control.release();
+        return undefined;
+      }
+    }
+
+    const runtime = createRuntime(pill, retryButton);
+    const previous = cells.active.current;
+    if (previous && previous !== runtime.publication) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    runtime.publish(
+      snapshotControlDom(pill),
+      placement,
+      expectedOwners(),
+    );
+    return runtime.retireForLayout;
+  };
+
+  const onRetry = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const button = publication?.retryButton;
+    const ownerDocument = publication?.ownerDocument;
+    const MouseEventConstructor = ownerDocument?.defaultView?.MouseEvent;
+    const nativeEvent = event?.nativeEvent;
+    const target = event?.target;
+    const propagationStopped =
+      typeof event?.isPropagationStopped === "function" &&
+      event.isPropagationStopped();
+    const defaultPrevented =
+      event.defaultPrevented ||
+      (typeof event?.isDefaultPrevented === "function" &&
+        event.isDefaultPrevented());
+    if (
+      !runtime ||
+      !publication ||
+      !button ||
+      !ownerDocument ||
+      !MouseEventConstructor ||
+      render.attempt !== null ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      !(nativeEvent instanceof MouseEventConstructor) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      !nativeEvent.bubbles ||
+      event.currentTarget !== button ||
+      nativeEvent.target !== target ||
+      !isNodeFromDocument(target, ownerDocument) ||
+      !target.isConnected ||
+      !button.contains(target) ||
+      !publication.retryTargets.includes(target) ||
+      defaultPrevented ||
+      nativeEvent.defaultPrevented ||
+      propagationStopped ||
+      nativeEvent.cancelBubble ||
+      cells.claimedReactEvents.has(event) ||
+      cells.claimedNativeEvents.has(nativeEvent) ||
+      cells.claimedPublications.has(publication) ||
+      cells.claimedActions.has(publication.action) ||
+      publication.action.claimed
+    ) {
+      return;
+    }
+    if (render.ownerDocument.visibilityState !== "visible") return;
+    if (!publicationIsCurrent(runtime)) {
+      runtime.retireForInvalidation();
+      return;
+    }
+
+    const attempt = createFailureCheckAttempt(
+      render.polling,
+      render.failure,
+      "retry",
+    );
+    cells.claimedPublications.add(publication);
+    cells.claimedActions.add(publication.action);
+    cells.claimedReactEvents.add(event);
+    cells.claimedNativeEvents.add(nativeEvent);
+    publication.action.claimed = true;
+    publication.retire();
+    render.retry(attempt);
+  };
+
+  return Object.freeze({
+    capturePill: pillOwner.capture,
+    captureRetryButton: retryButtonOwner.capture,
+    establish,
+    onRetry,
+  });
+}
+
+function FailureControl({
+  mount,
+  ownerDocument,
+  docId,
+  initialHash,
+  pollMs,
+  documentAuthority,
+  pollingAuthority,
+  failurePublication,
+  failureAttempt,
+  cells,
+  documentAuthorityRef,
+  pollingAuthorityRef,
+  failurePublicationRef,
+  failureAttemptRef,
+  retryCurrentFailure,
+}: {
+  mount: symbol;
+  ownerDocument: Document;
+  docId: string;
+  initialHash: string;
+  pollMs: number;
+  documentAuthority: DocumentAuthority;
+  pollingAuthority: PollingAuthority;
+  failurePublication: FailurePublication;
+  failureAttempt: FailureCheckAttempt | null;
+  cells: FailureControlCells;
+  documentAuthorityRef: React.RefObject<DocumentAuthority | null>;
+  pollingAuthorityRef: React.RefObject<PollingAuthority | null>;
+  failurePublicationRef: React.RefObject<FailurePublication | null>;
+  failureAttemptRef: React.RefObject<FailureCheckAttempt | null>;
+  retryCurrentFailure: (attempt: FailureCheckAttempt) => boolean;
+}) {
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const render = Object.freeze<FailureControlRender>({
+    identity: Symbol("reader-update-failure-control-render"),
+    mount,
+    ownerDocument,
+    docId,
+    initialHash,
+    pollMs,
+    document: documentAuthority,
+    polling: pollingAuthority,
+    failure: failurePublication,
+    attempt: failureAttempt,
+    retry: retryCurrentFailure,
+  });
+  const publication = createFailureControlPublication(
+    render,
+    cells,
+    documentAuthorityRef,
+    pollingAuthorityRef,
+    failurePublicationRef,
+    failureAttemptRef,
+    requestPublicationSuccessor,
+  );
+
+  useLayoutEffect(() => publication.establish(), [publication]);
+
+  const { capturePill, captureRetryButton, onRetry } = publication;
+  return (
+    <div
+      ref={capturePill}
+      className={PILL_CLASS_NAME}
+      role="status"
+      data-testid="reader-update-error"
+    >
+      <div className={FAILURE_NOTICE_CLASS_NAME}>
+        <span>{FAILURE_MESSAGE}</span>
+        <button
+          ref={captureRetryButton}
+          type="button"
+          className={RETRY_BUTTON_CLASS_NAME}
+          disabled={failureAttempt !== null}
+          onClick={onRetry}
+        >
+          {RETRY_TEXT}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function RefreshControl({
   mount,
   ownerDocument,
@@ -1092,8 +1865,11 @@ export function UpdatePill({
   const requestOwnerRef = useRef<RequestOwner | null>(null);
   const refreshPublicationRef = useRef<RefreshPublication | null>(null);
   const dismissedUpdateRef = useRef<DismissedUpdate | null>(null);
+  const failurePublicationRef = useRef<FailurePublication | null>(null);
+  const failureAttemptRef = useRef<FailureCheckAttempt | null>(null);
   const [refreshPublication, setRefreshPublication] =
     useState<RefreshPublication | null>(null);
+  const [failureState, setFailureState] = useState<FailureState | null>(null);
   const [controlCells] = useState<RefreshControlCells>(() => ({
     active: { current: null },
     successorOf: { current: null },
@@ -1102,6 +1878,16 @@ export function UpdatePill({
     claimedRefreshes: new WeakSet<RefreshPublication>(),
     claimedPublications: new WeakSet<RefreshControlPublication>(),
     claimedActions: new WeakSet<RefreshAction>(),
+    claimedReactEvents: new WeakSet<object>(),
+    claimedNativeEvents: new WeakSet<Event>(),
+  }));
+  const [failureControlCells] = useState<FailureControlCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    invalidFailures: new WeakSet<FailurePublication>(),
+    claimedPublications: new WeakSet<FailureControlPublication>(),
+    claimedActions: new WeakSet<RetryAction>(),
     claimedReactEvents: new WeakSet<object>(),
     claimedNativeEvents: new WeakSet<Event>(),
   }));
@@ -1118,6 +1904,12 @@ export function UpdatePill({
       }
       if (dismissedUpdateRef.current?.document === documentAuthority) {
         dismissedUpdateRef.current = null;
+      }
+      if (
+        failurePublicationRef.current?.authority.document === documentAuthority
+      ) {
+        failurePublicationRef.current = null;
+        failureAttemptRef.current = null;
       }
     };
   }, [documentAuthority]);
@@ -1144,6 +1936,27 @@ export function UpdatePill({
     [],
   );
 
+  const retryCurrentFailure = useCallback(
+    (attempt: FailureCheckAttempt) => {
+      const polling = pollingOwnerRef.current;
+      return Boolean(
+        polling &&
+          polling.authority === attempt.authority &&
+          attempt.failure.authority === attempt.authority &&
+          documentAuthorityRef.current === attempt.authority.document &&
+          authorityRef.current === attempt.authority &&
+          failurePublicationRef.current === attempt.failure &&
+          failureAttemptRef.current === null &&
+          !failureControlCells.invalidFailures.has(attempt.failure) &&
+          attempt.authority.document.ownerDocument.visibilityState ===
+            "visible" &&
+          requestOwnerRef.current === null &&
+          polling.retry(attempt),
+      );
+    },
+    [failureControlCells],
+  );
+
   useLayoutEffect(() => {
     if (!authority) return;
     authorityRef.current = authority;
@@ -1154,6 +1967,7 @@ export function UpdatePill({
       const request = requestOwnerRef.current;
       if (request?.authority === authority) {
         requestOwnerRef.current = null;
+        request.failureAttempt?.control.release();
         request.controller.abort();
       }
       const polling = pollingOwnerRef.current;
@@ -1182,37 +1996,142 @@ export function UpdatePill({
       clearInterval(timer);
       timer = null;
     };
-    const stopRequest = () => {
+    const stopRequest = (restoreFailure: boolean) => {
       const request = requestOwnerRef.current;
       if (request?.authority !== authority) return;
       requestOwnerRef.current = null;
+      const attempt = request.failureAttempt;
+      if (attempt && failureAttemptRef.current === attempt) {
+        failureAttemptRef.current = null;
+        if (
+          restoreFailure &&
+          failurePublicationRef.current === attempt.failure &&
+          !failureControlCells.invalidFailures.has(attempt.failure)
+        ) {
+          setFailureState((current) =>
+            current?.publication === attempt.failure &&
+            current.attempt === attempt
+              ? Object.freeze({
+                  publication: attempt.failure,
+                  attempt: null,
+                })
+              : current,
+          );
+        }
+      }
+      attempt?.control.release();
       request.controller.abort();
     };
-    const stop = () => {
+    const stop = (restoreFailure: boolean) => {
       stopTimer();
-      stopRequest();
+      stopRequest(restoreFailure);
     };
-    const check = async () => {
+
+    const failureIsCurrent = (failure: FailurePublication) =>
+      failure.authority === authority &&
+      failurePublicationRef.current === failure &&
+      !failureControlCells.invalidFailures.has(failure);
+
+    const publishFailure = () => {
       if (
         retired ||
         changed ||
         !hasAuthority() ||
-        requestOwnerRef.current !== null ||
         pollingDocument.visibilityState !== "visible"
       ) {
         return;
       }
-      const request: RequestOwner = {
-        authority,
-        controller: new AbortController(),
-      };
-      requestOwnerRef.current = request;
-      const ownsRequest = () =>
-        !retired &&
-        hasAuthority() &&
-        requestOwnerRef.current === request &&
-        !request.controller.signal.aborted;
+      const current = failurePublicationRef.current;
+      const publication =
+        current && failureIsCurrent(current)
+          ? current
+          : Object.freeze<FailurePublication>({
+              identity: Symbol("reader-update-failure"),
+              authority,
+            });
+      failurePublicationRef.current = publication;
+      failureAttemptRef.current = null;
+      setFailureState((state) =>
+        state?.publication === publication && state.attempt === null
+          ? state
+          : Object.freeze({ publication, attempt: null }),
+      );
+    };
 
+    const clearFailure = () => {
+      const failure = failurePublicationRef.current;
+      if (failure?.authority !== authority) return;
+      failurePublicationRef.current = null;
+      failureAttemptRef.current = null;
+      setFailureState((current) =>
+        current?.publication.authority === authority ? null : current,
+      );
+    };
+
+    const requestCanSettle = (request: RequestOwner) => {
+      if (
+        retired ||
+        changed ||
+        !hasAuthority() ||
+        requestOwnerRef.current !== request ||
+        request.controller.signal.aborted ||
+        pollingDocument.visibilityState !== "visible"
+      ) {
+        return false;
+      }
+      const attempt = request.failureAttempt;
+      return (
+        attempt === null ||
+        (failureAttemptRef.current === attempt &&
+          failureIsCurrent(attempt.failure) &&
+          failureControlSettlementIsCurrent(failureControlCells, attempt))
+      );
+    };
+
+    const releaseAcceptedRequest = (request: RequestOwner) => {
+      requestOwnerRef.current = null;
+      if (failureAttemptRef.current === request.failureAttempt) {
+        failureAttemptRef.current = null;
+      }
+      request.failureAttempt?.control.release();
+    };
+
+    const settleFailure = (request: RequestOwner) => {
+      if (!requestCanSettle(request)) return;
+      releaseAcceptedRequest(request);
+      publishFailure();
+    };
+
+    const settleHash = (request: RequestOwner, remoteHash: string) => {
+      if (!requestCanSettle(request)) return;
+      releaseAcceptedRequest(request);
+      clearFailure();
+      if (remoteHash === authority.document.initialHash) {
+        if (
+          dismissedUpdateRef.current?.document === authority.document
+        ) {
+          dismissedUpdateRef.current = null;
+        }
+        return;
+      }
+      const dismissed = dismissedUpdateRef.current;
+      if (
+        dismissed?.document === authority.document &&
+        dismissed.remoteHash === remoteHash
+      ) {
+        return;
+      }
+      changed = true;
+      stopTimer();
+      const publication = Object.freeze<RefreshPublication>({
+        document: authority.document,
+        remoteHash,
+      });
+      refreshPublicationRef.current = publication;
+      setRefreshPublication(publication);
+    };
+
+    const performRequest = async (request: RequestOwner) => {
       try {
         const res = await fetch(
           `/api/documents/${authority.document.docId}/content`,
@@ -1221,50 +2140,79 @@ export function UpdatePill({
             signal: request.controller.signal,
           },
         );
-        if (!ownsRequest() || !res.ok) return;
+        await request.failureAttempt?.control.ready;
+        if (!requestCanSettle(request)) return;
+        if (!res.ok) {
+          settleFailure(request);
+          return;
+        }
         const data = (await res.json()) as { contentHash?: unknown };
-        if (
-          !ownsRequest() ||
-          pollingDocument.visibilityState !== "visible"
-        ) {
-          return;
-        }
+        if (!requestCanSettle(request)) return;
         const remoteHash = data.contentHash;
-        if (typeof remoteHash !== "string" || remoteHash.length === 0) return;
-        if (remoteHash === authority.document.initialHash) {
-          if (
-            dismissedUpdateRef.current?.document === authority.document
-          ) {
-            dismissedUpdateRef.current = null;
-          }
+        if (typeof remoteHash !== "string" || remoteHash.length === 0) {
+          settleFailure(request);
           return;
         }
-        const dismissed = dismissedUpdateRef.current;
-        if (
-          dismissed?.document === authority.document &&
-          dismissed.remoteHash === remoteHash
-        ) {
-          return;
-        }
-        changed = true;
-        stopTimer();
-        const publication = Object.freeze<RefreshPublication>({
-          document: authority.document,
-          remoteHash,
-        });
-        refreshPublicationRef.current = publication;
-        setRefreshPublication(publication);
+        settleHash(request, remoteHash);
       } catch {
-        // Offline or transient error: try again on the next tick.
+        await request.failureAttempt?.control.ready;
+        settleFailure(request);
       } finally {
-        if (
-          !retired &&
-          hasAuthority() &&
-          requestOwnerRef.current === request
-        ) {
+        if (requestOwnerRef.current === request) {
           requestOwnerRef.current = null;
+          if (failureAttemptRef.current === request.failureAttempt) {
+            failureAttemptRef.current = null;
+          }
         }
+        request.failureAttempt?.control.release();
       }
+    };
+
+    const check = (retryAttempt: FailureCheckAttempt | null = null) => {
+      if (
+        retired ||
+        changed ||
+        !hasAuthority() ||
+        requestOwnerRef.current !== null ||
+        pollingDocument.visibilityState !== "visible"
+      ) {
+        return false;
+      }
+      const currentFailure = failurePublicationRef.current;
+      if (
+        retryAttempt &&
+        (retryAttempt.source !== "retry" ||
+          retryAttempt.authority !== authority ||
+          retryAttempt.failure !== currentFailure ||
+          !failureIsCurrent(retryAttempt.failure) ||
+          failureAttemptRef.current !== null)
+      ) {
+        return false;
+      }
+      const failureAttempt =
+        retryAttempt ??
+        (currentFailure && failureIsCurrent(currentFailure)
+          ? createFailureCheckAttempt(authority, currentFailure, "poll")
+          : null);
+      const request: RequestOwner = {
+        authority,
+        controller: new AbortController(),
+        failureAttempt,
+      };
+      requestOwnerRef.current = request;
+      if (failureAttempt) {
+        failureAttemptRef.current = failureAttempt;
+        setFailureState((current) =>
+          current?.publication === failureAttempt.failure
+            ? Object.freeze({
+                publication: failureAttempt.failure,
+                attempt: failureAttempt,
+              })
+            : current,
+        );
+      }
+      void performRequest(request);
+      return true;
     };
     const start = (checkImmediately = true) => {
       if (
@@ -1283,25 +2231,29 @@ export function UpdatePill({
       if (pollingDocument.visibilityState === "visible") {
         start();
       } else {
-        stop();
+        stop(true);
       }
     };
     const retire = () => {
       if (retired) return;
       retired = true;
-      stop();
+      stop(false);
       pollingDocument.removeEventListener("visibilitychange", onVisibility);
       if (pollingOwnerRef.current === polling) {
         pollingOwnerRef.current = null;
       }
     };
-    const polling: PollingOwner = { authority, retire };
+    const polling: PollingOwner = {
+      authority,
+      retry: (attempt) => check(attempt),
+      retire,
+    };
 
     pollingOwnerRef.current = polling;
     start(!resumesDismissedUpdate);
     pollingDocument.addEventListener("visibilitychange", onVisibility);
     return retire;
-  }, [authority, refreshPublication]);
+  }, [authority, failureControlCells, refreshPublication]);
 
   const currentPublication =
     documentAuthority &&
@@ -1312,35 +2264,68 @@ export function UpdatePill({
     !controlCells.claimedRefreshes.has(refreshPublication)
       ? refreshPublication
       : null;
+  const currentFailure =
+    documentAuthority &&
+    authority &&
+    failureState?.publication.authority === authority &&
+    failurePublicationRef.current === failureState.publication &&
+    failureAttemptRef.current === failureState.attempt &&
+    !failureControlCells.invalidFailures.has(failureState.publication)
+      ? failureState
+      : null;
 
   useLayoutEffect(() => {
     if (currentPublication) return;
     retireInactiveControl(controlCells);
   }, [controlCells, currentPublication]);
 
-  if (
-    !currentPublication ||
-    !ownerDocument ||
-    !documentAuthority ||
-    !authority
-  ) {
+  useLayoutEffect(() => {
+    if (currentFailure) return;
+    retireInactiveFailureControl(failureControlCells);
+  }, [currentFailure, failureControlCells]);
+
+  if (!ownerDocument || !documentAuthority || !authority) {
     return null;
   }
-  return (
-    <RefreshControl
-      mount={mount}
-      ownerDocument={ownerDocument}
-      docId={docId}
-      initialHash={initialHash}
-      pollMs={pollMs}
-      documentAuthority={documentAuthority}
-      pollingAuthority={authority}
-      refreshPublication={currentPublication}
-      cells={controlCells}
-      documentAuthorityRef={documentAuthorityRef}
-      pollingAuthorityRef={authorityRef}
-      refreshPublicationRef={refreshPublicationRef}
-      dismissCurrentPublication={dismissCurrentPublication}
-    />
-  );
+  if (currentPublication) {
+    return (
+      <RefreshControl
+        mount={mount}
+        ownerDocument={ownerDocument}
+        docId={docId}
+        initialHash={initialHash}
+        pollMs={pollMs}
+        documentAuthority={documentAuthority}
+        pollingAuthority={authority}
+        refreshPublication={currentPublication}
+        cells={controlCells}
+        documentAuthorityRef={documentAuthorityRef}
+        pollingAuthorityRef={authorityRef}
+        refreshPublicationRef={refreshPublicationRef}
+        dismissCurrentPublication={dismissCurrentPublication}
+      />
+    );
+  }
+  if (currentFailure) {
+    return (
+      <FailureControl
+        mount={mount}
+        ownerDocument={ownerDocument}
+        docId={docId}
+        initialHash={initialHash}
+        pollMs={pollMs}
+        documentAuthority={documentAuthority}
+        pollingAuthority={authority}
+        failurePublication={currentFailure.publication}
+        failureAttempt={currentFailure.attempt}
+        cells={failureControlCells}
+        documentAuthorityRef={documentAuthorityRef}
+        pollingAuthorityRef={authorityRef}
+        failurePublicationRef={failurePublicationRef}
+        failureAttemptRef={failureAttemptRef}
+        retryCurrentFailure={retryCurrentFailure}
+      />
+    );
+  }
+  return null;
 }
