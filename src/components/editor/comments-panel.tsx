@@ -1,6 +1,7 @@
 "use client";
 
 import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type MouseEvent } from "react";
+import { flushSync } from "react-dom";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -169,7 +170,1286 @@ function commentSuggestionTargets(threads: CommentThread[], text: string): Comme
   });
 }
 
-function SuggestionActions({
+const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
+const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
+const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
+const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
+const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "currentTarget",
+)?.get;
+const suggestionEventTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "target",
+)?.get;
+const suggestionEventComposedPath = globalThis.Event.prototype.composedPath;
+const suggestionAddEventListener = globalThis.EventTarget.prototype.addEventListener;
+const suggestionRemoveEventListener = globalThis.EventTarget.prototype.removeEventListener;
+const suggestionWindowAddEventListener =
+  typeof globalThis.addEventListener === "function" ? globalThis.addEventListener : null;
+const suggestionWindowRemoveEventListener =
+  typeof globalThis.removeEventListener === "function" ? globalThis.removeEventListener : null;
+const suggestionGlobalWindow = typeof window === "undefined" ? null : window;
+const suggestionReflectApply = Reflect.apply;
+
+function suggestionNativeCurrentTarget(event: Event): EventTarget | null {
+  return suggestionEventCurrentTargetGetter
+    ? (suggestionReflectApply(suggestionEventCurrentTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
+
+function suggestionNativeTarget(event: Event): EventTarget | null {
+  return suggestionEventTargetGetter
+    ? (suggestionReflectApply(suggestionEventTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
+
+function suggestionNativeComposedPath(event: Event): EventTarget[] {
+  return suggestionReflectApply(suggestionEventComposedPath, event, []) as EventTarget[];
+}
+
+function addSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionAddEventListener, target, ["click", listener, options]);
+}
+
+function removeSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionRemoveEventListener, target, ["click", listener, options]);
+}
+
+function addSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean): boolean {
+  const intrinsic = target === suggestionGlobalWindow ? suggestionWindowAddEventListener : suggestionAddEventListener;
+  if (!intrinsic) return false;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
+  return true;
+}
+
+function removeSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean) {
+  const intrinsic =
+    target === suggestionGlobalWindow ? suggestionWindowRemoveEventListener : suggestionRemoveEventListener;
+  if (!intrinsic) return;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
+}
+
+type SuggestionActionKind = "accept" | "reject";
+
+interface SuggestionActionAuthority {
+  readonly mount: symbol;
+  readonly state: CommentSuggestionState;
+  readonly canAccept: boolean;
+  readonly canReject: boolean;
+  readonly disabled: boolean;
+  readonly onAccept: () => void | Promise<void>;
+  readonly onReject: () => void | Promise<unknown>;
+  readonly order: readonly SuggestionActionKind[];
+}
+
+interface SuggestionActionElements {
+  readonly root: HTMLDivElement;
+  readonly accept: HTMLButtonElement | null;
+  readonly reject: HTMLButtonElement | null;
+  readonly buttons: readonly HTMLButtonElement[];
+}
+
+interface SuggestionActionDefinition {
+  readonly identity: symbol;
+  readonly renderIdentity: symbol;
+  readonly kind: SuggestionActionKind;
+  readonly enabled: boolean;
+  readonly callback: () => void | Promise<unknown>;
+  readonly capture: (element: HTMLButtonElement | null) => void;
+  readonly onClickCapture: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+interface SuggestionActionRender {
+  readonly identity: symbol;
+  readonly authority: SuggestionActionAuthority;
+  readonly accept: SuggestionActionDefinition | null;
+  readonly reject: SuggestionActionDefinition | null;
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly onRootClickCapture: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly onRootClick: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onAcceptCapture: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureReject: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onRejectCapture: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly onReject: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly establish: () => void | (() => void);
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface SuggestionActionDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly SuggestionActionDomSnapshot[];
+}
+
+interface SuggestionActionNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface SuggestionActionPlacement {
+  readonly document: Document;
+  readonly chain: readonly SuggestionActionNodePlacement[];
+}
+
+interface SuggestionActionPublication {
+  readonly identity: symbol;
+  readonly render: SuggestionActionRender;
+  readonly authority: SuggestionActionAuthority;
+  readonly elements: SuggestionActionElements;
+  readonly ownerDocument: Document;
+  readonly dom: SuggestionActionDomSnapshot;
+  readonly placement: SuggestionActionPlacement;
+}
+
+interface SuggestionActionCells {
+  readonly active: { current: SuggestionActionPublication | null };
+  readonly successorOf: { current: SuggestionActionPublication | null };
+  readonly replay: { current: SuggestionActionReplay | null };
+  readonly retired: WeakSet<SuggestionActionPublication>;
+  readonly claimedPublications: WeakSet<SuggestionActionPublication>;
+  readonly claimedActions: WeakSet<SuggestionActionDefinition>;
+  readonly claimedReactEvents: WeakSet<object>;
+}
+
+interface SuggestionActionElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface SuggestionActionRefReplay {
+  readonly owner: SuggestionActionElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface SuggestionActionReplay {
+  readonly source: SuggestionActionPublication;
+  readonly dom: SuggestionActionDomSnapshot;
+  readonly placement: SuggestionActionPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface SuggestionActionDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface SuggestionNativeSnapshot {
+  readonly event: globalThis.MouseEvent;
+  readonly publication: SuggestionActionPublication;
+  readonly action: SuggestionActionDefinition | null;
+  readonly button: HTMLButtonElement | null;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly buttonValue: number;
+  readonly buttons: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly detail: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly screenX: number;
+  readonly screenY: number;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly relatedTarget: EventTarget | null;
+  readonly view: Window | null;
+  readonly timeStamp: number;
+}
+
+interface SuggestionNativeDelivery {
+  readonly snapshot: SuggestionNativeSnapshot;
+  delegationTarget: EventTarget | null;
+  crossedRoot: boolean;
+  captureInvalid: boolean;
+  captureEvent: object | null;
+  captureAction: SuggestionActionDefinition | null;
+  captureRootCount: number;
+  captureActionCount: number;
+  bubbleInvalid: boolean;
+  bubbleEvent: object | null;
+  bubbleAction: SuggestionActionDefinition | null;
+  bubbleActionCount: number;
+  bubbleRootCount: number;
+  bubbleDelivery: SuggestionReactDelivery | null;
+}
+
+interface SuggestionReactDelivery {
+  readonly publication: SuggestionActionPublication;
+  readonly action: SuggestionActionDefinition;
+  readonly event: object;
+  readonly native: SuggestionNativeDelivery;
+  readonly target: EventTarget;
+  readonly type: string;
+  readonly button: number;
+  readonly buttons: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+}
+
+interface SuggestionActionPublicationRuntime {
+  readonly publication: SuggestionActionPublication;
+  readonly publish: (owners: readonly SuggestionActionElementOwnerView[]) => boolean;
+  readonly stageCaptureRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly stageCaptureAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
+  readonly stageBubbleAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
+  readonly stageBubbleRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly noteRef: (owner: SuggestionActionElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+class SuggestionActionElementOwner<T extends HTMLElement> implements SuggestionActionElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: SuggestionActionElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+function suggestionActionSnapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotSuggestionActionDom(node: Node): SuggestionActionDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: suggestionActionSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotSuggestionActionDom)),
+  });
+}
+
+function suggestionActionDomMatches(snapshot: SuggestionActionDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = suggestionActionSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) => node.childNodes.item(index) === child.node && suggestionActionDomMatches(child))
+  );
+}
+
+function suggestionActionDomContains(snapshot: SuggestionActionDomSnapshot, target: Node): boolean {
+  return snapshot.node === target || snapshot.children.some((child) => suggestionActionDomContains(child, target));
+}
+
+function captureSuggestionActionPlacement(root: HTMLDivElement): SuggestionActionPlacement | null {
+  const document = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const chain: SuggestionActionNodePlacement[] = [];
+  let node: Node = root;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    chain.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+      }),
+    );
+    node = parent;
+  }
+  return Object.freeze({ document, chain: Object.freeze(chain) });
+}
+
+function suggestionActionPlacementMatches(root: HTMLDivElement, placement: SuggestionActionPlacement): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.chain.length > 0 &&
+    placement.chain[0]?.node === root &&
+    placement.chain.every(
+      ({ node, parent, previousSibling, nextSibling }) =>
+        node.parentNode === parent &&
+        node.previousSibling === previousSibling &&
+        node.nextSibling === nextSibling,
+    )
+  );
+}
+
+function suggestionActionPlacementMutationIsRelevant(record: MutationRecord, placement: SuggestionActionPlacement): boolean {
+  if (record.type !== "childList") {
+    return placement.chain.some(({ node }) => record.target === node);
+  }
+  return placement.chain.some(({ node, parent }) => {
+    if (record.target !== parent) return false;
+    return (
+      record.previousSibling === node ||
+      record.nextSibling === node ||
+      [...record.addedNodes].some((changed) => changed === node) ||
+      [...record.removedNodes].some((changed) => changed === node)
+    );
+  });
+}
+
+function createSuggestionActionDomGuard(
+  root: HTMLDivElement,
+  dom: SuggestionActionDomSnapshot,
+  placement: SuggestionActionPlacement,
+  onChange: () => void,
+): SuggestionActionDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    const nextChanged = records.some(
+      (record) =>
+        suggestionActionDomContains(dom, record.target) ||
+        suggestionActionPlacementMutationIsRelevant(record, placement),
+    );
+    if (nextChanged) {
+      changed = true;
+      onChange();
+    }
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(placement.document, {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    characterDataOldValue: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function suggestionActionControlIsEnabled(control: HTMLButtonElement): boolean {
+  if (control.disabled || control.matches(":disabled") || control.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (element.hasAttribute("inert") || element.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  }
+  return true;
+}
+
+function suggestionActionAuthoritiesMatch(previous: SuggestionActionAuthority, current: SuggestionActionAuthority): boolean {
+  return (
+    previous.mount === current.mount &&
+    previous.state === current.state &&
+    previous.canAccept === current.canAccept &&
+    previous.canReject === current.canReject &&
+    previous.disabled === current.disabled &&
+    previous.onAccept === current.onAccept &&
+    previous.onReject === current.onReject &&
+    previous.order.length === current.order.length &&
+    previous.order.every((kind, index) => kind === current.order[index])
+  );
+}
+
+function exactSuggestionActionDomIsCurrent(publication: SuggestionActionPublication): boolean {
+  const { authority, elements, ownerDocument } = publication;
+  const { root, accept, reject, buttons } = elements;
+  if (
+    !root.isConnected ||
+    root.ownerDocument !== ownerDocument ||
+    root.tagName !== "DIV" ||
+    root.className !== SUGGESTION_ACTIONS_CLASS ||
+    root.dataset.testid !== "suggestion-actions" ||
+    root.children.length !== authority.order.length ||
+    buttons.length !== authority.order.length ||
+    (authority.canAccept !== !!accept) ||
+    (authority.canReject !== !!reject)
+  ) {
+    return false;
+  }
+  return authority.order.every((kind, index) => {
+    const button = buttons[index];
+    const expected = kind === "accept" ? accept : reject;
+    const expectedDisabled = kind === "accept" ? authority.disabled || authority.state === "outdated" : authority.disabled;
+    const expectedClass = kind === "accept" ? SUGGESTION_ACCEPT_CLASS : SUGGESTION_REJECT_CLASS;
+    const expectedTestId = kind === "accept" ? "suggestion-accept-comment" : "suggestion-reject-comment";
+    const expectedText = kind === "accept" ? "Accept suggestion" : "Reject";
+    return (
+      !!button &&
+      button === expected &&
+      root.children.item(index) === button &&
+      button.isConnected &&
+      button.ownerDocument === ownerDocument &&
+      button.parentElement === root &&
+      button.tagName === "BUTTON" &&
+      button.type === "button" &&
+      button.disabled === expectedDisabled &&
+      button.className === expectedClass &&
+      button.dataset.testid === expectedTestId &&
+      button.textContent?.trim() === expectedText &&
+      (expectedDisabled || suggestionActionControlIsEnabled(button))
+    );
+  });
+}
+
+function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery): boolean {
+  const { snapshot } = delivery;
+  const { event, publication, target } = snapshot;
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(event instanceof ownerWindow.MouseEvent) ||
+    event.type !== snapshot.type ||
+    event.button !== snapshot.buttonValue ||
+    event.buttons !== snapshot.buttons ||
+    event.bubbles !== snapshot.bubbles ||
+    event.cancelable !== snapshot.cancelable ||
+    event.composed !== snapshot.composed ||
+    event.detail !== snapshot.detail ||
+    event.clientX !== snapshot.clientX ||
+    event.clientY !== snapshot.clientY ||
+    event.screenX !== snapshot.screenX ||
+    event.screenY !== snapshot.screenY ||
+    event.ctrlKey !== snapshot.ctrlKey ||
+    event.shiftKey !== snapshot.shiftKey ||
+    event.altKey !== snapshot.altKey ||
+    event.metaKey !== snapshot.metaKey ||
+    event.relatedTarget !== snapshot.relatedTarget ||
+    event.view !== snapshot.view ||
+    event.timeStamp !== snapshot.timeStamp ||
+    suggestionNativeTarget(event) !== target ||
+    event.defaultPrevented
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function suggestionNativeSnapshotMatches(delivery: SuggestionNativeDelivery): boolean {
+  const { event, publication, path } = delivery.snapshot;
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (!ownerWindow || event.eventPhase === ownerWindow.Event.NONE || !suggestionNativeSnapshotFieldsMatch(delivery)) {
+    return false;
+  }
+  const currentPath = suggestionNativeComposedPath(event);
+  return currentPath.length === path.length && path.every((entry, index) => currentPath[index] === entry);
+}
+
+function createSuggestionActionRender(
+  authority: SuggestionActionAuthority,
+  cells: SuggestionActionCells,
+  requestSuccessor: () => void,
+): SuggestionActionRender {
+  const render = {} as SuggestionActionRender;
+  const identity = Symbol("suggestion-action-render");
+  let currentRuntime: SuggestionActionPublicationRuntime | null = null;
+  let lastRuntime: SuggestionActionPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+  const buttonOwners: SuggestionActionElementOwner<HTMLButtonElement>[] = [];
+
+  const acceptsSuccessorOf = (publication: SuggestionActionPublication) =>
+    cells.active.current === null &&
+    cells.successorOf.current === publication &&
+    cells.retired.has(publication) &&
+    publication.render.isRetired() &&
+    !cells.claimedPublications.has(publication);
+
+  const requestReplaySuccessor = (runtime: SuggestionActionPublicationRuntime) => {
+    const { publication } = runtime;
+    if (
+      successorRequested ||
+      cells.replay.current !== null ||
+      !acceptsSuccessorOf(publication) ||
+      !suggestionActionAuthoritiesMatch(publication.authority, authority) ||
+      !exactSuggestionActionDomIsCurrent(publication) ||
+      !runtime.publishedDomMatches() ||
+      !runtime.stageSuccessorHandoff()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: publication,
+      dom: publication.dom,
+      placement: publication.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: SuggestionActionElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.publication)) requestReplaySuccessor(runtime);
+  };
+
+  const rootOwner = new SuggestionActionElementOwner<HTMLDivElement>(onElementChange);
+
+  const committedElements = (): SuggestionActionElements | null => {
+    const root = rootOwner.element();
+    const buttons = buttonOwners.map((owner) => owner.element());
+    if (!root || buttons.some((button) => button === null)) return null;
+    const committed = buttons as HTMLButtonElement[];
+    const acceptIndex = authority.order.indexOf("accept");
+    const rejectIndex = authority.order.indexOf("reject");
+    return Object.freeze({
+      root,
+      accept: acceptIndex === -1 ? null : committed[acceptIndex]!,
+      reject: rejectIndex === -1 ? null : committed[rejectIndex]!,
+      buttons: Object.freeze(committed),
+    });
+  };
+
+  const expectedOwners = (): readonly SuggestionActionElementOwnerView[] => [rootOwner, ...buttonOwners];
+
+  const createRuntime = (
+    publication: SuggestionActionPublication,
+    replayOwners: ReadonlySet<SuggestionActionElementOwnerView>,
+  ): SuggestionActionPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let released = false;
+    let replayRefs: SuggestionActionRefReplay[] = [];
+    let domGuard: SuggestionActionDomGuard | null = null;
+    const nativeDeliveries = new WeakMap<globalThis.MouseEvent, SuggestionNativeDelivery>();
+    const nativeBubbleTargets = new Set<EventTarget>();
+
+    const removeListeners = () => {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (ownerWindow) removeSuggestionWindowClickListener(ownerWindow, captureNative, true);
+      removeSuggestionClickListener(publication.elements.root, crossNativeRoot);
+      for (const target of nativeBubbleTargets) removeSuggestionClickListener(target, finalizeNative);
+      nativeBubbleTargets.clear();
+    };
+    const release = () => {
+      if (released) return;
+      released = true;
+      removeListeners();
+      domGuard?.release();
+    };
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(publication);
+      removeListeners();
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every((entry) => !entry.detached && !entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every((entry) => entry.detached && entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached && entry.reattached && entry.owner.element() === entry.element
+          : !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+        domGuard.isClean() &&
+        publication.elements.root === publication.dom.node &&
+        suggestionActionPlacementMatches(publication.elements.root, publication.placement) &&
+        suggestionActionDomMatches(publication.dom),
+      );
+    const publicationIsCurrent = () =>
+      !renderRetired &&
+      cells.active.current === publication &&
+      !cells.retired.has(publication) &&
+      publication.render === render &&
+      publication.authority === authority &&
+      exactSuggestionActionDomIsCurrent(publication) &&
+      publishedDomMatches();
+    const retireForMutation = () => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.claimedPublications.has(publication)
+      ) {
+        return;
+      }
+      retire("action");
+      if (successorRequested) return;
+      successorRequested = true;
+      flushSync(requestSuccessor);
+    };
+
+    function captureNative(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (
+        !publicationIsCurrent() ||
+        !ownerWindow ||
+        !(event instanceof ownerWindow.MouseEvent) ||
+        event.type !== "click" ||
+        event.button !== 0 ||
+        !event.bubbles ||
+        event.defaultPrevented ||
+        event.eventPhase === ownerWindow.Event.NONE
+      ) {
+        return;
+      }
+      const target = suggestionNativeTarget(event);
+      const NodeConstructor = ownerWindow.Node;
+      if (!(target instanceof NodeConstructor) || target.ownerDocument !== publication.ownerDocument) return;
+      const path = suggestionNativeComposedPath(event);
+      if (!path.includes(publication.elements.root)) return;
+      const action =
+        publication.elements.buttons
+          .map((button, index) => ({ button, action: authority.order[index] === "accept" ? render.accept : render.reject }))
+          .find(({ button }) => button.contains(target) && path.includes(button)) ?? null;
+      const snapshot: SuggestionNativeSnapshot = Object.freeze({
+        event,
+        publication,
+        action: action?.action ?? null,
+        button: action?.button ?? null,
+        target,
+        path: Object.freeze([...path]),
+        type: event.type,
+        buttonValue: event.button,
+        buttons: event.buttons,
+        bubbles: event.bubbles,
+        cancelable: event.cancelable,
+        composed: event.composed,
+        detail: event.detail,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        relatedTarget: event.relatedTarget,
+        view: event.view,
+        timeStamp: event.timeStamp,
+      });
+      const delivery: SuggestionNativeDelivery = {
+        snapshot,
+        delegationTarget: null,
+        crossedRoot: false,
+        captureInvalid: false,
+        captureEvent: null,
+        captureAction: null,
+        captureRootCount: 0,
+        captureActionCount: 0,
+        bubbleInvalid: false,
+        bubbleEvent: null,
+        bubbleAction: null,
+        bubbleActionCount: 0,
+        bubbleRootCount: 0,
+        bubbleDelivery: null,
+      };
+      nativeDeliveries.set(event, delivery);
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          if (nativeDeliveries.get(event) === delivery) nativeDeliveries.delete(event);
+        });
+      });
+    }
+
+    function crossNativeRoot(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow || !(event instanceof ownerWindow.MouseEvent)) return;
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        suggestionNativeCurrentTarget(event) !== publication.elements.root ||
+        !suggestionNativeSnapshotMatches(delivery)
+      ) {
+        return;
+      }
+      delivery.crossedRoot = true;
+      if (
+        delivery.captureInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        !delivery.captureEvent ||
+        !delivery.captureAction ||
+        delivery.snapshot.action !== delivery.captureAction ||
+        delivery.snapshot.button !==
+          (delivery.captureAction.kind === "accept"
+            ? publication.elements.accept
+            : publication.elements.reject)
+      ) {
+        delivery.captureInvalid = true;
+      }
+    }
+
+    const nativeDelivery = (
+      event: MouseEvent<HTMLElement>,
+      currentTarget: HTMLElement,
+      requireRootCrossing: boolean,
+    ): SuggestionNativeDelivery | null => {
+      if (!event || typeof event !== "object") return null;
+      const ownerWindow = publication.ownerDocument.defaultView;
+      const nativeEvent = event.nativeEvent;
+      if (!ownerWindow || !(nativeEvent instanceof ownerWindow.MouseEvent)) return null;
+      const delivery = nativeDeliveries.get(nativeEvent);
+      if (
+        !delivery ||
+        (requireRootCrossing && !delivery.crossedRoot) ||
+        delivery.snapshot.publication !== publication ||
+        event.nativeEvent !== delivery.snapshot.event ||
+        event.type !== "click" ||
+        event.button !== 0 ||
+        !event.bubbles ||
+        event.defaultPrevented ||
+        event.currentTarget !== currentTarget ||
+        event.target !== delivery.snapshot.target ||
+        suggestionNativeTarget(nativeEvent) !== event.target ||
+        !suggestionNativeSnapshotMatches(delivery)
+      ) {
+        return null;
+      }
+      return delivery;
+    };
+
+    const stageCaptureRoot = (event: MouseEvent<HTMLDivElement>) => {
+      const delivery = nativeDelivery(event, publication.elements.root, false);
+      if (
+        !delivery ||
+        delivery.crossedRoot ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureRootCount += 1;
+      if (delivery.captureRootCount !== 1 || (delivery.captureEvent && delivery.captureEvent !== event)) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureEvent = event;
+      const delegationTarget = suggestionNativeCurrentTarget(delivery.snapshot.event);
+      if (!delegationTarget || !delivery.snapshot.path.includes(delegationTarget)) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.delegationTarget = delegationTarget;
+      if (!nativeBubbleTargets.has(delegationTarget)) {
+        addSuggestionClickListener(delegationTarget, finalizeNative);
+        nativeBubbleTargets.add(delegationTarget);
+      }
+    };
+
+    const stageCaptureAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      const delivery = button ? nativeDelivery(event, button, false) : null;
+      if (
+        !delivery ||
+        delivery.crossedRoot ||
+        !button ||
+        action.renderIdentity !== identity ||
+        (action.kind === "accept" ? render.accept : render.reject) !== action ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureActionCount += 1;
+      if (
+        delivery.captureActionCount !== 1 ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureEvent !== event ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
+        (delivery.captureAction && delivery.captureAction !== action) ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button.contains(delivery.snapshot.target)
+      ) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureAction = action;
+    };
+
+    const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      const delivery = button ? nativeDelivery(event, button, true) : null;
+      if (delivery && delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event)) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      if (
+        !delivery ||
+        delivery.captureInvalid ||
+        !button ||
+        action.renderIdentity !== identity ||
+        (action.kind === "accept" ? render.accept : render.reject) !== action ||
+        delivery.captureAction !== action ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button.contains(delivery.snapshot.target) ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.bubbleActionCount += 1;
+      if (
+        delivery.bubbleActionCount !== 1 ||
+        (delivery.bubbleEvent && delivery.bubbleEvent !== event) ||
+        (delivery.bubbleAction && delivery.bubbleAction !== action)
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleEvent = event;
+      delivery.bubbleAction = action;
+      delivery.bubbleDelivery = Object.freeze({
+        publication,
+        action,
+        event,
+        native: delivery,
+        target: event.target,
+        type: event.type,
+        button: event.button,
+        buttons: event.buttons,
+        bubbles: event.bubbles,
+        cancelable: event.cancelable,
+      });
+    };
+
+    const stageBubbleRoot = (event: MouseEvent<HTMLDivElement>) => {
+      const delivery = nativeDelivery(event, publication.elements.root, true);
+      if (!delivery || !publicationIsCurrent()) return;
+      delivery.bubbleRootCount += 1;
+      if (
+        delivery.bubbleRootCount !== 1 ||
+        delivery.bubbleInvalid ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
+        delivery.bubbleEvent !== event ||
+        delivery.captureEvent === event ||
+        !delivery.bubbleAction ||
+        !delivery.bubbleDelivery
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+    };
+
+    function finalizeNative(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow || !(event instanceof ownerWindow.MouseEvent)) {
+        return;
+      }
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        suggestionNativeCurrentTarget(event) !== delivery.delegationTarget
+      ) {
+        return;
+      }
+      const pending = delivery.bubbleDelivery;
+      if (!pending) return;
+      const { action } = pending;
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      if (
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        delivery.bubbleActionCount !== 1 ||
+        delivery.bubbleRootCount !== 1 ||
+        delivery.captureAction !== action ||
+        delivery.bubbleAction !== action ||
+        pending.publication !== publication ||
+        pending.event !== delivery.bubbleEvent ||
+        pending.native !== delivery ||
+        pending.target !== delivery.snapshot.target ||
+        pending.type !== delivery.snapshot.type ||
+        pending.button !== delivery.snapshot.buttonValue ||
+        pending.buttons !== delivery.snapshot.buttons ||
+        pending.bubbles !== delivery.snapshot.bubbles ||
+        pending.cancelable !== delivery.snapshot.cancelable ||
+        !suggestionNativeSnapshotMatches(delivery) ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button ||
+        !button.contains(delivery.snapshot.target) ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        !delivery.captureEvent ||
+        cells.claimedReactEvents.has(delivery.captureEvent) ||
+        !delivery.bubbleEvent ||
+        cells.claimedReactEvents.has(delivery.bubbleEvent) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(action);
+      cells.claimedReactEvents.add(delivery.captureEvent);
+      cells.claimedReactEvents.add(delivery.bubbleEvent);
+      claimedSuggestionNativeEvents.add(delivery.snapshot.event);
+      nativeDeliveries.delete(delivery.snapshot.event);
+      event.stopPropagation();
+      void action.callback();
+    }
+
+    const runtime: SuggestionActionPublicationRuntime = Object.freeze({
+      publication,
+      publish: (owners: readonly SuggestionActionElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        domGuard = createSuggestionActionDomGuard(
+          publication.elements.root,
+          publication.dom,
+          publication.placement,
+          retireForMutation,
+        );
+        if (!domGuard) return false;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) throw new Error("Cannot publish suggestion actions without every committed ref");
+          return { owner, element, detached: false, reattached: false, handoffDetached: false };
+        });
+        const ownerWindow = publication.ownerDocument.defaultView;
+        if (!ownerWindow || !addSuggestionWindowClickListener(ownerWindow, captureNative, true)) return false;
+        addSuggestionClickListener(publication.elements.root, crossNativeRoot);
+        established = true;
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      stageCaptureRoot,
+      stageCaptureAction,
+      stageBubbleAction,
+      stageBubbleRoot,
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      noteRef: (owner: SuggestionActionElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (element === null && previous === proof.element && !proof.handoffDetached) proof.handoffDetached = true;
+          else if (element !== previous) invalidReplay = true;
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (element === proof.element && previous === null && proof.detached) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) || (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every((entry) => entry.handoffDetached && entry.owner.element() === null),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release,
+    });
+    return runtime;
+  };
+
+  const stageCaptureAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureAction(action, event);
+  };
+
+  const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleAction(action, event);
+  };
+
+  const action = (
+    kind: SuggestionActionKind,
+    enabled: boolean,
+    callback: () => void | Promise<unknown>,
+  ): SuggestionActionDefinition => {
+    const owner = new SuggestionActionElementOwner<HTMLButtonElement>(onElementChange);
+    buttonOwners.push(owner);
+    const definition = {} as SuggestionActionDefinition;
+    Object.assign(definition, {
+      identity: Symbol(`suggestion-${kind}`),
+      renderIdentity: identity,
+      kind,
+      enabled,
+      callback,
+      capture: owner.capture,
+      onClickCapture: (event: MouseEvent<HTMLButtonElement>) => stageCaptureAction(definition, event),
+      onClick: (event: MouseEvent<HTMLButtonElement>) => stageBubbleAction(definition, event),
+    });
+    return Object.freeze(definition);
+  };
+
+  const accept = authority.canAccept
+    ? action("accept", !authority.disabled && authority.state !== "outdated", authority.onAccept)
+    : null;
+  const reject = authority.canReject
+    ? action("reject", !authority.disabled, authority.onReject)
+    : null;
+
+  const establish = () => {
+    if (lastRuntime) {
+      const exactReplay = lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay();
+      if (exactReplay && acceptsSuccessorOf(lastRuntime.publication)) {
+        requestReplaySuccessor(lastRuntime);
+      } else if (
+        lastRuntime.isRetired() &&
+        !lastRuntime.mutationHistoryIsClean() &&
+        !successorRequested
+      ) {
+        successorRequested = true;
+        const replay = cells.replay.current;
+        if (replay?.source === lastRuntime.publication) {
+          cells.replay.current = null;
+          replay.release();
+        } else {
+          lastRuntime.release();
+        }
+        requestSuccessor();
+      }
+      return undefined;
+    }
+    if (renderRetired || invalidBeforeEstablish) return undefined;
+    const elements = committedElements();
+    const placement = elements ? captureSuggestionActionPlacement(elements.root) : null;
+    if (!elements || !placement) return undefined;
+    const publication: SuggestionActionPublication = Object.freeze({
+      identity: Symbol("suggestion-action-publication"),
+      render,
+      authority,
+      elements,
+      ownerDocument: elements.root.ownerDocument,
+      dom: snapshotSuggestionActionDom(elements.root),
+      placement,
+    });
+    if (!exactSuggestionActionDomIsCurrent(publication)) return undefined;
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = suggestionActionAuthoritiesMatch(replay.source.authority, authority);
+      const exactReplay =
+        sameAuthority &&
+        replay.source.render.isRetired() &&
+        cells.retired.has(replay.source) &&
+        cells.successorOf.current === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.root === replay.dom.node &&
+        suggestionActionPlacementMatches(elements.root, replay.placement) &&
+        suggestionActionDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+      if (sameAuthority && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(publication);
+        if (!successorRequested) {
+          successorRequested = true;
+          requestSuccessor();
+        }
+        return undefined;
+      }
+    }
+
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.render.retire();
+    const transitionSource = cells.successorOf.current;
+    const owners = expectedOwners();
+    const replayOwners = new Set<SuggestionActionElementOwnerView>();
+    if (transitionSource?.authority.mount === authority.mount) {
+      for (const owner of owners) {
+        const element = owner.element();
+        if (element && !suggestionActionDomContains(transitionSource.dom, element)) replayOwners.add(owner);
+      }
+    }
+    const runtime = createRuntime(publication, replayOwners);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish(owners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const retire = () => {
+    if (renderRetired) return false;
+    if (currentRuntime) {
+      currentRuntime.retireForAction();
+      return true;
+    }
+    renderRetired = true;
+    return true;
+  };
+
+  const onRootClickCapture = (event: MouseEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureRoot(event);
+  };
+
+  const onRootClick = (event: MouseEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleRoot(event);
+  };
+
+  Object.assign(render, {
+    identity,
+    authority,
+    accept,
+    reject,
+    captureRoot: rootOwner.capture,
+    onRootClickCapture,
+    onRootClick,
+    captureAccept: accept?.capture ?? null,
+    onAcceptCapture: accept?.onClickCapture ?? null,
+    onAccept: accept?.onClick ?? null,
+    captureReject: reject?.capture ?? null,
+    onRejectCapture: reject?.onClickCapture ?? null,
+    onReject: reject?.onClick ?? null,
+    establish,
+    retire,
+    isRetired: () => renderRetired,
+  });
+  return Object.freeze(render);
+}
+
+function PublishedSuggestionActions({
   state,
   canAccept,
   canReject,
@@ -184,27 +1464,105 @@ function SuggestionActions({
   onAccept: () => void | Promise<void>;
   onReject: () => void | Promise<unknown>;
 }) {
-  if ((state !== "pending" && state !== "outdated") || (!canAccept && !canReject)) return null;
+  const [mount] = useState(() => Symbol("suggestion-actions"));
+  const [cells] = useState<SuggestionActionCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet<SuggestionActionPublication>(),
+    claimedPublications: new WeakSet<SuggestionActionPublication>(),
+    claimedActions: new WeakSet<SuggestionActionDefinition>(),
+    claimedReactEvents: new WeakSet<object>(),
+  }));
+  const replayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    replayCleanup.current += 1;
+    return () => {
+      replayCleanup.current += 1;
+      const cleanup = replayCleanup.current;
+      queueMicrotask(() => {
+        if (replayCleanup.current !== cleanup) return;
+        const replay = cells.replay.current;
+        if (!replay) return;
+        cells.replay.current = null;
+        if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+        replay.release();
+      });
+    };
+  }, [cells]);
+  const [, setPublicationRevision] = useState(0);
+  const requestSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const authority: SuggestionActionAuthority = Object.freeze({
+    mount,
+    state,
+    canAccept,
+    canReject,
+    disabled,
+    onAccept,
+    onReject,
+    order: Object.freeze([
+      ...(canAccept ? (["accept"] as const) : []),
+      ...(canReject ? (["reject"] as const) : []),
+    ]),
+  });
+  const publication = createSuggestionActionRender(authority, cells, requestSuccessor);
+  useLayoutEffect(() => publication.establish(), [publication]);
+  const {
+    captureRoot,
+    onRootClickCapture,
+    onRootClick,
+    captureAccept,
+    onAcceptCapture,
+    onAccept: onAcceptClick,
+    captureReject,
+    onRejectCapture,
+    onReject: onRejectClick,
+  } = publication;
+
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()} data-testid="suggestion-actions">
+    <div ref={captureRoot} className={SUGGESTION_ACTIONS_CLASS} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid="suggestion-actions">
       {canAccept && (
         <button
+          ref={captureAccept}
           type="button"
-          className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
+          className={SUGGESTION_ACCEPT_CLASS}
           disabled={disabled || state === "outdated"}
-          onClick={() => void onAccept()}
+          onClickCapture={onAcceptCapture!}
+          onClick={onAcceptClick!}
           data-testid="suggestion-accept-comment"
         >
           <Check size={13} /> Accept suggestion
         </button>
       )}
       {canReject && (
-        <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap" disabled={disabled} onClick={() => void onReject()} data-testid="suggestion-reject-comment">
+        <button
+          ref={captureReject}
+          type="button"
+          className={SUGGESTION_REJECT_CLASS}
+          disabled={disabled}
+          onClickCapture={onRejectCapture!}
+          onClick={onRejectClick!}
+          data-testid="suggestion-reject-comment"
+        >
           <X size={13} /> Reject
         </button>
       )}
     </div>
   );
+}
+
+function SuggestionActions(props: {
+  state: CommentSuggestionState;
+  canAccept: boolean;
+  canReject: boolean;
+  disabled?: boolean;
+  onAccept: () => void | Promise<void>;
+  onReject: () => void | Promise<unknown>;
+}) {
+  if ((props.state !== "pending" && props.state !== "outdated") || (!props.canAccept && !props.canReject)) return null;
+  return <PublishedSuggestionActions {...props} />;
 }
 
 /** Review card author label: token name for agents, display name for humans. */
