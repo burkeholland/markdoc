@@ -6396,6 +6396,15 @@ type CommentNavigationKeyboardEventField =
   | "shiftKey"
   | "altKey"
   | "metaKey";
+type CommentNavigationMutationRecordField =
+  | "type"
+  | "target"
+  | "previousSibling"
+  | "nextSibling"
+  | "addedNodes"
+  | "removedNodes"
+  | "attributeName"
+  | "oldValue";
 
 interface CommentNavigationEventIntrinsics {
   readonly document: CommentNavigationNativeGetters<"activeElement">;
@@ -6412,6 +6421,7 @@ interface CommentNavigationMutationObserverIntrinsics {
   readonly observe: MutationObserver["observe"];
   readonly takeRecords: MutationObserver["takeRecords"];
   readonly disconnect: MutationObserver["disconnect"];
+  readonly record: CommentNavigationNativeGetters<CommentNavigationMutationRecordField>;
 }
 
 function captureCommentNavigationGetters<const Fields extends readonly string[]>(
@@ -6538,8 +6548,18 @@ function captureCommentNavigationMutationObserverIntrinsics(
     Constructor.prototype,
     "disconnect",
   );
-  if (!observe || !takeRecords || !disconnect) return null;
-  return Object.freeze({ Constructor, observe, takeRecords, disconnect });
+  const record = captureCommentNavigationGetters(ownerWindow.MutationRecord.prototype, [
+    "type",
+    "target",
+    "previousSibling",
+    "nextSibling",
+    "addedNodes",
+    "removedNodes",
+    "attributeName",
+    "oldValue",
+  ] as const);
+  if (!observe || !takeRecords || !disconnect || !record) return null;
+  return Object.freeze({ Constructor, observe, takeRecords, disconnect, record });
 }
 
 function commentNavigationNativeValue<Value>(
@@ -6598,6 +6618,35 @@ function commentNavigationActiveElement(
     publication.ownerDocument,
     [],
   ) as Element | null;
+}
+
+interface CommentNavigationMutationRecordSnapshot {
+  readonly type: MutationRecordType;
+  readonly target: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly addedNodes: readonly Node[];
+  readonly removedNodes: readonly Node[];
+  readonly attributeName: string | null;
+  readonly oldValue: string | null;
+}
+
+function snapshotCommentNavigationMutationRecord(
+  record: MutationRecord,
+  intrinsics: CommentNavigationMutationObserverIntrinsics,
+): CommentNavigationMutationRecordSnapshot {
+  const get = <Value,>(field: CommentNavigationMutationRecordField) =>
+    suggestionReflectApply(intrinsics.record[field], record, []) as Value;
+  return Object.freeze({
+    type: get<MutationRecordType>("type"),
+    target: get<Node>("target"),
+    previousSibling: get<Node | null>("previousSibling"),
+    nextSibling: get<Node | null>("nextSibling"),
+    addedNodes: Object.freeze([...get<NodeList>("addedNodes")]),
+    removedNodes: Object.freeze([...get<NodeList>("removedNodes")]),
+    attributeName: get<string | null>("attributeName"),
+    oldValue: get<string | null>("oldValue"),
+  });
 }
 
 interface CommentNavigationTabFacts {
@@ -6801,6 +6850,7 @@ interface CommentNavigationNativeSnapshot {
   readonly focus: Readonly<{
     relatedTarget: EventTarget | null;
     view: Window | null;
+    activeElement: Element | null;
   }> | null;
   readonly keyboard: Readonly<{
     key: string;
@@ -7134,7 +7184,7 @@ function commentNavigationPlacementMatches(
 }
 
 function commentNavigationPlacementMutationIsRelevant(
-  record: MutationRecord,
+  record: CommentNavigationMutationRecordSnapshot,
   placement: CommentNavigationPlacement,
 ): boolean {
   if (record.type !== "childList") {
@@ -7254,7 +7304,7 @@ function commentNavigationDomMatches(snapshot: CommentNavigationDomSnapshot): bo
 }
 
 function commentNavigationDomMutationIsRelevant(
-  record: MutationRecord,
+  record: CommentNavigationMutationRecordSnapshot,
   dom: CommentNavigationDomSnapshot,
 ): boolean {
   const shellEntry = commentNavigationSelectiveDomEntry(dom.shell, record.target);
@@ -7283,11 +7333,13 @@ function createCommentNavigationDomGuard(
   const recordChanges = (records: readonly MutationRecord[]) => {
     if (changed) return;
     if (
-      records.some(
-        (record) =>
-          commentNavigationDomMutationIsRelevant(record, dom) ||
-          commentNavigationPlacementMutationIsRelevant(record, placement),
-      )
+      records
+        .map((record) => snapshotCommentNavigationMutationRecord(record, intrinsics))
+        .some(
+          (record) =>
+            commentNavigationDomMutationIsRelevant(record, dom) ||
+            commentNavigationPlacementMutationIsRelevant(record, placement),
+        )
     ) {
       changed = true;
       onChange();
@@ -7635,7 +7687,9 @@ function commentNavigationNativeSnapshotMatches(
           focusEvent.relatedTarget,
           event,
         ) === focus.relatedTarget &&
-        commentNavigationNativeValue<Window | null>(uiEvent.view, event) === focus.view,
+        commentNavigationNativeValue<Window | null>(uiEvent.view, event) === focus.view &&
+        focus.activeElement === snapshot.control &&
+        commentNavigationActiveElement(publication) === focus.activeElement,
     );
   }
   const keyboard = snapshot.keyboard;
@@ -7953,6 +8007,7 @@ function createCommentNavigationRender(
           !control ||
           target !== control ||
           !path.includes(control) ||
+          commentNavigationActiveElement(publication) !== control ||
           action.tab === authority.selectedTab
         ) {
           return null;
@@ -8081,6 +8136,7 @@ function createCommentNavigationRender(
                 event,
               ),
               view: commentNavigationNativeValue<Window | null>(uiEvent.view, event),
+              activeElement: commentNavigationActiveElement(publication),
             })
           : null;
       const keyboard =

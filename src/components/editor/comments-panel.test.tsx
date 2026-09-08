@@ -1721,6 +1721,46 @@ describe("CommentsPanel", () => {
     }
   });
 
+  it("rejects a genuine focus event when its tab does not own document focus", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      const fixture = reviewSession("comment-navigation-focus-custody");
+      session = fixture.session;
+      render(
+        <CommentsPanel
+          session={session}
+          onClose={() => {}}
+          onReveal={() => {}}
+          focusTab={{ tab: "open", nonce: 1 }}
+        />,
+      );
+      const navigation = captureCommentNavigation();
+      const ownerWindow = navigation.resolved.element.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
+      outside.focus();
+
+      act(() => {
+        navigation.resolved.element.dispatchEvent(
+          new ownerWindow.FocusEvent("focusin", {
+            bubbles: true,
+            relatedTarget: outside,
+          }),
+        );
+      });
+      expect(outside).toHaveFocus();
+      expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
+
+      navigation.resolved.element.focus();
+      expect(navigation.resolved.element).toHaveFocus();
+      await waitFor(() =>
+        expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true"),
+      );
+    } finally {
+      outside.remove();
+    }
+  });
+
   it("uses captured observer drains when prototype methods are replaced", async () => {
     const fixture = reviewSession("comment-navigation-observer-intrinsics");
     session = fixture.session;
@@ -1754,6 +1794,49 @@ describe("CommentsPanel", () => {
       expect(stale.open.element).toHaveAttribute("aria-selected", "true");
     } finally {
       Object.defineProperty(prototype, "takeRecords", takeRecords);
+    }
+
+    await act(async () => {});
+    const recovered = captureCommentNavigation();
+    expect(recovered.resolved.click).not.toBe(stale.resolved.click);
+    act(() => dispatchReviewClick(recovered.resolved.element));
+    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("reads mutation relevance through captured owner-realm record accessors", async () => {
+    const fixture = reviewSession("comment-navigation-mutation-record-intrinsics");
+    session = fixture.session;
+    render(
+      <CommentsPanel
+        session={session}
+        onClose={() => {}}
+        onReveal={() => {}}
+        focusTab={{ tab: "open", nonce: 1 }}
+      />,
+    );
+    const stale = captureCommentNavigation();
+    const ownerDocument = stale.panel.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
+    const prototype = ownerWindow.MutationRecord.prototype;
+    const target = Object.getOwnPropertyDescriptor(prototype, "target");
+    if (!target || typeof target.get !== "function") {
+      throw new Error("MutationRecord.target was not an accessor");
+    }
+
+    Object.defineProperty(prototype, "target", {
+      ...target,
+      get: () => ownerDocument,
+    });
+    try {
+      act(() => {
+        stale.resolved.element.setAttribute("aria-selected", "true");
+        stale.resolved.element.setAttribute("aria-selected", "false");
+        dispatchReviewClick(stale.resolved.element);
+      });
+      expect(stale.open.element).toHaveAttribute("aria-selected", "true");
+    } finally {
+      Object.defineProperty(prototype, "target", target);
     }
 
     await act(async () => {});
