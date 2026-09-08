@@ -2705,6 +2705,184 @@ describe("CommentsPanel", () => {
       },
     );
 
+    it.each(["invert", "add-target"] as const)(
+      "retires a local batch when its published callback is replaced to %s",
+      async (replacement) => {
+        const fixture = makeBatchSession(`suggestions-callback-${replacement}`, 0);
+        addLocalBatchSuggestion(fixture, "gamma");
+        const originalReview = fixture.session.reviewSuggestion;
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const stale = captureSuggestionBatchActions(host).reject!;
+          const replacedReview = vi.spyOn(fixture.session, "reviewSuggestion").mockImplementation((action, id) => {
+            if (replacement === "add-target") addLocalBatchSuggestion(fixture, "delta");
+            const nextAction =
+              replacement === "invert"
+                ? action === "acceptAll"
+                  ? "rejectAll"
+                  : action === "rejectAll"
+                    ? "acceptAll"
+                    : action
+                : action;
+            return originalReview.call(fixture.session, nextAction, id);
+          });
+
+          act(() => dispatchReviewClick(stale.element));
+          expect(replacedReview).not.toHaveBeenCalled();
+          expect(fixture.session.suggestions.groups()).toHaveLength(1);
+
+          replacedReview.mockRestore();
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const current = captureSuggestionBatchActions(host).reject!;
+          expect(current.click).not.toBe(stale.click);
+          act(() => dispatchReviewClick(current.element));
+          expect(fixture.session.suggestions.groups()).toHaveLength(0);
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("rejects a new local target introduced after the batch owner is claimed", async () => {
+      const fixture = makeBatchSession("suggestions-target-added-after-claim", 0);
+      addLocalBatchSuggestion(fixture, "gamma");
+      const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+        });
+        const stale = captureSuggestionBatchActions(host).reject!;
+        const intrinsicSet = Map.prototype.set;
+        let introduced = false;
+        Map.prototype.set = function (key, value) {
+          const result = Reflect.apply(intrinsicSet, this, [key, value]);
+          const owner = value as { action?: unknown };
+          if (!introduced && key === "suggestions" && owner.action === "suggestions-reject") {
+            introduced = true;
+            addLocalBatchSuggestion(fixture, "delta");
+          }
+          return result;
+        };
+        try {
+          act(() => dispatchReviewClick(stale.element));
+        } finally {
+          Map.prototype.set = intrinsicSet;
+        }
+
+        expect(introduced).toBe(true);
+        expect(reviewLocal).not.toHaveBeenCalled();
+        expect(fixture.session.suggestions.groups()).toHaveLength(2);
+
+        await act(async () => {});
+        const current = captureSuggestionBatchActions(host).reject!;
+        act(() => dispatchReviewClick(current.element));
+        expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("rejectAll");
+        expect(fixture.session.suggestions.groups()).toHaveLength(0);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("reads canceled native clicks through the intrinsic getter and leaves a clean successor usable", async () => {
+      const fixture = makeBatchSession("suggestions-canceled-native-click", 0);
+      addLocalBatchSuggestion(fixture, "gamma");
+      const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+      const firstToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const secondToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const cancelAndShadow = (event: Event) => {
+        event.preventDefault();
+        Object.defineProperty(event, "defaultPrevented", { configurable: true, value: false });
+      };
+      window.addEventListener("click", cancelAndShadow, true);
+      let cancelListenerInstalled = true;
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, firstToast)}</StrictMode>);
+        });
+        const stale = captureSuggestionBatchActions(host).accept!;
+        const canceled = new MouseEvent("click", { bubbles: true, cancelable: true });
+        let dispatched = true;
+        act(() => {
+          dispatched = stale.element.dispatchEvent(canceled);
+        });
+        expect(dispatched).toBe(false);
+        expect(canceled.defaultPrevented).toBe(false);
+        expect(reviewLocal).not.toHaveBeenCalled();
+
+        window.removeEventListener("click", cancelAndShadow, true);
+        cancelListenerInstalled = false;
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
+        });
+        const current = captureSuggestionBatchActions(host).accept!;
+        expect(current.click).not.toBe(stale.click);
+        act(() => dispatchReviewClick(current.element));
+        expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("acceptAll");
+        expect(firstToast).not.toHaveBeenCalled();
+        expect(secondToast).toHaveBeenCalledOnce();
+      } finally {
+        if (cancelListenerInstalled) window.removeEventListener("click", cancelAndShadow, true);
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps local target scans bounded for a large published batch and one activation", async () => {
+      const created = reviewSession("suggestions-linear-snapshot");
+      session = created.session;
+      const sourceWords = Array.from({ length: 120 }, (_, index) => `word${index}`);
+      const sourceText = sourceWords.join(" ");
+      session.ytext.insert(0, sourceText);
+      const agent = makeCollabUser("agent:alice:Linear", "Linear");
+      let from = 0;
+      session.suggestions.proposeEdits(
+        sourceWords.map((word) => {
+          const edit = { from, to: from + word.length, insert: word.toUpperCase() };
+          from += word.length + 1;
+          return edit;
+        }),
+        agent,
+      );
+      session.undoManager.clear();
+      const groups = vi.spyOn(session.suggestions, "groups");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(session!)}</StrictMode>);
+        });
+        const renderScans = groups.mock.calls.length;
+        groups.mockClear();
+
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        const activationScans = groups.mock.calls.length;
+
+        expect(renderScans).toBeLessThan(30);
+        expect(activationScans).toBeLessThan(30);
+        expect(session.suggestions.groups()).toHaveLength(0);
+        expect(session.undoManager.undoStack).toHaveLength(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
     it("retires permission and callback publications while preserving current recovery", async () => {
       const fixture = makeBatchSession("suggestions-permission-callback", 1);
       const host = document.createElement("div");

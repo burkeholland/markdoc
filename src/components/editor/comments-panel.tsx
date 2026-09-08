@@ -183,6 +183,10 @@ const suggestionEventTargetGetter = Object.getOwnPropertyDescriptor(
   globalThis.Event.prototype,
   "target",
 )?.get;
+const suggestionEventDefaultPreventedGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "defaultPrevented",
+)?.get;
 const suggestionEventComposedPath = globalThis.Event.prototype.composedPath;
 const suggestionAddEventListener = globalThis.EventTarget.prototype.addEventListener;
 const suggestionRemoveEventListener = globalThis.EventTarget.prototype.removeEventListener;
@@ -207,6 +211,11 @@ function suggestionNativeTarget(event: Event): EventTarget | null {
 
 function suggestionNativeComposedPath(event: Event): EventTarget[] {
   return suggestionReflectApply(suggestionEventComposedPath, event, []) as EventTarget[];
+}
+
+function suggestionNativeDefaultPrevented(event: Event): boolean {
+  return !suggestionEventDefaultPreventedGetter ||
+    suggestionReflectApply(suggestionEventDefaultPreventedGetter, event, []) === true;
 }
 
 function addSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
@@ -727,7 +736,7 @@ function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery)
     event.view !== snapshot.view ||
     event.timeStamp !== snapshot.timeStamp ||
     suggestionNativeTarget(event) !== target ||
-    event.defaultPrevented
+    suggestionNativeDefaultPrevented(event)
   ) {
     return false;
   }
@@ -937,7 +946,7 @@ function createSuggestionActionRender(
         event.type !== "click" ||
         event.button !== 0 ||
         !event.bubbles ||
-        event.defaultPrevented ||
+        suggestionNativeDefaultPrevented(event) ||
         event.eventPhase === ownerWindow.Event.NONE
       ) {
         return;
@@ -3840,11 +3849,19 @@ function snapshotCommentResolveTarget(session: CollabSession, thread: CommentThr
   });
 }
 
-function snapshotLocalSuggestionTarget(session: CollabSession, suggestion: SuggestionGroup): LocalSuggestionBatchTarget | null {
+function indexLocalSuggestionGroups(groups: readonly SuggestionGroup[]): ReadonlyMap<string, SuggestionGroup> {
+  return new Map(groups.map((group) => [group.id, group]));
+}
+
+function snapshotLocalSuggestionTarget(
+  session: CollabSession,
+  suggestion: SuggestionGroup,
+  currentGroups: ReadonlyMap<string, SuggestionGroup>,
+): LocalSuggestionBatchTarget | null {
   const memberIds = suggestion.members.map((member) => member.id);
   const memberIdentities = memberIds.map((id) => session.suggestions.ymap.get(id));
   if (memberIdentities.some((identity) => !identity)) return null;
-  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === suggestion.id);
+  const current = currentGroups.get(suggestion.id);
   if (!current || current.members.map((member) => member.id).join("\0") !== memberIds.join("\0") || current.before !== suggestion.before || current.after !== suggestion.after) return null;
   return Object.freeze({
     kind: "local-suggestion",
@@ -3857,11 +3874,13 @@ function snapshotLocalSuggestionTarget(session: CollabSession, suggestion: Sugge
   });
 }
 
-function localSuggestionTargetStatus(session: CollabSession, target: LocalSuggestionBatchTarget): "ready" | "outdated" | "missing" {
-  if (target.memberIds.some((id, index) => session.suggestions.ymap.get(id) !== target.memberIdentities[index])) return "missing";
-  const current = session.suggestions.groups(session.ytext.toString()).find((group) => group.id === target.suggestionId);
-  if (!current || current.members.map((member) => member.id).join("\0") !== target.memberIds.join("\0") || current.before !== target.before || current.after !== target.after) return "missing";
-  return current.outdated ? "outdated" : "ready";
+function snapshotLocalSuggestionTargets(
+  session: CollabSession,
+  sources: readonly SuggestionGroup[],
+  currentGroups: readonly SuggestionGroup[],
+): readonly (LocalSuggestionBatchTarget | null)[] {
+  const index = indexLocalSuggestionGroups(currentGroups);
+  return sources.map((source) => snapshotLocalSuggestionTarget(session, source, index));
 }
 
 function commentSuggestionTargetStatus(session: CollabSession, target: CommentSuggestionBatchTarget): "ready" | "outdated" | "missing" {
@@ -3907,6 +3926,7 @@ async function executeCommentBatch(
   owner: CommentBatchOwner,
   ops: Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">,
   onToast?: CommentsPanelProps["onToast"],
+  reviewSuggestion?: CollabSession["reviewSuggestion"],
 ) {
   let done = 0;
   let failed = 0;
@@ -3917,13 +3937,26 @@ async function executeCommentBatch(
 
   if (localTargets.length > 0) {
     if (!currentCommentBatchContext(coordinator, owner)) return;
-    const status = localTargets.map((target) => localSuggestionTargetStatus(owner.session, target));
-    if (status.some((value) => value !== "ready")) {
+    const currentReviewSuggestion = owner.session.reviewSuggestion;
+    const currentLocalGroups = owner.session.suggestions.groups(owner.session.ytext.toString());
+    const currentLocalTargets = snapshotLocalSuggestionTargets(owner.session, currentLocalGroups, currentLocalGroups);
+    const exactLocalBatch =
+      reviewSuggestion !== undefined &&
+      currentReviewSuggestion === reviewSuggestion &&
+      currentLocalGroups.length === localTargets.length &&
+      currentLocalTargets.length === localTargets.length &&
+      currentLocalTargets.every((target, targetIndex) =>
+        sameLocalSuggestionTarget(target, localTargets[targetIndex] ?? null),
+      ) &&
+      currentLocalGroups.every((group) => !group.outdated);
+    if (!exactLocalBatch) {
       skipped += owner.targets.length;
       index = owner.targets.length;
     } else {
       try {
-        const decided = owner.session.reviewSuggestion(accepting ? "acceptAll" : "rejectAll");
+        const decided = suggestionReflectApply(reviewSuggestion, owner.session, [
+          accepting ? "acceptAll" : "rejectAll",
+        ]) as number;
         done += Math.min(decided, localTargets.length);
         skipped += Math.max(0, localTargets.length - decided);
       } catch (error) {
@@ -4070,6 +4103,7 @@ interface SuggestionBatchAuthority {
   readonly rejectDisabled: boolean;
   readonly opsSource: ReturnType<typeof useCommentOps>;
   readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
+  readonly reviewSuggestion: CollabSession["reviewSuggestion"];
   readonly onToast: CommentsPanelProps["onToast"];
   readonly presentation: SuggestionActionPresentation;
   readonly claims: SuggestionBatchClaimCells;
@@ -4901,6 +4935,7 @@ function createSuggestionBatchAuthority({
   session,
   text,
   localSources,
+  localTargetSnapshots,
   commentSources,
   targets,
   coordinator,
@@ -4913,6 +4948,7 @@ function createSuggestionBatchAuthority({
   session: CollabSession;
   text: string;
   localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
   commentSources: readonly CommentSuggestionTarget[];
   targets: readonly CommentBatchTarget[];
   coordinator: CommentRowActionCoordinator;
@@ -4922,7 +4958,6 @@ function createSuggestionBatchAuthority({
   onToast: CommentsPanelProps["onToast"];
   claims: SuggestionBatchClaimCells;
 }): SuggestionBatchAuthority {
-  const localTargetSnapshots = Object.freeze(localSources.map((target) => snapshotLocalSuggestionTarget(session, target)));
   const commentTargetSnapshots = Object.freeze(commentSources.map((target) => snapshotCommentSuggestionTarget(session, target)));
   const localOutdated = Object.freeze(localSources.map((target) => target.outdated));
   const commentStates = Object.freeze(commentSources.map((target) => target.state));
@@ -4947,7 +4982,7 @@ function createSuggestionBatchAuthority({
     canAct: session.role === "owner" || session.role === "editor",
     text,
     localSources: Object.freeze([...localSources]),
-    localTargetSnapshots,
+    localTargetSnapshots: Object.freeze([...localTargetSnapshots]),
     localOutdated,
     commentSources: Object.freeze([...commentSources]),
     commentTargetSnapshots,
@@ -4966,6 +5001,7 @@ function createSuggestionBatchAuthority({
       rejectSuggestion: ops.rejectSuggestion,
       resolve: ops.resolve,
     }),
+    reviewSuggestion: session.reviewSuggestion,
     onToast,
     presentation,
     claims,
@@ -5005,6 +5041,7 @@ function suggestionBatchAuthoritiesMatch(
       previous.ops.acceptSuggestion === current.ops.acceptSuggestion &&
       previous.ops.rejectSuggestion === current.ops.rejectSuggestion &&
       previous.ops.resolve === current.ops.resolve &&
+      previous.reviewSuggestion === current.reviewSuggestion &&
       previous.onToast === current.onToast &&
       suggestionActionPresentationsMatch(previous.presentation, current.presentation) &&
       previous.claims === current.claims)
@@ -5026,12 +5063,14 @@ function suggestionBatchAuthorityFactsAreCurrent(batch: SuggestionBatchAuthority
     ((coordinator.batchOwners.get(SUGGESTIONS_SCOPE) ?? null) !== null) !== batch.busy ||
     batch.opsSource.acceptSuggestion !== batch.ops.acceptSuggestion ||
     batch.opsSource.rejectSuggestion !== batch.ops.rejectSuggestion ||
-    batch.opsSource.resolve !== batch.ops.resolve
+    batch.opsSource.resolve !== batch.ops.resolve ||
+    session.reviewSuggestion !== batch.reviewSuggestion
   ) {
     return false;
   }
 
-  const sourceLocalTargets = batch.localSources.map((target) => snapshotLocalSuggestionTarget(session, target));
+  const currentLocalSources = session.suggestions.groups(batch.text);
+  const sourceLocalTargets = snapshotLocalSuggestionTargets(session, batch.localSources, currentLocalSources);
   const sourceCommentTargets = batch.commentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
   if (
     sourceLocalTargets.length !== batch.localTargetSnapshots.length ||
@@ -5044,11 +5083,10 @@ function suggestionBatchAuthorityFactsAreCurrent(batch: SuggestionBatchAuthority
     return false;
   }
 
-  const currentLocalSources = session.suggestions.groups(batch.text);
   const currentCommentSources = commentSuggestionTargets(session.comments.list(), batch.text).filter(
     (target) => target.state === "pending" || target.state === "outdated",
   );
-  const currentLocalTargets = currentLocalSources.map((target) => snapshotLocalSuggestionTarget(session, target));
+  const currentLocalTargets = snapshotLocalSuggestionTargets(session, currentLocalSources, currentLocalSources);
   const currentCommentTargets = currentCommentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
   const currentTargets = [...currentLocalTargets, ...currentCommentTargets].filter(
     (target): target is LocalSuggestionBatchTarget | CommentSuggestionBatchTarget => target !== null,
@@ -5113,7 +5151,13 @@ function invokeSuggestionBatch(authority: SuggestionBatchAuthority, accept: bool
     return false;
   }
   authority.claims.owners.add(owner);
-  void executeCommentBatch(authority.coordinator, owner, authority.ops, authority.onToast);
+  void executeCommentBatch(
+    authority.coordinator,
+    owner,
+    authority.ops,
+    authority.onToast,
+    authority.reviewSuggestion,
+  );
   return true;
 }
 
@@ -6245,6 +6289,7 @@ function PublishedSuggestionBatchActions({
   session,
   text,
   localSources,
+  localTargetSnapshots,
   commentSources,
   targets,
   coordinator,
@@ -6256,6 +6301,7 @@ function PublishedSuggestionBatchActions({
   session: CollabSession;
   text: string;
   localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
   commentSources: readonly CommentSuggestionTarget[];
   targets: readonly CommentBatchTarget[];
   coordinator: CommentRowActionCoordinator;
@@ -6273,6 +6319,7 @@ function PublishedSuggestionBatchActions({
     session,
     text,
     localSources,
+    localTargetSnapshots,
     commentSources,
     targets,
     coordinator,
@@ -6445,7 +6492,8 @@ export function CommentsPanel({
     }
     return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
   });
-  const renderedLocalSuggestionTargets = suggestions.map((suggestion) => snapshotLocalSuggestionTarget(session, suggestion)).filter((target): target is LocalSuggestionBatchTarget => target !== null);
+  const renderedLocalSuggestionTargetSnapshots = snapshotLocalSuggestionTargets(session, suggestions, suggestions);
+  const renderedLocalSuggestionTargets = renderedLocalSuggestionTargetSnapshots.filter((target): target is LocalSuggestionBatchTarget => target !== null);
   const renderedCommentSuggestionTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
   const renderedSuggestionBatchTargets = [...renderedLocalSuggestionTargets, ...renderedCommentSuggestionTargets];
   // The global controls only exist on this tab. Elsewhere, do not subscribe the panel to every row owner:
@@ -6729,6 +6777,7 @@ export function CommentsPanel({
                   session={session}
                   text={text}
                   localSources={suggestions}
+                  localTargetSnapshots={renderedLocalSuggestionTargetSnapshots}
                   commentSources={commentSuggestions}
                   targets={renderedSuggestionBatchTargets}
                   coordinator={actionCoordinator}
