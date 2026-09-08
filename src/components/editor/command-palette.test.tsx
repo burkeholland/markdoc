@@ -123,6 +123,52 @@ function escapeDismissalEvent(
   return event;
 }
 
+function primaryPointerEvent(
+  target: HTMLElement,
+  type: "pointerdown" | "pointerup" | "pointercancel",
+) {
+  const ownerWindow = target.ownerDocument.defaultView!;
+  const Pointer = ownerWindow.PointerEvent ?? ownerWindow.Event;
+  const button = type === "pointercancel" ? -1 : 0;
+  const event = new Pointer(type, {
+    bubbles: true,
+    cancelable: true,
+    button,
+    pointerId: 1,
+    isPrimary: true,
+  } as PointerEventInit);
+  for (const [name, value] of Object.entries({
+    button,
+    pointerId: 1,
+    isPrimary: true,
+  })) {
+    if (!(name in event)) {
+      Object.defineProperty(event, name, { configurable: true, value });
+    }
+  }
+  return event;
+}
+
+function primaryClickEvent(target: HTMLElement) {
+  const ownerWindow = target.ownerDocument.defaultView!;
+  return new ownerWindow.MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+  });
+}
+
+function implicitSubmitEvent(form: HTMLFormElement) {
+  const ownerWindow = form.ownerDocument.defaultView!;
+  return typeof ownerWindow.SubmitEvent === "function"
+    ? new ownerWindow.SubmitEvent("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      })
+    : new ownerWindow.Event("submit", { bubbles: true, cancelable: true });
+}
+
 function pointerOutsideEvent(
   content: HTMLElement,
   target: HTMLElement,
@@ -130,9 +176,12 @@ function pointerOutsideEvent(
   dispatch = false,
 ) {
   const ownerWindow = content.ownerDocument.defaultView!;
-  const Pointer = ownerWindow.PointerEvent ?? ownerWindow.Event;
-  const originalEvent = new Pointer("pointerdown", { bubbles: true, cancelable: true });
-  if (dispatch) target.dispatchEvent(originalEvent);
+  const originalEvent = primaryPointerEvent(target, "pointerdown");
+  if (dispatch) {
+    target.dispatchEvent(originalEvent);
+    target.dispatchEvent(primaryPointerEvent(target, "pointerup"));
+    target.dispatchEvent(primaryClickEvent(target));
+  }
   else Object.defineProperty(originalEvent, "target", { configurable: true, value: target });
   const event = new ownerWindow.CustomEvent("dismissableLayer.pointerDownOutside", {
     cancelable: true,
@@ -906,8 +955,11 @@ describe("CommandPalette command ownership", () => {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
-      fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
-      fireEvent.click(outside);
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+        outside.dispatchEvent(primaryClickEvent(outside));
+      });
       await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
       await waitFor(() => expect(opener).toHaveFocus());
     } finally {
@@ -928,7 +980,7 @@ describe("CommandPalette command ownership", () => {
       />,
     );
 
-    const content = await screen.findByRole("dialog");
+    const content = screen.getByRole("dialog");
     const handlers = contentDismissalHandlers(content);
 
     try {
@@ -1515,7 +1567,7 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
-  it("claims one genuine pointer-outside dismissal after replay", async () => {
+  it("keeps primary pointer provenance through Radix's deferred click after a microtask", async () => {
     const outside = document.createElement("button");
     document.body.append(outside);
     const onOpenChange = vi.fn();
@@ -1528,16 +1580,86 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     );
 
     try {
-      const content = await screen.findByRole("dialog");
-      const handlers = contentDismissalHandlers(content);
-      const event = pointerOutsideEvent(content, outside, content, true);
-      handlers.onPointerDownOutside(event);
-      handlers.onPointerDownOutside(event);
-      handlers.onDismiss();
-      handlers.onDismiss();
+      await screen.findByRole("dialog");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      act(() => outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown")));
+      await act(async () => Promise.resolve());
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+        outside.dispatchEvent(primaryClickEvent(outside));
+        outside.dispatchEvent(primaryClickEvent(outside));
+      });
 
       expect(onOpenChange).toHaveBeenCalledTimes(1);
       expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      await mounted.unmount();
+      outside.remove();
+    }
+  });
+
+  it("expires incomplete and retired pointer sequences without poisoning the successor", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const onOpenChangeA = vi.fn();
+    const onOpenChangeB = vi.fn();
+    const mounted = await renderStrictRoot(
+      <CommandPalette
+        open
+        onOpenChange={onOpenChangeA}
+        commands={commandProvider(command("alpha", "Alpha"))}
+      />,
+    );
+
+    try {
+      await screen.findByTestId("palette-item-alpha");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      act(() => outside.dispatchEvent(primaryClickEvent(outside)));
+      expect(onOpenChangeA).not.toHaveBeenCalled();
+
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointercancel"));
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+        outside.dispatchEvent(primaryClickEvent(outside));
+      });
+      expect(onOpenChangeA).not.toHaveBeenCalled();
+
+      act(() => outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown")));
+      await mounted.render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChangeB}
+          commands={commandProvider(command("beta", "Beta"))}
+        />,
+      );
+      await screen.findByTestId("palette-item-beta");
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+        outside.dispatchEvent(primaryClickEvent(outside));
+      });
+      expect(onOpenChangeA).not.toHaveBeenCalled();
+      expect(onOpenChangeB).not.toHaveBeenCalled();
+
+      act(() => {
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+        outside.dispatchEvent(primaryClickEvent(outside));
+      });
+      expect(onOpenChangeA).not.toHaveBeenCalled();
+      expect(onOpenChangeB).toHaveBeenCalledOnce();
     } finally {
       await mounted.unmount();
       outside.remove();
@@ -1573,7 +1695,109 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
-  it.each(["mutate-restore", "detach-reinsert", "reorder-restore"] as const)(
+  it("prevents an invalidated implicit submit and accepts the fresh submit once", async () => {
+    vi.useFakeTimers();
+    const staleRun = vi.fn();
+    const currentRun = vi.fn();
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const mounted = await renderStrictRoot(
+      <Harness items={[command("stale", "Stale", staleRun)]} />,
+    );
+
+    try {
+      const content = screen.getByRole("dialog");
+      const staleForm = screen.getByTestId("palette-input").closest("form");
+      if (!staleForm) throw new Error("Palette form was not rendered");
+      content.setAttribute("data-intervening", "true");
+      content.removeAttribute("data-intervening");
+      const staleSubmit = implicitSubmitEvent(staleForm);
+      act(() => staleForm.dispatchEvent(staleSubmit));
+
+      expect(staleSubmit.defaultPrevented).toBe(true);
+      expect(staleRun).not.toHaveBeenCalled();
+      expect(setItem).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      await mounted.render(
+        <Harness items={[command("current", "Current", currentRun)]} />,
+      );
+      const currentInput = screen.getByTestId("palette-input");
+      screen.getByTestId("palette-item-current");
+      const currentForm = currentInput.closest("form");
+      if (!currentForm) throw new Error("Fresh palette form was not rendered");
+      const currentSubmit = implicitSubmitEvent(currentForm);
+      act(() => currentForm.dispatchEvent(currentSubmit));
+      await act(async () => vi.runAllTimersAsync());
+
+      expect(currentSubmit.defaultPrevented).toBe(true);
+      expect(staleRun).not.toHaveBeenCalled();
+      expect(currentRun).toHaveBeenCalledOnce();
+      expect(setItem).toHaveBeenCalledOnce();
+    } finally {
+      setItem.mockRestore();
+      await mounted.unmount();
+    }
+  });
+
+  it("disconnects every palette guard after a layout-active ordinary invalidation", async () => {
+    const NativeMutationObserver = window.MutationObserver;
+    const tracked = new Set<TrackingMutationObserver>();
+    class TrackingMutationObserver extends NativeMutationObserver {
+      disconnected = false;
+
+      override observe(target: Node, options?: MutationObserverInit): void {
+        if (
+          target instanceof HTMLElement &&
+          (target.getAttribute("role") === "dialog" ||
+            target.classList.contains("dialog-overlay"))
+        ) {
+          tracked.add(this);
+        }
+        super.observe(target, options);
+      }
+
+      override disconnect(): void {
+        this.disconnected = true;
+        super.disconnect();
+      }
+    }
+    Object.defineProperty(window, "MutationObserver", {
+      configurable: true,
+      value: TrackingMutationObserver,
+    });
+    const run = vi.fn();
+    const mounted = await renderStrictRoot(
+      <Harness items={[command("leaf", "Leaf", run)]} />,
+    );
+    let unmounted = false;
+
+    try {
+      const content = await screen.findByRole("dialog");
+      content.setAttribute("data-intervening", "true");
+      content.removeAttribute("data-intervening");
+      fireEvent.click(screen.getByTestId("palette-item-leaf"));
+      expect(run).not.toHaveBeenCalled();
+
+      await mounted.unmount();
+      unmounted = true;
+      expect(tracked.size).toBeGreaterThan(0);
+      expect([...tracked].every((observer) => observer.disconnected)).toBe(true);
+    } finally {
+      if (!unmounted) await mounted.unmount();
+      Object.defineProperty(window, "MutationObserver", {
+        configurable: true,
+        value: NativeMutationObserver,
+      });
+    }
+  });
+
+  it.each([
+    "mutate-restore",
+    "detach-reinsert",
+    "reorder-restore",
+    "portal-parent-detach",
+    "portal-ancestor-detach",
+  ] as const)(
     "retires a Strict Mode row after %s without poisoning its fresh replacement",
     async (transition) => {
       const staleChildren = vi.fn(() => [command("stale-result", "Stale result")]);
@@ -1601,6 +1825,20 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
         if (transition === "mutate-restore") {
           content.setAttribute("data-intervening", "true");
           content.removeAttribute("data-intervening");
+        } else if (
+          transition === "portal-parent-detach" ||
+          transition === "portal-ancestor-detach"
+        ) {
+          const portalParent = content.parentNode;
+          const node =
+            transition === "portal-parent-detach"
+              ? portalParent
+              : portalParent?.parentNode;
+          const parent = node?.parentNode;
+          if (!node || !parent) throw new Error("Palette portal ancestry was incomplete");
+          const next = node.nextSibling;
+          parent.removeChild(node);
+          parent.insertBefore(node, next);
         } else {
           const parent = staleRow.parentElement!;
           if (transition === "detach-reinsert") {

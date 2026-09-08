@@ -129,6 +129,13 @@ interface DomSnapshot {
   children: readonly DomSnapshot[];
 }
 
+interface AncestorPlacement {
+  node: Node;
+  parent: Node;
+  previous: Node | null;
+  next: Node | null;
+}
+
 interface PalettePlacement {
   document: Document;
   parent: Node;
@@ -136,6 +143,7 @@ interface PalettePlacement {
   overlayNext: Node | null;
   contentPrevious: Node | null;
   contentNext: Node | null;
+  ancestors: readonly AncestorPlacement[];
 }
 
 interface PaletteDomGuard {
@@ -150,8 +158,26 @@ interface CommittedElement {
 
 type NativeDismissal =
   | { kind: "escape"; event: KeyboardEvent }
-  | { kind: "pointer"; event: PointerEvent | Event }
+  | { kind: "pointer"; event: PointerEvent | Event; click: MouseEvent }
   | { kind: "focus"; event: FocusEvent };
+
+type CapturedDismissal =
+  | {
+      kind: "instant";
+      document: Document;
+      event: Event;
+    }
+  | {
+      kind: "pointer";
+      document: Document;
+      event: PointerEvent | Event;
+      target: Node;
+      pointerId: number | null;
+      button: number;
+      pointerUp: PointerEvent | Event | null;
+      click: MouseEvent | null;
+      expiration: number | null;
+    };
 
 interface CommittedPresentation {
   token: symbol;
@@ -458,14 +484,39 @@ function capturePlacement(
   content: HTMLDivElement,
 ): PalettePlacement | null {
   const parent = content.parentNode;
-  if (!parent || overlay.parentNode !== parent) return null;
+  const document = content.ownerDocument;
+  if (
+    !parent ||
+    overlay.parentNode !== parent ||
+    overlay.ownerDocument !== document ||
+    !overlay.isConnected ||
+    !content.isConnected
+  ) {
+    return null;
+  }
+  const ancestors: AncestorPlacement[] = [];
+  let node = parent;
+  while (node !== document) {
+    const ancestorParent = node.parentNode;
+    if (!ancestorParent) return null;
+    ancestors.push(
+      Object.freeze({
+        node,
+        parent: ancestorParent,
+        previous: node.previousSibling,
+        next: node.nextSibling,
+      }),
+    );
+    node = ancestorParent;
+  }
   return Object.freeze({
-    document: content.ownerDocument,
+    document,
     parent,
     overlayPrevious: previousCommittedSibling(overlay),
     overlayNext: nextCommittedSibling(overlay),
     contentPrevious: previousCommittedSibling(content),
     contentNext: nextCommittedSibling(content),
+    ancestors: Object.freeze(ancestors),
   });
 }
 
@@ -475,6 +526,8 @@ function placementMatches(
   placement: PalettePlacement,
 ): boolean {
   return (
+    overlay.isConnected &&
+    content.isConnected &&
     overlay.ownerDocument === placement.document &&
     content.ownerDocument === placement.document &&
     overlay.parentNode === placement.parent &&
@@ -482,7 +535,14 @@ function placementMatches(
     previousCommittedSibling(overlay) === placement.overlayPrevious &&
     nextCommittedSibling(overlay) === placement.overlayNext &&
     previousCommittedSibling(content) === placement.contentPrevious &&
-    nextCommittedSibling(content) === placement.contentNext
+    nextCommittedSibling(content) === placement.contentNext &&
+    placement.ancestors.every(
+      (ancestor) =>
+        ancestor.node.isConnected &&
+        ancestor.node.parentNode === ancestor.parent &&
+        ancestor.node.previousSibling === ancestor.previous &&
+        ancestor.node.nextSibling === ancestor.next,
+    )
   );
 }
 
@@ -543,23 +603,38 @@ function createDomGuard(
       ) {
         return true;
       }
-      if (mutation.type !== "childList" || mutation.target !== placement.parent) {
+      if (mutation.type !== "childList") {
         return false;
       }
-      if (
-        mutation.previousSibling === overlay ||
-        mutation.nextSibling === overlay ||
-        mutation.previousSibling === content ||
-        mutation.nextSibling === content
-      ) {
-        return true;
+      if (mutation.target === placement.parent) {
+        if (
+          mutation.previousSibling === overlay ||
+          mutation.nextSibling === overlay ||
+          mutation.previousSibling === content ||
+          mutation.nextSibling === content
+        ) {
+          return true;
+        }
+        if (
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (node) =>
+              node === overlay ||
+              node === content ||
+              (node instanceof Element &&
+                (node.contains(overlay) || node.contains(content))),
+          )
+        ) {
+          return true;
+        }
       }
-      return [...mutation.addedNodes, ...mutation.removedNodes].some(
-        (node) =>
-          node === overlay ||
-          node === content ||
-          (node instanceof Element &&
-            (node.contains(overlay) || node.contains(content))),
+      return placement.ancestors.some(
+        (ancestor) =>
+          mutation.target === ancestor.parent &&
+          (mutation.previousSibling === ancestor.node ||
+            mutation.nextSibling === ancestor.node ||
+            [...mutation.addedNodes, ...mutation.removedNodes].includes(
+              ancestor.node,
+            )),
       );
     });
   };
@@ -579,6 +654,9 @@ function createDomGuard(
     subtree: true,
   });
   observer.observe(placement.parent, { childList: true });
+  for (const ancestor of placement.ancestors) {
+    observer.observe(ancestor.parent, { childList: true });
+  }
   return Object.freeze({
     isClean: () => {
       record(observer.takeRecords());
@@ -838,7 +916,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   const closeRef = useRef<CloseTransition | null>(null);
   const commandTimersRef = useRef(new Set<CommandExecution>());
   const claimedControlsRef = useRef(new WeakSet<object>());
-  const capturedDismissalRef = useRef<{ document: Document; event: Event } | null>(null);
+  const capturedDismissalRef = useRef<CapturedDismissal | null>(null);
   const dismissalCaptureRef = useRef<{
     document: Document;
     remove: () => void;
@@ -855,12 +933,75 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     overlay: null,
     content: null,
   });
+  const clearCapturedDismissal = useCallback((expected?: CapturedDismissal) => {
+    const captured = capturedDismissalRef.current;
+    if (!captured || (expected && captured !== expected)) return;
+    if (captured.kind === "pointer" && captured.expiration !== null) {
+      captured.document.defaultView?.clearTimeout(captured.expiration);
+      captured.expiration = null;
+    }
+    capturedDismissalRef.current = null;
+  }, []);
   const ensureDismissalCapture = useCallback((ownerDocument: Document) => {
     const existing = dismissalCaptureRef.current;
     if (existing?.document === ownerDocument) return;
     existing?.remove();
-    capturedDismissalRef.current = null;
+    clearCapturedDismissal();
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow) return;
+    const exactPointer = (
+      captured: Extract<CapturedDismissal, { kind: "pointer" }>,
+      event: Event,
+    ) => {
+      const pointerId = Reflect.get(event, "pointerId");
+      const button = Reflect.get(event, "button");
+      return (
+        event.target === captured.target &&
+        (captured.pointerId === null
+          ? typeof pointerId !== "number"
+          : pointerId === captured.pointerId) &&
+        (event.type === "pointercancel" ||
+          typeof button !== "number" ||
+          button === captured.button)
+      );
+    };
     const remember = (event: Event) => {
+      const current = capturedDismissalRef.current;
+      if (event.type === "pointercancel") {
+        if (current?.kind === "pointer" && exactPointer(current, event)) {
+          clearCapturedDismissal(current);
+        }
+        return;
+      }
+      if (event.type === "pointerup") {
+        if (current?.kind !== "pointer") return;
+        if (!exactPointer(current, event)) {
+          clearCapturedDismissal(current);
+          return;
+        }
+        current.pointerUp = event;
+        current.expiration = ownerWindow.setTimeout(
+          () => clearCapturedDismissal(current),
+          0,
+        );
+        return;
+      }
+      if (event.type === "click") {
+        if (current?.kind !== "pointer") return;
+        if (
+          !current.pointerUp ||
+          !(event instanceof ownerWindow.MouseEvent) ||
+          event.button !== current.button ||
+          event.target !== current.target
+        ) {
+          clearCapturedDismissal(current);
+          return;
+        }
+        current.click = event;
+        queueMicrotask(() => clearCapturedDismissal(current));
+        return;
+      }
+      if (event.type === "focusin" && current?.kind === "pointer") return;
       if (
         event.type !== "keydown" &&
         event.type !== "pointerdown" &&
@@ -868,24 +1009,59 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       ) {
         return;
       }
-      const captured = { document: ownerDocument, event };
+      clearCapturedDismissal();
+      if (event.type === "pointerdown") {
+        const target = event.target;
+        const pointerId = Reflect.get(event, "pointerId");
+        const button = Reflect.get(event, "button");
+        const isPrimary = Reflect.get(event, "isPrimary");
+        if (
+          !(target instanceof ownerWindow.Node) ||
+          target.ownerDocument !== ownerDocument ||
+          (typeof button === "number" && button !== 0) ||
+          isPrimary === false
+        ) {
+          return;
+        }
+        capturedDismissalRef.current = {
+          kind: "pointer",
+          document: ownerDocument,
+          event,
+          target,
+          pointerId: typeof pointerId === "number" ? pointerId : null,
+          button: typeof button === "number" ? button : 0,
+          pointerUp: null,
+          click: null,
+          expiration: null,
+        };
+        return;
+      }
+      const captured: CapturedDismissal = {
+        kind: "instant",
+        document: ownerDocument,
+        event,
+      };
       capturedDismissalRef.current = captured;
-      queueMicrotask(() => {
-        if (capturedDismissalRef.current === captured) capturedDismissalRef.current = null;
-      });
+      queueMicrotask(() => clearCapturedDismissal(captured));
     };
     ownerDocument.addEventListener("keydown", remember, true);
     ownerDocument.addEventListener("pointerdown", remember, true);
+    ownerDocument.addEventListener("pointerup", remember, true);
+    ownerDocument.addEventListener("pointercancel", remember, true);
+    ownerDocument.addEventListener("click", remember, true);
     ownerDocument.addEventListener("focusin", remember, true);
     dismissalCaptureRef.current = {
       document: ownerDocument,
       remove: () => {
         ownerDocument.removeEventListener("keydown", remember, true);
         ownerDocument.removeEventListener("pointerdown", remember, true);
+        ownerDocument.removeEventListener("pointerup", remember, true);
+        ownerDocument.removeEventListener("pointercancel", remember, true);
+        ownerDocument.removeEventListener("click", remember, true);
         ownerDocument.removeEventListener("focusin", remember, true);
       },
     };
-  }, []);
+  }, [clearCapturedDismissal]);
   const retirePortalElement = useCallback((element: HTMLDivElement) => {
     const commit = activeCommitRef.current;
     if (!commit) return;
@@ -1014,13 +1190,13 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         ) {
           capture.remove();
           dismissalCaptureRef.current = null;
-          capturedDismissalRef.current = null;
+          clearCapturedDismissal();
         }
       });
     };
     // Authority teardown must not restart for each render-local retirement closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authority, ensureDismissalCapture]);
+  }, [authority, clearCapturedDismissal, ensureDismissalCapture]);
 
   useLayoutEffect(() => {
     if (!visit || authorityRef.current !== authority) return;
@@ -1160,6 +1336,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     reason: "layout" | "ref" | "ordinary",
     detached?: ElementPublication<HTMLElement>,
   ): void {
+    clearCapturedDismissal();
     let replay = replayRef.current?.source === commit ? replayRef.current : null;
     if (!commit.retired) {
       commit.retired = true;
@@ -1181,7 +1358,11 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     }
     if (!replay) return;
     if (reason === "layout") replay.layoutRetired = true;
-    if (reason === "ordinary") replay.invalid = true;
+    if (reason === "ordinary") {
+      replay.invalid = true;
+      releaseReplay(replay);
+      return;
+    }
     if (detached) {
       const ref = replay.refs.find((entry) => entry.publication === detached);
       if (!ref || detached.element !== null && detached.element !== ref.element) {
@@ -1379,6 +1560,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     value: PalettePresentation,
     event: object,
     nativeEvent: object,
+    relatedEvent?: object,
   ): boolean {
     const commit = activeCommitRef.current;
     if (
@@ -1386,15 +1568,18 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       !ownsPresentation(value) ||
       commit.source !== value ||
       claimedEventsRef.current.has(event) ||
-      claimedEventsRef.current.has(nativeEvent)
+      claimedEventsRef.current.has(nativeEvent) ||
+      (relatedEvent !== undefined && claimedEventsRef.current.has(relatedEvent))
     ) {
       return false;
     }
     commit.claimed = true;
     claimedEventsRef.current.add(event);
     claimedEventsRef.current.add(nativeEvent);
+    if (relatedEvent !== undefined) claimedEventsRef.current.add(relatedEvent);
     value.consumedEvents.add(event);
     value.consumedEvents.add(nativeEvent);
+    if (relatedEvent !== undefined) value.consumedEvents.add(relatedEvent);
     return true;
   }
 
@@ -1439,12 +1624,16 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         proof = { kind: "escape", event: nativeEvent };
       } else if (
         source === "pointer" &&
+        captured.kind === "pointer" &&
         nativeEvent.type === "pointerdown" &&
+        captured.pointerUp !== null &&
+        captured.click !== null &&
         !content.contains(target)
       ) {
-        proof = { kind: "pointer", event: nativeEvent };
+        proof = { kind: "pointer", event: nativeEvent, click: captured.click };
       } else if (
         source === "focus" &&
+        captured.kind === "instant" &&
         nativeEvent instanceof ownerWindow.FocusEvent &&
         nativeEvent.type === "focusin" &&
         !content.contains(target)
@@ -1457,6 +1646,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       !content ||
       !overlay ||
       !visit ||
+      !captured ||
       !ownsPresentation(value) ||
       !content.isConnected ||
       !overlay.isConnected ||
@@ -1465,9 +1655,18 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     ) {
       return;
     }
-    if (nativeEvent !== proof.event || !claimEvent(value, event, nativeEvent)) {
+    if (
+      nativeEvent !== proof.event ||
+      !claimEvent(
+        value,
+        event,
+        nativeEvent,
+        proof.kind === "pointer" ? proof.click : undefined,
+      )
+    ) {
       return;
     }
+    clearCapturedDismissal(captured);
     dismissalRef.current = {
       authority: value.authority,
       visit,
@@ -2120,16 +2319,16 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
             onSubmit={(event) => {
               const form = presentation.form.element;
               const input = presentation.input.element;
+              if (!form || !input) return;
+              const nativeEvent = exactNativeSubmit(event, form, input);
+              if (!nativeEvent) return;
+              event.preventDefault();
               if (
-                !form ||
-                !input ||
-                !ownsElement(presentation, presentation.form, event.currentTarget)
+                !ownsElement(presentation, presentation.form, event.currentTarget) ||
+                !claimEvent(presentation, event, nativeEvent)
               ) {
                 return;
               }
-              const nativeEvent = exactNativeSubmit(event, form, input);
-              if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
-              event.preventDefault();
               const row = presentation.rows[presentation.state.highlight];
               if (row) pickRow(presentation, row);
             }}
