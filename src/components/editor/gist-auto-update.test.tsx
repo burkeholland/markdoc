@@ -106,6 +106,14 @@ function ReplacementGistControl({ doc }: { doc: DocumentDto }) {
   return <GistAutoUpdateControl doc={doc} isOwner />;
 }
 
+function GistParentCommit({ visit }: { visit: number }) {
+  return (
+    <div data-visit={visit}>
+      <GistAutoUpdateControl doc={DOC} isOwner />
+    </div>
+  );
+}
+
 type ButtonHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type CheckboxHandler = (event: ChangeEvent<HTMLInputElement>) => void;
 
@@ -1131,6 +1139,149 @@ describe("gist auto-update settings publication ownership", () => {
     await settle();
     expect(externalOperations()).toBe(operations + 1);
   });
+
+  it("keeps a stable checkbox publication exact through repeated parent commits and failed-poll recovery", async () => {
+    const view = renderDirect(<StrictMode><GistParentCommit visit={0} /></StrictMode>);
+    await settle();
+
+    const check = capturedButton(capturePresentation(), "Check linked gist");
+    const previewCalls = vi.mocked(api.documents.gistAutoUpdatePreview).mock.calls.length;
+    act(() => {
+      const event = buttonEvent(check.element);
+      check.onClick(event);
+      check.onClick(event);
+    });
+    await settle();
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(previewCalls + 1);
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, "Status unavailable."));
+    await advance();
+    expect(state()).toHaveTextContent("Failed");
+
+    const stable = capturePresentation();
+    const stableCheckbox = stable.checkbox;
+    if (!stableCheckbox) throw new Error("Checked destination did not render acknowledgement");
+    const inputRecords: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => {
+      inputRecords.push(...records.filter((record) => record.target === stableCheckbox.element));
+    });
+    observer.observe(stableCheckbox.element, { attributes: true, attributeOldValue: true });
+    mutationObservers.push(observer);
+
+    for (let visit = 1; visit <= 3; visit++) {
+      act(() => view.root.render(<StrictMode><GistParentCommit visit={visit} /></StrictMode>));
+      await settle();
+    }
+
+    const current = capturePresentation();
+    if (!current.checkbox) throw new Error("Parent commits removed acknowledgement");
+    expect(current.root).toBe(stable.root);
+    expect(current.rootRef).toBe(stable.rootRef);
+    expect(current.checkbox.element).toBe(stableCheckbox.element);
+    expect(current.checkbox.ref).toBe(stableCheckbox.ref);
+    for (const label of ["Refresh status", "Recheck linked gist", "Enable auto-update"]) {
+      expect(capturedButton(current, label).ref).toBe(capturedButton(stable, label).ref);
+    }
+    expect(inputRecords.map((record) => [record.attributeName, record.oldValue])).toEqual([
+      ["name", null],
+      ["type", "checkbox"],
+      ["name", ""],
+      ["name", null],
+      ["type", "checkbox"],
+      ["name", ""],
+      ["name", null],
+      ["type", "checkbox"],
+      ["name", ""],
+    ]);
+    expect(current.checkbox.element).not.toHaveAttribute("name");
+    expect(current.checkbox.element).toHaveAttribute("type", "checkbox");
+
+    const operationsBeforeAcknowledgement = externalOperations();
+    act(() => {
+      current.checkbox!.element.checked = true;
+      const event = checkboxEvent(current.checkbox!.element);
+      current.checkbox!.onChange(event);
+      current.checkbox!.onChange(event);
+    });
+    expect(externalOperations()).toBe(operationsBeforeAcknowledgement);
+    expect(screen.getByRole("checkbox")).toBeChecked();
+
+    const statusCalls = vi.mocked(api.documents.gistAutoUpdate).mock.calls.length;
+    const refresh = capturedButton(capturePresentation(), "Refresh status");
+    act(() => {
+      const event = buttonEvent(refresh.element);
+      refresh.onClick(event);
+      refresh.onClick(event);
+    });
+    await settle();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(statusCalls + 1);
+    expect(state()).toHaveTextContent("Off");
+    expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeEnabled();
+
+    const recheckCalls = vi.mocked(api.documents.gistAutoUpdatePreview).mock.calls.length;
+    const recheck = capturedButton(capturePresentation(), "Recheck linked gist");
+    act(() => {
+      const event = buttonEvent(recheck.element);
+      recheck.onClick(event);
+      recheck.onClick(event);
+    });
+    await settle();
+    expect(api.documents.gistAutoUpdatePreview).toHaveBeenCalledTimes(recheckCalls + 1);
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+
+    const acknowledgement = capturePresentation().checkbox;
+    if (!acknowledgement) throw new Error("Rechecked destination did not render acknowledgement");
+    act(() => {
+      acknowledgement.element.checked = true;
+      const event = checkboxEvent(acknowledgement.element);
+      acknowledgement.onChange(event);
+      acknowledgement.onChange(event);
+    });
+
+    const updateCalls = vi.mocked(api.documents.setGistAutoUpdate).mock.calls.length;
+    const enable = capturedButton(capturePresentation(), "Enable auto-update");
+    act(() => {
+      const event = buttonEvent(enable.element);
+      enable.onClick(event);
+      enable.onClick(event);
+    });
+    await settle();
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(updateCalls + 1);
+
+    const disable = capturedButton(capturePresentation(), "Disable auto-update");
+    act(() => {
+      const event = buttonEvent(disable.element);
+      disable.onClick(event);
+      disable.onClick(event);
+    });
+    await settle();
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(updateCalls + 2);
+  });
+
+  it.each(["exact", "non-exact"] as const)(
+    "does not launder a hostile %s checkbox attribute sequence through a parent commit",
+    async (sequence) => {
+      const view = renderDirect(<StrictMode><GistParentCommit visit={0} /></StrictMode>);
+      await settle();
+      await consent();
+      const acknowledgement = capturePresentation().checkbox;
+      if (!acknowledgement) throw new Error("Checked destination did not render acknowledgement");
+
+      act(() => {
+        acknowledgement.element.setAttribute("name", "");
+        if (sequence === "non-exact") {
+          acknowledgement.element.setAttribute("type", "radio");
+        }
+        acknowledgement.element.setAttribute("type", "checkbox");
+        acknowledgement.element.removeAttribute("name");
+        view.root.render(<StrictMode><GistParentCommit visit={1} /></StrictMode>);
+      });
+      await settle();
+
+      const operations = externalOperations();
+      act(() => invokeButton(capturedButton(capturePresentation(), "Recheck linked gist")));
+      expect(externalOperations()).toBe(operations);
+    },
+  );
 
   it.each(["name", "type", "React-like sequence"] as const)(
     "does not mistake restored checkbox %s mutation for React reconciliation",

@@ -172,6 +172,7 @@ type SettingsPublication = Readonly<{
   controls: SettingsControls;
   captureRoot: (element: HTMLElement | null) => void;
   establish: () => (() => void) | undefined;
+  reconcileReactCommit: () => void;
   claimClick: (
     name: SettingsButtonName,
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -345,6 +346,7 @@ function settingsPlacementMatches(root: HTMLElement, placement: SettingsPlacemen
 }
 
 type SettingsDomGuard = Readonly<{
+  acceptReactCommit: () => void;
   isClean: () => boolean;
   release: () => void;
 }>;
@@ -352,40 +354,40 @@ type SettingsDomGuard = Readonly<{
 function createSettingsDomGuard(
   root: HTMLElement,
   placement: SettingsPlacement,
-  transientSpan: (records: readonly MutationRecord[], index: number) => number,
+  transientSpan: (
+    records: readonly MutationRecord[],
+    index: number,
+    fromReactCommit: boolean,
+  ) => number,
 ): SettingsDomGuard | null {
   const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
   if (!MutationObserverConstructor) return null;
   let changed = false;
+  const touchesGuardedDom = (record: MutationRecord) => {
+    if (record.target === root || root.contains(record.target)) return true;
+    if (record.type !== "childList" || record.target !== placement.parent) return false;
+    return record.previousSibling === root
+      || record.nextSibling === root
+      || [...record.addedNodes, ...record.removedNodes].some((node) =>
+        node === root || (node.nodeType === 1 && (node as Element).contains(root)));
+  };
   const recordChanges = (records: readonly MutationRecord[]) => {
     if (changed) return;
     for (let index = 0; index < records.length;) {
-      const skip = transientSpan(records, index);
+      const skip = transientSpan(records, index, false);
       if (skip > 0) {
         index += skip;
         continue;
       }
       const record = records[index];
-      if (record) {
-        if (record.target === root || root.contains(record.target)) {
-          changed = true;
-          return;
-        }
-        if (record.type === "childList" && record.target === placement.parent) {
-          const touchesPlacement = record.previousSibling === root
-            || record.nextSibling === root
-            || [...record.addedNodes, ...record.removedNodes].some((node) =>
-              node === root || (node.nodeType === 1 && (node as Element).contains(root)));
-          if (touchesPlacement) {
-            changed = true;
-            return;
-          }
-        }
+      if (record && touchesGuardedDom(record)) {
+        changed = true;
+        return;
       }
       index += 1;
     }
   };
-  const observer = new MutationObserverConstructor(recordChanges);
+  const observer = new MutationObserverConstructor((records) => recordChanges(records));
   observer.observe(root, {
     attributes: true,
     attributeOldValue: true,
@@ -395,6 +397,17 @@ function createSettingsDomGuard(
   });
   observer.observe(placement.parent, { childList: true });
   return Object.freeze({
+    acceptReactCommit: () => {
+      const records = observer.takeRecords();
+      const guardedRecords = records.filter(touchesGuardedDom);
+      if (
+        guardedRecords.length > 0
+        && transientSpan(guardedRecords, 0, true) === guardedRecords.length
+      ) {
+        return;
+      }
+      recordChanges(records);
+    },
     isClean: () => {
       recordChanges(observer.takeRecords());
       return !changed;
@@ -844,13 +857,24 @@ function createSettingsPublication(
     const guard = createSettingsDomGuard(
       rootElement,
       placement,
-      (records, index) => {
+      (records, index, fromReactCommit) => {
         const input = controls.acknowledgement.element();
+        const currentRoot = root.element();
         const nameStart = records[index];
         const typeReset = records[index + 1];
         const nameEnd = records[index + 2];
-        return cells.checkboxReconciliation === input
+        const exactReactCommit = fromReactCommit
+          && index === 0
+          && records.length === 3;
+        return (cells.checkboxReconciliation === input || exactReactCommit)
           && input
+          && currentRoot === domSnapshot?.node
+          && placementSnapshot
+          && settingsPlacementMatches(currentRoot, placementSnapshot)
+          && settingsDomMatches(domSnapshot)
+          && cells.active === publication
+          && publicationFactsAreCurrent()
+          && exactDomIsCurrent()
           && nameStart?.type === "attributes"
           && nameStart.target === input
           && nameStart.attributeName === "name"
@@ -907,6 +931,11 @@ function createSettingsPublication(
       }
     });
     return retireForLayout;
+  };
+  const reconcileReactCommit = () => {
+    if (!retired && established && cells.active === publication) {
+      domGuard?.acceptReactCommit();
+    }
   };
   const ownsControl = (
     control: AnySettingsControl,
@@ -1030,6 +1059,7 @@ function createSettingsPublication(
     controls,
     captureRoot: root.capture,
     establish,
+    reconcileReactCommit,
     claimClick,
     claimAcknowledgement,
     retire: () => retire("other"),
@@ -1510,6 +1540,9 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
     [presentation, publicationCells, requestPublicationSuccessor],
   );
   useLayoutEffect(() => publication.establish(), [publication]);
+  useLayoutEffect(() => {
+    publication.reconcileReactCommit();
+  });
   const { captureRoot, claimAcknowledgement, claimClick, controls } = publication;
   const { capture: captureRefresh } = controls.refresh;
   const { capture: capturePreview } = controls.preview;
