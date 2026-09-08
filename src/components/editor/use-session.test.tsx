@@ -679,14 +679,41 @@ describe("SaveIndicator", () => {
     }
   });
 
-  it("does not canonize DOM tampering that precedes the first layout publication", () => {
+  it.each([
+    "icon attribute",
+    "root comment",
+    "button text node",
+    "nested same-text markup",
+  ] as const)("does not canonize pre-publication %s", (tampering) => {
     const session = fakeSession("pending");
     const save = controlledSave();
     session.flushSave.mockReturnValue(save.promise);
     let setup = 0;
+    let restore = () => {};
     const tamperBeforePublication = () => {
       setup++;
-      if (setup === 1) captureSave().icon.setAttribute("data-tampered", "true");
+      if (setup !== 1) return;
+      const current = captureSave();
+      if (tampering === "icon attribute") {
+        current.icon.setAttribute("data-tampered", "true");
+        restore = () => current.icon.removeAttribute("data-tampered");
+      } else if (tampering === "root comment") {
+        const comment = current.root.ownerDocument.createComment("tampered");
+        current.root.append(comment);
+        restore = () => comment.remove();
+      } else if (tampering === "button text node") {
+        const extraText = current.button.ownerDocument.createTextNode("");
+        current.button.append(extraText);
+        restore = () => extraText.remove();
+      } else {
+        const expectedText = current.text.textContent ?? "";
+        const nested = current.text.ownerDocument.createElement("b");
+        nested.textContent = expectedText;
+        current.text.replaceChildren(nested);
+        restore = () => current.text.replaceChildren(
+          current.text.ownerDocument.createTextNode(expectedText),
+        );
+      }
     };
     const tree = (revision: number) => {
       void revision;
@@ -707,7 +734,10 @@ describe("SaveIndicator", () => {
       act(() => tampered.button.click());
       expect(session.flushSave).not.toHaveBeenCalled();
 
-      tampered.icon.removeAttribute("data-tampered");
+      restore();
+      act(() => tampered.button.click());
+      expect(session.flushSave).not.toHaveBeenCalled();
+
       view.render(tree(1));
       act(() => captureSave(view.host).button.click());
       expect(session.flushSave).toHaveBeenCalledOnce();
@@ -751,7 +781,9 @@ describe("SaveIndicator", () => {
       const control = current;
       if (!control || !(nativeEvent instanceof MouseEvent)) return;
       let currentTarget: EventTarget = control.root;
-      const wrapper = Object.assign(Object.create({}), {
+      function ForgedSyntheticEvent() {}
+      const customPrototype = ForgedSyntheticEvent.prototype;
+      const wrapper = Object.assign(Object.create(customPrototype), {
         type: "click",
         target: control.button,
         nativeEvent,
@@ -776,6 +808,8 @@ describe("SaveIndicator", () => {
         isPropagationStopped: () => false,
         persist: () => undefined,
       });
+      expect(customPrototype.constructor).toBe(ForgedSyntheticEvent);
+      expect(ForgedSyntheticEvent.prototype).toBe(customPrototype);
       Object.defineProperty(wrapper, "currentTarget", {
         configurable: true,
         get: () => currentTarget,

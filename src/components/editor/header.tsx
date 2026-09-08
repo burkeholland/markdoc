@@ -235,6 +235,8 @@ interface ManualSaveClickAdmission {
   readonly target: Node;
   readonly root: HTMLSpanElement;
   readonly button: HTMLButtonElement;
+  readonly reachedButtonThroughDispatcher: () => boolean;
+  readonly releaseCurrentTarget: () => void;
 }
 
 interface ManualSaveCells {
@@ -628,24 +630,15 @@ function clearDetachedManualSaveReplay(
   replay.release();
 }
 
-function manualSaveReactMouseWrapperPrototype(
+function manualSaveReactMouseWrapperIsExact(
   event: React.MouseEvent<Element>,
   nativeEvent: MouseEvent,
   currentTarget: Element,
   target: Node,
   phase: number,
-): object | null {
-  const prototype = Object.getPrototypeOf(event) as object | null;
-  const constructor = prototype
-    ? Reflect.get(prototype, "constructor") as unknown
-    : null;
-  if (
-    !prototype
-    || prototype === Object.prototype
-    || typeof constructor !== "function"
-    || constructor === Object
-    || constructor.prototype !== prototype
-    || event.nativeEvent !== nativeEvent
+): boolean {
+  return (
+    event.nativeEvent !== nativeEvent
     || event.type !== nativeEvent.type
     || event.currentTarget !== currentTarget
     || event.target !== target
@@ -672,10 +665,52 @@ function manualSaveReactMouseWrapperPrototype(
     || typeof event.isDefaultPrevented !== "function"
     || typeof event.isPropagationStopped !== "function"
     || typeof event.persist !== "function"
-  ) {
+  ) === false;
+}
+
+function createManualSaveDispatcherAdmission(
+  event: React.MouseEvent<HTMLSpanElement>,
+  root: HTMLSpanElement,
+  button: HTMLButtonElement,
+): Pick<
+  ManualSaveClickAdmission,
+  "reachedButtonThroughDispatcher" | "releaseCurrentTarget"
+> | null {
+  let currentTarget: EventTarget | null = root;
+  let leftRoot = false;
+  let reachedButton = false;
+  let invalid = false;
+  try {
+    Object.defineProperty(event, "currentTarget", {
+      configurable: true,
+      enumerable: true,
+      get: () => currentTarget,
+      set: (value: EventTarget | null) => {
+        if (!leftRoot && !reachedButton && currentTarget === root && value === null) {
+          leftRoot = true;
+        } else if (leftRoot && !reachedButton && currentTarget === null && value === button) {
+          reachedButton = true;
+        } else {
+          invalid = true;
+        }
+        currentTarget = value;
+      },
+    });
+  } catch {
     return null;
   }
-  return prototype;
+  return Object.freeze({
+    reachedButtonThroughDispatcher: () =>
+      !invalid && leftRoot && reachedButton && currentTarget === button,
+    releaseCurrentTarget: () => {
+      Object.defineProperty(event, "currentTarget", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: currentTarget,
+      });
+    },
+  });
 }
 
 function createManualSavePublication(
@@ -780,6 +815,8 @@ function createManualSavePublication(
       || root.getAttribute("role") !== "status"
       || root.getAttribute("title") !== (render.rootTitle ?? null)
       || root.children.length !== 1
+      || root.childNodes.length !== 1
+      || root.childNodes.item(0) !== button
       || root.firstElementChild !== button
       || button.parentElement !== root
       || button.tagName !== "BUTTON"
@@ -790,6 +827,9 @@ function createManualSavePublication(
       || button.getAttribute("aria-busy") !== (render.buttonBusy ? "true" : null)
       || button.getAttribute("aria-label") !== render.buttonLabel
       || button.children.length !== 2
+      || button.childNodes.length !== 2
+      || button.childNodes.item(0) !== icon
+      || button.childNodes.item(1) !== text
       || button.children.item(0) !== icon
       || button.children.item(1) !== text
       || icon.parentElement !== button
@@ -799,6 +839,9 @@ function createManualSavePublication(
       || text.tagName !== "SPAN"
       || text.className !== render.textClassName
       || text.textContent !== render.text
+      || text.childNodes.length !== 1
+      || text.firstChild?.nodeType !== ownerWindow.Node.TEXT_NODE
+      || text.firstChild.nodeValue !== render.text
       || button.textContent !== render.text
       || root.querySelectorAll("button").length !== 1
     ) {
@@ -1102,14 +1145,23 @@ function createManualSavePublication(
     ) {
       return;
     }
-    const wrapperPrototype = manualSaveReactMouseWrapperPrototype(
+    if (
+      !manualSaveReactMouseWrapperIsExact(
+        event,
+        nativeEvent,
+        root,
+        target,
+        ownerWindow.Event.CAPTURING_PHASE,
+      )
+    ) {
+      return;
+    }
+    const dispatcherAdmission = createManualSaveDispatcherAdmission(
       event,
-      nativeEvent,
       root,
-      target,
-      ownerWindow.Event.CAPTURING_PHASE,
+      button,
     );
-    if (!wrapperPrototype) return;
+    if (!dispatcherAdmission) return;
     cells.clickAdmissions.set(nativeEvent, Object.freeze({
       publication,
       nativeEvent,
@@ -1117,6 +1169,7 @@ function createManualSavePublication(
       target,
       root,
       button,
+      ...dispatcherAdmission,
     }));
   };
 
@@ -1129,13 +1182,13 @@ function createManualSavePublication(
     const ownerWindow = ownerDocument?.defaultView;
     const nativeEvent = event?.nativeEvent;
     const target = event?.target;
-    const wrapperPrototype = (
+    const wrapperIsExact = (
       ownerWindow
       && button
       && nativeEvent instanceof ownerWindow.MouseEvent
       && target instanceof ownerWindow.Node
     )
-      ? manualSaveReactMouseWrapperPrototype(
+      ? manualSaveReactMouseWrapperIsExact(
           event,
           nativeEvent,
           button,
@@ -1159,7 +1212,7 @@ function createManualSavePublication(
       || target.ownerDocument !== ownerDocument
       || !button.contains(target)
       || nativeEvent.button !== 0
-      || !wrapperPrototype
+      || !wrapperIsExact
       || !isLiveNativeEvent(nativeEvent, ownerDocument)
       || !nativeEvent.composedPath().includes(button)
       || !admission
@@ -1169,6 +1222,7 @@ function createManualSavePublication(
       || admission.target !== target
       || admission.root !== root
       || admission.button !== button
+      || !admission.reachedButtonThroughDispatcher()
       || cells.requestOwner.current !== null
       || cells.claimedPublications.has(publication)
       || cells.claimedActions.has(render.action)
@@ -1185,6 +1239,7 @@ function createManualSavePublication(
       return;
     }
 
+    admission.releaseCurrentTarget();
     cells.clickAdmissions.delete(nativeEvent);
     const operation: ManualSaveOperation = Object.freeze({
       mount: render.mount,
