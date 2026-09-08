@@ -238,17 +238,20 @@ function ListLoadError({
   error,
   pending,
   onRetry,
+  buttonRef,
   testId,
 }: {
   error: string;
   pending: boolean;
-  onRetry: () => void;
+  onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  buttonRef: (element: HTMLButtonElement | null) => void;
   testId: string;
 }) {
   return (
     <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid={testId}>
       <div>{error}</div>
       <button
+        ref={buttonRef}
         type="button"
         className="btn btn-outline btn-sm mt-2 gap-1.5"
         onClick={onRetry}
@@ -338,6 +341,7 @@ interface PickerCallbacks {
 
 interface GitHubPickerPresentation {
   readonly identity: object;
+  readonly revision: number;
   readonly mount: symbol;
   readonly visit: number;
   readonly mode: GitHubPickerProps["mode"];
@@ -379,21 +383,70 @@ type PickerElementName =
   | "gistPublic"
   | "gistCreate"
   | "gistList"
+  | "gistRetry"
   | "gistRows"
   | "repositoryList"
+  | "repositoryRetry"
   | "repositoryRows"
   | "repositoryBack"
   | "branchList"
+  | "branchRetry"
   | "branchSelect"
   | "pathForm"
   | "path"
   | "pathSubmit"
   | "fileList"
+  | "fileRetry"
   | "fileRows";
 
+type PickerMappedElementName = "gistRows" | "repositoryRows" | "branchOptions" | "fileRows";
+type PickerMappedItem =
+  | PickerGistRowPresentation
+  | PickerRepoPresentation
+  | PickerBranchPresentation
+  | PickerFilePresentation;
+type PickerRuntimePhase =
+  | "mounting"
+  | "active"
+  | "layout-retired"
+  | "replacement-retired"
+  | "refs-detached"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+type PickerRefOwner =
+  | {
+      readonly kind: "element";
+      readonly name: PickerElementName;
+      current: HTMLElement | null;
+      captured: boolean;
+      readonly capture: (element: HTMLElement | null) => void;
+    }
+  | {
+      readonly kind: "mapped";
+      readonly mapName: PickerMappedElementName;
+      readonly item: PickerMappedItem;
+      current: HTMLElement | null;
+      captured: boolean;
+      readonly capture: (element: HTMLElement | null) => void;
+    };
+
 interface GitHubPickerPresentationRuntime {
-  active: boolean;
   claimed: boolean;
+  phase: PickerRuntimePhase;
+  layoutRetired: boolean;
+  publication: GitHubPickerPublication | null;
+  history: PickerMutationHistory | null;
+  expiry: number;
+  readonly owners: PickerRefOwner[];
+  readonly elementOwners: Map<PickerElementName, PickerRefOwner>;
+  readonly mappedOwners: Map<object, PickerRefOwner>;
+  committedRefs: Map<PickerRefOwner, HTMLElement> | null;
+  mountReplayRefs: Set<PickerRefOwner>;
+  replayExpected: Set<PickerRefOwner>;
+  replayDetached: Set<PickerRefOwner>;
+  replayAttached: Set<PickerRefOwner>;
   elements: Record<PickerElementName, HTMLElement | null>;
   gistRows: Map<PickerGistRowPresentation, HTMLButtonElement>;
   repositoryRows: Map<PickerRepoPresentation, HTMLButtonElement>;
@@ -403,6 +456,8 @@ interface GitHubPickerPresentationRuntime {
 
 interface PickerDomSnapshot {
   readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
   readonly children: readonly PickerDomSnapshot[];
 }
 
@@ -411,7 +466,115 @@ interface GitHubPickerPublication {
   readonly runtime: GitHubPickerPresentationRuntime;
   readonly ownerDocument: Document;
   readonly rootParent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
   readonly dom: PickerDomSnapshot;
+}
+
+interface PickerReplay {
+  readonly source: GitHubPickerPublication;
+  readonly history: PickerMutationHistory;
+}
+
+class GitHubPickerPublicationCoordinator {
+  #active: GitHubPickerPublication | null = null;
+  #successorOf: GitHubPickerPublication | null = null;
+  #replay: PickerReplay | null = null;
+  #retired = new WeakSet<GitHubPickerPublication>();
+  #claimedEvents = new WeakSet<object>();
+
+  active() {
+    return this.#active;
+  }
+
+  successorOf() {
+    return this.#successorOf;
+  }
+
+  replay() {
+    return this.#replay;
+  }
+
+  isRetired(publication: GitHubPickerPublication) {
+    return this.#retired.has(publication);
+  }
+
+  markRetired(publication: GitHubPickerPublication) {
+    this.#retired.add(publication);
+  }
+
+  retire(publication: GitHubPickerPublication) {
+    this.markRetired(publication);
+    if (this.#active !== publication) return false;
+    this.#active = null;
+    this.#successorOf = publication;
+    return true;
+  }
+
+  publish(publication: GitHubPickerPublication) {
+    this.#active = publication;
+    this.#successorOf = null;
+  }
+
+  clear(publication: GitHubPickerPublication) {
+    if (this.#active === publication) this.#active = null;
+    if (this.#successorOf === publication) this.#successorOf = null;
+  }
+
+  startReplay(replay: PickerReplay) {
+    this.#replay = replay;
+  }
+
+  clearReplay(publication: GitHubPickerPublication) {
+    if (this.#replay?.source !== publication) return false;
+    this.#replay = null;
+    return true;
+  }
+
+  hasClaimed(event: object) {
+    return this.#claimedEvents.has(event);
+  }
+
+  claim(event: object) {
+    this.#claimedEvents.add(event);
+  }
+}
+
+class GitHubPickerRuntimeRegistry {
+  #runtimes = new WeakMap<GitHubPickerPresentation, GitHubPickerPresentationRuntime>();
+
+  get(candidate: GitHubPickerPresentation) {
+    return this.#runtimes.get(candidate);
+  }
+
+  for(candidate: GitHubPickerPresentation) {
+    let runtime = this.get(candidate);
+    if (!runtime) {
+      runtime = {
+        claimed: false,
+        phase: "mounting",
+        layoutRetired: false,
+        publication: null,
+        history: null,
+        expiry: 0,
+        owners: [],
+        elementOwners: new Map(),
+        mappedOwners: new Map(),
+        committedRefs: null,
+        mountReplayRefs: new Set(),
+        replayExpected: new Set(),
+        replayDetached: new Set(),
+        replayAttached: new Set(),
+        elements: emptyPickerElements(),
+        gistRows: new Map(),
+        repositoryRows: new Map(),
+        branchOptions: new Map(),
+        fileRows: new Map(),
+      };
+      this.#runtimes.set(candidate, runtime);
+    }
+    return runtime;
+  }
 }
 
 type PickerChangingControl = "filter" | "newGist" | "gistName" | "gistPublic" | "branch" | "path" | null;
@@ -624,16 +787,46 @@ function pickerPresentationFactsMatch(presentation: GitHubPickerPresentation): b
   );
 }
 
+function snapshotPickerAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    Array.from((node as Element).attributes, ({ name, value }) => Object.freeze([name, value] as const)).sort(
+      ([left], [right]) => left.localeCompare(right),
+    ),
+  );
+}
+
 function snapshotPickerDom(node: Node): PickerDomSnapshot {
   return Object.freeze({
     node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotPickerAttributes(node),
     children: Object.freeze(Array.from(node.childNodes, snapshotPickerDom)),
   });
 }
 
 function pickerDomMatches(snapshot: PickerDomSnapshot, ownerDocument: Document): boolean {
   const { node, children } = snapshot;
-  if (!node.isConnected || node.ownerDocument !== ownerDocument || node.childNodes.length !== children.length) return false;
+  if (
+    !node.isConnected ||
+    node.ownerDocument !== ownerDocument ||
+    node.nodeValue !== snapshot.nodeValue ||
+    node.childNodes.length !== children.length
+  ) {
+    return false;
+  }
+  const attributes = snapshotPickerAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || expected[0] !== name || expected[1] !== value;
+    })
+  ) {
+    return false;
+  }
   for (let index = 0; index < children.length; index++) {
     const child = children[index];
     if (node.childNodes.item(index) !== child.node || !pickerDomMatches(child, ownerDocument)) return false;
@@ -653,17 +846,142 @@ function emptyPickerElements(): Record<PickerElementName, HTMLElement | null> {
     gistPublic: null,
     gistCreate: null,
     gistList: null,
+    gistRetry: null,
     gistRows: null,
     repositoryList: null,
+    repositoryRetry: null,
     repositoryRows: null,
     repositoryBack: null,
     branchList: null,
+    branchRetry: null,
     branchSelect: null,
     pathForm: null,
     path: null,
     pathSubmit: null,
     fileList: null,
+    fileRetry: null,
     fileRows: null,
+  };
+}
+
+function pickerPlacementMatches(publication: GitHubPickerPublication): boolean {
+  const root = publication.dom.node;
+  return Boolean(
+    root &&
+      root.ownerDocument === publication.ownerDocument &&
+      root.parentNode === publication.rootParent &&
+      root.previousSibling === publication.previousSibling &&
+      root.nextSibling === publication.nextSibling,
+  );
+}
+
+function pickerSnapshotNodes(snapshot: PickerDomSnapshot, nodes = new Set<Node>()): Set<Node> {
+  nodes.add(snapshot.node);
+  for (const child of snapshot.children) pickerSnapshotNodes(child, nodes);
+  return nodes;
+}
+
+function pickerInputCorrectionsAreExact(
+  records: readonly MutationRecord[],
+  publication: GitHubPickerPublication,
+): boolean {
+  const root = publication.dom.node;
+  const Input = publication.ownerDocument.defaultView?.HTMLInputElement;
+  if (!Input || !pickerDomMatches(publication.dom, publication.ownerDocument)) return false;
+
+  for (let index = 0; index < records.length; ) {
+    const first = records[index];
+    if (
+      !first ||
+      first.type !== "attributes" ||
+      first.attributeName !== "name" ||
+      !(first.target instanceof Input) ||
+      !root.contains(first.target)
+    ) {
+      return false;
+    }
+    const input = first.target;
+    const checkable = input.type === "checkbox" || input.type === "radio";
+    if (checkable) {
+      const type = records[index + 1];
+      const restoredName = records[index + 2];
+      if (
+        first.oldValue !== input.getAttribute("name") ||
+        !type ||
+        type.target !== input ||
+        type.type !== "attributes" ||
+        type.attributeName !== "type" ||
+        type.oldValue !== input.type ||
+        !restoredName ||
+        restoredName.target !== input ||
+        restoredName.type !== "attributes" ||
+        restoredName.attributeName !== "name" ||
+        restoredName.oldValue !== ""
+      ) {
+        return false;
+      }
+      index += 3;
+      continue;
+    }
+    const restoredName = records[index + 1];
+    if (
+      first.oldValue !== null ||
+      input.hasAttribute("name") ||
+      !restoredName ||
+      restoredName.target !== input ||
+      restoredName.type !== "attributes" ||
+      restoredName.attributeName !== "name" ||
+      restoredName.oldValue !== ""
+    ) {
+      return false;
+    }
+    index += 2;
+  }
+  return records.length > 0;
+}
+
+class PickerMutationHistory {
+  private dirty = false;
+  private readonly records: MutationRecord[] = [];
+  private readonly rootObserver: MutationObserver;
+  private readonly parentObserver: MutationObserver;
+
+  constructor(private readonly publication: GitHubPickerPublication) {
+    const Observer = publication.ownerDocument.defaultView?.MutationObserver;
+    if (!Observer) throw new Error("The GitHub picker has no owner-document MutationObserver");
+    this.rootObserver = new Observer((records) => {
+      this.records.push(...records);
+    });
+    this.parentObserver = new Observer((records) => {
+      if (records.length > 0) this.dirty = true;
+    });
+    this.rootObserver.observe(publication.dom.node, {
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    this.parentObserver.observe(publication.rootParent, { childList: true });
+  }
+
+  readonly isPristine = (allowInputNameCorrection = false) => {
+    this.records.push(...this.rootObserver.takeRecords());
+    if (this.parentObserver.takeRecords().length > 0) this.dirty = true;
+    if (!this.dirty && this.records.length > 0) {
+      const exactInputCorrection =
+        allowInputNameCorrection &&
+        pickerInputCorrectionsAreExact(this.records, this.publication);
+      if (exactInputCorrection) this.records.length = 0;
+      else this.dirty = true;
+    }
+    return !this.dirty;
+  };
+
+  readonly disconnect = () => {
+    this.isPristine();
+    this.rootObserver.disconnect();
+    this.parentObserver.disconnect();
   };
 }
 
@@ -720,14 +1038,17 @@ function pickerPresentationDomIsExact(
     if (
       !none(
         "repositoryList",
+        "repositoryRetry",
         "repositoryRows",
         "repositoryBack",
         "branchList",
+        "branchRetry",
         "branchSelect",
         "pathForm",
         "path",
         "pathSubmit",
         "fileList",
+        "fileRetry",
         "fileRows",
       ) ||
       runtime.repositoryRows.size !== 0 ||
@@ -780,7 +1101,7 @@ function pickerPresentationDomIsExact(
         gistCreate.type !== "button" ||
         gistCreate.disabled !== (presentation.busy || !presentation.gistName.trim()) ||
         gistCreate.dataset.testid !== "gist-create" ||
-        !none("gistList", "gistRows") ||
+        !none("gistList", "gistRetry", "gistRows") ||
         runtime.gistRows.size !== 0
       ) {
         return false;
@@ -788,15 +1109,23 @@ function pickerPresentationDomIsExact(
     } else {
       if (!none("gistName", "gistPublic", "gistCreate")) return false;
       const list = runtime.elements.gistList;
+      const retry = runtime.elements.gistRetry;
       const rows = runtime.elements.gistRows;
+      const hasRetry = presentation.gists.error !== null;
       const hasRows =
-        presentation.gists.error === null &&
+        !hasRetry &&
         presentation.gists.sourceItems !== null &&
         presentation.gistRows.length > 0;
       if (
         !(list instanceof ownerWindow.HTMLDivElement) ||
         !belongs(list) ||
         list.dataset.testid !== "gist-list" ||
+        (hasRetry
+          ? !(retry instanceof ownerWindow.HTMLButtonElement) ||
+            !belongs(retry) ||
+            retry.type !== "button" ||
+            retry.disabled !== presentation.gists.pending
+          : retry !== null) ||
         (hasRows
           ? !(rows instanceof ownerWindow.HTMLUListElement) || !belongs(rows) || rows.parentElement !== list
           : rows !== null) ||
@@ -831,7 +1160,7 @@ function pickerPresentationDomIsExact(
   }
 
   if (
-    !none("newGist", "existingGist", "gistName", "gistPublic", "gistCreate", "gistList", "gistRows") ||
+    !none("newGist", "existingGist", "gistName", "gistPublic", "gistCreate", "gistList", "gistRetry", "gistRows") ||
     runtime.gistRows.size !== 0
   ) {
     return false;
@@ -839,22 +1168,41 @@ function pickerPresentationDomIsExact(
 
   if (!presentation.selectedRepo) {
     if (
-      !none("repositoryBack", "branchList", "branchSelect", "pathForm", "path", "pathSubmit", "fileList", "fileRows") ||
+      !none(
+        "repositoryBack",
+        "branchList",
+        "branchRetry",
+        "branchSelect",
+        "pathForm",
+        "path",
+        "pathSubmit",
+        "fileList",
+        "fileRetry",
+        "fileRows",
+      ) ||
       runtime.branchOptions.size !== 0 ||
       runtime.fileRows.size !== 0
     ) {
       return false;
     }
     const list = runtime.elements.repositoryList;
+    const retry = runtime.elements.repositoryRetry;
     const rows = runtime.elements.repositoryRows;
+    const hasRetry = presentation.repositories.error !== null;
     const hasRows =
-      presentation.repositories.error === null &&
+      !hasRetry &&
       presentation.repositories.sourceItems !== null &&
       presentation.repositoryRows.length > 0;
     if (
       !(list instanceof ownerWindow.HTMLDivElement) ||
       !belongs(list) ||
       list.dataset.testid !== "repo-list" ||
+      (hasRetry
+        ? !(retry instanceof ownerWindow.HTMLButtonElement) ||
+          !belongs(retry) ||
+          retry.type !== "button" ||
+          retry.disabled !== presentation.repositories.pending
+        : retry !== null) ||
       (hasRows
         ? !(rows instanceof ownerWindow.HTMLUListElement) || !belongs(rows) || rows.parentElement !== list
         : rows !== null) ||
@@ -888,11 +1236,14 @@ function pickerPresentationDomIsExact(
     return true;
   }
 
-  if (!none("repositoryList", "repositoryRows") || runtime.repositoryRows.size !== 0) return false;
+  if (!none("repositoryList", "repositoryRetry", "repositoryRows") || runtime.repositoryRows.size !== 0) return false;
   const repositoryBack = runtime.elements.repositoryBack;
   const branchList = runtime.elements.branchList;
+  const branchRetry = runtime.elements.branchRetry;
   const fileList = runtime.elements.fileList;
+  const fileRetry = runtime.elements.fileRetry;
   const fileRows = runtime.elements.fileRows;
+  const hasBranchRetry = presentation.branches.error !== null;
   const hasBranchSelect =
     presentation.branches.error === null &&
     presentation.branches.sourceItems !== null &&
@@ -902,6 +1253,7 @@ function pickerPresentationDomIsExact(
     presentation.files.error === null &&
     presentation.files.sourceItems !== null &&
     presentation.fileRows.length > 0;
+  const hasFileRetry = presentation.files.error !== null;
   if (
     !(repositoryBack instanceof ownerWindow.HTMLButtonElement) ||
     !(branchList instanceof ownerWindow.HTMLDivElement) ||
@@ -913,6 +1265,18 @@ function pickerPresentationDomIsExact(
     repositoryBack.disabled !== presentation.busy ||
     branchList.dataset.testid !== "branch-list" ||
     fileList.dataset.testid !== "file-list" ||
+    (hasBranchRetry
+      ? !(branchRetry instanceof ownerWindow.HTMLButtonElement) ||
+        !belongs(branchRetry) ||
+        branchRetry.type !== "button" ||
+        branchRetry.disabled !== presentation.branches.pending
+      : branchRetry !== null) ||
+    (hasFileRetry
+      ? !(fileRetry instanceof ownerWindow.HTMLButtonElement) ||
+        !belongs(fileRetry) ||
+        fileRetry.type !== "button" ||
+        fileRetry.disabled !== presentation.files.pending
+      : fileRetry !== null) ||
     (hasBranchSelect
       ? !(branchSelect instanceof ownerWindow.HTMLSelectElement) || !belongs(branchSelect)
       : branchSelect !== null) ||
@@ -1020,8 +1384,50 @@ function commitPickerPresentation(
     runtime,
     ownerDocument: root.ownerDocument,
     rootParent: root.parentNode,
+    previousSibling: root.previousSibling,
+    nextSibling: root.nextSibling,
     dom: snapshotPickerDom(root),
   });
+}
+
+function pickerReplayFactsMatch(
+  source: GitHubPickerPresentation,
+  successor: GitHubPickerPresentation,
+): boolean {
+  return (
+    source.identity !== successor.identity &&
+    successor.revision === source.revision + 1 &&
+    source.mount === successor.mount &&
+    source.visit === successor.visit &&
+    source.mode === successor.mode &&
+    source.document === successor.document &&
+    source.documentId === successor.documentId &&
+    source.documentTitle === successor.documentTitle &&
+    source.githubAvailable === successor.githubAvailable &&
+    source.githubConfigured === successor.githubConfigured &&
+    source.tab === successor.tab &&
+    source.filter === successor.filter &&
+    source.gistChoiceName === successor.gistChoiceName &&
+    source.newGist === successor.newGist &&
+    source.gistName === successor.gistName &&
+    source.gistPublic === successor.gistPublic &&
+    source.selectedRepo === successor.selectedRepo &&
+    source.branch === successor.branch &&
+    source.path === successor.path &&
+    source.busy === successor.busy &&
+    source.actionError === successor.actionError &&
+    source.operation === successor.operation &&
+    source.callbacks === successor.callbacks &&
+    source.gists === successor.gists &&
+    source.gistRows === successor.gistRows &&
+    source.repositories === successor.repositories &&
+    source.repositoryRows === successor.repositoryRows &&
+    source.branches === successor.branches &&
+    source.files === successor.files &&
+    source.fileRows === successor.fileRows &&
+    pickerPresentationFactsMatch(source) &&
+    pickerPresentationFactsMatch(successor)
+  );
 }
 
 function pickerSyntheticEventShape(event: unknown, reactName: "onClick" | "onChange" | "onSubmit"): boolean {
@@ -1109,12 +1515,12 @@ function exactPickerSubmit(
     event.type === "submit" &&
     event.currentTarget === form &&
     event.target === form &&
-    !event.defaultPrevented &&
+    event.defaultPrevented &&
     nativeEvent instanceof ownerWindow.SubmitEvent &&
     nativeEvent.type === "submit" &&
     nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
     nativeEvent.target === form &&
-    !nativeEvent.defaultPrevented &&
+    nativeEvent.defaultPrevented &&
     (nativeEvent.submitter === null || nativeEvent.submitter === submit) &&
     form.isConnected &&
     submit.isConnected &&
@@ -1183,8 +1589,12 @@ function GitHubPickerVisit({
   const activeOperationRef = useRef<GitHubPickerOperation | null>(null);
   const onLinkedRef = useRef(onLinked);
   const onImportedRef = useRef(onImported);
-  const activePresentationRef = useRef<GitHubPickerPublication | null>(null);
-  const presentationRuntimesRef = useRef(new WeakMap<GitHubPickerPresentation, GitHubPickerPresentationRuntime>());
+  const [publicationCoordinator] = useState(() => new GitHubPickerPublicationCoordinator());
+  const [publicationRuntimes] = useState(() => new GitHubPickerRuntimeRegistry());
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
 
   useLayoutEffect(() => {
     mountedRef.current = true;
@@ -1245,137 +1655,542 @@ function GitHubPickerVisit({
     if (tab === "repo" && repo && branch && fileList.items === null && !fileList.error && !fileList.pending) loadFiles();
   }, [branch, fileList.error, fileList.items, fileList.pending, loadFiles, repo, tab]);
 
-  const publishedGists = pickerList(gistList, snapshotPickerGist);
-  const publishedRepositories = pickerList(repoList, snapshotPickerRepo);
-  const publishedBranches = pickerList(branchList, snapshotPickerBranch);
-  const publishedFiles = pickerList(fileList, snapshotPickerFile);
+  const publishedGists = useMemo(() => pickerList(gistList, snapshotPickerGist), [gistList]);
+  const publishedRepositories = useMemo(() => pickerList(repoList, snapshotPickerRepo), [repoList]);
+  const publishedBranches = useMemo(() => pickerList(branchList, snapshotPickerBranch), [branchList]);
+  const publishedFiles = useMemo(() => pickerList(fileList, snapshotPickerFile), [fileList]);
   const query = filter.toLowerCase();
-  const gistRows = Object.freeze(
-    publishedGists.items
-      .filter(
-        (gist) =>
-          !query ||
-          (gist.description ?? "").toLowerCase().includes(query) ||
-          gist.files.some((file) => file.filename.toLowerCase().includes(query)),
-      )
-      .flatMap((gist) =>
-        gist.files
-          .filter((file) => /\.(md|markdown|mdx)$/i.test(file.filename) || file.language === "Markdown")
-          .map((file) => ({ gist, file })),
-      )
-      .map(({ gist, file }, index) => Object.freeze({ index, gist, file })),
+  const gistRows = useMemo(
+    () =>
+      Object.freeze(
+        publishedGists.items
+          .filter(
+            (gist) =>
+              !query ||
+              (gist.description ?? "").toLowerCase().includes(query) ||
+              gist.files.some((file) => file.filename.toLowerCase().includes(query)),
+          )
+          .flatMap((gist) =>
+            gist.files
+              .filter((file) => /\.(md|markdown|mdx)$/i.test(file.filename) || file.language === "Markdown")
+              .map((file) => ({ gist, file })),
+          )
+          .map(({ gist, file }, index) => Object.freeze({ index, gist, file })),
+      ),
+    [publishedGists, query],
   );
-  const repositoryRows = Object.freeze(
-    publishedRepositories.items.filter((item) => !query || item.fullName.toLowerCase().includes(query)),
+  const repositoryRows = useMemo(
+    () =>
+      Object.freeze(
+        publishedRepositories.items.filter((item) => !query || item.fullName.toLowerCase().includes(query)),
+      ),
+    [publishedRepositories, query],
   );
-  const fileRows = Object.freeze(publishedFiles.items.filter((item) => !query || item.path.toLowerCase().includes(query)));
-  const selectedRepo = repo ? snapshotPickerRepo(repo, -1) : null;
-  const identity = Object.freeze({});
-  const callbacks = Object.freeze<PickerCallbacks>({
-    onLinked,
-    onImported,
-    loadGists,
-    loadRepos,
-    loadBranches,
-    loadFiles,
-    invalidateGistLoad,
-    invalidateRepoLoad,
-    invalidateBranchLoad,
-    invalidateFileLoad,
-    resetBranchLoad,
-    resetFileLoad,
-  });
-  const presentation = Object.freeze<GitHubPickerPresentation>({
-    identity,
-    mount,
-    visit,
-    mode,
-    document: doc,
-    documentId: mode === "link" ? (doc?.id ?? null) : null,
-    documentTitle: mode === "link" ? (doc?.title ?? null) : null,
-    githubAvailable,
-    githubConfigured,
-    tab,
-    filter,
-    gistChoiceName,
-    newGist,
-    gistName,
-    gistPublic,
-    selectedRepo,
-    branch,
-    path,
-    busy,
-    actionError,
-    operation: busyOperation,
-    callbacks,
-    gists: publishedGists,
-    gistRows,
-    repositories: publishedRepositories,
-    repositoryRows,
-    branches: publishedBranches,
-    files: publishedFiles,
-    fileRows,
-  });
+  const fileRows = useMemo(
+    () => Object.freeze(publishedFiles.items.filter((item) => !query || item.path.toLowerCase().includes(query))),
+    [publishedFiles, query],
+  );
+  const selectedRepo = useMemo(() => (repo ? snapshotPickerRepo(repo, -1) : null), [repo]);
+  const callbacks = useMemo(
+    () =>
+      Object.freeze<PickerCallbacks>({
+        onLinked,
+        onImported,
+        loadGists,
+        loadRepos,
+        loadBranches,
+        loadFiles,
+        invalidateGistLoad,
+        invalidateRepoLoad,
+        invalidateBranchLoad,
+        invalidateFileLoad,
+        resetBranchLoad,
+        resetFileLoad,
+      }),
+    [
+      invalidateBranchLoad,
+      invalidateFileLoad,
+      invalidateGistLoad,
+      invalidateRepoLoad,
+      loadBranches,
+      loadFiles,
+      loadGists,
+      loadRepos,
+      onImported,
+      onLinked,
+      resetBranchLoad,
+      resetFileLoad,
+    ],
+  );
+  const presentation = useMemo(
+    () =>
+      Object.freeze<GitHubPickerPresentation>({
+        identity: Object.freeze({}),
+        revision: publicationRevision,
+        mount,
+        visit,
+        mode,
+        document: doc,
+        documentId: mode === "link" ? (doc?.id ?? null) : null,
+        documentTitle: mode === "link" ? (doc?.title ?? null) : null,
+        githubAvailable,
+        githubConfigured,
+        tab,
+        filter,
+        gistChoiceName,
+        newGist,
+        gistName,
+        gistPublic,
+        selectedRepo,
+        branch,
+        path,
+        busy,
+        actionError,
+        operation: busyOperation,
+        callbacks,
+        gists: publishedGists,
+        gistRows,
+        repositories: publishedRepositories,
+        repositoryRows,
+        branches: publishedBranches,
+        files: publishedFiles,
+        fileRows,
+      }),
+    [
+      actionError,
+      branch,
+      busy,
+      busyOperation,
+      callbacks,
+      doc,
+      fileRows,
+      filter,
+      githubAvailable,
+      githubConfigured,
+      gistChoiceName,
+      gistName,
+      gistPublic,
+      gistRows,
+      mode,
+      mount,
+      newGist,
+      path,
+      publicationRevision,
+      publishedBranches,
+      publishedFiles,
+      publishedGists,
+      publishedRepositories,
+      repositoryRows,
+      selectedRepo,
+      tab,
+      visit,
+    ],
+  );
+  const identity = presentation.identity;
 
-  const runtimeFor = useCallback((candidate: GitHubPickerPresentation) => {
-    const runtimes = presentationRuntimesRef.current;
-    let runtime = runtimes.get(candidate);
-    if (!runtime) {
-      runtime = {
-        active: false,
-        claimed: false,
-        elements: emptyPickerElements(),
-        gistRows: new Map(),
-        repositoryRows: new Map(),
-        branchOptions: new Map(),
-        fileRows: new Map(),
-      };
-      runtimes.set(candidate, runtime);
-    }
-    return runtime;
-  }, []);
-
-  const retirePresentation = useCallback((candidate: GitHubPickerPresentation) => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
-    if (runtime) runtime.active = false;
-    if (activePresentationRef.current?.presentation === candidate) activePresentationRef.current = null;
-  }, []);
-
-  const bindElement = useCallback(
-    (candidate: GitHubPickerPresentation, name: PickerElementName, element: HTMLElement | null) => {
-      const runtime = runtimeFor(candidate);
-      const previous = runtime.elements[name];
-      if (runtime.active && previous !== element) retirePresentation(candidate);
-      runtime.elements[name] = element;
-      if (!element) retirePresentation(candidate);
+  const invalidateRuntime = useCallback(
+    (runtime: GitHubPickerPresentationRuntime) => {
+      runtime.expiry++;
+      runtime.phase = "dead";
+      const publication = runtime.publication;
+      if (publication) publicationCoordinator.markRetired(publication);
+      const replay = publicationCoordinator.replay();
+      if (publication && replay?.source === publication) {
+        replay.history.disconnect();
+        publicationCoordinator.clearReplay(publication);
+      } else {
+        runtime.history?.disconnect();
+      }
+      runtime.history = null;
+      if (publication) publicationCoordinator.clear(publication);
     },
-    [retirePresentation, runtimeFor],
+    [publicationCoordinator],
   );
 
-  const bindMappedElement = useCallback(
-    <T extends PickerGistRowPresentation | PickerRepoPresentation | PickerBranchPresentation | PickerFilePresentation>(
-      candidate: GitHubPickerPresentation,
-      mapName: "gistRows" | "repositoryRows" | "branchOptions" | "fileRows",
-      item: T,
-      element: HTMLButtonElement | HTMLOptionElement | null,
+  const retireRuntime = useCallback(
+    (
+      runtime: GitHubPickerPresentationRuntime,
+      reason: "element" | "layout" | "replacement" | "other",
     ) => {
-      const runtime = runtimeFor(candidate);
-      const map = runtime[mapName] as Map<T, HTMLButtonElement | HTMLOptionElement>;
-      const previous = map.get(item) ?? null;
-      if (runtime.active && previous !== element) retirePresentation(candidate);
-      if (element) map.set(item, element);
-      else {
-        map.delete(item);
-        retirePresentation(candidate);
+      if (reason === "layout") runtime.layoutRetired = true;
+      const publication = runtime.publication;
+      if (
+        !publication ||
+        runtime.phase === "mounting" ||
+        runtime.phase === "dead" ||
+        runtime.phase === "successor-requested" ||
+        publicationCoordinator.isRetired(publication)
+      ) {
+        return false;
+      }
+      publicationCoordinator.retire(publication);
+      runtime.phase = reason === "replacement" ? "replacement-retired" : "layout-retired";
+      runtime.replayExpected =
+        reason === "layout"
+          ? new Set(runtime.committedRefs?.keys())
+          : reason === "element"
+            ? new Set(runtime.mountReplayRefs)
+            : new Set();
+      runtime.replayDetached.clear();
+      runtime.replayAttached.clear();
+      const ticket = ++runtime.expiry;
+      queueMicrotask(() => {
+        if (
+          runtime.expiry === ticket &&
+          runtime.phase !== "active" &&
+          runtime.phase !== "successor-requested" &&
+          publicationCoordinator.replay()?.source !== publication
+        ) {
+          invalidateRuntime(runtime);
+        }
+      });
+      return true;
+    },
+    [invalidateRuntime, publicationCoordinator],
+  );
+
+  const requestReplaySuccessor = useCallback(
+    (runtime: GitHubPickerPresentationRuntime) => {
+      const publication = runtime.publication;
+      const history = runtime.history;
+      if (
+        runtime.phase !== "replay-ready" ||
+        !publication ||
+        !history ||
+        !publicationCoordinator.isRetired(publication) ||
+        publicationCoordinator.active() !== null ||
+        publicationCoordinator.successorOf() !== publication ||
+        publicationCoordinator.replay() !== null ||
+        runtime.replayExpected.size === 0 ||
+        runtime.replayDetached.size !== runtime.replayExpected.size ||
+        runtime.replayAttached.size !== runtime.replayExpected.size ||
+        !history.isPristine() ||
+        !pickerPlacementMatches(publication) ||
+        !pickerDomMatches(publication.dom, publication.ownerDocument) ||
+        !pickerPresentationDomIsExact(publication.presentation, runtime)
+      ) {
+        invalidateRuntime(runtime);
+        return;
+      }
+      runtime.phase = "successor-requested";
+      publicationCoordinator.startReplay(Object.freeze({ source: publication, history }));
+      const ticket = ++runtime.expiry;
+      queueMicrotask(() => {
+        if (
+          runtime.expiry !== ticket ||
+          runtime.phase !== "successor-requested" ||
+          publicationCoordinator.replay()?.source !== publication
+        ) {
+          return;
+        }
+        if (
+          !history.isPristine() ||
+          !pickerPlacementMatches(publication) ||
+          !pickerDomMatches(publication.dom, publication.ownerDocument) ||
+          !pickerPresentationDomIsExact(publication.presentation, runtime)
+        ) {
+          invalidateRuntime(runtime);
+          return;
+        }
+        history.disconnect();
+        requestPublicationSuccessor();
+      });
+    },
+    [invalidateRuntime, publicationCoordinator, requestPublicationSuccessor],
+  );
+
+  const noteRef = useCallback(
+    (
+      runtime: GitHubPickerPresentationRuntime,
+      owner: PickerRefOwner,
+      element: HTMLElement | null,
+    ) => {
+      if (owner.current === element) return;
+      const previous = owner.current;
+      owner.current = element;
+      if (owner.kind === "element") {
+        runtime.elements[owner.name] = element;
+      } else {
+        const map = runtime[owner.mapName] as Map<PickerMappedItem, HTMLElement>;
+        if (element) map.set(owner.item, element);
+        else map.delete(owner.item);
+      }
+
+      if (
+        runtime.phase === "dead" ||
+        runtime.phase === "successor-requested" ||
+        runtime.phase === "replacement-retired"
+      ) {
+        return;
+      }
+      if (runtime.phase === "mounting") {
+        if (owner.captured || previous !== null || element === null) {
+          invalidateRuntime(runtime);
+          return;
+        }
+        owner.captured = true;
+        return;
+      }
+
+      if (runtime.phase === "active") {
+        if (!runtime.mountReplayRefs.has(owner)) {
+          retireRuntime(runtime, "replacement");
+          return;
+        }
+        retireRuntime(runtime, "element");
+      }
+      const committed = runtime.committedRefs?.get(owner);
+      if (!committed || !runtime.replayExpected.has(owner)) {
+        invalidateRuntime(runtime);
+        return;
+      }
+      if (!runtime.layoutRetired) {
+        if (
+          previous === committed &&
+          element === null &&
+          !runtime.replayDetached.has(owner) &&
+          !runtime.replayAttached.has(owner)
+        ) {
+          runtime.replayDetached.add(owner);
+        } else if (
+          previous === null &&
+          element === committed &&
+          runtime.replayDetached.has(owner) &&
+          !runtime.replayAttached.has(owner)
+        ) {
+          runtime.replayAttached.add(owner);
+        } else {
+          invalidateRuntime(runtime);
+          return;
+        }
+        if (
+          runtime.replayDetached.size === runtime.replayExpected.size &&
+          runtime.replayAttached.size === runtime.replayExpected.size
+        ) {
+          runtime.phase = "replay-ready";
+          requestReplaySuccessor(runtime);
+        }
+        return;
+      }
+      if (runtime.phase === "layout-retired") {
+        if (
+          previous !== committed ||
+          element !== null ||
+          runtime.replayDetached.has(owner) ||
+          runtime.replayAttached.size > 0
+        ) {
+          invalidateRuntime(runtime);
+          return;
+        }
+        runtime.replayDetached.add(owner);
+        if (runtime.replayDetached.size === runtime.replayExpected.size) runtime.phase = "refs-detached";
+        return;
+      }
+      if (
+        runtime.phase !== "refs-detached" ||
+        previous !== null ||
+        element !== committed ||
+        !runtime.replayDetached.has(owner) ||
+        runtime.replayAttached.has(owner)
+      ) {
+        invalidateRuntime(runtime);
+        return;
+      }
+      runtime.replayAttached.add(owner);
+      if (runtime.replayAttached.size === runtime.replayExpected.size) {
+        runtime.phase = "replay-ready";
+        if (!runtime.layoutRetired) requestReplaySuccessor(runtime);
       }
     },
-    [retirePresentation, runtimeFor],
+    [invalidateRuntime, requestReplaySuccessor, retireRuntime],
+  );
+
+  const elementRef = useCallback(
+    (candidate: GitHubPickerPresentation, name: PickerElementName) => {
+      const runtime = publicationRuntimes.for(candidate);
+      let owner = runtime.elementOwners.get(name);
+      if (!owner) {
+        owner = {
+          kind: "element",
+          name,
+          current: null,
+          captured: false,
+          capture: (element) => noteRef(runtime, owner!, element),
+        };
+        runtime.elementOwners.set(name, owner);
+        runtime.owners.push(owner);
+      }
+      return owner.capture;
+    },
+    [noteRef, publicationRuntimes],
+  );
+
+  const mappedElementRef = useCallback(
+    <T extends PickerGistRowPresentation | PickerRepoPresentation | PickerBranchPresentation | PickerFilePresentation>(
+      candidate: GitHubPickerPresentation,
+      mapName: PickerMappedElementName,
+      item: T,
+    ) => {
+      const runtime = publicationRuntimes.for(candidate);
+      let owner = runtime.mappedOwners.get(item);
+      if (!owner) {
+        owner = {
+          kind: "mapped",
+          mapName,
+          item,
+          current: null,
+          captured: false,
+          capture: (element) => noteRef(runtime, owner!, element),
+        };
+        runtime.mappedOwners.set(item, owner);
+        runtime.owners.push(owner);
+      }
+      return owner.capture;
+    },
+    [noteRef, publicationRuntimes],
+  );
+
+  const presentationIsCurrent = useCallback(
+    (candidate: GitHubPickerPresentation) =>
+      candidate === presentation &&
+      candidate.identity === identity &&
+      candidate.revision === publicationRevision &&
+      candidate.mount === mount &&
+      candidate.visit === visit &&
+      candidate.mode === mode &&
+      candidate.document === doc &&
+      candidate.documentId === (mode === "link" ? (doc?.id ?? null) : null) &&
+      candidate.documentTitle === (mode === "link" ? (doc?.title ?? null) : null) &&
+      candidate.githubAvailable === githubAvailable &&
+      candidate.githubConfigured === githubConfigured &&
+      candidate.tab === tab &&
+      candidate.filter === filter &&
+      candidate.gistChoiceName === gistChoiceName &&
+      candidate.newGist === newGist &&
+      candidate.gistName === gistName &&
+      candidate.gistPublic === gistPublic &&
+      (candidate.selectedRepo?.source ?? null) === repo &&
+      candidate.branch === branch &&
+      candidate.path === path &&
+      candidate.busy === busy &&
+      candidate.actionError === actionError &&
+      candidate.operation === activeOperationRef.current &&
+      candidate.gists.state === gistList &&
+      candidate.repositories.state === repoList &&
+      candidate.branches.state === branchList &&
+      candidate.files.state === fileList &&
+      candidate.callbacks === callbacks &&
+      candidate.callbacks.onLinked === onLinked &&
+      candidate.callbacks.onImported === onImported &&
+      candidate.callbacks.onLinked === onLinkedRef.current &&
+      candidate.callbacks.onImported === onImportedRef.current &&
+      pickerPresentationFactsMatch(candidate),
+    [
+      actionError,
+      branch,
+      branchList,
+      busy,
+      callbacks,
+      doc,
+      fileList,
+      filter,
+      gistChoiceName,
+      gistList,
+      gistName,
+      gistPublic,
+      githubAvailable,
+      githubConfigured,
+      identity,
+      mode,
+      mount,
+      newGist,
+      onImported,
+      onLinked,
+      path,
+      presentation,
+      publicationRevision,
+      repo,
+      repoList,
+      tab,
+      visit,
+    ],
+  );
+
+  const replayRefsAreExact = (
+    source: GitHubPickerPresentationRuntime,
+    successor: GitHubPickerPresentationRuntime,
+  ) => {
+    const committed = source.committedRefs;
+    if (
+      !committed ||
+      source.owners.length !== committed.size ||
+      successor.owners.length !== source.owners.length
+    ) {
+      return false;
+    }
+    for (let index = 0; index < source.owners.length; index++) {
+      const previous = source.owners[index];
+      const current = successor.owners[index];
+      if (
+        !previous ||
+        !current ||
+        previous.kind !== current.kind ||
+        current.current !== committed.get(previous) ||
+        (previous.kind === "element" &&
+          (current.kind !== "element" || previous.name !== current.name)) ||
+        (previous.kind === "mapped" &&
+          (current.kind !== "mapped" ||
+            previous.mapName !== current.mapName ||
+            previous.item !== current.item))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const releasePublication = useCallback(
+    (publication: GitHubPickerPublication) => {
+      const replay = publicationCoordinator.replay();
+      if (replay?.source === publication) {
+        replay.history.disconnect();
+        publicationCoordinator.clearReplay(publication);
+      } else {
+        publication.runtime.history?.disconnect();
+      }
+      publication.runtime.history = null;
+      publication.runtime.phase = "dead";
+      publication.runtime.expiry++;
+      publicationCoordinator.clear(publication);
+    },
+    [publicationCoordinator],
   );
 
   useLayoutEffect(() => {
-    const runtime = runtimeFor(presentation);
+    const runtime = publicationRuntimes.for(presentation);
+    if (!presentationIsCurrent(presentation)) {
+      invalidateRuntime(runtime);
+      return;
+    }
+
+    if (runtime.phase === "replay-ready") {
+      if (!runtime.layoutRetired) {
+        invalidateRuntime(runtime);
+        return;
+      }
+      requestReplaySuccessor(runtime);
+      return;
+    }
+
+    if (runtime.phase !== "mounting") {
+      invalidateRuntime(runtime);
+      return;
+    }
     if (
+      runtime.owners.length === 0 ||
+      runtime.owners.some((owner) => !owner.captured || !owner.current) ||
       presentation.mount !== mount ||
+      presentation.revision !== publicationRevision ||
       presentation.visit !== visit ||
       presentation.mode !== mode ||
       presentation.document !== doc ||
@@ -1400,38 +2215,108 @@ function GitHubPickerVisit({
       presentation.callbacks.onLinked !== onLinkedRef.current ||
       presentation.callbacks.onImported !== onImportedRef.current
     ) {
+      invalidateRuntime(runtime);
       return;
     }
     const publication = commitPickerPresentation(presentation, runtime);
-    if (!publication) return;
-    const previous = activePresentationRef.current;
-    if (previous && previous.presentation !== presentation) retirePresentation(previous.presentation);
-    runtime.active = true;
-    activePresentationRef.current = publication;
-    return () => retirePresentation(presentation);
+    if (!publication) {
+      invalidateRuntime(runtime);
+      return;
+    }
+
+    let transitionSource: GitHubPickerPublication | null = null;
+    const replay = publicationCoordinator.replay();
+    if (replay) {
+      transitionSource = replay.source;
+      const sameFacts = pickerReplayFactsMatch(replay.source.presentation, presentation);
+      const exactReplay =
+        sameFacts &&
+        publicationCoordinator.isRetired(replay.source) &&
+        publicationCoordinator.successorOf() === replay.source &&
+        replay.source.runtime.phase === "successor-requested" &&
+        replay.history.isPristine() &&
+        pickerPlacementMatches(replay.source) &&
+        pickerDomMatches(replay.source.dom, replay.source.ownerDocument) &&
+        replayRefsAreExact(replay.source.runtime, runtime);
+      releasePublication(replay.source);
+      if (sameFacts && !exactReplay) {
+        invalidateRuntime(runtime);
+        return;
+      }
+    } else {
+      const successorOf = publicationCoordinator.successorOf();
+      if (successorOf) {
+        transitionSource = successorOf;
+        releasePublication(successorOf);
+      }
+    }
+
+    const previous = publicationCoordinator.active();
+    if (previous && previous !== publication) {
+      retireRuntime(previous.runtime, "other");
+      if (publicationCoordinator.active()) {
+        invalidateRuntime(runtime);
+        return;
+      }
+      releasePublication(previous);
+    }
+    runtime.publication = publication;
+    runtime.committedRefs = new Map(
+      runtime.owners.map((owner) => [owner, owner.current!] as const),
+    );
+    const previousNodes = transitionSource
+      ? pickerSnapshotNodes(transitionSource.dom)
+      : new Set<Node>();
+    runtime.mountReplayRefs = new Set(
+      runtime.owners.filter((owner) => !previousNodes.has(owner.current!)),
+    );
+    runtime.history = new PickerMutationHistory(publication);
+    if (
+      !runtime.history.isPristine() ||
+      !pickerPlacementMatches(publication) ||
+      !pickerDomMatches(publication.dom, publication.ownerDocument) ||
+      !pickerPresentationDomIsExact(presentation, runtime)
+    ) {
+      invalidateRuntime(runtime);
+      return;
+    }
+    runtime.phase = "active";
+    publicationCoordinator.publish(publication);
+    return () => {
+      retireRuntime(runtime, "layout");
+    };
   }, [
     actionError,
     branch,
     branchList,
     busy,
+    callbacks,
     doc,
     fileList,
     filter,
-    githubAvailable,
-    githubConfigured,
+    gistChoiceName,
     gistList,
     gistName,
     gistPublic,
-    gistChoiceName,
+    githubAvailable,
+    githubConfigured,
+    identity,
+    invalidateRuntime,
     mode,
     mount,
     newGist,
     path,
     presentation,
+    presentationIsCurrent,
+    publicationCoordinator,
+    publicationRuntimes,
+    publicationRevision,
+    releasePublication,
     repo,
     repoList,
-    retirePresentation,
-    runtimeFor,
+    requestPublicationSuccessor,
+    requestReplaySuccessor,
+    retireRuntime,
     tab,
     visit,
   ]);
@@ -1440,47 +2325,26 @@ function GitHubPickerVisit({
     candidate: GitHubPickerPresentation,
     changing: PickerChangingControl = null,
   ): GitHubPickerPublication | null => {
-    const publication = activePresentationRef.current;
+    const publication = publicationCoordinator.active();
     if (
       !publication ||
       publication.presentation !== candidate ||
-      publication.runtime !== presentationRuntimesRef.current.get(candidate) ||
-      !publication.runtime.active ||
-      candidate !== presentation ||
-      candidate.identity !== identity ||
-      candidate.mount !== mount ||
-      candidate.visit !== visit ||
-      candidate.mode !== mode ||
-      candidate.document !== doc ||
-      candidate.documentId !== (mode === "link" ? (doc?.id ?? null) : null) ||
-      candidate.documentTitle !== (mode === "link" ? (doc?.title ?? null) : null) ||
-      candidate.githubAvailable !== githubAvailable ||
-      candidate.githubConfigured !== githubConfigured ||
-      candidate.tab !== tab ||
-      candidate.filter !== filter ||
-      candidate.gistChoiceName !== gistChoiceName ||
-      candidate.newGist !== newGist ||
-      candidate.gistName !== gistName ||
-      candidate.gistPublic !== gistPublic ||
-      (candidate.selectedRepo?.source ?? null) !== repo ||
-      candidate.branch !== branch ||
-      candidate.path !== path ||
-      candidate.busy !== busy ||
-      candidate.actionError !== actionError ||
-      candidate.operation !== activeOperationRef.current ||
-      candidate.gists.state !== gistList ||
-      candidate.repositories.state !== repoList ||
-      candidate.branches.state !== branchList ||
-      candidate.files.state !== fileList ||
-      candidate.callbacks.onLinked !== onLinked ||
-      candidate.callbacks.onImported !== onImported ||
-      candidate.callbacks.onLinked !== onLinkedRef.current ||
-      candidate.callbacks.onImported !== onImportedRef.current ||
-      publication.rootParent !== publication.runtime.elements.root?.parentNode ||
-      !pickerPresentationFactsMatch(candidate) ||
-      !pickerPresentationDomIsExact(candidate, publication.runtime, changing) ||
+      publication.runtime !== publicationRuntimes.get(candidate)
+    ) {
+      return null;
+    }
+    const runtime = publication.runtime;
+    if (
+      runtime.phase !== "active" ||
+      runtime.claimed ||
+      publicationCoordinator.isRetired(publication) ||
+      !presentationIsCurrent(candidate) ||
+      !runtime.history?.isPristine(true) ||
+      !pickerPlacementMatches(publication) ||
+      !pickerPresentationDomIsExact(candidate, runtime, changing) ||
       !pickerDomMatches(publication.dom, publication.ownerDocument)
     ) {
+      invalidateRuntime(runtime);
       return null;
     }
     return publication;
@@ -1491,11 +2355,23 @@ function GitHubPickerVisit({
     event: ReactMouseEvent<HTMLButtonElement>,
     expected: HTMLButtonElement | null | undefined,
   ): GitHubPickerPublication | null => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
-    if (!runtime || runtime.claimed || !expected || !exactPickerClick(event, expected)) return null;
+    const runtime = publicationRuntimes.get(candidate);
+    const nativeEvent = event?.nativeEvent;
+    if (
+      !runtime ||
+      runtime.claimed ||
+      !expected ||
+      !exactPickerClick(event, expected) ||
+      publicationCoordinator.hasClaimed(event) ||
+      publicationCoordinator.hasClaimed(nativeEvent)
+    ) {
+      return null;
+    }
     const publication = currentPresentation(candidate);
     if (!publication || publication.runtime !== runtime) return null;
     runtime.claimed = true;
+    publicationCoordinator.claim(event);
+    publicationCoordinator.claim(nativeEvent);
     return publication;
   };
 
@@ -1506,19 +2382,23 @@ function GitHubPickerVisit({
     changing: Exclude<PickerChangingControl, null>,
     destinationMatches: (control: T) => boolean,
   ): GitHubPickerPublication | null => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
+    const runtime = publicationRuntimes.get(candidate);
     if (
       !runtime ||
       runtime.claimed ||
       !expected ||
       !exactPickerChange(event, expected) ||
-      !destinationMatches(expected)
+      !destinationMatches(expected) ||
+      publicationCoordinator.hasClaimed(event) ||
+      publicationCoordinator.hasClaimed(event.nativeEvent)
     ) {
       return null;
     }
     const publication = currentPresentation(candidate, changing);
     if (!publication || publication.runtime !== runtime) return null;
     runtime.claimed = true;
+    publicationCoordinator.claim(event);
+    publicationCoordinator.claim(event.nativeEvent);
     return publication;
   };
 
@@ -1526,7 +2406,7 @@ function GitHubPickerVisit({
     candidate: GitHubPickerPresentation,
     event: ReactFormEvent<HTMLFormElement>,
   ): GitHubPickerPublication | null => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
+    const runtime = publicationRuntimes.get(candidate);
     const form = runtime?.elements.pathForm;
     const submit = runtime?.elements.pathSubmit;
     const ownerWindow = form?.ownerDocument.defaultView;
@@ -1536,7 +2416,9 @@ function GitHubPickerVisit({
       !ownerWindow ||
       !(form instanceof ownerWindow.HTMLFormElement) ||
       !(submit instanceof ownerWindow.HTMLButtonElement) ||
-      !exactPickerSubmit(event, form, submit)
+      !exactPickerSubmit(event, form, submit) ||
+      publicationCoordinator.hasClaimed(event) ||
+      publicationCoordinator.hasClaimed(event.nativeEvent)
     ) {
       return null;
     }
@@ -1550,6 +2432,8 @@ function GitHubPickerVisit({
       return null;
     }
     runtime.claimed = true;
+    publicationCoordinator.claim(event);
+    publicationCoordinator.claim(event.nativeEvent);
     return publication;
   };
 
@@ -1672,7 +2556,7 @@ function GitHubPickerVisit({
 
   return (
     <div
-      ref={(element) => bindElement(presentation, "root", element)}
+      ref={elementRef(presentation, "root")}
       className="flex flex-col gap-3"
       data-testid="github-picker"
     >
@@ -1681,7 +2565,7 @@ function GitHubPickerVisit({
           {(["gist", "repo"] as Tab[]).map((t) => (
             <button
               key={t}
-              ref={(element) => bindElement(presentation, t === "gist" ? "tabGist" : "tabRepo", element)}
+              ref={elementRef(presentation, t === "gist" ? "tabGist" : "tabRepo")}
               type="button"
               className={cn(
                 "rounded-md px-3 py-1.5 text-sm font-medium",
@@ -1689,7 +2573,7 @@ function GitHubPickerVisit({
               )}
               onClick={(event) => {
                 if (t === presentation.tab) return;
-                const runtime = presentationRuntimesRef.current.get(presentation);
+                const runtime = publicationRuntimes.get(presentation);
                 const publication = claimMouse(
                   presentation,
                   event,
@@ -1717,7 +2601,7 @@ function GitHubPickerVisit({
         <div className="relative flex-1">
           <Search size={15} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
           <input
-            ref={(element) => bindElement(presentation, "filter", element)}
+            ref={elementRef(presentation, "filter")}
             className="input pl-9"
             placeholder={
               presentation.tab === "gist"
@@ -1731,7 +2615,7 @@ function GitHubPickerVisit({
             onChange={(event) => {
               const nextFilter = event.currentTarget.value;
               if (nextFilter === presentation.filter) return;
-              const runtime = presentationRuntimesRef.current.get(presentation);
+              const runtime = publicationRuntimes.get(presentation);
               if (
                 !claimChange(
                   presentation,
@@ -1760,14 +2644,14 @@ function GitHubPickerVisit({
             <div className="rounded-xl border border-line p-3">
               <label className="flex items-center gap-2 text-sm font-medium text-ink">
                 <input
-                  ref={(element) => bindElement(presentation, "newGist", element)}
+                  ref={elementRef(presentation, "newGist")}
                   type="radio"
                   name={presentation.gistChoiceName}
                   checked={presentation.newGist}
                   disabled={presentation.busy}
                   onChange={(event) => {
                     if (presentation.newGist) return;
-                    const runtime = presentationRuntimesRef.current.get(presentation);
+                    const runtime = publicationRuntimes.get(presentation);
                     if (
                       !claimChange(
                         presentation,
@@ -1789,14 +2673,14 @@ function GitHubPickerVisit({
               {presentation.newGist && (
                 <div className="mt-3 flex items-center gap-2 pl-6">
                   <input
-                    ref={(element) => bindElement(presentation, "gistName", element)}
+                    ref={elementRef(presentation, "gistName")}
                     className="input flex-1"
                     value={presentation.gistName}
                     disabled={presentation.busy}
                     onChange={(event) => {
                       const nextName = event.currentTarget.value;
                       if (nextName === presentation.gistName) return;
-                      const runtime = presentationRuntimesRef.current.get(presentation);
+                      const runtime = publicationRuntimes.get(presentation);
                       if (
                         !claimChange(
                           presentation,
@@ -1815,14 +2699,14 @@ function GitHubPickerVisit({
                   />
                   <label className="flex items-center gap-1.5 text-sm text-ink-2">
                     <input
-                      ref={(element) => bindElement(presentation, "gistPublic", element)}
+                      ref={elementRef(presentation, "gistPublic")}
                       type="checkbox"
                       checked={presentation.gistPublic}
                       disabled={presentation.busy}
                       onChange={(event) => {
                         const nextPublic = event.currentTarget.checked;
                         if (nextPublic === presentation.gistPublic) return;
-                        const runtime = presentationRuntimesRef.current.get(presentation);
+                        const runtime = publicationRuntimes.get(presentation);
                         if (
                           !claimChange(
                             presentation,
@@ -1840,12 +2724,12 @@ function GitHubPickerVisit({
                     Public
                   </label>
                   <button
-                    ref={(element) => bindElement(presentation, "gistCreate", element)}
+                    ref={elementRef(presentation, "gistCreate")}
                     type="button"
                     className="btn btn-primary"
                     disabled={presentation.busy || !presentation.gistName.trim()}
                     onClick={(event) => {
-                      const runtime = presentationRuntimesRef.current.get(presentation);
+                      const runtime = publicationRuntimes.get(presentation);
                       if (
                         !claimMouse(
                           presentation,
@@ -1865,14 +2749,14 @@ function GitHubPickerVisit({
               )}
               <label className="mt-3 flex items-center gap-2 text-sm font-medium text-ink">
                 <input
-                  ref={(element) => bindElement(presentation, "existingGist", element)}
+                  ref={elementRef(presentation, "existingGist")}
                   type="radio"
                   name={presentation.gistChoiceName}
                   checked={!presentation.newGist}
                   disabled={presentation.busy}
                   onChange={(event) => {
                     if (!presentation.newGist) return;
-                    const runtime = presentationRuntimesRef.current.get(presentation);
+                    const runtime = publicationRuntimes.get(presentation);
                     if (
                       !claimChange(
                         presentation,
@@ -1895,7 +2779,7 @@ function GitHubPickerVisit({
           )}
           {(presentation.mode === "import" || !presentation.newGist) && (
             <div
-              ref={(element) => bindElement(presentation, "gistList", element)}
+              ref={elementRef(presentation, "gistList")}
               className="scrollbar-thin max-h-72 overflow-y-auto rounded-xl border border-line"
               data-testid="gist-list"
             >
@@ -1903,7 +2787,20 @@ function GitHubPickerVisit({
                 <ListLoadError
                   error={presentation.gists.error}
                   pending={presentation.gists.pending}
-                  onRetry={presentation.callbacks.loadGists}
+                  onRetry={(event) => {
+                    const runtime = publicationRuntimes.get(presentation);
+                    if (
+                      !claimMouse(
+                        presentation,
+                        event,
+                        (runtime?.elements.gistRetry as HTMLButtonElement | null) ?? null,
+                      )
+                    ) {
+                      return;
+                    }
+                    presentation.callbacks.loadGists();
+                  }}
+                  buttonRef={elementRef(presentation, "gistRetry")}
                   testId="gist-load-error"
                 />
               ) : presentation.gists.sourceItems === null ? (
@@ -1913,16 +2810,16 @@ function GitHubPickerVisit({
               ) : presentation.gistRows.length === 0 ? (
                 <div className="px-3 py-6 text-center text-sm text-ink-3">No Markdown gists found.</div>
               ) : (
-                <ul ref={(element) => bindElement(presentation, "gistRows", element)} className="divide-y divide-line">
+                <ul ref={elementRef(presentation, "gistRows")} className="divide-y divide-line">
                   {presentation.gistRows.map((row) => (
                     <li key={row.gist.id + row.file.filename}>
                       <button
-                        ref={(element) => bindMappedElement(presentation, "gistRows", row, element)}
+                        ref={mappedElementRef(presentation, "gistRows", row)}
                         type="button"
                         className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
                         disabled={presentation.busy}
                         onClick={(event) => {
-                          const runtime = presentationRuntimesRef.current.get(presentation);
+                          const runtime = publicationRuntimes.get(presentation);
                           if (!claimMouse(presentation, event, runtime?.gistRows.get(row))) return;
                           linkGist(presentation, row.gist.id, row.file.filename);
                         }}
@@ -1951,7 +2848,7 @@ function GitHubPickerVisit({
         <div className="flex flex-col gap-3">
           {!presentation.selectedRepo ? (
             <div
-              ref={(element) => bindElement(presentation, "repositoryList", element)}
+              ref={elementRef(presentation, "repositoryList")}
               className="scrollbar-thin max-h-80 overflow-y-auto rounded-xl border border-line"
               data-testid="repo-list"
             >
@@ -1959,7 +2856,20 @@ function GitHubPickerVisit({
                 <ListLoadError
                   error={presentation.repositories.error}
                   pending={presentation.repositories.pending}
-                  onRetry={presentation.callbacks.loadRepos}
+                  onRetry={(event) => {
+                    const runtime = publicationRuntimes.get(presentation);
+                    if (
+                      !claimMouse(
+                        presentation,
+                        event,
+                        (runtime?.elements.repositoryRetry as HTMLButtonElement | null) ?? null,
+                      )
+                    ) {
+                      return;
+                    }
+                    presentation.callbacks.loadRepos();
+                  }}
+                  buttonRef={elementRef(presentation, "repositoryRetry")}
                   testId="repo-load-error"
                 />
               ) : presentation.repositories.sourceItems === null ? (
@@ -1970,17 +2880,17 @@ function GitHubPickerVisit({
                 <div className="px-3 py-6 text-center text-sm text-ink-3">No repositories found.</div>
               ) : (
                 <ul
-                  ref={(element) => bindElement(presentation, "repositoryRows", element)}
+                  ref={elementRef(presentation, "repositoryRows")}
                   className="divide-y divide-line"
                 >
                   {presentation.repositoryRows.map((row) => (
                     <li key={row.fullName}>
                       <button
-                        ref={(element) => bindMappedElement(presentation, "repositoryRows", row, element)}
+                        ref={mappedElementRef(presentation, "repositoryRows", row)}
                         type="button"
                         className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-surface-2 disabled:opacity-50"
                         onClick={(event) => {
-                          const runtime = presentationRuntimesRef.current.get(presentation);
+                          const runtime = publicationRuntimes.get(presentation);
                           if (!claimMouse(presentation, event, runtime?.repositoryRows.get(row))) return;
                           presentation.callbacks.resetBranchLoad();
                           presentation.callbacks.resetFileLoad();
@@ -2009,11 +2919,11 @@ function GitHubPickerVisit({
             <>
               <div className="flex items-center gap-2 text-sm">
                 <button
-                  ref={(element) => bindElement(presentation, "repositoryBack", element)}
+                  ref={elementRef(presentation, "repositoryBack")}
                   type="button"
                   className="btn btn-sm btn-ghost"
                   onClick={(event) => {
-                    const runtime = presentationRuntimesRef.current.get(presentation);
+                    const runtime = publicationRuntimes.get(presentation);
                     if (
                       !claimMouse(
                         presentation,
@@ -2034,7 +2944,7 @@ function GitHubPickerVisit({
                 </button>
                 <span className="font-medium text-ink">{presentation.selectedRepo.fullName}</span>
                 <div
-                  ref={(element) => bindElement(presentation, "branchList", element)}
+                  ref={elementRef(presentation, "branchList")}
                   className="ml-auto inline-flex items-center gap-1.5 text-ink-3"
                   data-testid="branch-list"
                 >
@@ -2043,7 +2953,20 @@ function GitHubPickerVisit({
                     <ListLoadError
                       error={presentation.branches.error}
                       pending={presentation.branches.pending}
-                      onRetry={presentation.callbacks.loadBranches}
+                      onRetry={(event) => {
+                        const runtime = publicationRuntimes.get(presentation);
+                        if (
+                          !claimMouse(
+                            presentation,
+                            event,
+                            (runtime?.elements.branchRetry as HTMLButtonElement | null) ?? null,
+                          )
+                        ) {
+                          return;
+                        }
+                        presentation.callbacks.loadBranches();
+                      }}
+                      buttonRef={elementRef(presentation, "branchRetry")}
                       testId="branch-load-error"
                     />
                   ) : presentation.branches.sourceItems === null ? (
@@ -2052,13 +2975,13 @@ function GitHubPickerVisit({
                     <span data-testid="branch-empty">No branches found.</span>
                   ) : (
                     <select
-                      ref={(element) => bindElement(presentation, "branchSelect", element)}
+                      ref={elementRef(presentation, "branchSelect")}
                       className="select h-8 text-xs"
                       value={presentation.branch}
                       onChange={(event) => {
                         const option = presentation.branches.items[event.currentTarget.selectedIndex];
                         if (!option || option.value === presentation.branch) return;
-                        const runtime = presentationRuntimesRef.current.get(presentation);
+                        const runtime = publicationRuntimes.get(presentation);
                         if (
                           !claimChange(
                             presentation,
@@ -2080,7 +3003,7 @@ function GitHubPickerVisit({
                     >
                       {presentation.branches.items.map((item) => (
                         <option
-                          ref={(element) => bindMappedElement(presentation, "branchOptions", item, element)}
+                          ref={mappedElementRef(presentation, "branchOptions", item)}
                           key={`${item.value}:${item.index}`}
                           value={item.value}
                         >
@@ -2093,16 +3016,16 @@ function GitHubPickerVisit({
               </div>
               {presentation.mode === "link" && (
                 <form
-                  ref={(element) => bindElement(presentation, "pathForm", element)}
+                  ref={elementRef(presentation, "pathForm")}
                   className="flex items-center gap-2"
                   onSubmit={(event) => {
-                    if (!claimSubmit(presentation, event)) return;
                     event.preventDefault();
+                    if (!claimSubmit(presentation, event)) return;
                     linkRepo(presentation, presentation.path.trim());
                   }}
                 >
                   <input
-                    ref={(element) => bindElement(presentation, "path", element)}
+                    ref={elementRef(presentation, "path")}
                     className="input flex-1 font-mono text-[13px]"
                     placeholder="docs/new-file.md (new or existing path)"
                     value={presentation.path}
@@ -2110,7 +3033,7 @@ function GitHubPickerVisit({
                     onChange={(event) => {
                       const nextPath = event.currentTarget.value;
                       if (nextPath === presentation.path) return;
-                      const runtime = presentationRuntimesRef.current.get(presentation);
+                      const runtime = publicationRuntimes.get(presentation);
                       if (
                         !claimChange(
                           presentation,
@@ -2127,7 +3050,7 @@ function GitHubPickerVisit({
                     data-testid="repo-path"
                   />
                   <button
-                    ref={(element) => bindElement(presentation, "pathSubmit", element)}
+                    ref={elementRef(presentation, "pathSubmit")}
                     type="submit"
                     className="btn btn-primary"
                     disabled={presentation.busy || !presentation.path.trim()}
@@ -2138,7 +3061,7 @@ function GitHubPickerVisit({
                 </form>
               )}
               <div
-                ref={(element) => bindElement(presentation, "fileList", element)}
+                ref={elementRef(presentation, "fileList")}
                 className="scrollbar-thin max-h-64 overflow-y-auto rounded-xl border border-line"
                 data-testid="file-list"
               >
@@ -2146,7 +3069,20 @@ function GitHubPickerVisit({
                   <ListLoadError
                     error={presentation.files.error}
                     pending={presentation.files.pending}
-                    onRetry={presentation.callbacks.loadFiles}
+                    onRetry={(event) => {
+                      const runtime = publicationRuntimes.get(presentation);
+                      if (
+                        !claimMouse(
+                          presentation,
+                          event,
+                          (runtime?.elements.fileRetry as HTMLButtonElement | null) ?? null,
+                        )
+                      ) {
+                        return;
+                      }
+                      presentation.callbacks.loadFiles();
+                    }}
+                    buttonRef={elementRef(presentation, "fileRetry")}
                     testId="file-load-error"
                   />
                 ) : presentation.files.sourceItems === null ? (
@@ -2156,17 +3092,17 @@ function GitHubPickerVisit({
                 ) : presentation.fileRows.length === 0 ? (
                   <div className="px-3 py-6 text-center text-sm text-ink-3">No Markdown files on this branch.</div>
                 ) : (
-                  <ul ref={(element) => bindElement(presentation, "fileRows", element)} className="divide-y divide-line">
+                  <ul ref={elementRef(presentation, "fileRows")} className="divide-y divide-line">
                     {presentation.fileRows.map((row) => (
                       <li key={row.path}>
                         <button
-                          ref={(element) => bindMappedElement(presentation, "fileRows", row, element)}
+                          ref={mappedElementRef(presentation, "fileRows", row)}
                           type="button"
                           className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-surface-2 disabled:opacity-50"
                           disabled={presentation.busy}
                           onClick={(event) => {
                             if (presentation.mode === "link" && presentation.path === row.path) return;
-                            const runtime = presentationRuntimesRef.current.get(presentation);
+                            const runtime = publicationRuntimes.get(presentation);
                             if (!claimMouse(presentation, event, runtime?.fileRows.get(row))) return;
                             if (presentation.mode === "link") setPath(row.path);
                             else linkRepo(presentation, row.path);
