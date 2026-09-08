@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode, type RefCallback } from "react";
 import { createRoot } from "react-dom/client";
 import type { FailedImport, ImportedDocument, ImportBatch } from "@/lib/import-upload";
 
@@ -12,7 +12,7 @@ vi.mock("@/lib/import-upload", async (importOriginal) => ({
 }));
 
 import { ApiError } from "@/lib/api";
-import { ImportDialog, useFileImport } from "./import-dialog";
+import { ImportDialog, type ImportItem, useFileImport } from "./import-dialog";
 
 function Harness({
   label = "Import",
@@ -63,6 +63,137 @@ function ImportLayoutBoundary({
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
+}
+
+interface ResultMouseEvent<T extends HTMLElement> {
+  type: string;
+  currentTarget: T;
+  target: EventTarget;
+  defaultPrevented: boolean;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+  nativeEvent: unknown;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+}
+
+type ResultClick<T extends HTMLElement> = (event: ResultMouseEvent<T>) => void;
+
+interface CapturedResultControl<T extends HTMLElement> {
+  element: T;
+  onClick: ResultClick<T>;
+}
+
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return value as T;
+}
+
+function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
+  return fiber.ref as RefCallback<T>;
+}
+
+function captureResultOpen(index = 0): CapturedResultControl<HTMLAnchorElement> {
+  const element = screen.getAllByTestId("import-open")[index] as HTMLAnchorElement | undefined;
+  if (!element) throw new Error(`Open control ${index} was not rendered`);
+  return { element, onClick: reactProp<ResultClick<HTMLAnchorElement>>(element, "onClick") };
+}
+
+function captureResultRetry(): CapturedResultControl<HTMLButtonElement> {
+  const element = screen.getByTestId("import-retry") as HTMLButtonElement;
+  return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
+}
+
+interface ResultEventOverrides {
+  type?: string;
+  target?: EventTarget;
+  nativeEvent?: unknown;
+  nativeType?: string;
+  nativeTarget?: HTMLElement;
+}
+
+function resultNativeMouseEvent(target: HTMLElement, type = "click"): MouseEvent {
+  const MouseEventConstructor = target.ownerDocument.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("The result control has no owner-document MouseEvent");
+  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function invokeResultControl<T extends HTMLElement>(
+  control: CapturedResultControl<T>,
+  currentTarget: T = control.element,
+  overrides: ResultEventOverrides = {},
+): ResultMouseEvent<T> {
+  const nativeEvent =
+    overrides.nativeEvent ?? resultNativeMouseEvent(overrides.nativeTarget ?? currentTarget, overrides.nativeType);
+  const event: ResultMouseEvent<T> = {
+    type: overrides.type ?? "click",
+    currentTarget,
+    target: overrides.target ?? currentTarget,
+    defaultPrevented: false,
+    ctrlKey: true,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+    nativeEvent,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+  control.onClick(event);
+  return event;
+}
+
+function resultItems(retry: () => void): ImportItem[] {
+  return [
+    {
+      name: "first.md",
+      status: "done",
+      id: "doc-first",
+      title: "First",
+      warnings: ["First warning"],
+    },
+    {
+      name: "second.md",
+      status: "error",
+      warnings: [],
+      error: "Second failed",
+      retry,
+    },
+  ];
+}
+
+function StatefulResultDialog({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <ImportDialog
+      open={open}
+      onOpenChange={(next) => {
+        onOpenChange(next);
+        setOpen(next);
+      }}
+      items={[
+        {
+          name: "native.md",
+          status: "done",
+          id: "native-document",
+          title: "Native",
+          warnings: [],
+        },
+      ]}
+      ignored={[]}
+    />
+  );
 }
 
 const WINDOW_DRAG_TYPES = ["dragenter", "dragover", "dragleave", "drop"] as const;
@@ -233,6 +364,673 @@ afterEach(() => {
   cleanup();
   process.off("unhandledRejection", recordUnhandledRejection);
   vi.restoreAllMocks();
+});
+
+describe("ImportDialog result publications", () => {
+  it("claims each current Open and Retry action once and gives an equal-looking successor fresh claims", () => {
+    const onOpenChange = vi.fn();
+    const retry = vi.fn();
+    const items = resultItems(retry);
+    const view = render(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={[]} />);
+    const firstOpen = captureResultOpen();
+    const firstRetry = captureResultRetry();
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const openEvent = invokeResultControl(firstOpen);
+      const retryEvent = invokeResultControl(firstRetry);
+      expect(openEvent.preventDefault).not.toHaveBeenCalled();
+      expect(openEvent.stopPropagation).not.toHaveBeenCalled();
+      expect(retryEvent.preventDefault).not.toHaveBeenCalled();
+      expect(retryEvent.stopPropagation).not.toHaveBeenCalled();
+    }
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(retry).toHaveBeenCalledOnce();
+
+    view.rerender(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={[]} />);
+    const successorOpen = captureResultOpen();
+    const successorRetry = captureResultRetry();
+    expect(successorOpen.element).toBe(firstOpen.element);
+    expect(successorRetry.element).toBe(firstRetry.element);
+
+    invokeResultControl(firstOpen, successorOpen.element);
+    invokeResultControl(firstRetry, successorRetry.element);
+    invokeResultControl(successorOpen);
+    invokeResultControl(successorRetry);
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+    expect(retry).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps Open as an unchanged native link and closes its exact current dialog once", () => {
+    const onOpenChange = vi.fn();
+    render(<StatefulResultDialog onOpenChange={onOpenChange} />);
+    const open = captureResultOpen();
+    expect(open.element.tagName).toBe("A");
+    expect(open.element).toHaveAttribute("href", "/d/native-document");
+    let event!: ResultMouseEvent<HTMLAnchorElement>;
+
+    act(() => {
+      event = invokeResultControl(open);
+    });
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.stopPropagation).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(screen.queryByTestId("import-dialog")).toBeNull();
+  });
+
+  it.each(["Open", "Retry"] as const)(
+    "rejects fabricated or inconsistent native events for %s without poisoning its exact control",
+    (kind) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onOpenChange = vi.fn();
+      const retry = vi.fn();
+
+      try {
+        act(() => {
+          root.render(<ImportDialog open onOpenChange={onOpenChange} items={resultItems(retry)} ignored={[]} />);
+        });
+        const exerciseControl = <T extends HTMLElement>(control: CapturedResultControl<T>) => {
+          const focusOwner = document.createElement("button");
+          const foreignTarget = document.createElement("span");
+          document.body.append(focusOwner);
+          focusOwner.focus();
+
+          const attempts: Array<() => ResultMouseEvent<T>> = [
+            () =>
+              invokeResultControl(control, control.element, {
+                nativeEvent: { type: "click", target: control.element },
+              }),
+            () => invokeResultControl(control, control.element, { type: "pointerup" }),
+            () => invokeResultControl(control, control.element, { nativeType: "mousedown" }),
+            () => invokeResultControl(control, control.element, { nativeTarget: foreignTarget }),
+            () => {
+              const unpublished = document.createElement("span");
+              control.element.append(unpublished);
+              const event = invokeResultControl(control, control.element, {
+                target: unpublished,
+                nativeTarget: unpublished,
+              });
+              unpublished.remove();
+              return event;
+            },
+          ];
+
+          for (const attempt of attempts) {
+            const activeElement = document.activeElement;
+            const markup = document.body.innerHTML;
+            const event = attempt();
+            expect(onOpenChange).not.toHaveBeenCalled();
+            expect(retry).not.toHaveBeenCalled();
+            expect(event.preventDefault).not.toHaveBeenCalled();
+            expect(event.stopPropagation).not.toHaveBeenCalled();
+            expect(document.activeElement).toBe(activeElement);
+            expect(document.body.innerHTML).toBe(markup);
+          }
+
+          const event = invokeResultControl(control);
+          expect(event.nativeEvent).toBeInstanceOf(control.element.ownerDocument.defaultView!.MouseEvent);
+          expect(event.preventDefault).not.toHaveBeenCalled();
+          expect(event.stopPropagation).not.toHaveBeenCalled();
+          if (kind === "Open") {
+            expect(control.element.tagName).toBe("A");
+            expect(control.element).toHaveAttribute("href", "/d/doc-first");
+            expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+            expect(retry).not.toHaveBeenCalled();
+          } else {
+            expect(onOpenChange).not.toHaveBeenCalled();
+            expect(retry).toHaveBeenCalledOnce();
+          }
+          focusOwner.remove();
+        };
+
+        if (kind === "Open") exerciseControl(captureResultOpen());
+        else exerciseControl(captureResultRetry());
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects sibling, wrong-row, cross-row and foreign Open controls without poisoning the exact link", () => {
+    const onOpenChange = vi.fn();
+    const focusOwner = document.createElement("button");
+    const foreign = document.createElement("a");
+    document.body.append(focusOwner, foreign);
+    render(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[
+          { name: "first.md", status: "done", id: "first", warnings: [] },
+          { name: "second.md", status: "done", id: "second", warnings: [] },
+        ]}
+        ignored={[]}
+      />,
+    );
+    const first = captureResultOpen(0);
+    const second = captureResultOpen(1);
+    focusOwner.focus();
+    const activeElement = document.activeElement;
+    const markup = document.body.innerHTML;
+
+    const rejected = [
+      invokeResultControl(first, second.element),
+      invokeResultControl(second, first.element),
+      invokeResultControl(first, foreign),
+    ];
+    for (const event of rejected) {
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+    }
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(activeElement);
+    expect(document.body.innerHTML).toBe(markup);
+
+    invokeResultControl(first);
+    invokeResultControl(second);
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    foreign.remove();
+    focusOwner.remove();
+  });
+
+  it.each([
+    "detached anchor",
+    "replacement anchor",
+    "detached row",
+    "replacement list",
+    "replacement root",
+    "moved root",
+    "reordered rows",
+    "wrong destination",
+  ] as const)("rejects an Open handler when its publication has a %s", (change) => {
+    const onOpenChange = vi.fn();
+    render(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[
+          { name: "first.md", status: "done", id: "first", warnings: [] },
+          { name: "second.md", status: "done", id: "second", warnings: [] },
+        ]}
+        ignored={[]}
+      />,
+    );
+    const open = captureResultOpen();
+    const root = screen.getByTestId("import-dialog");
+    const list = screen.getByTestId("import-list");
+    const rows = screen.getAllByTestId("import-item");
+    let source = open.element;
+    let restore = () => {};
+
+    if (change === "detached anchor") {
+      const row = open.element.parentElement!;
+      open.element.remove();
+      restore = () => row.append(open.element);
+    } else if (change === "replacement anchor") {
+      const row = open.element.parentElement!;
+      const replacement = open.element.cloneNode(true) as HTMLAnchorElement;
+      row.replaceChild(replacement, open.element);
+      source = replacement;
+      restore = () => row.replaceChild(open.element, replacement);
+    } else if (change === "detached row") {
+      rows[0].remove();
+      restore = () => list.insertBefore(rows[0], rows[1]);
+    } else if (change === "replacement list") {
+      const replacement = list.cloneNode(true);
+      root.replaceChild(replacement, list);
+      restore = () => root.replaceChild(list, replacement);
+    } else if (change === "replacement root") {
+      const parent = root.parentElement!;
+      const replacement = root.cloneNode(true);
+      parent.replaceChild(replacement, root);
+      restore = () => parent.replaceChild(root, replacement);
+    } else if (change === "moved root") {
+      const parent = root.parentElement!;
+      const foreign = document.createElement("div");
+      document.body.append(foreign);
+      foreign.append(root);
+      restore = () => {
+        parent.append(root);
+        foreign.remove();
+      };
+    } else if (change === "reordered rows") {
+      list.append(rows[0]);
+      restore = () => list.insertBefore(rows[0], rows[1]);
+    } else {
+      open.element.setAttribute("href", "/d/wrong");
+      restore = () => open.element.setAttribute("href", "/d/first");
+    }
+
+    const activeElement = document.activeElement;
+    const markup = document.body.innerHTML;
+    const event = invokeResultControl(open, source);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(event.stopPropagation).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(activeElement);
+    expect(document.body.innerHTML).toBe(markup);
+    restore();
+  });
+
+  it.each(["stale first", "current first"] as const)(
+    "rejects A-handler/B-control and B-handler/A-control after DOM replacement with %s ordering",
+    (order) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const staleOpenChange = vi.fn();
+      const currentOpenChange = vi.fn();
+      const staleRetry = vi.fn();
+      const currentRetry = vi.fn();
+
+      try {
+        act(() => {
+          root.render(
+            <ImportLayoutBoundary>
+              <ImportDialog
+                key="A"
+                open
+                onOpenChange={staleOpenChange}
+                items={resultItems(staleRetry)}
+                ignored={[]}
+              />
+            </ImportLayoutBoundary>,
+          );
+        });
+        const staleOpen = captureResultOpen();
+        const staleRetryControl = captureResultRetry();
+
+        act(() => {
+          root.render(
+            <ImportLayoutBoundary
+              boundary={1}
+              onBoundary={() => {
+                invokeResultControl(staleOpen);
+                invokeResultControl(staleRetryControl);
+                expect(staleOpenChange).not.toHaveBeenCalled();
+                expect(staleRetry).not.toHaveBeenCalled();
+              }}
+            >
+              <ImportDialog
+                key="B"
+                open
+                onOpenChange={currentOpenChange}
+                items={resultItems(currentRetry)}
+                ignored={[]}
+              />
+            </ImportLayoutBoundary>,
+          );
+        });
+
+        const currentOpen = captureResultOpen();
+        const currentRetryControl = captureResultRetry();
+        expect(currentOpen.element).not.toBe(staleOpen.element);
+        expect(currentRetryControl.element).not.toBe(staleRetryControl.element);
+        expect(staleOpen.element.isConnected).toBe(false);
+        expect(staleRetryControl.element.isConnected).toBe(false);
+        const staleAttempts = () => {
+          invokeResultControl(staleOpen);
+          invokeResultControl(staleOpen, currentOpen.element);
+          invokeResultControl(staleRetryControl);
+          invokeResultControl(staleRetryControl, currentRetryControl.element);
+          invokeResultControl(currentOpen, staleOpen.element);
+          invokeResultControl(currentRetryControl, staleRetryControl.element);
+        };
+        const currentAttempts = () => {
+          invokeResultControl(currentOpen);
+          invokeResultControl(currentRetryControl);
+        };
+        if (order === "stale first") {
+          staleAttempts();
+          currentAttempts();
+        } else {
+          currentAttempts();
+          staleAttempts();
+        }
+        expect(staleOpenChange).not.toHaveBeenCalled();
+        expect(staleRetry).not.toHaveBeenCalled();
+        expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+        expect(currentRetry).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["stale first", "current first"] as const)(
+    "rebinds reused DOM to replacement callbacks and equal-looking rows before the parent layout with %s ordering",
+    (order) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const staleOpenChange = vi.fn();
+      const currentOpenChange = vi.fn();
+      const staleRetry = vi.fn();
+      const currentRetry = vi.fn();
+
+      try {
+        act(() => {
+          root.render(
+            <ImportLayoutBoundary>
+              <ImportDialog
+                open
+                onOpenChange={staleOpenChange}
+                items={resultItems(staleRetry)}
+                ignored={["same.pdf"]}
+              />
+            </ImportLayoutBoundary>,
+          );
+        });
+        const staleRoot = screen.getByTestId("import-dialog");
+        const staleRootRef = reactRef(staleRoot);
+        const staleOpen = captureResultOpen();
+        const staleRetryControl = captureResultRetry();
+
+        act(() => {
+          root.render(
+            <ImportLayoutBoundary
+              boundary={1}
+              onBoundary={() => {
+                const currentRoot = screen.getByTestId("import-dialog");
+                const currentOpen = captureResultOpen();
+                const currentRetryControl = captureResultRetry();
+                expect(currentRoot).toBe(staleRoot);
+                expect(currentOpen.element).toBe(staleOpen.element);
+                expect(currentRetryControl.element).toBe(staleRetryControl.element);
+
+                staleRootRef(currentRoot);
+                staleRootRef(null);
+                if (order === "stale first") {
+                  invokeResultControl(staleOpen, currentOpen.element);
+                  invokeResultControl(staleRetryControl, currentRetryControl.element);
+                  invokeResultControl(currentOpen);
+                  invokeResultControl(currentRetryControl);
+                } else {
+                  invokeResultControl(currentOpen);
+                  invokeResultControl(currentRetryControl);
+                  invokeResultControl(staleOpen, currentOpen.element);
+                  invokeResultControl(staleRetryControl, currentRetryControl.element);
+                }
+              }}
+            >
+              <ImportDialog
+                open
+                onOpenChange={currentOpenChange}
+                items={resultItems(currentRetry)}
+                ignored={["same.pdf"]}
+              />
+            </ImportLayoutBoundary>,
+          );
+        });
+
+        expect(staleOpenChange).not.toHaveBeenCalled();
+        expect(staleRetry).not.toHaveBeenCalled();
+        expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+        expect(currentRetry).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retires removed result controls before parent layout and leaves a later publication usable", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const staleOpenChange = vi.fn();
+    const currentOpenChange = vi.fn();
+    const staleRetry = vi.fn();
+    const currentRetry = vi.fn();
+
+    try {
+      act(() => {
+        root.render(
+          <ImportLayoutBoundary>
+            <ImportDialog open onOpenChange={staleOpenChange} items={resultItems(staleRetry)} ignored={[]} />
+          </ImportLayoutBoundary>,
+        );
+      });
+      const staleOpen = captureResultOpen();
+      const staleRetryControl = captureResultRetry();
+      const staleRootRef = reactRef(screen.getByTestId("import-dialog"));
+
+      act(() => {
+        root.render(
+          <ImportLayoutBoundary
+            boundary={1}
+            onBoundary={() => {
+              invokeResultControl(staleOpen);
+              invokeResultControl(staleRetryControl);
+              staleRootRef(null);
+            }}
+          >
+            {null}
+          </ImportLayoutBoundary>,
+        );
+      });
+      expect(staleOpenChange).not.toHaveBeenCalled();
+      expect(staleRetry).not.toHaveBeenCalled();
+
+      act(() => {
+        root.render(
+          <ImportLayoutBoundary boundary={2}>
+            <ImportDialog open onOpenChange={currentOpenChange} items={resultItems(currentRetry)} ignored={[]} />
+          </ImportLayoutBoundary>,
+        );
+      });
+      invokeResultControl(captureResultOpen());
+      invokeResultControl(captureResultRetry());
+      expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(currentRetry).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "item order",
+    "row identity",
+    "name",
+    "status",
+    "id",
+    "title",
+    "error",
+    "warnings",
+    "warnings array",
+    "retry callback",
+    "ignored names",
+  ] as const)("rejects exact controls after an in-place %s mutation", (mutation) => {
+    const onOpenChange = vi.fn();
+    const retry = vi.fn();
+    const replacementRetry = vi.fn();
+    const items = resultItems(retry);
+    const ignored = ["skip.pdf"];
+    render(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={ignored} />);
+    const open = captureResultOpen();
+    const retryControl = captureResultRetry();
+    let restore = () => {};
+
+    if (mutation === "item order") {
+      items.reverse();
+      restore = () => items.reverse();
+    } else if (mutation === "row identity") {
+      const original = items[0];
+      items[0] = { ...original };
+      restore = () => {
+        items[0] = original;
+      };
+    } else if (mutation === "name") {
+      items[0].name = "changed.md";
+      restore = () => {
+        items[0].name = "first.md";
+      };
+    } else if (mutation === "status") {
+      items[0].status = "uploading";
+      restore = () => {
+        items[0].status = "done";
+      };
+    } else if (mutation === "id") {
+      items[0].id = "changed";
+      restore = () => {
+        items[0].id = "doc-first";
+      };
+    } else if (mutation === "title") {
+      items[0].title = "Changed";
+      restore = () => {
+        items[0].title = "First";
+      };
+    } else if (mutation === "error") {
+      items[1].error = "Changed failure";
+      restore = () => {
+        items[1].error = "Second failed";
+      };
+    } else if (mutation === "warnings") {
+      items[0].warnings.push("Changed warning");
+      restore = () => {
+        items[0].warnings.pop();
+      };
+    } else if (mutation === "warnings array") {
+      const original = items[0].warnings;
+      items[0].warnings = [...original];
+      restore = () => {
+        items[0].warnings = original;
+      };
+    } else if (mutation === "retry callback") {
+      items[1].retry = replacementRetry;
+      restore = () => {
+        items[1].retry = retry;
+      };
+    } else {
+      ignored.push("changed.zip");
+      restore = () => {
+        ignored.pop();
+      };
+    }
+
+    const activeElement = document.activeElement;
+    const markup = document.body.innerHTML;
+    const openEvent = invokeResultControl(open);
+    const retryEvent = invokeResultControl(retryControl);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(retry).not.toHaveBeenCalled();
+    expect(replacementRetry).not.toHaveBeenCalled();
+    expect(openEvent.preventDefault).not.toHaveBeenCalled();
+    expect(openEvent.stopPropagation).not.toHaveBeenCalled();
+    expect(retryEvent.preventDefault).not.toHaveBeenCalled();
+    expect(retryEvent.stopPropagation).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(activeElement);
+    expect(document.body.innerHTML).toBe(markup);
+    restore();
+  });
+
+  it.each(["sibling", "foreign", "detached", "replacement", "moved", "disabled"] as const)(
+    "rejects a %s Retry control without invoking or poisoning the current callback",
+    (source) => {
+      const retry = vi.fn();
+      const foreign = document.createElement("button");
+      document.body.append(foreign);
+      const view = render(
+        <ImportDialog
+          open
+          onOpenChange={vi.fn()}
+          items={resultItems(retry)}
+          ignored={[]}
+          footer={
+            <button type="button" data-testid="import-footer-button">
+              Footer
+            </button>
+          }
+        />,
+      );
+      const control = captureResultRetry();
+      const root = screen.getByTestId("import-dialog");
+      const sibling = screen.getByTestId("import-footer-button") as HTMLButtonElement;
+      const parent = control.element.parentElement!;
+      let currentTarget = source === "sibling" ? sibling : foreign;
+      let restore = () => {};
+      let needsSuccessor = false;
+
+      if (source === "detached") {
+        currentTarget = control.element;
+        control.element.remove();
+        restore = () => parent.insertBefore(control.element, sibling);
+        needsSuccessor = true;
+      } else if (source === "replacement") {
+        const replacement = control.element.cloneNode(true) as HTMLButtonElement;
+        parent.replaceChild(replacement, control.element);
+        currentTarget = replacement;
+        restore = () => parent.replaceChild(control.element, replacement);
+      } else if (source === "moved") {
+        currentTarget = control.element;
+        foreign.append(control.element);
+        restore = () => parent.insertBefore(control.element, sibling);
+        needsSuccessor = true;
+      } else if (source === "disabled") {
+        currentTarget = control.element;
+        control.element.disabled = true;
+        restore = () => {
+          control.element.disabled = false;
+        };
+      }
+
+      const activeElement = document.activeElement;
+      const markup = document.body.innerHTML;
+      const event = invokeResultControl(control, currentTarget);
+      expect(retry).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(activeElement);
+      expect(document.body.innerHTML).toBe(markup);
+      restore();
+
+      if (needsSuccessor) {
+        view.rerender(
+          <ImportDialog
+            open
+            onOpenChange={vi.fn()}
+            items={resultItems(retry)}
+            ignored={[]}
+            footer={
+              <button type="button" data-testid="import-footer-button">
+                Footer
+              </button>
+            }
+          />,
+        );
+      }
+      invokeResultControl(needsSuccessor ? captureResultRetry() : control);
+      expect(retry).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("import-dialog")).toBe(root);
+      foreign.remove();
+    },
+  );
+
+  it("keeps Retry disabled while the exact batch is busy and enables the successor result", () => {
+    const retry = vi.fn();
+    const items = resultItems(retry);
+    items.push({ name: "pending.md", status: "uploading", warnings: [] });
+    const view = render(<ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />);
+    const busyRetry = captureResultRetry();
+    expect(busyRetry.element).toBeDisabled();
+    invokeResultControl(busyRetry);
+    expect(retry).not.toHaveBeenCalled();
+
+    items[2] = { name: "pending.md", status: "done", id: "pending", warnings: [] };
+    view.rerender(<ImportDialog open onOpenChange={vi.fn()} items={items} ignored={[]} />);
+    const enabledRetry = captureResultRetry();
+    expect(enabledRetry.element).toBeEnabled();
+    invokeResultControl(busyRetry, enabledRetry.element);
+    expect(retry).not.toHaveBeenCalled();
+    invokeResultControl(enabledRetry);
+    expect(retry).toHaveBeenCalledOnce();
+  });
 });
 
 describe("useFileImport - initial batch ownership", () => {
