@@ -6,8 +6,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import * as Y from "yjs";
 
 type PopoverOpenChange = (open: boolean) => void;
+interface StatsContentCallbacks {
+  escape?: (event: KeyboardEvent) => void;
+  pointerOutside?: (
+    event: CustomEvent<{ originalEvent: PointerEvent }>,
+  ) => void;
+  focusOutside?: (
+    event: CustomEvent<{ originalEvent: FocusEvent }>,
+  ) => void;
+}
 
 const capturedPopoverOpenChanges = vi.hoisted(() => [] as PopoverOpenChange[]);
+const capturedStatsContentCallbacks = vi.hoisted(
+  () => [] as StatsContentCallbacks[],
+);
 const publishedPopoverOpenChanges = vi.hoisted(
   () => [] as { callback: PopoverOpenChange; open: boolean }[],
 );
@@ -15,6 +27,7 @@ const publishedPopoverOpenChanges = vi.hoisted(
 vi.mock("@/components/ui/primitives", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/primitives")>();
   const ActualPopover = actual.Popover;
+  const ActualPopoverContent = actual.PopoverContent;
   return {
     ...actual,
     Popover: (props: ComponentProps<typeof ActualPopover>) => {
@@ -33,6 +46,16 @@ vi.mock("@/components/ui/primitives", async (importOriginal) => {
           }
         />
       );
+    },
+    PopoverContent: (
+      props: ComponentProps<typeof ActualPopoverContent>,
+    ) => {
+      capturedStatsContentCallbacks.push({
+        escape: props.onEscapeKeyDown,
+        pointerOutside: props.onPointerDownOutside,
+        focusOutside: props.onFocusOutside,
+      });
+      return <ActualPopoverContent {...props} />;
     },
   };
 });
@@ -245,7 +268,6 @@ function reactProp<T>(element: HTMLElement, name: string): T {
   return value as T;
 }
 
-type SourceHandler = (event: { currentTarget: EventTarget | null }) => void;
 type GoalChangeHandler<T extends HTMLElement> = (event: React.ChangeEvent<T>) => void;
 type GoalSubmitHandler = (event: React.FormEvent<HTMLFormElement>) => void;
 type GoalClearHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
@@ -403,9 +425,175 @@ function directClear(
   return nativeEvent;
 }
 
-function authorizeTrigger(source: EventTarget | null = screen.getByTestId("stats-button")) {
-  const trigger = screen.getByTestId("stats-button");
-  reactProp<SourceHandler>(trigger, "onClickCapture")({ currentTarget: source });
+type StatsTriggerHandler = (
+  event: React.MouseEvent<HTMLButtonElement>,
+) => void;
+
+interface CapturedStatsTrigger {
+  element: HTMLButtonElement;
+  click: StatsTriggerHandler;
+  ref: RefCallback<HTMLButtonElement>;
+}
+
+function captureStatsTrigger(): CapturedStatsTrigger {
+  const element = screen.getByTestId(
+    "stats-button",
+  ) as HTMLButtonElement;
+  return {
+    element,
+    click: reactProp(element, "onClick"),
+    ref: reactProp(element, "ref"),
+  };
+}
+
+function dispatchStatsClick(
+  trigger: CapturedStatsTrigger,
+  handlers: readonly StatsTriggerHandler[],
+) {
+  const propsKey = Object.keys(trigger.element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to stats-button");
+  }
+  const properties = trigger.element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  if (!props) {
+    throw new Error("React props were not attached to stats-button");
+  }
+  const wrapped = {
+    ...props,
+    onClick: (event: React.MouseEvent<HTMLButtonElement>) => {
+      for (const handler of handlers) handler(event);
+    },
+  };
+  properties[propsKey] = wrapped;
+  try {
+    fireEvent.click(trigger.element);
+  } finally {
+    if (properties[propsKey] === wrapped) {
+      properties[propsKey] = props;
+    }
+  }
+}
+
+function renderStrictStats(
+  session: CollabSession,
+  onBoundary: () => void,
+  source = "One two three.",
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  act(() =>
+    root.render(
+      <StrictMode>
+        <StatsBoundary
+          session={session}
+          source={source}
+          boundary={1}
+          onBoundary={onBoundary}
+        />
+      </StrictMode>,
+    ),
+  );
+  return { host, root };
+}
+
+function dispatchStatsOutside(
+  source: "pointer" | "focus",
+  target: HTMLElement,
+  callbacks: readonly StatsContentCallbacks[],
+  openChanges: readonly PopoverOpenChange[],
+) {
+  const pending: VoidFunction[] = [];
+  const queued = vi
+    .spyOn(globalThis, "queueMicrotask")
+    .mockImplementation((callback) => pending.push(callback));
+  const callbackName =
+    source === "pointer" ? "pointerOutside" : "focusOutside";
+  const customType =
+    source === "pointer"
+      ? "dismissableLayer.pointerDownOutside"
+      : "dismissableLayer.focusOutside";
+  const consumeType = source === "pointer" ? "click" : "focusin";
+  const original =
+    source === "pointer"
+      ? new MouseEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          cancelable: true,
+          composed: true,
+        })
+      : new FocusEvent("focusin", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+  const consume = (event: Event) => {
+    if (source === "focus" && event !== original) return;
+    const custom = new CustomEvent(customType, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      detail: { originalEvent: original },
+    });
+    for (const callbacksForPublication of callbacks) {
+      const callback = callbacksForPublication[callbackName];
+      if (!callback) continue;
+      target.addEventListener(
+        customType,
+        (value) =>
+          callback(
+            value as CustomEvent<{
+              originalEvent: PointerEvent & FocusEvent;
+            }>,
+          ),
+        { once: true },
+      );
+    }
+    target.dispatchEvent(custom);
+    for (const openChange of openChanges) {
+      queueMicrotask(() => openChange(false));
+    }
+    while (pending.length) pending.shift()!();
+    event.stopPropagation();
+  };
+  target.addEventListener(consumeType, consume);
+  try {
+    act(() => {
+      if (source === "pointer") {
+        target.dispatchEvent(original);
+        target.dispatchEvent(
+          new MouseEvent("pointerup", {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+            composed: true,
+          }),
+        );
+        target.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+            composed: true,
+          }),
+        );
+      } else {
+        target.dispatchEvent(original);
+      }
+    });
+  } finally {
+    target.removeEventListener(consumeType, consume);
+    queued.mockRestore();
+    act(() => {
+      while (pending.length) pending.shift()!();
+    });
+  }
 }
 
 function expectDraft(kind: WritingGoal["kind"], mode: WritingGoal["mode"], value: string) {
@@ -445,6 +633,7 @@ async function updateSharedGoal(session: CollabSession, next: WritingGoal | null
 
 beforeEach(() => {
   capturedPopoverOpenChanges.length = 0;
+  capturedStatsContentCallbacks.length = 0;
   publishedPopoverOpenChanges.length = 0;
   unhandledRejections.length = 0;
   process.on("unhandledRejection", recordUnhandledRejection);
@@ -606,72 +795,88 @@ describe("StatsPopover local selection authority", () => {
 });
 
 describe("StatsPopover disclosure visit authority", () => {
-  it("requires one exact current trigger or content event for each disclosure transition", () => {
-    const session = makeSession("disclosure-controls");
-    render(view(session));
-    const trigger = screen.getByTestId("stats-button");
-    const authorizeOpen = reactProp<SourceHandler>(trigger, "onClickCapture");
-    const openChange = capturedPopoverOpenChanges.at(-1)!;
-    const foreign = document.createElement("button");
-    const sibling = document.createElement("button");
-    const detached = document.createElement("button");
-    const replacement = trigger.cloneNode(true) as HTMLButtonElement;
-    const focusOwner = document.createElement("button");
-    trigger.parentElement?.append(sibling);
-    document.body.append(foreign, focusOwner);
-    focusOwner.focus();
+  it("uses only the distinct exact trigger successor after direct-root Strict Mode replay", () => {
+    const session = makeSession("strict-trigger");
+    const replay = {
+      trigger: null as CapturedStatsTrigger | null,
+    };
+    const mounted = renderStrictStats(session, () => {
+      replay.trigger ??= captureStatsTrigger();
+    });
 
     try {
-      const closedMarkup = document.body.innerHTML;
-      act(() => {
-        for (const source of [foreign, sibling, detached, replacement]) {
-          authorizeOpen({ currentTarget: source });
-          openChange(true);
-        }
-        openChange(true);
-      });
-      expect(screen.queryByTestId("stats-popover")).toBeNull();
-      expect(document.body.innerHTML).toBe(closedMarkup);
-      expect(focusOwner).toHaveFocus();
+      const replayTrigger = replay.trigger;
+      if (!replayTrigger) {
+        throw new Error("Strict Mode did not expose its first layout");
+      }
+      const current = captureStatsTrigger();
+      expect(current.element).toBe(replayTrigger.element);
+      expect(current.click).not.toBe(replayTrigger.click);
+      replayTrigger.ref(null);
+      replayTrigger.ref(current.element);
 
-      act(() => {
-        authorizeOpen({ currentTarget: trigger });
-        openChange(true);
-        openChange(true);
-      });
-      const content = screen.getByTestId("stats-popover");
-      expect(content).toBeVisible();
-      const staleOpenChange = openChange;
-      const staleAuthorizeOpen = authorizeOpen;
-      const closeChange = capturedPopoverOpenChanges.at(-1)!;
-      const authorizeClose = reactProp<SourceHandler>(content, "onKeyDownCapture");
-      const openMarkup = document.body.innerHTML;
-      const focusAfterOpen = document.activeElement;
+      dispatchStatsClick(current, [
+        replayTrigger.click,
+        current.click,
+        current.click,
+      ]);
 
-      act(() => {
-        staleAuthorizeOpen({ currentTarget: trigger });
-        staleOpenChange(false);
-        for (const source of [foreign, sibling, detached, replacement, trigger]) {
-          authorizeClose({ currentTarget: source });
-          closeChange(false);
-        }
-        closeChange(false);
-      });
       expect(screen.getByTestId("stats-popover")).toBeVisible();
-      expect(document.body.innerHTML).toBe(openMarkup);
-      expect(document.activeElement).toBe(focusAfterOpen);
-
-      fireEvent.pointerDown(content, { button: 0 });
-      act(() => {
-        closeChange(false);
-        closeChange(false);
-      });
+      fireEvent.click(screen.getByTestId("stats-button"));
       expect(screen.queryByTestId("stats-popover")).toBeNull();
     } finally {
-      foreign.remove();
-      sibling.remove();
-      replacement.remove();
-      focusOwner.remove();
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+    }
+  });
+
+  it("keeps mutated, detached, replaced, and reordered trigger publications retired", () => {
+    const mounted = renderStrictStats(
+      makeSession("strict-trigger-integrity"),
+      () => {},
+    );
+    const retired: StatsTriggerHandler[] = [];
+    const retireAfter = (change: (trigger: HTMLButtonElement) => void) => {
+      const stale = captureStatsTrigger();
+      retired.push(stale.click);
+      change(stale.element);
+      fireEvent.click(stale.element);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(captureStatsTrigger().click).not.toBe(stale.click);
+    };
+
+    try {
+      retireAfter((trigger) => {
+        trigger.setAttribute("data-integrity-probe", "changed");
+        trigger.removeAttribute("data-integrity-probe");
+      });
+      retireAfter(() => {
+        const next = mounted.host.nextSibling;
+        mounted.host.remove();
+        document.body.insertBefore(mounted.host, next);
+      });
+      retireAfter((trigger) => {
+        const replacement =
+          trigger.cloneNode(true) as HTMLButtonElement;
+        trigger.replaceWith(replacement);
+        replacement.replaceWith(trigger);
+      });
+      retireAfter(() => {
+        const sibling = document.createElement("span");
+        document.body.insertBefore(sibling, mounted.host);
+        sibling.remove();
+      });
+
+      const current = captureStatsTrigger();
+      dispatchStatsClick(current, [
+        ...retired,
+        current.click,
+        current.click,
+      ]);
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
     }
   });
 
@@ -688,8 +893,6 @@ describe("StatsPopover disclosure visit authority", () => {
     try {
       act(() => root.render(<StatsBoundary session={session} />));
       openPopover();
-      const staleTrigger = screen.getByTestId("stats-button");
-      const staleAuthorize = reactProp<SourceHandler>(staleTrigger, "onClickCapture");
       const staleChange = capturedPopoverOpenChanges.at(-1)!;
       let boundaryReached = false;
 
@@ -705,7 +908,6 @@ describe("StatsPopover disclosure visit authority", () => {
             onBoundary={() => {
               boundaryReached = true;
               const markup = host.innerHTML;
-              staleAuthorize({ currentTarget: staleTrigger });
               staleChange(false);
               expect(host.innerHTML).toBe(markup);
               if (next.mount === "replacement") expect(screen.queryByTestId("stats-popover")).toBeNull();
@@ -725,115 +927,317 @@ describe("StatsPopover disclosure visit authority", () => {
     }
   });
 
-  it.each([
-    ["A before B", false],
-    ["B before A", true],
-  ] as const)(
-    "retires A before a replacement parent layout boundary and preserves B when callbacks run %s",
-    (_label, currentFirst) => {
-      const previous = makeSession("stats-previous");
-      const current = makeSession("stats-current");
-      const listeners = trackWindowKeydownListeners();
-      const host = document.createElement("div");
-      const focusOwner = document.createElement("button");
-      document.body.append(focusOwner, host);
-      const root = createRoot(host);
-      let passiveCleanups = 0;
+  it("keeps one current owner-window shortcut through direct-root replay and replacement", () => {
+    const previous = makeSession("stats-previous");
+    const current = makeSession("stats-current");
+    const listeners = trackWindowKeydownListeners();
+    let replayListener: WindowKeyListener | null = null;
+    const mounted = renderStrictStats(previous, () => {
+      replayListener ??= [...listeners.active][0] ?? null;
+    });
 
-      try {
-        act(() => root.render(<StatsBoundary session={previous} onPassiveCleanup={() => passiveCleanups++} />));
-        fireEvent.click(screen.getByTestId("stats-button"));
-        expect(screen.getByTestId("stats-popover")).toBeVisible();
-        expect(listeners.active.size).toBe(1);
-
-        const staleKey = listeners.added[0]!;
-        const staleOpenChange = capturedPopoverOpenChanges[0]!;
-        const staleEvent = new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          code: "KeyC",
-          ctrlKey: true,
-          shiftKey: true,
-        });
-        const stalePreventDefault = vi.spyOn(staleEvent, "preventDefault");
-        publishedPopoverOpenChanges.length = 0;
-        focusOwner.focus();
-
-        act(() => {
-          root.render(
-            <StatsBoundary
-              session={current}
-              source="One two three four five."
-              boundary={1}
-              onPassiveCleanup={() => passiveCleanups++}
-              onBoundary={() => {
-                expect(passiveCleanups).toBe(0);
-                expect(screen.queryByTestId("stats-popover")).toBeNull();
-                expect(listeners.added).toHaveLength(2);
-                expect(listeners.removed).toEqual([staleKey]);
-                expect([...listeners.active]).toEqual([listeners.added[1]]);
-
-                const currentOpenChange = capturedPopoverOpenChanges.findLast(
-                  (callback) => callback !== staleOpenChange,
-                )!;
-                const focusBeforeStaleCallbacks = document.activeElement;
-                if (currentFirst) {
-                  authorizeTrigger();
-                  currentOpenChange(true);
-                }
-                staleOpenChange(false);
-                invokeWindowListener(staleKey, staleEvent);
-                if (!currentFirst) {
-                  authorizeTrigger();
-                  currentOpenChange(true);
-                }
-                expect(document.activeElement).toBe(focusBeforeStaleCallbacks);
-              }}
-            />,
-          );
-        });
-
-        expect(stalePreventDefault).not.toHaveBeenCalled();
-        expect(screen.getByTestId("stats-popover")).toBeVisible();
-        expect(screen.getByTestId("word-count")).toHaveTextContent("5 words");
-        const currentOpenChange = capturedPopoverOpenChanges.findLast(
-          (callback) => callback !== staleOpenChange,
-        )!;
-
-        publishedPopoverOpenChanges.length = 0;
-        fireEvent.click(screen.getByTestId("stats-button"));
-        expect(screen.queryByTestId("stats-popover")).toBeNull();
-        expect(
-          publishedPopoverOpenChanges.filter(({ callback }) => callback === currentOpenChange),
-        ).toEqual([{ callback: currentOpenChange, open: false }]);
-
-        const currentEvent = new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          code: "KeyC",
-          ctrlKey: true,
-          shiftKey: true,
-        });
-        const currentPreventDefault = vi.spyOn(currentEvent, "preventDefault");
-        act(() => window.dispatchEvent(currentEvent));
-        expect(currentPreventDefault).toHaveBeenCalledOnce();
-        expect(screen.getByTestId("stats-popover")).toBeVisible();
-        expect(listeners.active.size).toBe(1);
-
-        act(() => {
-          staleOpenChange(false);
-          invokeWindowListener(staleKey, staleEvent);
-        });
-        expect(stalePreventDefault).not.toHaveBeenCalled();
-        expect(screen.getByTestId("stats-popover")).toBeVisible();
-        expect([...listeners.active]).toEqual([listeners.added[1]]);
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-        focusOwner.remove();
+    try {
+      if (!replayListener) {
+        throw new Error("Strict Mode did not expose its first listener");
       }
-    },
-  );
+      expect(listeners.active.size).toBe(1);
+      expect([...listeners.active][0]).not.toBe(replayListener);
+
+      const staleEvent = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      const stalePreventDefault = vi.spyOn(
+        staleEvent,
+        "preventDefault",
+      );
+      invokeWindowListener(replayListener, staleEvent);
+      expect(stalePreventDefault).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+      const windowEvent = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      const windowPreventDefault = vi.spyOn(
+        windowEvent,
+        "preventDefault",
+      );
+      act(() => window.dispatchEvent(windowEvent));
+      expect(windowPreventDefault).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+      const currentEvent = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyC",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+      const currentPreventDefault = vi.spyOn(
+        currentEvent,
+        "preventDefault",
+      );
+      act(() => document.body.dispatchEvent(currentEvent));
+      expect(currentPreventDefault).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      expect(listeners.active.size).toBe(1);
+      const currentListener = [...listeners.active][0]!;
+      invokeWindowListener(currentListener, currentEvent);
+      invokeWindowListener(currentListener, currentEvent);
+      expect(currentPreventDefault).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+
+      act(() =>
+        mounted.root.render(
+          <StatsBoundary session={current} source="One two three four five." />,
+        ),
+      );
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(listeners.active.size).toBe(1);
+      invokeWindowListener(replayListener, staleEvent);
+      expect(stalePreventDefault).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      expect(screen.getByTestId("word-count")).toHaveTextContent(
+        "5 words",
+      );
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+    }
+  });
+
+  it("accepts one genuine Escape dismissal after direct-root Strict Mode replay", async () => {
+    const mounted = renderStrictStats(makeSession("strict-escape"), () => {});
+    try {
+      openPopover();
+      expect(document.activeElement).toBe(
+        screen.getByTestId("goal-mode"),
+      );
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      const focusTrigger = vi.spyOn(trigger, "focus");
+      const currentCallbacks = capturedStatsContentCallbacks.at(-1)!;
+      const staleCallbacks = [...capturedStatsContentCallbacks]
+        .reverse()
+        .find(
+          ({ escape }) => escape !== currentCallbacks.escape,
+        )!;
+      const currentOpenChange = capturedPopoverOpenChanges.at(-1)!;
+      const staleOpenChange = [...capturedPopoverOpenChanges]
+        .reverse()
+        .find((openChange) => openChange !== currentOpenChange)!;
+      const closeCount = publishedPopoverOpenChanges.filter(
+        ({ open }) => !open,
+      ).length;
+      const escape = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Escape",
+        key: "Escape",
+      });
+      act(() =>
+        screen.getByTestId("stats-popover").dispatchEvent(escape),
+      );
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 0);
+          }),
+      );
+
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(
+        publishedPopoverOpenChanges.filter(({ open }) => !open),
+      ).toHaveLength(closeCount + 1);
+      expect(focusTrigger).toHaveBeenCalledOnce();
+      expect(document.activeElement).toBe(trigger);
+
+      staleCallbacks.escape?.(escape);
+      currentCallbacks.escape?.(escape);
+      currentCallbacks.escape?.(escape);
+      staleOpenChange(true);
+      currentOpenChange(true);
+      currentOpenChange(true);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(focusTrigger).toHaveBeenCalledOnce();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+    }
+  });
+
+  it.each([
+    "attribute mutation/restore",
+    "ancestor detach/reinsert",
+    "replacement/restore",
+    "reorder/restore",
+  ] as const)("keeps a restored portal %s retired without poisoning its exact successor", (change) => {
+    const mounted = renderStrictStats(
+      makeSession(`strict-portal-${change}`),
+      () => {},
+    );
+    try {
+      openPopover();
+      const content = screen.getByTestId("stats-popover") as HTMLDivElement;
+      const previousCallbacks = capturedStatsContentCallbacks.at(-1);
+      if (change === "attribute mutation/restore") {
+        content.setAttribute("data-integrity-probe", "changed");
+        content.removeAttribute("data-integrity-probe");
+      } else if (change === "ancestor detach/reinsert") {
+        const wrapper = content.parentElement!;
+        const next = wrapper.nextSibling;
+        wrapper.remove();
+        document.body.insertBefore(wrapper, next);
+      } else if (change === "replacement/restore") {
+        const child = content.firstElementChild!;
+        const replacement = child.cloneNode(true) as Element;
+        child.replaceWith(replacement);
+        replacement.replaceWith(child);
+      } else {
+        const first = content.children.item(0)!;
+        const second = content.children.item(1)!;
+        content.insertBefore(second, first);
+        content.insertBefore(first, second);
+      }
+
+      fireEvent.keyDown(content, {
+        bubbles: true,
+        cancelable: true,
+        code: "Escape",
+        key: "Escape",
+      });
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      expect(capturedStatsContentCallbacks.at(-1)).not.toBe(
+        previousCallbacks,
+      );
+
+      fireEvent.keyDown(screen.getByTestId("stats-popover"), {
+        bubbles: true,
+        cancelable: true,
+        code: "Escape",
+        key: "Escape",
+      });
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+    }
+  });
+
+  it("accepts one genuine pointer-outside dismissal after direct-root Strict Mode replay", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession("strict-pointer-outside"),
+      () => {},
+    );
+    try {
+      openPopover();
+      const currentCallbacks = capturedStatsContentCallbacks.at(-1)!;
+      const staleCallbacks = [...capturedStatsContentCallbacks]
+        .reverse()
+        .find(
+          ({ pointerOutside }) =>
+            pointerOutside !== currentCallbacks.pointerOutside,
+        )!;
+      const currentOpenChange = capturedPopoverOpenChanges.at(-1)!;
+      const staleOpenChange = [...capturedPopoverOpenChanges]
+        .reverse()
+        .find((openChange) => openChange !== currentOpenChange)!;
+      const focusTrigger = vi.spyOn(
+        screen.getByTestId("stats-button"),
+        "focus",
+      );
+      expect(currentCallbacks.pointerOutside).not.toBe(
+        staleCallbacks.pointerOutside,
+      );
+
+      dispatchStatsOutside(
+        "pointer",
+        outside,
+        [staleCallbacks, currentCallbacks, currentCallbacks],
+        [staleOpenChange, currentOpenChange, currentOpenChange],
+      );
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 0);
+          }),
+      );
+
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(document.activeElement).not.toBe(
+        screen.getByTestId("stats-button"),
+      );
+      expect(focusTrigger).not.toHaveBeenCalled();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
+
+  it("accepts one genuine focus-outside dismissal after direct-root Strict Mode replay", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession("strict-focus-outside"),
+      () => {},
+    );
+    try {
+      openPopover();
+      const currentCallbacks = capturedStatsContentCallbacks.at(-1)!;
+      const staleCallbacks = [...capturedStatsContentCallbacks]
+        .reverse()
+        .find(
+          ({ focusOutside }) =>
+            focusOutside !== currentCallbacks.focusOutside,
+        )!;
+      const currentOpenChange = capturedPopoverOpenChanges.at(-1)!;
+      const staleOpenChange = [...capturedPopoverOpenChanges]
+        .reverse()
+        .find((openChange) => openChange !== currentOpenChange)!;
+      const focusTrigger = vi.spyOn(
+        screen.getByTestId("stats-button"),
+        "focus",
+      );
+      expect(currentCallbacks.focusOutside).not.toBe(
+        staleCallbacks.focusOutside,
+      );
+
+      dispatchStatsOutside(
+        "focus",
+        outside,
+        [staleCallbacks, currentCallbacks, currentCallbacks],
+        [staleOpenChange, currentOpenChange, currentOpenChange],
+      );
+      await act(
+        () =>
+          new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 0);
+          }),
+      );
+
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(document.activeElement).not.toBe(
+        screen.getByTestId("stats-button"),
+      );
+      expect(focusTrigger).not.toHaveBeenCalled();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
 
   it("retires a removed visit before the parent layout boundary", () => {
     const session = makeSession("stats-removed");
@@ -849,8 +1253,8 @@ describe("StatsPopover disclosure visit authority", () => {
       fireEvent.click(screen.getByTestId("stats-button"));
       expect(screen.getByTestId("stats-popover")).toBeVisible();
 
-      const staleKey = listeners.added[0]!;
-      const staleOpenChange = capturedPopoverOpenChanges[0]!;
+      const staleKey = [...listeners.active][0]!;
+      const staleOpenChange = capturedPopoverOpenChanges.at(-1)!;
       const staleEvent = new KeyboardEvent("keydown", {
         bubbles: true,
         cancelable: true,
@@ -871,7 +1275,7 @@ describe("StatsPopover disclosure visit authority", () => {
             onBoundary={() => {
               expect(passiveCleanups).toBe(0);
               expect(screen.queryByTestId("stats-popover")).toBeNull();
-              expect(listeners.removed).toEqual([staleKey]);
+              expect(listeners.removed).toContain(staleKey);
               expect(listeners.active.size).toBe(0);
               const focusBeforeStaleCallbacks = document.activeElement;
               staleOpenChange(true);
