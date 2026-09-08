@@ -2,7 +2,6 @@
 import "./import.css";
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -23,6 +22,7 @@ export { IMPORT_ACCEPT };
 
 /** The drop-zone toast when nothing importable was dropped: the server's 415 sentence with a capital. */
 const NOTHING_IMPORTABLE_MESSAGE = `${IMPORT_EXTENSIONS_LIST[0].toUpperCase()}${IMPORT_EXTENSIONS_LIST.slice(1)}.`;
+const MALFORMED_IMPORT_RESULT_MESSAGE = "Import returned an invalid result";
 
 /** Same predicate the server applies before it answers 415, so the client never disagrees with it. */
 export function isImportableFile(file: File): boolean {
@@ -72,6 +72,8 @@ interface RetryOwnership {
 
 interface HookAuthority {
   readonly token: symbol;
+  readonly onDone: UseFileImportOptions["onDone"];
+  readonly onError: UseFileImportOptions["onError"];
 }
 
 type StartFileImport = (files: Iterable<File>) => Promise<void>;
@@ -114,7 +116,7 @@ type RetryRequest = (
   ownership: RetryOwnership,
   rowIndex: number | null,
   action: () => void,
-) => void;
+) => Promise<void> | void;
 
 function createRetryOwnership(
   authority: HookAuthority,
@@ -172,6 +174,31 @@ function summarizeImportItems(items: ImportItem[]): { documents: ImportedDocumen
         : [],
     ),
   };
+}
+
+function validateImportBatchResult(
+  attempted: readonly File[],
+  created: readonly ImportedDocument[],
+  failed: readonly FailedImport[],
+): Map<number, FailedImport> {
+  if (created.length + failed.length !== attempted.length) {
+    throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+  }
+
+  const failedAt = new Map<number, FailedImport>();
+  for (const failure of failed) {
+    if (
+      !Number.isInteger(failure.index) ||
+      failure.index < 0 ||
+      failure.index >= attempted.length ||
+      failedAt.has(failure.index) ||
+      failure.name !== attempted[failure.index].name
+    ) {
+      throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+    }
+    failedAt.set(failure.index, failure);
+  }
+  return failedAt;
 }
 
 export interface ImportDialogProps {
@@ -1733,6 +1760,10 @@ export interface UseFileImportOptions {
  * file input, the dialog items and the upload itself.
  */
 export function useFileImport(options: UseFileImportOptions = {}) {
+  const callbackSnapshot = Object.freeze({
+    onDone: options.onDone,
+    onError: options.onError,
+  });
   const [items, setItems] = useState<ImportItem[]>([]);
   const [ignored, setIgnored] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
@@ -1744,10 +1775,11 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   const activeUploadRef = useRef<UploadOwnership | null>(null);
   const retryOwnershipRef = useRef<RetryOwnership | null>(null);
   const retryRequestRef = useRef<RetryRequest | null>(null);
-  const optionsRef = useRef(options);
-  useEffect(() => {
-    optionsRef.current = options;
-  }, [options]);
+  const callbackSnapshotRef = useRef(callbackSnapshot);
+  const dragOwnerRef = useRef<DragListenerOwner | null>(null);
+  useLayoutEffect(() => {
+    callbackSnapshotRef.current = callbackSnapshot;
+  });
 
   const replaceItems = useCallback((next: ImportItem[]) => {
     itemsRef.current = next;
@@ -1760,6 +1792,83 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       activeUploadRef.current === ownership &&
       generationRef.current === ownership.generation,
     [],
+  );
+
+  const ownsSettledUpload = useCallback(
+    (ownership: UploadOwnership) =>
+      authorityRef.current === ownership.authority &&
+      activeUploadRef.current === null &&
+      generationRef.current === ownership.generation,
+    [],
+  );
+
+  const claimUploadAuthority = useCallback((current: HookAuthority): HookAuthority | null => {
+    const callbacks = callbackSnapshotRef.current;
+    if (authorityRef.current !== current || activeUploadRef.current) return null;
+    const onDone = callbacks.onDone;
+    if (authorityRef.current !== current || callbackSnapshotRef.current !== callbacks) return null;
+    const onError = callbacks.onError;
+    if (authorityRef.current !== current || callbackSnapshotRef.current !== callbacks) return null;
+    const claimed = Object.freeze({ token: current.token, onDone, onError });
+    authorityRef.current = claimed;
+    return claimed;
+  }, []);
+
+  const finalizeUpload = useCallback(
+    (ownership: UploadOwnership) => {
+      if (!ownsUpload(ownership)) return false;
+      activeUploadRef.current = null;
+      return ownsSettledUpload(ownership);
+    },
+    [ownsSettledUpload, ownsUpload],
+  );
+
+  const deliverDone = useCallback(
+    (ownership: UploadOwnership, documents: ImportedDocument[], failed: FailedImport[]) => {
+      if (!ownsSettledUpload(ownership)) return;
+      const onDone = ownership.authority.onDone;
+      if (!ownsSettledUpload(ownership)) return;
+      onDone?.(documents, failed);
+    },
+    [ownsSettledUpload],
+  );
+
+  const deliverFailure = useCallback(
+    (
+      ownership: UploadOwnership,
+      message: string,
+      documents: ImportedDocument[],
+      failed: FailedImport[],
+    ) => {
+      if (!ownsSettledUpload(ownership)) return;
+      const onError = ownership.authority.onError;
+      if (!ownsSettledUpload(ownership)) return;
+      let onErrorFailure: unknown;
+      try {
+        onError?.(message);
+      } catch (error) {
+        onErrorFailure = error;
+      }
+
+      let onDoneFailure: unknown;
+      if (ownsSettledUpload(ownership)) {
+        const onDone = ownership.authority.onDone;
+        if (ownsSettledUpload(ownership)) {
+          try {
+            onDone?.(documents, failed);
+          } catch (error) {
+            onDoneFailure = error;
+          }
+        }
+      }
+
+      if (onErrorFailure !== undefined && onDoneFailure !== undefined) {
+        throw new AggregateError([onErrorFailure, onDoneFailure], "Import callbacks failed");
+      }
+      if (onErrorFailure !== undefined) throw onErrorFailure;
+      if (onDoneFailure !== undefined) throw onDoneFailure;
+    },
+    [ownsSettledUpload],
   );
 
   const setDialogOpen = useCallback((next: boolean) => {
@@ -1775,17 +1884,18 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setOpen(next);
   }, []);
 
-  const retryDispatch = useCallback<RetryRequest>((ownership, rowIndex, action) => {
-    retryRequestRef.current?.(ownership, rowIndex, action);
-  }, []);
+  const retryDispatch = useCallback<RetryRequest>(
+    (ownership, rowIndex, action) => retryRequestRef.current?.(ownership, rowIndex, action),
+    [],
+  );
 
   const requestRetry = useCallback<RetryRequest>(async (retryOwnership, rowIndex, action) => {
-    const authority = authorityRef.current;
+    const currentAuthority = authorityRef.current;
     if (
-      !authority ||
+      !currentAuthority ||
       activeUploadRef.current ||
       retryOwnershipRef.current !== retryOwnership ||
-      retryOwnership.authority !== authority ||
+      retryOwnership.authority !== currentAuthority ||
       retryOwnership.generation !== generationRef.current
     ) {
       return;
@@ -1824,6 +1934,8 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       }
     }
 
+    const authority = claimUploadAuthority(currentAuthority);
+    if (!authority) return;
     const rowIndexes = entries.map(([index]) => index);
     const selectedRows = new Set(rowIndexes);
     const documents = entries.map(([, file]) => file);
@@ -1846,35 +1958,33 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       ),
     );
 
+    let completedResult: ReturnType<typeof summarizeImportItems> | null = null;
     try {
       const { documents: created, failed } = await uploadImportBatch(documents, ownership.images);
       if (!ownsUpload(ownership)) return;
 
-      const failedAt = new Map(failed.map((failure) => [failure.index, failure.error]));
+      const failedAt = validateImportBatchResult(documents, created, failed);
       const retained = new Map(retryOwnership.files);
       const outcomes = new Map<number, ImportItem>();
       let nextCreated = 0;
       for (let attemptIndex = 0; attemptIndex < rowIndexes.length; attemptIndex++) {
         const rowIndex = rowIndexes[attemptIndex];
         const file = documents[attemptIndex];
-        const error = failedAt.get(attemptIndex);
-        if (error !== undefined) {
-          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error });
+        const failure = failedAt.get(attemptIndex);
+        if (failure) {
+          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error: failure.error });
           continue;
         }
         const document = created[nextCreated++];
-        if (document) {
-          retained.delete(rowIndex);
-          outcomes.set(rowIndex, {
-            name: file.name,
-            status: "done",
-            id: document.id,
-            title: document.title,
-            warnings: document.warnings,
-          });
-        } else {
-          outcomes.set(rowIndex, { name: file.name, status: "error", warnings: [], error: "Import failed" });
-        }
+        if (!document) throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+        retained.delete(rowIndex);
+        outcomes.set(rowIndex, {
+          name: file.name,
+          status: "done",
+          id: document.id,
+          title: document.title,
+          warnings: document.warnings,
+        });
       }
 
       const nextOwnership = retained.size
@@ -1895,9 +2005,8 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       retryOwnershipRef.current = nextOwnership;
       replaceItems(nextItems);
       const result = summarizeImportItems(nextItems);
-      if (ownsUpload(ownership)) {
-        optionsRef.current.onDone?.(result.documents, result.failed);
-      }
+      if (!finalizeUpload(ownership)) return;
+      completedResult = result;
     } catch (err) {
       if (!ownsUpload(ownership)) return;
       const message = apiErrorText(err, "Import failed");
@@ -1917,15 +2026,21 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       if (!ownsUpload(ownership)) return;
       retryOwnershipRef.current = nextOwnership;
       replaceItems(publishedItems);
-      if (ownsUpload(ownership)) optionsRef.current.onError?.(message);
       const result = summarizeImportItems(publishedItems);
-      if (ownsUpload(ownership)) {
-        optionsRef.current.onDone?.(result.documents, result.failed);
-      }
-    } finally {
-      if (ownsUpload(ownership)) activeUploadRef.current = null;
+      if (!finalizeUpload(ownership)) return;
+      deliverFailure(ownership, message, result.documents, result.failed);
+      return;
     }
-  }, [ownsUpload, replaceItems, retryDispatch]);
+    deliverDone(ownership, completedResult.documents, completedResult.failed);
+  }, [
+    claimUploadAuthority,
+    deliverDone,
+    deliverFailure,
+    finalizeUpload,
+    ownsUpload,
+    replaceItems,
+    retryDispatch,
+  ]);
 
   useLayoutEffect(() => {
     retryRequestRef.current = requestRetry;
@@ -1935,8 +2050,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
   }, [requestRetry]);
 
   const start = useCallback(async (files: Iterable<File>) => {
-    const authority = authorityRef.current;
-    if (!authority || activeUploadRef.current) return;
+    const currentAuthority = authorityRef.current;
+    if (!currentAuthority || activeUploadRef.current) return;
+    const authority = claimUploadAuthority(currentAuthority);
+    if (!authority) return;
 
     const selectedFiles = Array.from(files);
     const { documents, images, ignored: skipped } = splitImportFiles(selectedFiles);
@@ -1946,9 +2063,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setIgnored(ignoredNames);
     if (documents.length === 0) {
       const msg = images.length ? "Drop a Markdown, text or HTML file together with the images." : NOTHING_IMPORTABLE_MESSAGE;
-      optionsRef.current.onError?.(msg);
       replaceItems([]);
       setOpen(skipped.length > 0 || images.length > 0);
+      const onError = authority.onError;
+      if (authorityRef.current === authority && generationRef.current === generation) onError?.(msg);
       return;
     }
 
@@ -1965,23 +2083,23 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     if (!ownsUpload(ownership)) return;
     replaceItems(documents.map((f) => ({ name: f.name, status: "uploading", warnings: [] })));
     setOpen(true);
+    let completedResult: { documents: ImportedDocument[]; failed: FailedImport[] } | null = null;
     try {
       const { documents: created, failed } = await uploadImportBatch(documents, images);
       if (!ownsUpload(ownership)) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
-      const failedAt = new Map(failed.map((f) => [f.index, f.error]));
+      const failedAt = validateImportBatchResult(documents, created, failed);
       const retained = new Map<number, File>();
       let next = 0;
       const pendingItems = documents.map((f, i): ImportItem => {
-        const error = failedAt.get(i);
-        if (error !== undefined) {
+        const failure = failedAt.get(i);
+        if (failure) {
           retained.set(i, f);
-          return { name: f.name, status: "error", warnings: [], error };
+          return { name: f.name, status: "error", warnings: [], error: failure.error };
         }
         const doc = created[next++];
-        if (doc) return { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings };
-        retained.set(i, f);
-        return { name: f.name, status: "error", warnings: [], error: "Import failed" };
+        if (!doc) throw new Error(MALFORMED_IMPORT_RESULT_MESSAGE);
+        return { name: f.name, status: "done", id: doc.id, title: doc.title, warnings: doc.warnings };
       });
       const retryOwnership = retained.size
         ? createRetryOwnership(authority, generation, retained, images, retryDispatch)
@@ -1990,7 +2108,8 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       if (!ownsUpload(ownership)) return;
       retryOwnershipRef.current = retryOwnership;
       replaceItems(nextItems);
-      if (ownsUpload(ownership)) optionsRef.current.onDone?.(created, failed);
+      if (!finalizeUpload(ownership)) return;
+      completedResult = { documents: created, failed };
     } catch (err) {
       if (!ownsUpload(ownership)) return;
       const message = apiErrorText(err, "Import failed");
@@ -2010,29 +2129,43 @@ export function useFileImport(options: UseFileImportOptions = {}) {
       if (!ownsUpload(ownership)) return;
       retryOwnershipRef.current = retryOwnership;
       replaceItems(nextItems);
-      if (ownsUpload(ownership)) optionsRef.current.onError?.(message);
-      if (ownsUpload(ownership)) optionsRef.current.onDone?.([], []);
-    } finally {
-      if (ownsUpload(ownership)) activeUploadRef.current = null;
+      if (!finalizeUpload(ownership)) return;
+      deliverFailure(ownership, message, [], []);
+      return;
     }
-  }, [ownsUpload, replaceItems, retryDispatch]);
+    deliverDone(ownership, completedResult.documents, completedResult.failed);
+  }, [
+    claimUploadAuthority,
+    deliverDone,
+    deliverFailure,
+    finalizeUpload,
+    ownsUpload,
+    replaceItems,
+    retryDispatch,
+  ]);
 
   const pick = useCallback(() => inputRef.current?.click(), []);
 
-  const dragOwnerRef = useRef<DragListenerOwner | null>(null);
   const startIntentRef = useRef(start);
 
   useLayoutEffect(() => {
     startIntentRef.current = start;
     const owner = dragOwnerRef.current;
-    if (owner?.active && authorityRef.current === owner.authority) owner.start = start;
+    if (owner?.active && authorityRef.current?.token === owner.authority.token) owner.start = start;
   }, [start]);
 
   useLayoutEffect(() => {
-    const authority: HookAuthority = { token: Symbol("file-import-authority") };
+    const callbacks = callbackSnapshotRef.current;
+    const authority: HookAuthority = Object.freeze({
+      token: Symbol("file-import-authority"),
+      onDone: callbacks.onDone,
+      onError: callbacks.onError,
+    });
     const target = window;
     const ownsListeners = () =>
-      owner.active && dragOwnerRef.current === owner && authorityRef.current === owner.authority;
+      owner.active &&
+      dragOwnerRef.current === owner &&
+      authorityRef.current?.token === owner.authority.token;
     const owner: DragListenerOwner = {
       active: true,
       authority,
@@ -2073,10 +2206,10 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     return () => {
       owner.active = false;
       if (dragOwnerRef.current === owner) dragOwnerRef.current = null;
-      if (authorityRef.current === authority) {
+      if (authorityRef.current?.token === authority.token) {
         authorityRef.current = null;
-        if (activeUploadRef.current?.authority === authority) activeUploadRef.current = null;
-        if (retryOwnershipRef.current?.authority === authority) retryOwnershipRef.current = null;
+        if (activeUploadRef.current?.authority.token === authority.token) activeUploadRef.current = null;
+        if (retryOwnershipRef.current?.authority.token === authority.token) retryOwnershipRef.current = null;
         itemsRef.current = [];
       }
       owner.target.removeEventListener("dragenter", owner.enter);
