@@ -879,12 +879,19 @@ function createHintPublication(
     let nativeClick: HintNativeClickProof | null = null;
     let reactMouseDown: HintReactProof | null = null;
     let reactClick: HintReactProof | null = null;
+    let interactionExpiry: number | null = null;
     const releasePrimaryPress = () => {
       cells.pressedPublications.delete(publication);
       cells.pressedControls.delete(controls.primary);
       cells.pressedActions.delete(preserveFocus);
     };
+    const cancelInteractionExpiry = () => {
+      if (interactionExpiry === null) return;
+      ownerWindow.clearTimeout(interactionExpiry);
+      interactionExpiry = null;
+    };
     const clearInteractionProofs = () => {
+      cancelInteractionExpiry();
       nativeMouseDown = null;
       nativeMouseUp = null;
       keyboardDown = null;
@@ -897,21 +904,25 @@ function createHintPublication(
       down: HintNativeMouseProof,
       up: HintNativeMouseProof,
     ) => {
-      queueMicrotask(() => {
+      cancelInteractionExpiry();
+      interactionExpiry = ownerWindow.setTimeout(() => {
+        interactionExpiry = null;
         if (nativeMouseDown !== down || nativeMouseUp !== up) return;
         releasePrimaryPress();
         clearInteractionProofs();
-      });
+      }, 0);
     };
     const expireKeyboardProof = (
       down: HintKeyboardProof,
       up: HintKeyboardReleaseProof | null,
     ) => {
-      queueMicrotask(() => {
+      cancelInteractionExpiry();
+      interactionExpiry = ownerWindow.setTimeout(() => {
+        interactionExpiry = null;
         if (keyboardDown !== down || keyboardUp !== up) return;
         releasePrimaryPress();
         clearInteractionProofs();
-      });
+      }, 0);
     };
 
     const controlForTarget = (target: Node) =>
@@ -1181,11 +1192,13 @@ function createHintPublication(
         return;
       }
       const capturedClick = nativeClick;
-      queueMicrotask(() => {
+      cancelInteractionExpiry();
+      interactionExpiry = ownerWindow.setTimeout(() => {
+        interactionExpiry = null;
         if (nativeClick !== capturedClick) return;
         releasePrimaryPress();
         clearInteractionProofs();
-      });
+      }, 0);
     };
     const releaseNativeListeners = () => {
       ownerDocument.removeEventListener("mousedown", onNativeMouseDown, true);

@@ -370,6 +370,98 @@ async function crossTaskBoundary() {
   expect(crossed).toBe(true);
 }
 
+async function buildHintBarBrowserHarness() {
+  const testUint8Array = globalThis.Uint8Array;
+  globalThis.Uint8Array = Object.getPrototypeOf(
+    new TextEncoder().encode(""),
+  ).constructor as typeof Uint8Array;
+  try {
+    const [{ build }, path] = await Promise.all([
+      import("esbuild"),
+      import("node:path"),
+    ]);
+    const root = process.cwd();
+    const result = await build({
+      bundle: true,
+      define: {
+        "process.env.NODE_ENV": '"development"',
+      },
+      format: "iife",
+      platform: "browser",
+      target: "chrome120",
+      write: false,
+      stdin: {
+        contents: `
+        import React, { StrictMode } from "react";
+        import { createRoot } from "react-dom/client";
+        import { HintBar } from "./hint-bar";
+
+        const events = [];
+        window.__hintEvents = events;
+        for (const type of ["mousedown", "mouseup", "keydown", "keyup", "click"]) {
+          document.addEventListener(type, (event) => {
+            if (!(event.target instanceof Element) || !event.target.closest("[data-testid='hint-bar']")) return;
+            queueMicrotask(() => events.push(type + ":document-microtask"));
+          }, true);
+        }
+
+        const presence = [];
+        const comments = [{ id: "thread-1" }];
+        const session = {
+          docId: "browser-hint",
+          role: "editor",
+          canEdit: true,
+          synced: true,
+          authError: null,
+          trashed: false,
+          subscribe: () => () => {},
+          presence: () => presence,
+          comments: { list: () => comments },
+        };
+        const actions = {
+          focus: () => events.push("focus"),
+        };
+        localStorage.setItem(
+          "markdoc:hints",
+          JSON.stringify({ dismissed: ["collab-agent"], agentSeen: false }),
+        );
+        createRoot(document.getElementById("root")).render(
+          <StrictMode>
+            <HintBar
+              session={session}
+              actions={actions}
+              onShare={() => events.push("share")}
+              onComment={() => events.push("comment")}
+            />
+          </StrictMode>,
+        );
+      `,
+        loader: "tsx",
+        resolveDir: path.join(root, "src", "components", "editor"),
+        sourcefile: "hint-bar-browser-harness.tsx",
+      },
+      plugins: [
+        {
+          name: "markdoc-alias",
+          setup(builder) {
+            builder.onResolve({ filter: /^@\// }, (args) =>
+              builder.resolve(path.join(root, "src", args.path.slice(2)), {
+                kind: args.kind,
+                resolveDir: root,
+              }),
+            );
+          },
+        },
+      ],
+    });
+    const output = result.outputFiles[0];
+    if (!output) throw new Error("HintBar browser harness did not bundle");
+    return output.text;
+  } finally {
+    globalThis.Uint8Array = testUint8Array;
+  }
+}
+
 describe("HintBar collaborator discovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1540,6 +1632,123 @@ describe("HintBar collaborator discovery", () => {
         outside.remove();
       }
     },
+  );
+
+  it.skipIf(process.env.HINTBAR_CHROMIUM !== "1")(
+    "keeps trusted Chromium pointer, Enter, and Space activation live across capture microtask checkpoints",
+    async () => {
+      vi.useRealTimers();
+      const [{ chromium }, harness] = await Promise.all([
+        import("playwright-core"),
+        buildHintBarBrowserHarness(),
+      ]);
+      const browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext();
+      try {
+        const createPage = async () => {
+          const page = await context.newPage();
+          await page.route("http://hintbar.test/", (route) =>
+            route.fulfill({
+              body: `<div id="root"></div><script>${harness}</script>`,
+              contentType: "text/html",
+            }),
+          );
+          await page.goto("http://hintbar.test/");
+          await page
+            .locator("[data-testid='hint-bar']")
+            .waitFor({ state: "visible" });
+          return page;
+        };
+        const readEvents = (page: Awaited<ReturnType<typeof createPage>>) =>
+          page.evaluate(() =>
+            (
+              window as unknown as {
+                __hintEvents: string[];
+              }
+            ).__hintEvents.slice(),
+          );
+
+        for (const activation of ["pointer", "Enter", " "] as const) {
+          const page = await createPage();
+          const control = page.locator(
+            activation === " "
+              ? "[data-testid='hint-dismiss']"
+              : "[data-testid='hint-action']",
+          );
+          if (activation === "pointer") {
+            await control.click();
+          } else {
+            await control.focus();
+            await page.keyboard.press(activation === " " ? "Space" : activation);
+          }
+          const accepted = activation === " " ? "focus" : "comment";
+          await expect
+            .poll(async () => (await readEvents(page)).filter((event) => event === accepted))
+            .toHaveLength(1);
+          const events = await readEvents(page);
+          const checkpoint =
+            activation === "pointer"
+              ? "click:document-microtask"
+              : `${activation === " " ? "keyup" : "keydown"}:document-microtask`;
+          expect(events.indexOf(checkpoint)).toBeGreaterThanOrEqual(0);
+          expect(events.indexOf(checkpoint)).toBeLessThan(
+            events.indexOf(accepted),
+          );
+          await page.close();
+        }
+
+        for (const activation of ["pointer", "Enter", " "] as const) {
+          const page = await createPage();
+          const selector =
+            activation === " "
+              ? "[data-testid='hint-dismiss']"
+              : "[data-testid='hint-action']";
+          const control = page.locator(selector);
+          await control.evaluate((element) => {
+            element.addEventListener(
+              "click",
+              (event) => event.stopPropagation(),
+              { once: true },
+            );
+          });
+          if (activation === "pointer") {
+            await control.click();
+          } else {
+            await control.focus();
+            await page.keyboard.press(activation === " " ? "Space" : activation);
+          }
+          await page.waitForTimeout(20);
+          await control.evaluate((element, detail) => {
+            element.dispatchEvent(
+              new MouseEvent("click", {
+                bubbles: true,
+                button: 0,
+                detail,
+              }),
+            );
+          }, activation === "pointer" ? 1 : 0);
+          await page.waitForTimeout(20);
+          const events = await readEvents(page);
+          expect(events).not.toContain("comment");
+          expect(events).not.toContain("focus");
+          expect(
+            await page.evaluate(() =>
+              JSON.parse(
+                localStorage.getItem("markdoc:hints") ?? "null",
+              ),
+            ),
+          ).toEqual({
+            dismissed: ["collab-agent"],
+            agentSeen: false,
+          });
+          await page.close();
+        }
+      } finally {
+        await context.close();
+        await browser.close();
+      }
+    },
+    60_000,
   );
 
   it("rejects crossed and fabricated events without poisoning the Strict Mode successor", async () => {
