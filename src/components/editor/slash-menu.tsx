@@ -202,6 +202,9 @@ interface PointerRowElements {
 
 interface PointerPresentationRuntime {
   retired: boolean;
+  effectReplay: CommittedPointerPresentation | null;
+  detachedCommit: CommittedPointerPresentation | null;
+  detachedElements: Set<Element>;
   root: HTMLDivElement | null;
   groups: PointerGroupElements[];
   rows: PointerRowElements[];
@@ -209,6 +212,11 @@ interface PointerPresentationRuntime {
   committed: CommittedPointerPresentation | null;
   highlightClaimed: boolean;
   itemClaimed: boolean;
+}
+
+interface PointerRootOwner {
+  candidate: PointerPresentation;
+  element: HTMLDivElement;
 }
 
 type DomTree = Readonly<{
@@ -354,6 +362,7 @@ export function SlashMenu({
   const keyOwnerRef = useRef<KeyOwner | null>(null);
   const pointerRuntimesRef = useRef(new WeakMap<PointerPresentation, PointerPresentationRuntime>());
   const activePointerRef = useRef<CommittedPointerPresentation | null>(null);
+  const pointerRootOwnerRef = useRef<PointerRootOwner | null>(null);
   const claimedNativeEventsRef = useRef(new WeakSet<Event>());
   const [snapshot, setSnapshot] = useState<SlashMenuSnapshot | null>(() =>
     authority ? Object.freeze({ authority, state: controller.getState() }) : null,
@@ -374,7 +383,7 @@ export function SlashMenu({
       setSnapshot(null);
       return;
     }
-
+    authorityRef.current = authority;
     authorityRef.current = authority;
     const publish = (next: SlashState | null) => {
       if (authorityRef.current !== authority) return;
@@ -565,53 +574,92 @@ export function SlashMenu({
     } satisfies PointerPresentation);
   })();
 
+  function createPointerRuntime(
+    candidate: PointerPresentation,
+    previous?: PointerPresentationRuntime,
+  ): PointerPresentationRuntime {
+    return {
+      retired: false,
+      effectReplay: null,
+      detachedCommit: null,
+      detachedElements: new Set(),
+      root: previous?.root ?? null,
+      groups: candidate.groups.map((_, index) => ({
+        root: previous?.groups[index]?.root ?? null,
+        heading: previous?.groups[index]?.heading ?? null,
+      })),
+      rows: candidate.items.map((_, index) => ({
+        root: previous?.rows[index]?.root ?? null,
+        icon: previous?.rows[index]?.icon ?? null,
+        body: previous?.rows[index]?.body ?? null,
+        title: previous?.rows[index]?.title ?? null,
+        description: previous?.rows[index]?.description ?? null,
+        hint: previous?.rows[index]?.hint ?? null,
+      })),
+      empty: previous?.empty ?? null,
+      committed: null,
+      highlightClaimed: false,
+      itemClaimed: false,
+    };
+  }
+
   function runtimeFor(candidate: PointerPresentation): PointerPresentationRuntime {
     const runtimes = pointerRuntimesRef.current;
     let runtime = runtimes.get(candidate);
     if (!runtime) {
-      runtime = {
-        retired: false,
-        root: null,
-        groups: candidate.groups.map(() => ({ root: null, heading: null })),
-        rows: candidate.items.map(() => ({
-          root: null,
-          icon: null,
-          body: null,
-          title: null,
-          description: null,
-          hint: null,
-        })),
-        empty: null,
-        committed: null,
-        highlightClaimed: false,
-        itemClaimed: false,
-      };
+      runtime = createPointerRuntime(candidate);
       runtimes.set(candidate, runtime);
     }
     return runtime;
   }
 
-  function retirePointer(candidate: PointerPresentation): void {
-    const runtime = pointerRuntimesRef.current.get(candidate);
+  function retirePointer(
+    candidate: PointerPresentation,
+    expectedRuntime?: PointerPresentationRuntime,
+    reason: "ordinary" | "ref" | "effect" = "ordinary",
+    detachedElement?: Element,
+  ): void {
+    const runtime = expectedRuntime ?? pointerRuntimesRef.current.get(candidate);
     if (!runtime) return;
-    runtime.retired = true;
     const committed = runtime.committed;
+    if (reason === "ordinary") {
+      runtime.effectReplay = null;
+      runtime.detachedCommit = null;
+      runtime.detachedElements.clear();
+    } else if (reason === "ref" && committed && activePointerRef.current === committed) {
+      runtime.detachedCommit = committed;
+      if (detachedElement) runtime.detachedElements.add(detachedElement);
+    } else if (reason === "ref" && runtime.detachedCommit && detachedElement) {
+      runtime.detachedElements.add(detachedElement);
+    } else if (reason === "effect") {
+      const replay = committed && activePointerRef.current === committed ? committed : runtime.detachedCommit;
+      if (replay && (!activePointerRef.current || activePointerRef.current === replay)) {
+        runtime.effectReplay = replay;
+      }
+    }
+    runtime.retired = true;
     if (committed && activePointerRef.current === committed) activePointerRef.current = null;
     runtime.committed = null;
   }
 
   function bindPointerRoot(candidate: PointerPresentation, element: HTMLDivElement | null): void {
     const runtime = runtimeFor(candidate);
+    const rootOwner = pointerRootOwnerRef.current;
+    if (!element && rootOwner?.candidate === candidate) pointerRootOwnerRef.current = null;
     if (runtime.root === element) return;
     if (!element) {
       if (runtime.root) {
+        const detached = runtime.root;
         runtime.root = null;
-        retirePointer(candidate);
+        retirePointer(candidate, runtime, "ref", detached);
       }
       return;
     }
+    if (runtime.retired && rootOwner && rootOwner.candidate !== candidate) return;
     if (runtime.root && runtime.root !== element) retirePointer(candidate);
     runtime.root = element;
+    pointerRootOwnerRef.current = { candidate, element };
+    if (runtime.retired && (runtime.effectReplay || runtime.detachedCommit)) establishPointer(candidate);
   }
 
   function bindPointerGroup<K extends keyof PointerGroupElements>(
@@ -625,13 +673,15 @@ export function SlashMenu({
     if (!elements || candidate.groups[group.order] !== group || elements[kind] === element) return;
     if (!element) {
       if (elements[kind]) {
+        const detached = elements[kind];
         elements[kind] = null;
-        retirePointer(candidate);
+        retirePointer(candidate, runtime, "ref", detached);
       }
       return;
     }
     if (elements[kind] && elements[kind] !== element) retirePointer(candidate);
     elements[kind] = element;
+    if (runtime.retired && (runtime.effectReplay || runtime.detachedCommit)) establishPointer(candidate);
   }
 
   function bindPointerRow<K extends keyof PointerRowElements>(
@@ -645,13 +695,15 @@ export function SlashMenu({
     if (!elements || candidate.items[item.index] !== item || elements[kind] === element) return;
     if (!element) {
       if (elements[kind]) {
+        const detached = elements[kind];
         elements[kind] = null;
-        retirePointer(candidate);
+        retirePointer(candidate, runtime, "ref", detached);
       }
       return;
     }
     if (elements[kind] && elements[kind] !== element) retirePointer(candidate);
     elements[kind] = element;
+    if (runtime.retired && (runtime.effectReplay || runtime.detachedCommit)) establishPointer(candidate);
   }
 
   function bindPointerEmpty(candidate: PointerPresentation, element: HTMLDivElement | null): void {
@@ -659,17 +711,20 @@ export function SlashMenu({
     if (runtime.empty === element) return;
     if (!element) {
       if (runtime.empty) {
+        const detached = runtime.empty;
         runtime.empty = null;
-        retirePointer(candidate);
+        retirePointer(candidate, runtime, "ref", detached);
       }
       return;
     }
     if (runtime.empty && runtime.empty !== element) retirePointer(candidate);
     runtime.empty = element;
+    if (runtime.retired && (runtime.effectReplay || runtime.detachedCommit)) establishPointer(candidate);
   }
 
   function pointerFactsAreCurrent(candidate: PointerPresentation): boolean {
     const { authority: owner, state: stateFacts, position: geometry } = candidate;
+    const rootOwner = pointerRootOwnerRef.current;
     if (
       candidate.mount !== mount ||
       authorityRef.current !== owner ||
@@ -687,7 +742,9 @@ export function SlashMenu({
       candidate.where.canComment !== candidate.canComment ||
       candidate.snapshot.authority !== owner ||
       candidate.snapshot.state !== stateFacts.source ||
-      containerRef.current !== geometry.container
+      containerRef.current !== geometry.container ||
+      rootOwner?.candidate !== candidate ||
+      rootOwner.element !== pointerRuntimesRef.current.get(candidate)?.root
     ) {
       return false;
     }
@@ -926,19 +983,110 @@ export function SlashMenu({
     });
   }
 
-  function establishPointer(candidate: PointerPresentation): void {
+  function runtimeHasCommittedElements(
+    runtime: PointerPresentationRuntime,
+    committed: CommittedPointerPresentation,
+  ): boolean {
+    if (
+      runtime.root !== committed.root ||
+      runtime.empty !== committed.empty ||
+      runtime.groups.length !== committed.groups.length ||
+      runtime.rows.length !== committed.rows.length
+    ) {
+      return false;
+    }
+    for (const group of committed.groups) {
+      const elements = runtime.groups[group.group.order];
+      if (elements?.root !== group.root || elements.heading !== group.heading) return false;
+    }
+    for (const row of committed.rows) {
+      const elements = runtime.rows[row.item.index];
+      if (
+        elements?.root !== row.elements.root ||
+        elements.icon !== row.elements.icon ||
+        elements.body !== row.elements.body ||
+        elements.title !== row.elements.title ||
+        elements.description !== row.elements.description ||
+        elements.hint !== row.elements.hint
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function runtimeSawCompleteRefDetach(
+    runtime: PointerPresentationRuntime,
+    committed: CommittedPointerPresentation,
+  ): boolean {
+    // Strict Mode replays the whole ref tree; a retained individual ref must not revive a retired presentation.
+    const detached = runtime.detachedElements;
+    if (!detached.has(committed.root)) return false;
+    for (const group of committed.groups) {
+      if (!detached.has(group.root) || !detached.has(group.heading)) return false;
+    }
+    for (const row of committed.rows) {
+      const elements = row.elements;
+      if (
+        !detached.has(elements.root) ||
+        !detached.has(elements.icon) ||
+        !detached.has(elements.body) ||
+        !detached.has(elements.title) ||
+        (elements.description && !detached.has(elements.description)) ||
+        (elements.hint && !detached.has(elements.hint))
+      ) {
+        return false;
+      }
+    }
+    return !committed.empty || detached.has(committed.empty);
+  }
+
+  function runtimeForEstablishment(candidate: PointerPresentation): PointerPresentationRuntime | null {
+    const runtime = runtimeFor(candidate);
+    if (!runtime.retired) return runtime;
+
+    const replay =
+      runtime.effectReplay ??
+      (runtime.detachedCommit && runtimeSawCompleteRefDetach(runtime, runtime.detachedCommit)
+        ? runtime.detachedCommit
+        : null);
+    if (!replay || replay.source !== candidate) return null;
+    if (!runtimeHasCommittedElements(runtime, replay)) return null;
+    if (activePointerRef.current || !pointerDomIsCurrent(replay)) {
+      runtime.effectReplay = null;
+      runtime.detachedCommit = null;
+      return null;
+    }
+    if (!pointerFactsAreCurrent(candidate)) {
+      if (!authorityRef.current) return null;
+      runtime.effectReplay = null;
+      runtime.detachedCommit = null;
+      return null;
+    }
+
+    runtime.effectReplay = null;
+    runtime.detachedCommit = null;
+    // The retired runtime remains permanent; an exact replay receives a new one.
+    const replacement = createPointerRuntime(candidate, runtime);
+    pointerRuntimesRef.current.set(candidate, replacement);
+    return replacement;
+  }
+
+  function establishPointer(candidate: PointerPresentation): PointerPresentationRuntime | null {
+    const runtime = runtimeForEstablishment(candidate);
+    if (!runtime) return null;
     const previous = activePointerRef.current;
     if (previous && previous.source !== candidate) retirePointer(previous.source);
-    const runtime = runtimeFor(candidate);
     const committed = buildCommittedPointer(candidate);
     const factsCurrent = pointerFactsAreCurrent(candidate);
     const domCurrent = committed ? pointerDomIsCurrent(committed) : false;
     if (!committed || !factsCurrent || !domCurrent) {
-      retirePointer(candidate);
-      return;
+      retirePointer(candidate, runtime);
+      return null;
     }
     runtime.committed = committed;
     activePointerRef.current = committed;
+    return runtime;
   }
 
   function currentPointer(candidate: PointerPresentation): CommittedPointerPresentation | null {
@@ -1031,8 +1179,9 @@ export function SlashMenu({
 
   useLayoutEffect(() => {
     if (!pointerPresentation) return;
-    establishPointer(pointerPresentation);
-    return () => retirePointer(pointerPresentation);
+    const runtime = establishPointer(pointerPresentation);
+    if (!runtime) return;
+    return () => retirePointer(pointerPresentation, runtime, "effect");
   });
 
   // Resolve the selected row from this exact committed presentation, never from a successor's DOM.

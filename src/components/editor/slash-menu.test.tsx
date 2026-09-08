@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { TextSelection } from "prosemirror-state";
@@ -508,6 +508,88 @@ describe("slash-menu visit authority", () => {
 });
 
 describe("slash-menu pointer presentation", () => {
+  it("keeps the exact current controls usable after Strict Mode replays layout effects", () => {
+    const a = makeVisit();
+    const b = makeVisit();
+    a.controller.state = slashState();
+    b.controller.state = slashState();
+    const mounted = render(
+      <StrictMode>
+        <BoundaryHarness visit={a} />
+      </StrictMode>,
+    );
+
+    const headingBeforeHover = captureRow("heading1");
+    act(() => {
+      invokeMouse(headingBeforeHover.enter, headingBeforeHover.element, "mouseenter");
+    });
+    const heading = captureRow("heading1");
+    expect(heading.element).toHaveAttribute("aria-selected", "true");
+
+    const root = captureRoot();
+    const title = heading.element.querySelector(".truncate");
+    expect(title).toBeInstanceOf(HTMLSpanElement);
+    const down = invokeMouse(root.down, root.element, "mousedown", {
+      target: title!,
+      nativeTarget: title!,
+    });
+    root.down(down.event);
+    expect(down.preventDefault).toHaveBeenCalledOnce();
+
+    const click = clickRow(heading, title!);
+    heading.click(click.event);
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+    expect(a.view.focus).toHaveBeenCalledOnce();
+
+    act(() => a.controller.emit(slashState()));
+    const staleRow = captureRow("heading1");
+    const staleRoot = captureRoot();
+    mounted.rerender(
+      <StrictMode>
+        <BoundaryHarness visit={b} />
+      </StrictMode>,
+    );
+    const currentRow = captureRow("heading1");
+    const currentRoot = captureRoot();
+
+    act(() => {
+      staleRow.ref(currentRow.element);
+      staleRoot.ref(currentRoot.element);
+      staleRow.ref(null);
+      staleRoot.ref(null);
+    });
+    act(() => {
+      invokeMouse(staleRow.enter, currentRow.element, "mouseenter");
+    });
+    const staleDown = invokeMouse(staleRoot.down, currentRoot.element, "mousedown", {
+      target: currentRow.element,
+      nativeTarget: currentRow.element,
+    });
+    clickRow({ ...staleRow, element: currentRow.element });
+    expect(currentRow.element).toHaveAttribute("aria-selected", "false");
+    expect(staleDown.preventDefault).not.toHaveBeenCalled();
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+    expect(b.view.focus).not.toHaveBeenCalled();
+
+    act(() => {
+      invokeMouse(currentRow.enter, currentRow.element, "mouseenter");
+    });
+    const acceptedRow = captureRow("heading1");
+    const acceptedRoot = captureRoot();
+    const acceptedTitle = acceptedRow.element.querySelector(".truncate");
+    expect(acceptedTitle).toBeInstanceOf(HTMLSpanElement);
+    const acceptedDown = invokeMouse(acceptedRoot.down, acceptedRoot.element, "mousedown", {
+      target: acceptedTitle!,
+      nativeTarget: acceptedTitle!,
+    });
+    acceptedRoot.down(acceptedDown.event);
+    expect(acceptedDown.preventDefault).toHaveBeenCalledOnce();
+    const acceptedClick = clickRow(acceptedRow, acceptedTitle!);
+    acceptedRow.click(acceptedClick.event);
+    expect(slashActions.applyCommand).toHaveBeenCalledTimes(2);
+    expect(b.view.focus).toHaveBeenCalledOnce();
+  });
+
   it("binds hover, root prevention, and command application to one exact native interaction", () => {
     const visit = makeVisit();
     render(<BoundaryHarness visit={visit} />);
