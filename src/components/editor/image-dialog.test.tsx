@@ -275,6 +275,80 @@ describe("ImageDialog upload lifecycle", () => {
     expect(screen.getByTestId("image-upload")).toBeEnabled();
   });
 
+  it.each(["url", "alt", "error"] as const)(
+    "terminally settles a current upload when its %s getter throws",
+    async (getter) => {
+      const failed = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const onUpload = vi
+        .fn()
+        .mockReturnValueOnce(failed.promise)
+        .mockReturnValueOnce(retry.promise);
+      await renderStrictRoot(<Harness onUpload={onUpload} />);
+
+      const input = screen.getByTestId("image-file") as HTMLInputElement;
+      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      setInputValue(input, "failed-selection");
+
+      if (getter === "error") {
+        const error = new Error();
+        Object.defineProperty(error, "message", {
+          get() {
+            throw new Error("Error message getter failed");
+          },
+        });
+        await act(async () => {
+          failed.reject(error);
+          await failed.promise.catch(() => undefined);
+          await Promise.resolve();
+        });
+      } else {
+        const result = {
+          alt: "Unread Alt",
+          url: "/api/assets/unread",
+        } as UploadResult;
+        Object.defineProperty(result, getter, {
+          get() {
+            throw new Error(
+              getter === "url"
+                ? "URL result getter failed"
+                : "Alt result getter failed",
+            );
+          },
+        });
+        await act(async () => {
+          failed.resolve(result);
+          await failed.promise;
+          await Promise.resolve();
+        });
+      }
+
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        getter === "url"
+          ? "URL result getter failed"
+          : getter === "alt"
+            ? "Alt result getter failed"
+            : "Upload failed",
+      );
+      expect(screen.getByTestId("image-upload")).toBeEnabled();
+      expect(input.value).toBe("");
+
+      const retryFile = new File(["retry"], "retry.png", {
+        type: "image/png",
+      });
+      choose(retryFile);
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      await act(async () => {
+        retry.resolve({ url: "/api/assets/retry" });
+        await retry.promise;
+      });
+      expect(screen.getByTestId("image-url")).toHaveValue(
+        "/api/assets/retry",
+      );
+    },
+  );
+
   it("keeps stale success and finalizer work out of a reopened visit with a newer upload", async () => {
     const stale = deferred<UploadResult>();
     const current = deferred<UploadResult>();
@@ -442,6 +516,70 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/owned");
   });
 
+  it("claims an authenticated file change before one mutable selection read", async () => {
+    const pending = deferred<UploadResult>();
+    let fileAtUpload: File | null = null;
+    let readsAtUpload = -1;
+    let selectionReads = 0;
+    const selected = new File(["selected"], "selected.png", {
+      type: "image/png",
+    });
+    const swapped = new File(["swapped"], "swapped.png", {
+      type: "image/png",
+    });
+    const onUpload = vi.fn((file: File) => {
+      fileAtUpload = file;
+      readsAtUpload = selectionReads;
+      return pending.promise;
+    });
+    await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const handler =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+    let fabricatedReads = 0;
+    handler({
+      target: {
+        get files() {
+          fabricatedReads += 1;
+          return [selected];
+        },
+      },
+    } as unknown as ChangeEvent<HTMLInputElement>);
+    expect(fabricatedReads).toBe(0);
+    expect(onUpload).not.toHaveBeenCalled();
+
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      get() {
+        selectionReads += 1;
+        if (selectionReads === 1) {
+          input.dispatchEvent(
+            new Event("change", { bubbles: true, cancelable: true }),
+          );
+          return [selected] as unknown as FileList;
+        }
+        return [swapped] as unknown as FileList;
+      },
+    });
+    act(() => {
+      input.dispatchEvent(
+        new Event("change", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(onUpload).toHaveBeenCalledOnce();
+    expect(onUpload).toHaveBeenCalledWith(selected);
+    expect(fileAtUpload).toBe(selected);
+    expect(readsAtUpload).toBe(1);
+  });
+
   it.each(["close", "cancel", "escape", "outside"] as const)(
     "claims one current %s dismissal after replay",
     async (kind) => {
@@ -579,6 +717,54 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       expect(currentClose).toHaveBeenCalledOnce();
     },
   );
+
+  it("retires restored content mutation queued before passive settlement", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const NativeObserver = window.MutationObserver;
+    let mutationQueued = false;
+    class PrePassiveMutationObserver extends NativeObserver {
+      override observe(target: Node, options?: MutationObserverInit) {
+        super.observe(target, options);
+        if (
+          !mutationQueued &&
+          target instanceof HTMLDivElement &&
+          target.classList.contains("dialog")
+        ) {
+          mutationQueued = true;
+          const className = target.className;
+          target.className = "mutated-before-passive";
+          target.className = className;
+        }
+      }
+    }
+    vi.stubGlobal("MutationObserver", PrePassiveMutationObserver);
+
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    expect(mutationQueued).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
+  });
 
   it("invalidates an Escape proof when another native event intervenes", async () => {
     const onOpenChange = vi.fn();
@@ -971,6 +1157,49 @@ describe("ImageDialog exact Strict Mode ownership", () => {
 
     expect(input).toHaveValue("https://example.com/recovered.png");
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("does not recover a partial replay after an unexpected ref replay", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const bridge = view.host.querySelector(".contents");
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    if (!(bridge instanceof HTMLDivElement)) {
+      throw new Error("Image bridge was not rendered");
+    }
+    const bridgeRef = reactProp<RefCallback<HTMLDivElement>>(bridge, "ref");
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    act(() => {
+      bridgeRef(null);
+      bridgeRef(bridge);
+      inputRef(null);
+      inputRef(input);
+    });
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
   });
 
   it("keeps preview errors bound to the exact preview publication", async () => {

@@ -648,6 +648,14 @@ const IMAGE_RADIX_SETTLING_ATTRIBUTES = new Set([
   "style",
 ]);
 
+function imageUploadErrorText(error: unknown) {
+  try {
+    return apiErrorText(error, "Upload failed");
+  } catch {
+    return "Upload failed";
+  }
+}
+
 interface ImageVisit {
   readonly onOpenChange: (open: boolean) => void;
   readonly onSubmit: (src: string, alt: string) => void;
@@ -782,7 +790,6 @@ interface ImagePublication {
   readonly authorizeDismissal: (event: Event) => void;
   readonly retire: () => boolean;
   readonly isRetired: () => boolean;
-  readonly commitIsSettling: () => boolean;
   readonly publishedDomMatches: (
     changing?: "url" | "alt" | "file" | null,
   ) => boolean;
@@ -1496,7 +1503,6 @@ interface ImageDomGuard {
   readonly isClean: (
     changing?: "url" | "alt" | "file" | null,
   ) => boolean;
-  readonly isSettling: () => boolean;
   readonly finishCommit: () => void;
   readonly release: () => void;
 }
@@ -1625,19 +1631,6 @@ function createImageDomGuard(
   };
   const record = (records: readonly MutationRecord[]) => {
     if (changed || records.length === 0) return changed;
-    if (
-      reactCommitSettling &&
-      records.every(
-        (entry) =>
-          entry.target === dom.content ||
-          dom.content.contains(entry.target) ||
-          entry.target === dom.overlay ||
-          dom.overlay.contains(entry.target),
-      ) &&
-      committedDomMatches()
-    ) {
-      return false;
-    }
     for (let index = 0; index < records.length; index += 1) {
       const reconciled = exactControlledInputReconciliation(records, index);
       if (reconciled > 0) {
@@ -1690,7 +1683,6 @@ function createImageDomGuard(
       record(observer.takeRecords());
       return !changed;
     },
-    isSettling: () => reactCommitSettling,
     finishCommit: () => {
       if (!reactCommitSettling) return;
       record(observer.takeRecords());
@@ -2346,7 +2338,6 @@ function createImagePublicationRuntime(
       authorizeDismissal(publication, event),
     retire: () => retire("other"),
     isRetired: () => retired,
-    commitIsSettling: () => guard?.isSettling() === true,
     publishedDomMatches: (changing: ImageChangingControl = null) => {
       const exact = currentDomMatches(changing);
       if (!exact) retire("element");
@@ -2441,6 +2432,7 @@ function createImagePublicationRuntime(
       retirement === "element" &&
       established &&
       !layoutRetired &&
+      !invalidReplay &&
       replayRefs.some((entry) => entry.detached && entry.reattached) &&
       replayRefs.every(
         (entry) =>
@@ -2946,50 +2938,28 @@ function createImagePresentation(
   const onFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const publication = currentPublication("file");
     const input = file.owner.element();
-    const ownerWindow = input?.ownerDocument.defaultView;
-    const commitFiles =
-      publication &&
-      input &&
-      ownerWindow &&
-      publication.dom.overlay === publication.dom.content &&
-      publication.commitIsSettling() &&
-      publication.fileFacts !== null &&
-      input.value !== publication.fileFacts.value &&
-      event.currentTarget === undefined &&
-      event.nativeEvent === undefined &&
-      event.target !== null &&
-      typeof event.target === "object" &&
-      "files" in event.target &&
-      Array.isArray(event.target.files) &&
-      event.target.files.length === 1 &&
-      event.target.files[0] instanceof ownerWindow.File
-        ? event.target.files
-        : null;
     if (
       !publication ||
       !input ||
       publication.dom.file !== input ||
-      (event.currentTarget !== input && commitFiles === null)
+      event.currentTarget !== input
     ) {
       return;
     }
     const nativeEvent = imageExactNativeInput(event, input, publication);
-    const chosen = nativeEvent ? input.files?.[0] : commitFiles?.[0];
     if (
-      !chosen ||
+      !nativeEvent ||
       !authority.onUpload ||
       authority.uploading ||
       activeUpload() !== null ||
-      (nativeEvent
-        ? !claim(publication, file, file.action, event, nativeEvent)
-        : commitFiles === null ||
-          !coordinator.claimContinuation(
-            publication,
-            file,
-            file.action,
-            event,
-          ))
+      !claim(publication, file, file.action, event, nativeEvent)
     ) {
+      return;
+    }
+    const selected = input.files;
+    const chosen = selected?.[0];
+    if (!chosen) {
+      requestSuccessor();
       return;
     }
     startUpload(publication, authority, chosen, input);
@@ -3339,13 +3309,30 @@ export const ImageDialog = memo(function ImageDialog({
       let resultUrl: string | null = null;
       let resultAlt: string | undefined;
       let message: string | null = null;
+      let succeeded = outcome.kind === "success";
       if (outcome.kind === "success") {
-        resultUrl = outcome.result.url;
         if (!uploadLeaseIsCurrent(lease)) return;
-        resultAlt = outcome.result.alt;
+        try {
+          resultUrl = outcome.result.url;
+        } catch (error) {
+          if (!uploadLeaseIsCurrent(lease)) return;
+          succeeded = false;
+          message = imageUploadErrorText(error);
+        }
         if (!uploadLeaseIsCurrent(lease)) return;
+        if (succeeded) {
+          try {
+            resultAlt = outcome.result.alt;
+          } catch (error) {
+            if (!uploadLeaseIsCurrent(lease)) return;
+            succeeded = false;
+            message = imageUploadErrorText(error);
+          }
+          if (!uploadLeaseIsCurrent(lease)) return;
+        }
       } else {
-        message = apiErrorText(outcome.error, "Upload failed");
+        if (!uploadLeaseIsCurrent(lease)) return;
+        message = imageUploadErrorText(outcome.error);
         if (!uploadLeaseIsCurrent(lease)) return;
       }
       const publication = lease.publication;
@@ -3367,10 +3354,10 @@ export const ImageDialog = memo(function ImageDialog({
         ) {
           return current;
         }
-        if (outcome.kind === "error") {
+        if (!succeeded) {
           return nextImageDraft(current, {
             upload: null,
-            error: message,
+            error: message ?? "Upload failed",
           });
         }
         const nextAlt =
