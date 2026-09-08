@@ -107,6 +107,23 @@ type TokenClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type TokenInputHandler = (event: ChangeEvent<HTMLInputElement>) => void;
 type TokenSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
 
+function interceptTokenClick(
+  element: HTMLButtonElement,
+  invoke: (current: TokenClickHandler, event: ReactMouseEvent<HTMLButtonElement>) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the token control");
+  const record = element as unknown as Record<string, { onClick?: TokenClickHandler }>;
+  const props = record[propsKey];
+  const current = props?.onClick;
+  if (!current) throw new Error("The token control has no onClick callback");
+  const intercepted = { ...props, onClick: (event: ReactMouseEvent<HTMLButtonElement>) => invoke(current, event) };
+  record[propsKey] = intercepted;
+  return () => {
+    if (record[propsKey] === intercepted) record[propsKey] = props;
+  };
+}
+
 function tokenClickEvent(
   currentTarget: HTMLElement,
   options: {
@@ -1018,7 +1035,7 @@ describe("exact token control visits", () => {
       expect(await screen.findByTestId("token-created")).toBeVisible();
       await screen.findByRole("button", { name: `Rename ${row.name}` });
 
-      const staleDismiss = captureReactCallback<() => void>(
+      const staleDismiss = captureReactCallback<TokenClickHandler>(
         screen.getByRole("button", { name: "I stored it - hide secret" }),
         "onClick",
       );
@@ -1031,24 +1048,26 @@ describe("exact token control visits", () => {
       }));
       await waitFor(() => expect(screen.getByRole("button", { name: `Rename ${row.name}` })).toHaveFocus());
 
-      const currentDismiss = captureReactCallback<() => void>(
-        screen.getByRole("button", { name: "I stored it - hide secret" }),
-        "onClick",
-      );
+      const currentHide = screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement;
+      const currentDismiss = captureReactCallback<TokenClickHandler>(currentHide, "onClick");
       expect(currentDismiss).not.toBe(staleDismiss);
       expect(screen.getByTestId("copy-token").textContent === created.token).toBe(true);
       const tokensButton = screen.getByRole("button", { name: "Tokens" });
       const focus = vi.spyOn(tokensButton, "focus");
 
-      if (order === "stale-before-current") {
-        act(() => staleDismiss());
-        expect(screen.getByTestId("token-created")).toBeVisible();
-        expect(focus).not.toHaveBeenCalled();
-        act(() => currentDismiss());
-      } else {
-        act(() => currentDismiss());
-        act(() => staleDismiss());
-      }
+      const restore = interceptTokenClick(currentHide, (current, event) => {
+        if (order === "stale-before-current") {
+          staleDismiss(event);
+          expect(screen.getByTestId("token-created")).toBeVisible();
+          expect(focus).not.toHaveBeenCalled();
+          current(event);
+        } else {
+          current(event);
+          staleDismiss(event);
+        }
+      });
+      act(() => currentHide.click());
+      restore();
 
       expect(screen.queryByTestId("token-created")).toBeNull();
       expect(focus).toHaveBeenCalledTimes(1);
@@ -1077,7 +1096,7 @@ describe("exact token control visits", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
 
     const staleListener = listeners.added[0];
-    const staleDismiss = captureReactCallback<() => void>(
+    const staleDismiss = captureReactCallback<TokenClickHandler>(
       screen.getByRole("button", { name: "I stored it - hide secret" }),
       "onClick",
     );
@@ -1091,23 +1110,25 @@ describe("exact token control visits", () => {
         boundary={1}
         onBoundary={() => {
           expect(listeners.active.has(staleListener)).toBe(false);
-          staleDismiss();
+          const currentHide = screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement;
+          const restore = interceptTokenClick(currentHide, (_current, event) => staleDismiss(event));
+          currentHide.click();
+          restore();
         }}
       />,
     );
     expect(screen.getByTestId("token-created")).toBeVisible();
     expect(screen.getByRole("button", { name: "Tokens" })).toBe(tokensButton);
 
-    const currentDismiss = captureReactCallback<() => void>(
-      screen.getByRole("button", { name: "I stored it - hide secret" }),
-      "onClick",
-    );
+    const currentHide = screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement;
     const focus = vi.spyOn(tokensButton, "focus");
-    act(() => {
-      staleDismiss();
-      currentDismiss();
-      staleDismiss();
+    const restore = interceptTokenClick(currentHide, (current, event) => {
+      staleDismiss(event);
+      current(event);
+      staleDismiss(event);
     });
+    act(() => currentHide.click());
+    restore();
 
     expect(screen.queryByTestId("token-created")).toBeNull();
     expect(focus).toHaveBeenCalledTimes(1);
