@@ -361,6 +361,53 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
+  it("authenticates an owner-document Escape through current focus custody", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed}>
+          <input data-testid="document-escape-input" autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    expect(screen.getByTestId("document-escape-input")).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a foreign-document Escape without poisoning the current publication", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed}>
+          <input data-testid="foreign-escape-input" autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    const foreignFrame = document.createElement("iframe");
+    document.body.append(foreignFrame);
+    const foreignDocument = foreignFrame.contentDocument;
+    const foreignWindow = foreignFrame.contentWindow;
+    if (!foreignDocument || !foreignWindow) throw new Error("The foreign document was not created");
+
+    const foreignEscape = foreignDocument.createEvent("KeyboardEvent");
+    foreignEscape.initEvent("keydown", true, true);
+    Object.defineProperty(foreignEscape, "key", { value: "Escape" });
+    document.dispatchEvent(foreignEscape);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
   it("publishes an initially empty explicit description and closes with exact focus custody", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
@@ -741,6 +788,46 @@ describe("DialogContent exact Strict Mode publication", () => {
 
     expect(screen.getByRole("dialog", { name: "Outer retained roots" })).toBeInTheDocument();
     expect(outerClosed).not.toHaveBeenCalled();
+  });
+
+  it("drains off-state focus-guard removal before synchronous replay and recovers cleanly", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    const body = <input data-testid="guard-replay" autoFocus />;
+    const tree = (rootKey: string, onClosed: () => void) => (
+      <StrictMode>
+        <ControlledDialog
+          key={rootKey}
+          title="Guard replay"
+          onClosed={onClosed}
+        >
+          {body}
+        </ControlledDialog>
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", taintedClosed));
+    const focusGuard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
+    expect(focusGuard).not.toBeNull();
+
+    act(() => {
+      focusGuard!.remove();
+      view.root.render(tree("tainted", taintedClosed));
+    });
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard replay");
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard replay");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", cleanClosed)));
+    expect(screen.getByTestId("guard-replay")).toHaveFocus();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
   });
 
   it("finishes an authenticated close through fresh controlled callback identities", async () => {

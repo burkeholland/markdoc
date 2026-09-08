@@ -359,6 +359,7 @@ class MutationJournal {
   readonly #focusGuards = new Set<Node>();
   readonly #nestedRoots = new Set<Node>();
   #processed = 0;
+  #replayPreparation: object | null = null;
   #closing = false;
   #replaying = false;
   #invalid = false;
@@ -549,7 +550,23 @@ class MutationJournal {
     return allowed;
   }
 
-  #isAllowedChildList(record: MutationRecord) {
+  #isReaddedLater(index: number, target: Node, node: Node) {
+    for (let cursor = index + 1; cursor < this.#records.length; cursor++) {
+      const candidate = this.#records[cursor];
+      if (
+        candidate.type === "childList"
+        && candidate.target === target
+        && candidate.removedNodes.length === 0
+        && [...candidate.addedNodes].every(isFocusGuard)
+        && [...candidate.addedNodes].includes(node)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  #isAllowedChildList(record: MutationRecord, index: number) {
     const added = [...record.addedNodes];
     const removed = [...record.removedNodes];
     if (this.#isBodyDescendant(record.target)) return true;
@@ -593,6 +610,13 @@ class MutationJournal {
       && added.length === 0
       && removed.every((node) => this.#focusGuards.has(node))
     ) {
+      if (removed.every((node) => (
+        (node === this.#ownerDocument.body.firstElementChild
+          || node === this.#ownerDocument.body.lastElementChild)
+        && this.#isReaddedLater(index, record.target, node)
+      ))) {
+        return true;
+      }
       if (!this.#closing && !this.#replaying && this.#nestedRoots.size === 0) return false;
       removed.forEach((node) => this.#focusGuards.delete(node));
       return true;
@@ -642,22 +666,45 @@ class MutationJournal {
     return false;
   }
 
+  #collectRecords() {
+    this.#records.push(...this.#observer.takeRecords());
+  }
+
+  #hasPendingCloseTransition() {
+    for (let index = this.#processed; index < this.#records.length; index++) {
+      const record = this.#records[index];
+      const target = record.target;
+      if (
+        record.type === "attributes"
+        && record.attributeName === "data-state"
+        && target instanceof Element
+        && (target === this.#content || target === this.#overlay)
+        && record.oldValue === "open"
+        && this.#nextAttributeValue(index, target, "data-state") === "closed"
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   #process() {
     if (this.#released || this.#invalid) return;
-    this.#records.push(...this.#observer.takeRecords());
+    this.#collectRecords();
     for (; this.#processed < this.#records.length; this.#processed++) {
       const record = this.#records[this.#processed];
       if (!this.#isRelevant(record)) continue;
       const allowed = record.type === "attributes"
         ? this.#isAllowedAttribute(record, this.#processed)
         : record.type === "childList"
-          ? this.#isAllowedChildList(record)
+          ? this.#isAllowedChildList(record, this.#processed)
           : record.type === "characterData" && this.#isBodyDescendant(record.target);
       if (!allowed) {
         this.#invalid = true;
         this.#observer.disconnect();
         this.#records.length = 0;
         this.#processed = 0;
+        this.#replayPreparation = null;
         this.#focusGuards.clear();
         this.#nestedRoots.clear();
         this.#onInvalid();
@@ -684,7 +731,30 @@ class MutationJournal {
 
   startReplay() {
     if (this.#released || this.#invalid) return false;
+    const prepared = this.#replayPreparation !== null;
+    this.#replayPreparation = null;
+    if (!prepared) {
+      this.#collectRecords();
+      if (this.#hasPendingCloseTransition()) return false;
+      this.#process();
+      if (this.#released || this.#invalid) return false;
+    }
     this.#replaying = true;
+    return true;
+  }
+
+  prepareReplay() {
+    if (this.#released || this.#invalid) return false;
+    this.#collectRecords();
+    if (this.#hasPendingCloseTransition()) return false;
+    this.#process();
+    if (this.#released || this.#invalid) return false;
+    // Ref cleanup precedes Radix replay teardown; only that same turn may consume this boundary.
+    const preparation = {};
+    this.#replayPreparation = preparation;
+    queueMicrotask(() => {
+      if (this.#replayPreparation === preparation) this.#replayPreparation = null;
+    });
     return true;
   }
 
@@ -697,6 +767,7 @@ class MutationJournal {
     this.#process();
     this.#observer.disconnect();
     this.#records.length = 0;
+    this.#replayPreparation = null;
     this.#focusGuards.clear();
     this.#nestedRoots.clear();
     this.#released = true;
@@ -1084,8 +1155,10 @@ function exactEscape(event: EscapeKeyEvent, publication: DialogPublication) {
   const view = ownerDocument.defaultView;
   const target = event?.target;
   const path = event?.composedPath?.() ?? [];
-  const targetIsAccepted = isNodeFromDocument(target, ownerDocument)
-    && (publication.elements.content.contains(target) || !publication.authority.root.modal);
+  const interactionTarget = target === ownerDocument ? focusedElement(ownerDocument) : target;
+  const targetIsAccepted = isNodeFromDocument(interactionTarget, ownerDocument)
+    && (publication.elements.content.contains(interactionTarget)
+      || !publication.authority.root.modal);
   return (
     view
     && event instanceof view.KeyboardEvent
@@ -1094,16 +1167,20 @@ function exactEscape(event: EscapeKeyEvent, publication: DialogPublication) {
     && event.bubbles
     && event.cancelable
     && !event.defaultPrevented
-    && event.eventPhase === view.Event.CAPTURING_PHASE
+    && event.eventPhase === (target === ownerDocument
+      ? view.Event.AT_TARGET
+      : view.Event.CAPTURING_PHASE)
     && event.currentTarget === ownerDocument
     && targetIsAccepted
     && path[0] === target
-    && (path.includes(publication.elements.content) || !publication.authority.root.modal)
+    && (target === ownerDocument
+      || path.includes(publication.elements.content)
+      || !publication.authority.root.modal)
     && path.includes(ownerDocument)
     && (contentSnapshotContains(
       publication.contentDom,
       publication.elements.header,
-      target,
+      interactionTarget,
     ) || !publication.authority.root.modal)
   )
     ? event
@@ -1114,6 +1191,7 @@ function bridgeableEscape(event: EscapeKeyEvent, publication: DialogPublication)
   const ownerDocument = publication.ownerDocument;
   const view = ownerDocument.defaultView;
   const target = event?.target;
+  const interactionTarget = target === ownerDocument ? focusedElement(ownerDocument) : target;
   return Boolean(
     view
     && event instanceof view.KeyboardEvent
@@ -1122,12 +1200,12 @@ function bridgeableEscape(event: EscapeKeyEvent, publication: DialogPublication)
     && event.bubbles
     && event.cancelable
     && !event.defaultPrevented
-    && isNodeFromDocument(target, ownerDocument)
-    && publication.elements.content.contains(target)
+    && isNodeFromDocument(interactionTarget, ownerDocument)
+    && publication.elements.content.contains(interactionTarget)
     && contentSnapshotContains(
       publication.contentDom,
       publication.elements.header,
-      target,
+      interactionTarget,
     )
   );
 }
@@ -2105,6 +2183,13 @@ function createPublicationRuntime(
       publication.openingTimer = ownerWindow.setTimeout(recoverOpeningFocus, 0);
     },
     retireForElement: () => {
+      if (
+        authority.root.actualOpen
+        && elements.content.isConnected
+        && elements.content.getAttribute("data-state") === "open"
+      ) {
+        journal.prepareReplay();
+      }
       retire("element");
     },
     retireForLayout: () => {
@@ -2462,7 +2547,9 @@ function createDialogPresentation(
       coordinator.stageEscapeBridge(publication, actions.escape, event);
       return;
     }
-    const target = nativeEvent.target;
+    const target = nativeEvent.target === publication.ownerDocument
+      ? focusedElement(publication.ownerDocument)
+      : nativeEvent.target;
     const expandedCombobox = target instanceof Element
       ? target.closest<HTMLElement>('[role="combobox"][aria-expanded="true"]')
       : null;
