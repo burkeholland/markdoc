@@ -87,20 +87,49 @@ function captureRef<T extends Element>(element: T): RefCallback<T> {
   return ref as RefCallback<T>;
 }
 
+function markJsdomEventTrusted(event: Event) {
+  // jsdom has no hardware input; set its internal slot so accepted paths model browser input.
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
 function keyboardEvent(
   ownerDocument: Document,
   key: string,
   init: Omit<KeyboardEventInit, "key"> = {},
+  trusted = true,
 ) {
-  const KeyboardEventConstructor = ownerDocument.defaultView?.KeyboardEvent;
-  if (!KeyboardEventConstructor) throw new Error("The owner document has no KeyboardEvent");
-  return new KeyboardEventConstructor("keydown", {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The owner document has no window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
     composed: true,
     key,
     ...init,
   });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
 }
 
 function dispatchKey(
@@ -111,6 +140,24 @@ function dispatchKey(
   const event = keyboardEvent(target.ownerDocument, key, init);
   target.dispatchEvent(event);
   return event;
+}
+
+function dispatchWithKeyDown(
+  target: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void,
+) {
+  const propsKey = Object.keys(target).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the pane radio");
+  const properties = target as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    target.dispatchEvent(event);
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
 }
 
 function primaryClick(ownerDocument: Document) {
@@ -276,7 +323,6 @@ describe("phone pane switch keyboard navigation", () => {
     const event = keyboardEvent(document, "ArrowRight");
     const publicPreventDefault = vi.fn();
     Object.defineProperties(event, {
-      key: { configurable: true, value: "Home" },
       composedPath: { configurable: true, value: vi.fn(() => []) },
       preventDefault: { configurable: true, value: publicPreventDefault },
     });
@@ -291,6 +337,70 @@ describe("phone pane switch keyboard navigation", () => {
     expect(publicPreventDefault).not.toHaveBeenCalled();
     expect(publicFocus).not.toHaveBeenCalled();
     expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a dispatched untrusted owner-realm key before accepting a trusted successor", () => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    source.focus();
+    focus.mockClear();
+    const untrusted = keyboardEvent(document, "ArrowRight", {}, false);
+
+    act(() => source.dispatchEvent(untrusted));
+
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelection(host, "rich");
+
+    let trusted!: KeyboardEvent;
+    act(() => {
+      trusted = dispatchKey(source, "ArrowRight");
+    });
+    expect(trusted.isTrusted).toBe(true);
+    expect(trusted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("code");
+    expect(focus).toHaveBeenCalledOnce();
+    expectSelection(host, "code");
+  });
+
+  it("rejects a replacement React wrapper predicate before accepting the genuine pair", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const handler = captureKeyDown(source);
+    source.focus();
+    focus.mockClear();
+    const replaced = keyboardEvent(document, "ArrowRight");
+
+    act(() => {
+      dispatchWithKeyDown(source, replaced, (event) => {
+        handler(new Proxy(event, {
+          get(target, property, receiver) {
+            if (property === "isDefaultPrevented") return () => true;
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+      });
+    });
+
+    expect(replaced.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelection(host, "rich");
+
+    act(() => dispatchKey(source, "ArrowRight"));
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expectSelection(host, "code");
   });
 
   it.each([
