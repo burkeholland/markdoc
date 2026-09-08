@@ -887,6 +887,7 @@ class PanelPublicationCoordinator {
 
   #requestReplaySuccessor(candidate: PanelPublication) {
     const keyboardReplay = candidate.keyboardReplay;
+    const keyboardSlots = formKeyboardSlots(candidate);
     const keyboardReplayMatchesPublication =
       candidate.presentation.adding &&
       keyboardReplay !== null &&
@@ -894,22 +895,14 @@ class PanelPublicationCoordinator {
       keyboardReplay.presentation === candidate.presentation &&
       keyboardReplay.generation === candidate.presentation.generation &&
       keyboardReplay.generation === this.#mount;
-    const keyboardOwners = new Set(
-      keyboardReplayMatchesPublication
-        ? keyboardReplay.targets.map((target) => target.owner)
-        : [],
-    );
-    const replayRefsAreExact =
+    const genericReplayRefsAreExact =
       candidate.replayRefs.length > 0 &&
       candidate.replayRefs.every(
         (entry) =>
-          keyboardOwners.has(entry.owner) ||
-          (
-            entry.detached &&
-            entry.reattached &&
-            entry.owner.element === entry.element &&
-            entry.element.isConnected
-          ),
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element === entry.element &&
+          entry.element.isConnected,
       );
     const dom = candidate.dom;
     const placement = candidate.placement;
@@ -932,9 +925,10 @@ class PanelPublicationCoordinator {
         keyboardReplay.layoutReleased &&
         keyboardReplay.layoutRebound &&
         candidate.keyboard === null &&
-        keyboardReplay.targets.length > 0 &&
+        keyboardReplay.targets.length === keyboardSlots.length &&
         keyboardReplay.targets.every(
-          (target) =>
+          (target, index) =>
+            keyboardSlots[index] === target.owner &&
             target.released &&
             target.rebound &&
             target.owner.element === target.element &&
@@ -942,10 +936,11 @@ class PanelPublicationCoordinator {
             target.element.isConnected,
         )
       ) &&
-      replayRefsAreExact &&
       currentPublicationIsExact;
     const layoutRetired =
       candidate.layoutRetired || exactFormKeyboardReplay;
+    const replayRefsAreExact =
+      genericReplayRefsAreExact || exactFormKeyboardReplay;
     const exactKeyboardReplay =
       !candidate.presentation.adding || exactFormKeyboardReplay;
     const exactReplay =
