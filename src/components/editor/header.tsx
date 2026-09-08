@@ -6234,9 +6234,20 @@ class MoreMenuPublicationCoordinator {
     this.#selectionIntent = intent;
     this.#selectionTerminalRelease = terminalRelease;
     queueMicrotask(() => {
+      const ownerWindow = publication.document.defaultView;
       if (
         this.#selectionIntent === intent
-        && !isLiveMoreMenuNativeEvent(nativeEvent, publication.document)
+        && (
+          !isLiveMoreMenuNativeEvent(nativeEvent, publication.document)
+          || Boolean(
+            ownerWindow
+            && nativeEventGetter<boolean>(
+              ownerWindow.Event.prototype,
+              "cancelBubble",
+              nativeEvent,
+            ) === true
+          )
+        )
       ) {
         this.#clearSelection(intent);
       }
