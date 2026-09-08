@@ -201,8 +201,14 @@ test.describe("single user editing", () => {
     await expect(items.nth(2)).toHaveAttribute("aria-current", "location");
     await expect(items.nth(0)).not.toHaveAttribute("aria-current", /.+/);
 
-    // Roving tabindex: ArrowDown/ArrowUp/Home/End move focus between items.
+    // Roving tabindex: arrows wrap at both ends, while Home/End still jump directly.
     await items.nth(0).focus();
+    await page.keyboard.press("ArrowUp");
+    await expect(items.nth(2)).toBeFocused();
+    await expect(page.locator(".cm-activeLine")).toContainText("## Third");
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(0)).toBeFocused();
+    await expect(page.locator(".cm-activeLine")).toContainText("## Third");
     await page.keyboard.press("ArrowDown");
     await expect(items.nth(1)).toBeFocused();
     await page.keyboard.press("End");
