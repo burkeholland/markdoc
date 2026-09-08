@@ -3,6 +3,7 @@ import {
   StrictMode,
   useLayoutEffect,
   type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
   type SyntheticEvent,
 } from "react";
 import { createRoot } from "react-dom/client";
@@ -42,7 +43,7 @@ vi.mock("@/lib/notice", () => ({
 }));
 
 import { ApiError } from "@/lib/api";
-import { VersionsPanel } from "./versions-panel";
+import { VersionDiffView, VersionsPanel } from "./versions-panel";
 
 const DOC_ID = "doc-1484";
 
@@ -279,6 +280,236 @@ function expectMutationControlsToBeDisabled(disabled: boolean) {
   }
 }
 
+type VersionDiffKeyHandler = (
+  event: ReactKeyboardEvent<HTMLDivElement>,
+) => void;
+
+interface VersionDiffReactProps {
+  onKeyDown?: VersionDiffKeyHandler;
+  ref?: (element: HTMLElement | null) => void;
+}
+
+interface VersionDiffViewFixture {
+  root: ReturnType<typeof createRoot>;
+  host: HTMLDivElement;
+}
+
+const VERSION_DIFF_OLD =
+  "first old\n\n\n\nshared one\nsecond old\n\n\n\nshared two\nthird old";
+const VERSION_DIFF_CURRENT =
+  "first new\n\n\n\nshared one\nsecond new\n\n\n\nshared two\nthird new";
+const versionDiffViews: VersionDiffViewFixture[] = [];
+
+function versionDiffSession(
+  current = VERSION_DIFF_CURRENT,
+  docId = "version-diff-document",
+): CollabSession {
+  return {
+    docId,
+    role: "owner",
+    version: 0,
+    subscribe: () => () => {},
+    ytext: { toString: () => current },
+  } as unknown as CollabSession;
+}
+
+function versionDiffPreview(
+  content = VERSION_DIFF_OLD,
+  id = "version-diff-version",
+) {
+  return {
+    version: {
+      ...named,
+      id,
+      number: 7,
+      title: "Diff fixture",
+    },
+    content,
+  };
+}
+
+function versionDiffProps(element: HTMLElement): {
+  propsKey: string;
+  record: Record<string, VersionDiffReactProps>;
+  props: VersionDiffReactProps;
+} {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) throw new Error("Version diff React props were not attached");
+  const record = element as unknown as Record<string, VersionDiffReactProps>;
+  return { propsKey, record, props: record[propsKey] };
+}
+
+function versionDiffKeyHandler(element: HTMLDivElement) {
+  const handler = versionDiffProps(element).props.onKeyDown;
+  if (!handler) throw new Error("Version diff key handler was not attached");
+  return handler;
+}
+
+function versionDiffRef(element: HTMLElement) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  const props = propsKey
+    ? (element as unknown as Record<string, VersionDiffReactProps>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref;
+  const fiberKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactFiber$"),
+  );
+  if (!fiberKey) throw new Error("Version diff React fiber was not attached");
+  const fiber = (
+    element as unknown as Record<
+      string,
+      { ref?: (node: HTMLElement | null) => void }
+    >
+  )[fiberKey];
+  if (typeof fiber.ref !== "function") {
+    throw new Error("Version diff ref was not attached");
+  }
+  return fiber.ref;
+}
+
+function interceptVersionDiffKey(
+  element: HTMLDivElement,
+  invokeHandler: (
+    current: VersionDiffKeyHandler,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void,
+) {
+  const { propsKey, record, props } = versionDiffProps(element);
+  const current = props.onKeyDown;
+  if (!current) throw new Error("Version diff key handler was not attached");
+  record[propsKey] = {
+    ...props,
+    onKeyDown: (event) => invokeHandler(current, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  if (!implementationSymbol) {
+    throw new Error("Keyboard event implementation slot was not available");
+  }
+  const implementation = (
+    event as unknown as Record<symbol, { isTrusted: boolean; view: Window }>
+  )[implementationSymbol];
+  implementation.view = ownerWindow;
+  const descriptor = Object.getOwnPropertyDescriptor(
+    implementation,
+    "isTrusted",
+  );
+  if (!descriptor?.writable) {
+    throw new Error("Keyboard event trust slot was not writable");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  expect(event.isTrusted).toBe(true);
+  expect(event.view).toBe(ownerWindow);
+}
+
+function createVersionDiffKey(
+  target: HTMLElement,
+  key: "Home" | "End",
+  init: KeyboardEventInit = {},
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Version diff owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  trustKeyboardEvent(event, ownerWindow);
+  return event;
+}
+
+function dispatchVersionDiffKey(
+  target: HTMLElement,
+  key: "Home" | "End",
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  const event = createVersionDiffKey(target, key, init);
+  let allowed = true;
+  act(() => {
+    if (focus) target.focus();
+    allowed = target.dispatchEvent(event);
+  });
+  return { event, allowed };
+}
+
+function createVersionDiffView(
+  preview = versionDiffPreview(),
+  current = VERSION_DIFF_CURRENT,
+  generation = "initial",
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const fixture = { root: createRoot(host), host };
+  versionDiffViews.push(fixture);
+  act(() => {
+    fixture.root.render(
+      <StrictMode>
+        <VersionDiffView
+          key={generation}
+          session={versionDiffSession(current)}
+          preview={preview}
+        />
+      </StrictMode>,
+    );
+  });
+  return fixture;
+}
+
+function renderVersionDiffView(
+  fixture: VersionDiffViewFixture,
+  preview: ReturnType<typeof versionDiffPreview>,
+  current = VERSION_DIFF_CURRENT,
+  generation = "initial",
+) {
+  act(() => {
+    fixture.root.render(
+      <StrictMode>
+        <VersionDiffView
+          key={generation}
+          session={versionDiffSession(current)}
+          preview={preview}
+        />
+      </StrictMode>,
+    );
+  });
+}
+
+function versionDiffRoot(host: HTMLElement) {
+  const root = host.querySelector<HTMLDivElement>(
+    '[data-testid="version-diff"]',
+  );
+  if (!root) throw new Error("Version diff root was not rendered");
+  return root;
+}
+
+function expectNoVersionDiffExternalWork() {
+  expect(versions).not.toHaveBeenCalled();
+  expect(version).not.toHaveBeenCalled();
+  expect(renameVersion).not.toHaveBeenCalled();
+  expect(restoreVersion).not.toHaveBeenCalled();
+  expect(copyVersion).not.toHaveBeenCalled();
+  expect(push).not.toHaveBeenCalled();
+  expect(pendingNotice).not.toHaveBeenCalled();
+}
+
 const named: VersionSummary = {
   id: "ver-1",
   number: 1,
@@ -305,6 +536,586 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("VersionDiffView · direct-root Strict Mode Home/End authority", () => {
+  let originalScrollIntoView: PropertyDescriptor | undefined;
+  let scrollIntoView: ReturnType<typeof vi.fn>;
+  let reveals: Array<{
+    element: Element;
+    options: ScrollIntoViewOptions | undefined;
+  }>;
+
+  beforeEach(() => {
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "scrollIntoView",
+    );
+    reveals = [];
+    scrollIntoView = vi.fn(function (
+      this: Element,
+      options?: ScrollIntoViewOptions,
+    ) {
+      reveals.push({ element: this, options });
+    });
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+  });
+
+  afterEach(async () => {
+    while (versionDiffViews.length > 0) {
+      const fixture = versionDiffViews.pop()!;
+      await act(async () => fixture.root.unmount());
+      fixture.host.remove();
+    }
+    if (originalScrollIntoView) {
+      Object.defineProperty(
+        Element.prototype,
+        "scrollIntoView",
+        originalScrollIntoView,
+      );
+    } else {
+      delete (Element.prototype as { scrollIntoView?: unknown })
+        .scrollIntoView;
+    }
+  });
+
+  it.each([
+    [0, "Home", 0, false],
+    [0, "End", 2, true],
+    [1, "Home", 0, true],
+    [1, "End", 2, true],
+    [2, "Home", 0, true],
+    [2, "End", 2, false],
+  ] as const)(
+    "moves from hunk %i with %s to exact hunk %i",
+    (sourceIndex, key, destinationIndex, shouldReveal) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const fixture = createVersionDiffView();
+      const root = versionDiffRoot(fixture.host);
+      const controls = within(fixture.host);
+      for (let index = 0; index < sourceIndex; index++) {
+        fireEvent.click(controls.getByTestId("diff-next"));
+      }
+      expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+        `${sourceIndex + 1} of 3 changes`,
+      );
+      preventDefault.mockClear();
+      scrollIntoView.mockClear();
+      reveals.length = 0;
+
+      const result = dispatchVersionDiffKey(root, key);
+
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+        `${destinationIndex + 1} of 3 changes`,
+      );
+      expect(
+        controls.getByTestId(`diff-hunk-${destinationIndex + 1}`),
+      ).toHaveAttribute("data-active", "true");
+      if (shouldReveal) {
+        expect(scrollIntoView).toHaveBeenCalledOnce();
+        expect(reveals).toEqual([
+          {
+            element: controls.getByTestId(
+              `diff-hunk-${destinationIndex + 1}`,
+            ),
+            options: { block: "center" },
+          },
+        ]);
+      } else {
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(reveals).toEqual([]);
+      }
+      expectNoVersionDiffExternalWork();
+    },
+  );
+
+  it("retains bracket shortcuts and previous/next buttons without external work", () => {
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    scrollIntoView.mockClear();
+    reveals.length = 0;
+
+    fireEvent.keyDown(root, { key: "]" });
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "2 of 3 changes",
+    );
+    fireEvent.click(controls.getByTestId("diff-next"));
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "3 of 3 changes",
+    );
+    fireEvent.click(controls.getByTestId("diff-prev"));
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "2 of 3 changes",
+    );
+    fireEvent.keyDown(root, { key: "[" });
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(4);
+    expect(
+      reveals.every(({ options }) => options?.block === "center"),
+    ).toBe(true);
+    expectNoVersionDiffExternalWork();
+  });
+
+  it.each([
+    "input",
+    "button",
+    "a",
+    "select",
+    "textarea",
+    "editable",
+    "outside",
+  ] as const)(
+    "preserves native Home/End behavior for %s targets",
+    (targetKind) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const fixture = createVersionDiffView();
+      const root = versionDiffRoot(fixture.host);
+      const controls = within(fixture.host);
+      fireEvent.click(controls.getByTestId("diff-next"));
+      preventDefault.mockClear();
+      scrollIntoView.mockClear();
+      reveals.length = 0;
+
+      let target: HTMLElement;
+      if (targetKind === "editable") {
+        target = document.createElement("div");
+        target.contentEditable = "true";
+      } else if (targetKind === "outside") {
+        target = document.createElement("button");
+      } else {
+        target = document.createElement(targetKind);
+      }
+      target.tabIndex = 0;
+      if (targetKind === "outside") document.body.append(target);
+      else root.append(target);
+
+      const result = dispatchVersionDiffKey(target, "End");
+
+      expect(result.allowed).toBe(true);
+      expect(result.event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+        "2 of 3 changes",
+      );
+      expect(document.activeElement).toBe(target);
+      expectNoVersionDiffExternalWork();
+      target.remove();
+    },
+  );
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects %s without claiming or preventing", (_name, init) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    preventDefault.mockClear();
+
+    const first = dispatchVersionDiffKey(root, "End", init);
+    expect(first.event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+
+    const successor = dispatchVersionDiffKey(root, "End");
+    expect(successor.allowed).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "3 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("rejects untrusted, pre-canceled, propagation-stopped, and fabricated events", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    root.focus();
+    preventDefault.mockClear();
+
+    const synthetic = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "End",
+    });
+    act(() => {
+      expect(root.dispatchEvent(synthetic)).toBe(true);
+    });
+    expect(synthetic.isTrusted).toBe(false);
+
+    const canceled = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "End",
+    });
+    trustKeyboardEvent(canceled, window);
+    canceled.preventDefault();
+    preventDefault.mockClear();
+    act(() => {
+      expect(root.dispatchEvent(canceled)).toBe(false);
+    });
+
+    const stop = (event: Event) => event.stopPropagation();
+    root.addEventListener("keydown", stop, { capture: true, once: true });
+    dispatchVersionDiffKey(root, "End");
+
+    const handler = versionDiffKeyHandler(root);
+    expect(() =>
+      handler({
+        type: "keydown",
+        key: "End",
+        target: root,
+        currentTarget: root,
+        nativeEvent: Object.create(KeyboardEvent.prototype),
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        repeat: false,
+        defaultPrevented: false,
+        isDefaultPrevented: () => false,
+        isPropagationStopped: () => false,
+        persist: vi.fn(),
+      } as unknown as ReactKeyboardEvent<HTMLDivElement>),
+    ).not.toThrow();
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("rejects foreign and crossed native events without consuming the current publication", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as
+      | (Window & typeof globalThis)
+      | null;
+    if (!foreignWindow) throw new Error("Foreign keyboard realm was unavailable");
+    root.focus();
+    preventDefault.mockClear();
+
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "End",
+    });
+    trustKeyboardEvent(foreign, foreignWindow);
+    act(() => {
+      expect(root.dispatchEvent(foreign)).toBe(true);
+    });
+    iframe.remove();
+
+    const restore = interceptVersionDiffKey(root, (current, event) => {
+      const crossed = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "End",
+      });
+      trustKeyboardEvent(crossed, window);
+      Object.defineProperty(event, "nativeEvent", {
+        configurable: true,
+        value: crossed,
+      });
+      current(event);
+    });
+    dispatchVersionDiffKey(root, "End");
+    restore();
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+
+    dispatchVersionDiffKey(root, "End");
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "3 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("rejects stale and replayed handlers before one exact current event", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    const stale = versionDiffKeyHandler(root);
+    fireEvent.click(controls.getByTestId("diff-next"));
+    const restore = interceptVersionDiffKey(
+      root,
+      (current, event) => {
+        stale(event);
+        current(event);
+        current(event);
+      },
+    );
+    preventDefault.mockClear();
+    scrollIntoView.mockClear();
+    reveals.length = 0;
+
+    dispatchVersionDiffKey(root, "Home");
+    restore();
+
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(reveals[0]?.element).toBe(controls.getByTestId("diff-hunk-1"));
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
+
+  it.each([
+    ["root attribute", (root: HTMLDivElement) => {
+      const className = root.className;
+      root.className = `${className} changed`;
+      root.className = className;
+    }],
+    ["root placement", (root: HTMLDivElement) => {
+      const parent = root.parentNode!;
+      const next = root.nextSibling;
+      root.remove();
+      parent.insertBefore(root, next);
+    }],
+    ["hunk order", (_root: HTMLDivElement, host: HTMLElement) => {
+      const first = within(host).getByTestId("diff-hunk-1");
+      const parent = first.parentNode!;
+      const next = first.nextSibling;
+      parent.append(first);
+      parent.insertBefore(first, next);
+    }],
+    ["hunk replacement", (_root: HTMLDivElement, host: HTMLElement) => {
+      const first = within(host).getByTestId("diff-hunk-1");
+      const replacement = first.cloneNode(true);
+      first.replaceWith(replacement);
+      replacement.parentNode?.replaceChild(first, replacement);
+    }],
+  ] as const)(
+    "keeps restored %s history inert and accepts a fresh keyed successor",
+    (_name, tamper) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const preview = versionDiffPreview();
+      const fixture = createVersionDiffView(preview);
+      let root = versionDiffRoot(fixture.host);
+      const controls = within(fixture.host);
+      fireEvent.click(controls.getByTestId("diff-next"));
+      preventDefault.mockClear();
+      scrollIntoView.mockClear();
+      reveals.length = 0;
+
+      tamper(root, fixture.host);
+      const rejected = dispatchVersionDiffKey(root, "End");
+      expect(rejected.allowed).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+        "2 of 3 changes",
+      );
+
+      renderVersionDiffView(
+        fixture,
+        preview,
+        VERSION_DIFF_CURRENT,
+        `fresh-${_name}`,
+      );
+      root = versionDiffRoot(fixture.host);
+      preventDefault.mockClear();
+      scrollIntoView.mockClear();
+      reveals.length = 0;
+      const accepted = dispatchVersionDiffKey(root, "End");
+
+      expect(accepted.allowed).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(scrollIntoView).toHaveBeenCalledOnce();
+      expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+        "3 of 3 changes",
+      );
+      expectNoVersionDiffExternalWork();
+    },
+  );
+
+  it("binds range facts and recovers only through a fresh comparison", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const newer = {
+      ...named,
+      id: "range-newer",
+      number: 3,
+      title: "Range newer",
+    };
+    const older = {
+      ...named,
+      id: "range-older",
+      number: 1,
+      title: "Range older",
+    };
+    const rangeMiddle = {
+      ...named,
+      id: "range-middle",
+      number: 2,
+      title: "Range middle",
+    };
+    const preview = {
+      version: newer,
+      content: VERSION_DIFF_CURRENT,
+      base: { version: older, content: VERSION_DIFF_OLD },
+      range: [newer, rangeMiddle],
+    };
+    const fixture = createVersionDiffView(
+      preview,
+      "unused live document text",
+    );
+    let root = versionDiffRoot(fixture.host);
+    const controls = within(fixture.host);
+    preventDefault.mockClear();
+    rangeMiddle.title = "Mutated range";
+
+    const rejected = dispatchVersionDiffKey(root, "End");
+    expect(rejected.allowed).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "1 of 3 changes",
+    );
+
+    rangeMiddle.title = "Range middle";
+    renderVersionDiffView(
+      fixture,
+      preview,
+      "unused live document text",
+      "fresh-range",
+    );
+    root = versionDiffRoot(fixture.host);
+    preventDefault.mockClear();
+    const accepted = dispatchVersionDiffKey(root, "End");
+    expect(accepted.allowed).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(controls.getByTestId("diff-counter")).toHaveTextContent(
+      "3 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("rejects partial ref replay and accepts a complete current generation", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const preview = versionDiffPreview();
+    const fixture = createVersionDiffView(preview);
+    let root = versionDiffRoot(fixture.host);
+    const firstHunk = within(fixture.host).getByTestId("diff-hunk-1");
+    const ref = versionDiffRef(firstHunk);
+    act(() => {
+      ref(null);
+      ref(firstHunk);
+    });
+    preventDefault.mockClear();
+
+    const rejected = dispatchVersionDiffKey(root, "End");
+    expect(rejected.allowed).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    renderVersionDiffView(fixture, preview);
+    root = versionDiffRoot(fixture.host);
+    preventDefault.mockClear();
+    const accepted = dispatchVersionDiffKey(root, "End");
+    expect(accepted.allowed).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(scrollIntoView).toHaveBeenCalledOnce();
+    expect(
+      within(fixture.host).getByTestId("diff-counter"),
+    ).toHaveTextContent("3 of 3 changes");
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("releases mutation custody on cleanup and leaves retained handlers inert", async () => {
+    const NativeMutationObserver = window.MutationObserver;
+    const activeObservers = new Set<MutationObserver>();
+    class TrackingMutationObserver extends NativeMutationObserver {
+      constructor(callback: MutationCallback) {
+        super(callback);
+        activeObservers.add(this);
+      }
+
+      override disconnect() {
+        activeObservers.delete(this);
+        super.disconnect();
+      }
+    }
+    window.MutationObserver = TrackingMutationObserver;
+    const fixture = createVersionDiffView();
+    const root = versionDiffRoot(fixture.host);
+    const stale = versionDiffKeyHandler(root);
+    expect(activeObservers.size).toBe(1);
+
+    try {
+      await act(async () => {
+        fixture.root.unmount();
+        await Promise.resolve();
+      });
+      const index = versionDiffViews.indexOf(fixture);
+      if (index >= 0) versionDiffViews.splice(index, 1);
+      expect(activeObservers.size).toBe(0);
+
+      const preventDefault = vi.fn();
+      stale({
+        currentTarget: root,
+        target: root,
+        key: "End",
+        preventDefault,
+        nativeEvent: createVersionDiffKey(root, "End"),
+      } as unknown as ReactKeyboardEvent<HTMLDivElement>);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expectNoVersionDiffExternalWork();
+    } finally {
+      window.MutationObserver = NativeMutationObserver;
+      fixture.host.remove();
+    }
+  });
 });
 
 describe("VersionsPanel · exact panel publications", () => {
