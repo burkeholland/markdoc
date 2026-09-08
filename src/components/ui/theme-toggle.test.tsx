@@ -127,6 +127,20 @@ function clickEvent(
   } as unknown as CapturedClickEvent;
 }
 
+function primaryClickEvent(ownerDocument = document) {
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  return new MouseEventConstructor("click", {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+  });
+}
+
+function dispatchClick(target: Element, event = primaryClickEvent(target.ownerDocument)) {
+  target.dispatchEvent(event);
+  return event;
+}
+
 function retainedClick(element: HTMLButtonElement): () => void {
   const click = captureClick(element);
   const event = clickEvent(element);
@@ -201,6 +215,17 @@ function TogglePropsBoundary({
     if (boundary > 0) onLayout?.();
   }, [boundary, className, onLayout, size]);
   return <ThemeToggle className={className} size={size} />;
+}
+
+function LayoutProbe({
+  children,
+  onLayout,
+}: {
+  children: ReactNode;
+  onLayout: () => void;
+}) {
+  useLayoutEffect(onLayout, [onLayout]);
+  return children;
 }
 
 function trackThemeEffects(): ThemeEffects {
@@ -349,8 +374,7 @@ describe("mounted theme controls", () => {
 
     for (const preference of ["light", "dark", "system"] as const) {
       const button = toggle(host);
-      const click = captureClick(button);
-      act(() => click(clickEvent(button)));
+      act(() => dispatchClick(button.querySelector("svg") ?? button));
       expect(toggle(host).dataset.themePreference).toBe(preference);
     }
 
@@ -394,6 +418,127 @@ describe("mounted theme controls", () => {
     expect(toggle(host)).toBeEnabled();
   });
 
+  it.each([
+    {
+      initial: "system",
+      kind: "toggle",
+      name: "Toggle cycle",
+      selections: ["light", "dark", "system"],
+    },
+    {
+      initial: "dark",
+      kind: "picker",
+      name: "Picker System",
+      selections: ["system"],
+    },
+    {
+      initial: "system",
+      kind: "picker",
+      name: "Picker Light",
+      selections: ["light"],
+    },
+    {
+      initial: "system",
+      kind: "picker",
+      name: "Picker Dark",
+      selections: ["dark"],
+    },
+  ] as const)(
+    "keeps $name exact through direct Strict Mode replay, repetition, and reentry",
+    ({ initial, kind, selections }) => {
+      if (initial !== "system") localStorage.setItem(THEME_STORAGE_KEY, initial);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      directViews.push({ host, root });
+      let retiredClick: ThemeClick | undefined;
+      let retiredRefs: Array<(node: Element | null) => void> = [];
+      const captureRetired = () => {
+        if (retiredClick) return;
+        const button = kind === "toggle"
+          ? toggle(host)
+          : option(host, selections[0]);
+        retiredClick = captureClick(button);
+        retiredRefs = kind === "toggle"
+          ? [captureElementRef(button)]
+          : [
+              captureElementRef(picker(host)),
+              ...(["system", "light", "dark"] as const).flatMap((preference) => {
+                const row = option(host, preference);
+                return [
+                  captureElementRef(row),
+                  captureElementRef(row.querySelector("svg")!),
+                ];
+              }),
+            ];
+      };
+      act(() => root.render(
+        <StrictMode>
+          <LayoutProbe onLayout={captureRetired}>
+            {kind === "toggle" ? <ThemeToggle /> : <ThemePicker />}
+          </LayoutProbe>
+        </StrictMode>,
+      ));
+
+      const firstButton = kind === "toggle"
+        ? toggle(host)
+        : option(host, selections[0]);
+      const currentClick = captureClick(firstButton);
+      expect(retiredClick).toBeDefined();
+      expect(currentClick).not.toBe(retiredClick);
+      const currentElements = kind === "toggle"
+        ? [firstButton]
+        : [
+            picker(host),
+            ...(["system", "light", "dark"] as const).flatMap((preference) => {
+              const row = option(host, preference);
+              return [row, row.querySelector("svg")!];
+            }),
+          ];
+      const originalSetItem = Storage.prototype.setItem;
+      const effects = trackThemeEffects();
+      let reentered = false;
+      effects.storage.mockImplementation(function setItem(this: Storage, key, value) {
+        if (key === THEME_STORAGE_KEY && !reentered) {
+          reentered = true;
+          dispatchClick(firstButton.querySelector("svg") ?? firstButton);
+          retiredClick?.(clickEvent(firstButton));
+        }
+        return originalSetItem.call(this, key, value);
+      });
+      const staleEvidence = invokeStale(effects, host, [
+        () => retiredClick?.(clickEvent(firstButton)),
+        () => {
+          retiredRefs.forEach((ref, index) => ref(currentElements[index]));
+          [...retiredRefs].reverse().forEach((ref) => ref(null));
+        },
+      ]);
+      expectNoStaleEffects(staleEvidence);
+
+      selections.forEach((selection) => {
+        const button = kind === "toggle"
+          ? toggle(host)
+          : option(host, selection);
+        const repeated = primaryClickEvent();
+        act(() => {
+          dispatchClick(button.querySelector("svg") ?? button, repeated);
+          dispatchClick(button.querySelector("svg") ?? button, repeated);
+        });
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe(selection);
+        if (kind === "toggle") {
+          expect(toggle(host).dataset.themePreference).toBe(selection);
+        } else {
+          expect(option(host, selection)).toHaveAttribute("aria-checked", "true");
+        }
+      });
+      expect(effectCounts(effects)).toMatchObject({
+        attribute: selections.length,
+        emission: selections.length,
+        storage: selections.length,
+      });
+    },
+  );
+
   it("accepts valid Picker and useTheme selections once and rejects repeated, selected, and invalid values", () => {
     let consumer!: ConsumerControl;
     const { host } = renderDirect(
@@ -407,21 +552,19 @@ describe("mounted theme controls", () => {
     expect(option(host, "system")).toHaveAttribute("role", "radio");
     expect(option(host, "system")).toHaveAttribute("aria-checked", "true");
     const light = option(host, "light");
-    const selectLight = captureClick(light);
-    const selectLightEvent = clickEvent(light);
+    const selectLightEvent = primaryClickEvent();
     act(() => {
-      selectLight(selectLightEvent);
-      selectLight(selectLightEvent);
+      dispatchClick(light.querySelector("svg") ?? light, selectLightEvent);
+      dispatchClick(light.querySelector("svg") ?? light, selectLightEvent);
     });
     expect(consumer.preference).toBe("light");
     expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
     expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
 
     const currentLight = option(host, "light");
-    const selectCurrentLight = captureClick(currentLight);
     const currentSetter = consumer.setPreference;
     act(() => {
-      selectCurrentLight(clickEvent(currentLight));
+      dispatchClick(currentLight);
       (currentSetter as (next: unknown) => void)("sepia");
       currentSetter("light");
     });
@@ -435,12 +578,12 @@ describe("mounted theme controls", () => {
     expect(effectCounts(effects)).toMatchObject({ attribute: 2, emission: 2, storage: 2 });
 
     const system = option(host, "system");
-    act(() => captureClick(system)(clickEvent(system)));
+    act(() => dispatchClick(system));
     expect(consumer.preference).toBe("system");
     expect(option(host, "system")).toHaveAttribute("aria-checked", "true");
 
     const dark = option(host, "dark");
-    act(() => captureClick(dark)(clickEvent(dark)));
+    act(() => dispatchClick(dark));
     expect(consumer.preference).toBe("dark");
     expect(option(host, "dark")).toHaveAttribute("aria-checked", "true");
     expect(effectCounts(effects)).toMatchObject({ attribute: 4, emission: 4, storage: 4 });
@@ -457,15 +600,17 @@ describe("mounted theme controls", () => {
     "mismatched target",
     "wrong event type",
     "fabricated event",
-  ] as const)("rejects a %s Toggle source without work and keeps the exact control usable", (source) => {
-    const { host } = renderDirect(
-      <>
+  ] as const)("rejects a %s Toggle source without work and keeps later authority usable", (source) => {
+    const controls = (visit: string) => (
+      <section key={visit}>
         <fieldset>
           <ThemeToggle />
         </fieldset>
         <ThemeToggle />
-      </>,
+      </section>
     );
+    const view = renderDirect(controls("a"));
+    const { host } = view;
     const buttons = [...host.querySelectorAll<HTMLButtonElement>('[data-testid="theme-toggle"]')];
     const button = buttons[0];
     const sibling = buttons[1];
@@ -535,12 +680,20 @@ describe("mounted theme controls", () => {
     restore();
     cleanup();
     effects.mutation.takeRecords();
-    const exactEvent = clickEvent(button, button.querySelector("svg"));
-    act(() => click(exactEvent));
-    expect(button.dataset.themePreference).toBe("light");
+    let currentButton = button;
+    if (source === "disabled") {
+      const retiredEvidence = invokeStale(effects, host, [
+        () => dispatchClick(button.querySelector("svg") ?? button),
+      ]);
+      expectNoStaleEffects(retiredEvidence);
+      act(() => view.root.render(controls("b")));
+      currentButton = toggle(host);
+    }
+    const exactEvent = primaryClickEvent();
+    act(() => dispatchClick(currentButton.querySelector("svg") ?? currentButton, exactEvent));
+    expect(currentButton.dataset.themePreference).toBe("light");
     expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
-    expect(exactEvent.preventDefault).not.toHaveBeenCalled();
-    expect(exactEvent.stopPropagation).not.toHaveBeenCalled();
+    expect(exactEvent.defaultPrevented).toBe(false);
     expect(focusOwner).toHaveFocus();
     focusOwner.remove();
   });
@@ -579,10 +732,10 @@ describe("mounted theme controls", () => {
       expect(event.stopPropagation).not.toHaveBeenCalled();
     }
 
-    const exactEvent = clickEvent(light, light.querySelector("svg"));
+    const exactEvent = primaryClickEvent();
     act(() => {
-      selectLight(exactEvent);
-      selectLight(exactEvent);
+      dispatchClick(light.querySelector("svg") ?? light, exactEvent);
+      dispatchClick(light.querySelector("svg") ?? light, exactEvent);
     });
     expect(option(roots[0], "light")).toHaveAttribute("aria-checked", "true");
     expect(option(roots[1], "light")).toHaveAttribute("aria-checked", "true");
@@ -615,10 +768,66 @@ describe("mounted theme controls", () => {
     effects.emission.mockClear();
     effects.storage.mockClear();
     effects.mutation.takeRecords();
-    const current = captureClick(button);
-    act(() => current(clickEvent(button)));
+    act(() => dispatchClick(button));
     expect(button.dataset.themePreference).toBe("light");
     expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
+  });
+
+  it("fails transient mutation, root detach, restored reorder, and partial ref replay closed without poisoning successors", () => {
+    const controls = (visit: string) => (
+      <section key={visit}>
+        <ThemeToggle />
+        <ThemePicker />
+      </section>
+    );
+    const view = renderDirect(controls("a"));
+    const staleToggle = toggle(view.host);
+    const stalePicker = picker(view.host);
+    const staleLight = option(stalePicker, "light");
+    const staleToggleClick = captureClick(staleToggle);
+    const staleLightClick = captureClick(staleLight);
+    const staleToggleRef = captureElementRef(staleToggle);
+    const parent = stalePicker.parentNode;
+    if (!parent) throw new Error("ThemePicker did not have a committed parent");
+    const nextSibling = stalePicker.nextSibling;
+    const dark = option(stalePicker, "dark");
+    const lightIcon = staleLight.querySelector("svg");
+    if (!lightIcon) throw new Error("ThemePicker Light did not have an icon");
+    const replacementIcon = lightIcon.cloneNode(true) as Element;
+    const originalLabel = staleToggle.getAttribute("aria-label");
+
+    staleToggle.setAttribute("aria-label", "Changed");
+    if (originalLabel === null) staleToggle.removeAttribute("aria-label");
+    else staleToggle.setAttribute("aria-label", originalLabel);
+    stalePicker.remove();
+    parent.insertBefore(stalePicker, nextSibling);
+    stalePicker.insertBefore(dark, staleLight);
+    stalePicker.insertBefore(staleLight, dark);
+    lightIcon.replaceWith(replacementIcon);
+    replacementIcon.replaceWith(lightIcon);
+    staleToggleRef(null);
+    staleToggleRef(staleToggle);
+
+    const effects = trackThemeEffects();
+    const retiredEvidence = invokeStale(effects, view.host, [
+      () => dispatchClick(staleToggle),
+      () => dispatchClick(staleLight),
+      () => staleToggleClick(clickEvent(staleToggle)),
+      () => staleLightClick(clickEvent(staleLight)),
+    ]);
+    expectNoStaleEffects(retiredEvidence);
+
+    act(() => view.root.render(controls("b")));
+    const currentToggle = toggle(view.host);
+    const currentLight = option(view.host, "light");
+    expect(captureClick(currentToggle)).not.toBe(staleToggleClick);
+    expect(captureClick(currentLight)).not.toBe(staleLightClick);
+    act(() => dispatchClick(currentToggle));
+    expect(toggle(view.host).dataset.themePreference).toBe("light");
+    const currentDark = option(view.host, "dark");
+    act(() => dispatchClick(currentDark));
+    expect(toggle(view.host).dataset.themePreference).toBe("dark");
+    expect(effectCounts(effects)).toMatchObject({ attribute: 2, emission: 2, storage: 2 });
   });
 
   it.each([
@@ -630,7 +839,6 @@ describe("mounted theme controls", () => {
     const previousIcon = previousButton.querySelector("svg")!;
     const staleClick = captureClick(previousButton);
     const staleButtonRef = captureRef(previousButton);
-    const staleIconRef = captureRef(previousIcon);
     const effects = trackThemeEffects();
     let staleEvidence!: StaleEvidence;
     let boundaryRan = false;
@@ -645,13 +853,10 @@ describe("mounted theme controls", () => {
             boundaryRan = true;
             const currentButton = toggle(view.host);
             const currentIcon = currentButton.querySelector("svg")!;
-            const currentClick = captureClick(currentButton);
             const staleCallbacks = [
               () => staleClick(clickEvent(currentButton)),
               () => {
                 staleButtonRef(currentButton);
-                staleIconRef(currentIcon);
-                staleIconRef(null);
                 staleButtonRef(null);
               },
             ];
@@ -661,9 +866,9 @@ describe("mounted theme controls", () => {
             expect(currentIcon).toHaveAttribute("width", "24");
             if (staleFirst) {
               staleEvidence = invokeStale(effects, view.host, staleCallbacks);
-              currentClick(clickEvent(currentButton, currentIcon));
+              dispatchClick(currentIcon);
             } else {
-              currentClick(clickEvent(currentButton, currentIcon));
+              dispatchClick(currentIcon);
               effects.mutation.takeRecords();
               staleEvidence = invokeStale(effects, view.host, staleCallbacks);
             }
@@ -725,8 +930,7 @@ describe("mounted theme controls", () => {
         );
       });
       const currentButton = part === "Toggle control" ? toggle(view.host) : option(view.host, "light");
-      const currentEvent = clickEvent(currentButton, currentButton.querySelector("svg"));
-      act(() => captureClick(currentButton)(currentEvent));
+      act(() => dispatchClick(currentButton.querySelector("svg") ?? currentButton));
       expect(toggle(view.host).dataset.themePreference).toBe("light");
       expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
       expect(focusOwner).toHaveFocus();
@@ -752,7 +956,6 @@ describe("mounted theme controls", () => {
     const staleLight = captureClick(staleLightButton);
     const staleRefs = [
       captureElementRef(staleToggleButton),
-      captureElementRef(staleToggleButton.querySelector("svg")!),
       captureElementRef(picker(view.host)),
       captureElementRef(staleLightButton),
       captureElementRef(staleLightButton.querySelector("svg")!),
@@ -773,7 +976,6 @@ describe("mounted theme controls", () => {
     const currentLightButton = option(view.host, "light");
     const currentElements = [
       currentToggleButton,
-      currentToggleButton.querySelector("svg")!,
       picker(view.host),
       currentLightButton,
       currentLightButton.querySelector("svg")!,
@@ -791,11 +993,10 @@ describe("mounted theme controls", () => {
     });
     expectNoStaleEffects(evidence);
 
-    const currentLight = captureClick(currentLightButton);
-    const currentEvent = clickEvent(currentLightButton, currentLightButton.querySelector("svg"));
+    const currentEvent = primaryClickEvent();
     act(() => {
-      currentLight(currentEvent);
-      currentLight(currentEvent);
+      dispatchClick(currentLightButton.querySelector("svg") ?? currentLightButton, currentEvent);
+      dispatchClick(currentLightButton.querySelector("svg") ?? currentLightButton, currentEvent);
     });
     expect(toggle(view.host).dataset.themePreference).toBe("light");
     expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
@@ -829,7 +1030,6 @@ describe("mounted theme controls", () => {
     const stalePicker = () => stalePickerHandler(clickEvent(staleDarkButton));
     const staleRefs = [
       captureElementRef(staleToggleButton),
-      captureElementRef(staleToggleButton.querySelector("svg")!),
       captureElementRef(stalePickerRoot),
       ...(["system", "light", "dark"] as const).flatMap((preference) => {
         const button = option(stalePickerRoot, preference);
@@ -871,9 +1071,9 @@ describe("mounted theme controls", () => {
           passiveAtBoundary = passiveCleaned;
           if (staleFirst) {
             staleEvidence = invokeStale(effects, view.host, staleCallbacks);
-            currentToggle(clickEvent(currentButton));
+            dispatchClick(currentButton);
           } else {
-            currentToggle(clickEvent(currentButton));
+            dispatchClick(currentButton);
             effects.mutation.takeRecords();
             staleEvidence = invokeStale(effects, view.host, staleCallbacks);
           }
@@ -896,7 +1096,6 @@ describe("mounted theme controls", () => {
     const currentPickerRoot = picker(view.host);
     const currentRefElements = [
       currentToggleButton,
-      currentToggleButton.querySelector("svg")!,
       currentPickerRoot,
       ...(["system", "light", "dark"] as const).flatMap((preference) => {
         const button = option(currentPickerRoot, preference);
@@ -912,7 +1111,7 @@ describe("mounted theme controls", () => {
     expectNoStaleEffects(refEvidence);
 
     const dark = option(view.host, "dark");
-    act(() => captureClick(dark)(clickEvent(dark)));
+    act(() => dispatchClick(dark));
     expect(toggle(view.host).dataset.themePreference).toBe("dark");
     expect(effectCounts(effects)).toMatchObject({ attribute: 2, emission: 2, storage: 2 });
     focusOwner.remove();
