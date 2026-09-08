@@ -1193,7 +1193,7 @@ interface AgentTabDomSnapshot {
 interface AgentTabEventIntrinsics {
   readonly keyboardPrototype: object;
   readonly bubblingPhase: number;
-  readonly isPrototypeOf: Object["isPrototypeOf"];
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
   readonly trusted: AgentTabTrustedAuthority;
   readonly event: Readonly<{
     type: (this: Event) => string;
@@ -2610,6 +2610,7 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
   const [tabCoordinator] = useState(() => new AgentTabCoordinator(mount));
   const stdioConfig = mcpConfigFor(base, TOKEN_PLACEHOLDER, target === "mcp-clients" ? "servers" : "mcpServers");
   const tabsId = useId();
+  // eslint-disable-next-line react-hooks/refs -- authorityRef/selectedTargetRef pass by identity; only committed coordinator layout/event paths dereference them.
   const tabRender: AgentTabRender = Object.freeze({
     identity: Symbol("agent-tab-render"),
     mount,
