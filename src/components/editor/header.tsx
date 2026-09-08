@@ -6036,8 +6036,9 @@ class MoreMenuPublicationCoordinator {
   #requestedSuccessors = new WeakSet<MoreMenuPublication>();
   #unpublishedChangeRequested = false;
   #dispatchObserverPublication: MoreMenuPublication | null = null;
-  #dispatchObserverRestorers: Array<() => void> = [];
+  #dispatchObserverRestorers: Array<readonly [EventTarget, () => boolean]> = [];
   #observedOutsideTargets = new WeakSet<EventTarget>();
+  #unsafeDispatchTargets = new WeakSet<EventTarget>();
 
   constructor(private readonly requestSuccessor: () => void) {}
 
@@ -6064,14 +6065,26 @@ class MoreMenuPublicationCoordinator {
     this.#dispatchObserverPublication = publication;
     for (const item of Object.values(publication.dom.actions)) {
       if (!item) continue;
+      if (this.#unsafeDispatchTargets.has(item)) {
+        this.#clearDispatchObservers(publication);
+        publication.retire();
+        return false;
+      }
       const restore = installMoreMenuDispatchObserver(
         publication.document.defaultView,
         item,
         (target, event) => this.observeDispatchedCustom(publication, target, event),
       );
-      if (restore) this.#dispatchObserverRestorers.push(restore);
+      if (!restore) {
+        this.#unsafeDispatchTargets.add(item);
+        this.#clearDispatchObservers(publication);
+        publication.retire();
+        return false;
+      }
+      this.#dispatchObserverRestorers.push([item, restore]);
     }
     focusTarget?.focus();
+    return true;
   }
 
   retire(publication: MoreMenuPublication) {
@@ -6321,15 +6334,23 @@ class MoreMenuPublicationCoordinator {
     }
     const target = exactMoreMenuNativeOutsideAtCapture(publication, nativeEvent);
     if (!target || this.#observedOutsideTargets.has(target)) return Boolean(target);
+    if (this.#unsafeDispatchTargets.has(target)) {
+      publication.retire();
+      return false;
+    }
     const restore = installMoreMenuDispatchObserver(
       publication.document.defaultView,
       target,
       (dispatchTarget, event) =>
         this.observeDispatchedCustom(publication, dispatchTarget, event),
     );
-    if (!restore) return false;
+    if (!restore) {
+      this.#unsafeDispatchTargets.add(target);
+      publication.retire();
+      return false;
+    }
     this.#observedOutsideTargets.add(target);
-    this.#dispatchObserverRestorers.push(restore);
+    this.#dispatchObserverRestorers.push([target, restore]);
     return true;
   }
 
@@ -6467,7 +6488,9 @@ class MoreMenuPublicationCoordinator {
     ) {
       return;
     }
-    for (const restore of this.#dispatchObserverRestorers.splice(0).reverse()) restore();
+    for (const [target, restore] of this.#dispatchObserverRestorers.splice(0).reverse()) {
+      if (!restore()) this.#unsafeDispatchTargets.add(target);
+    }
     this.#dispatchObserverPublication = null;
     this.#observedOutsideTargets = new WeakSet<EventTarget>();
   }
@@ -6823,14 +6846,65 @@ function nativeEventPath(ownerWindow: Window & typeof globalThis, event: Event) 
 
 type MoreMenuDispatchCompletion = (reachedTarget: boolean) => void;
 
+const moreMenuGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const moreMenuDefineProperty = Object.defineProperty;
+const moreMenuIsExtensible = Object.isExtensible;
+const moreMenuDeleteProperty = Reflect.deleteProperty;
+const MORE_MENU_DESCRIPTOR_FAILURE = Symbol("more-menu-descriptor-failure");
+
+function moreMenuOwnDescriptor(target: object, property: PropertyKey) {
+  try {
+    return moreMenuGetOwnPropertyDescriptor(target, property);
+  } catch {
+    return MORE_MENU_DESCRIPTOR_FAILURE;
+  }
+}
+
+function moreMenuDescriptorMatches(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor | undefined,
+) {
+  if (!current || !expected) return current === expected;
+  if (
+    current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  if ("value" in expected || "writable" in expected) {
+    return (
+      "value" in current
+      && current.value === expected.value
+      && current.writable === expected.writable
+    );
+  }
+  return (
+    !("value" in current)
+    && current.get === expected.get
+    && current.set === expected.set
+  );
+}
+
 function installMoreMenuDispatchObserver(
   ownerWindow: (Window & typeof globalThis) | null,
   target: EventTarget,
   observe: (target: EventTarget, event: Event) => MoreMenuDispatchCompletion | null,
 ) {
   if (!ownerWindow || !(target instanceof ownerWindow.EventTarget)) return null;
-  const descriptor = Object.getOwnPropertyDescriptor(target, "dispatchEvent");
-  if (descriptor && !descriptor.configurable) return null;
+  const descriptor = moreMenuOwnDescriptor(target, "dispatchEvent");
+  if (
+    descriptor === MORE_MENU_DESCRIPTOR_FAILURE
+    || (descriptor && !descriptor.configurable)
+  ) {
+    return null;
+  }
+  if (!descriptor) {
+    try {
+      if (!moreMenuIsExtensible(target)) return null;
+    } catch {
+      return null;
+    }
+  }
   const eventTargetPrototype = ownerWindow.EventTarget.prototype;
   const nativeDispatch = eventTargetPrototype.dispatchEvent;
   const nativeAdd = eventTargetPrototype.addEventListener;
@@ -6852,17 +6926,44 @@ function installMoreMenuDispatchObserver(
       completion(reachedTarget);
     }
   };
-  Object.defineProperty(target, "dispatchEvent", {
+  const installedDescriptor: PropertyDescriptor = {
     configurable: true,
+    enumerable: false,
     value: observedDispatch,
     writable: true,
-  });
-  return () => {
-    const current = Object.getOwnPropertyDescriptor(target, "dispatchEvent");
-    if (!current || !("value" in current) || current.value !== observedDispatch) return;
-    if (descriptor) Object.defineProperty(target, "dispatchEvent", descriptor);
-    else Reflect.deleteProperty(target, "dispatchEvent");
   };
+  const restoreObserved = () => {
+    const current = moreMenuOwnDescriptor(target, "dispatchEvent");
+    if (current === MORE_MENU_DESCRIPTOR_FAILURE) return false;
+    if (!current || !("value" in current) || current.value !== observedDispatch) {
+      return moreMenuDescriptorMatches(current, descriptor);
+    }
+    try {
+      if (descriptor) moreMenuDefineProperty(target, "dispatchEvent", descriptor);
+      else if (!moreMenuDeleteProperty(target, "dispatchEvent")) return false;
+    } catch {
+      return false;
+    }
+    const restored = moreMenuOwnDescriptor(target, "dispatchEvent");
+    return (
+      restored !== MORE_MENU_DESCRIPTOR_FAILURE
+      && moreMenuDescriptorMatches(restored, descriptor)
+    );
+  };
+  try {
+    moreMenuDefineProperty(target, "dispatchEvent", installedDescriptor);
+  } catch {
+    return null;
+  }
+  const installed = moreMenuOwnDescriptor(target, "dispatchEvent");
+  if (
+    installed === MORE_MENU_DESCRIPTOR_FAILURE
+    || !moreMenuDescriptorMatches(installed, installedDescriptor)
+  ) {
+    restoreObserved();
+    return null;
+  }
+  return restoreObserved;
 }
 
 function exactMoreMenuUndispatchedSelect(

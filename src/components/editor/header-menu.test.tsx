@@ -346,6 +346,81 @@ describe("editor header More menu authority", () => {
     expect(history.dispatchEvent).toBe(EventTarget.prototype.dispatchEvent);
   });
 
+  it("fails closed when a current item becomes non-extensible before replacement", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const props = headerProps(session, actions);
+    const view = await renderStrict(header(props));
+    openMenu();
+    const history = item("history");
+    Object.preventExtensions(history);
+
+    await view.render(header({ ...props, commentsOpen: true }));
+
+    fireEvent.click(history);
+    fireEvent.click(item("history"));
+    expect(actions.onHistory).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an owned item is non-extensible before publication", async () => {
+    const nativeSetAttribute = Element.prototype.setAttribute;
+    const setAttribute = vi.spyOn(Element.prototype, "setAttribute").mockImplementation(
+      function (this: Element, name: string, value: string) {
+        Reflect.apply(nativeSetAttribute, this, [name, value]);
+        if (name === "data-testid" && value === "menu-history") {
+          void this.attributes;
+          void this.children;
+          void this.childNodes;
+          void this.classList;
+          void (this as HTMLElement).dataset;
+          void (this as HTMLElement).style;
+          Object.preventExtensions(this);
+        }
+      },
+    );
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+
+    openMenu();
+    setAttribute.mockRestore();
+    fireEvent.click(item("history"));
+
+    expect(actions.onHistory).not.toHaveBeenCalled();
+  });
+
+  it("restores a fresh item's exact dispatch descriptor after selection", async () => {
+    const nativeSetAttribute = Element.prototype.setAttribute;
+    const originalDispatch = function (this: EventTarget, event: Event) {
+      return Reflect.apply(EventTarget.prototype.dispatchEvent, this, [event]) as boolean;
+    };
+    const originalDescriptor: PropertyDescriptor = {
+      configurable: true,
+      enumerable: true,
+      value: originalDispatch,
+      writable: false,
+    };
+    const setAttribute = vi.spyOn(Element.prototype, "setAttribute").mockImplementation(
+      function (this: Element, name: string, value: string) {
+        Reflect.apply(nativeSetAttribute, this, [name, value]);
+        if (name === "data-testid" && value === "menu-history") {
+          Object.defineProperty(this, "dispatchEvent", originalDescriptor);
+        }
+      },
+    );
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    setAttribute.mockRestore();
+    const history = item("history");
+
+    fireEvent.click(history);
+
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(Object.getOwnPropertyDescriptor(history, "dispatchEvent")).toEqual(originalDescriptor);
+  });
+
   it("rejects unadmitted and repeated custom selection without consuming a fresh action", async () => {
     const session = createSession();
     const actions = createActions();
