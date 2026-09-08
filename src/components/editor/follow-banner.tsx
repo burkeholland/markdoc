@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useLayoutEffect,
   useMemo,
   useState,
@@ -27,6 +28,8 @@ interface FollowedSnapshot {
 }
 
 interface FollowAuthority {
+  readonly generation: symbol;
+  readonly revision: number;
   readonly mount: symbol;
   readonly session: CollabSession;
   readonly followed: FollowedSnapshot;
@@ -53,10 +56,17 @@ interface FollowDomSnapshot {
   readonly bannerNodes: readonly Node[];
   readonly stopTargets: readonly Node[];
   readonly markup: string;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
 }
 
 interface FollowCells {
-  readonly active: { current: FollowPresentation | null };
+  readonly active: {
+    current: FollowGrant | null;
+    revision: number;
+  };
+  readonly replay: { current: FollowSuccessor | null };
   readonly claimedEvents: WeakSet<object>;
 }
 
@@ -74,19 +84,60 @@ interface FollowPresentation {
   readonly onStop: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
+interface FollowGrant {
+  readonly generation: symbol;
+  readonly publication: FollowPresentation;
+  readonly committed: FollowDomSnapshot;
+  actionClaimed: boolean;
+  retired: boolean;
+  readonly retire: () => void;
+}
+
+type FollowElementName = keyof FollowElements;
+// React replays layout effects only after tearing down and restoring callback refs.
+// A retired grant stays dead; this phase machine alone may issue its exact successor.
+type FollowPhase =
+  | "mounting"
+  | "active"
+  | "layout-retired"
+  | "refs-detached"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+interface FollowReplay {
+  readonly committed: FollowDomSnapshot;
+  readonly revision: number;
+  readonly detached: Set<FollowElementName>;
+  readonly attached: Set<FollowElementName>;
+}
+
+interface FollowSuccessor {
+  readonly source: FollowPresentation;
+  readonly authority: FollowAuthority;
+  readonly committed: FollowDomSnapshot;
+  readonly history: FollowMutationHistory;
+  readonly revision: number;
+}
+
 class ElementOwner<T extends Element> {
   private current: T | null = null;
-  private last: T | null = null;
 
-  constructor(private readonly onReplacement: () => void) {}
+  constructor(
+    private readonly name: FollowElementName,
+    private readonly onChange: (
+      name: FollowElementName,
+      previous: T | null,
+      current: T | null,
+    ) => void,
+  ) {}
 
   readonly element = () => this.current;
   readonly capture = (element: T | null) => {
     if (this.current === element) return;
-    const replaced = element !== null && this.last !== null && this.last !== element;
+    const previous = this.current;
     this.current = element;
-    if (element) this.last = element;
-    if (replaced || element === null) this.onReplacement();
+    this.onChange(this.name, previous, element);
   };
 }
 
@@ -105,8 +156,100 @@ function sameNodes(expected: readonly Node[], element: Element): boolean {
   return current.length === expected.length && current.every((node, index) => node === expected[index]);
 }
 
-function createFollowPresentation(authority: FollowAuthority, cells: FollowCells): FollowPresentation {
+class FollowMutationHistory {
+  private dirty = false;
+  private readonly rootObserver: MutationObserver;
+  private readonly placementObserver: MutationObserver;
+
+  constructor(private readonly committed: FollowDomSnapshot) {
+    const ownerWindow = committed.elements.banner.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Follow banner has no owner window");
+    this.rootObserver = new ownerWindow.MutationObserver((records) => {
+      if (records.length > 0) this.dirty = true;
+    });
+    this.placementObserver = new ownerWindow.MutationObserver((records) => {
+      this.recordPlacement(records);
+    });
+    this.rootObserver.observe(committed.elements.banner, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    this.placementObserver.observe(committed.parent, { childList: true });
+  }
+
+  private readonly recordPlacement = (records: readonly MutationRecord[]) => {
+    const banner = this.committed.elements.banner;
+    for (const record of records) {
+      if (
+        Array.from(record.addedNodes).includes(banner) ||
+        Array.from(record.removedNodes).includes(banner)
+      ) {
+        this.dirty = true;
+        return;
+      }
+    }
+  };
+
+  readonly isPristine = () => {
+    if (this.rootObserver.takeRecords().length > 0) this.dirty = true;
+    this.recordPlacement(this.placementObserver.takeRecords());
+    return !this.dirty;
+  };
+
+  readonly disconnect = () => {
+    this.rootObserver.disconnect();
+    this.placementObserver.disconnect();
+  };
+}
+
+function snapshotDom(elements: FollowElements): FollowDomSnapshot | null {
+  const parent = elements.banner.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    elements: Object.freeze(elements),
+    bannerNodes: descendantsOf(elements.banner),
+    stopTargets: descendantsOf(elements.stop),
+    markup: elements.banner.outerHTML,
+    parent,
+    previousSibling: elements.banner.previousSibling,
+    nextSibling: elements.banner.nextSibling,
+  });
+}
+
+function snapshotElement(
+  committed: FollowDomSnapshot,
+  name: FollowElementName,
+): Element | null {
+  return committed.elements[name];
+}
+
+function sameAuthorityFacts(
+  expected: FollowAuthority,
+  current: FollowAuthority,
+): boolean {
+  return (
+    expected.mount === current.mount &&
+    expected.session === current.session &&
+    expected.followed === current.followed &&
+    expected.follow === current.follow &&
+    expected.bannerClass === current.bannerClass &&
+    expected.sectionClass === current.sectionClass &&
+    expected.separatorClass === current.separatorClass &&
+    expected.stopClass === current.stopClass &&
+    expected.shortcutClass === current.shortcutClass
+  );
+}
+
+function createFollowPresentation(
+  authority: FollowAuthority,
+  cells: FollowCells,
+  requestSuccessor: () => void,
+): FollowPresentation {
   const {
+    generation,
+    revision,
     mount,
     session,
     followed,
@@ -118,18 +261,117 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
     shortcutClass,
   } = authority;
   const { followUserId, id, name, color, section } = followed;
-  let committed: FollowDomSnapshot | null = null;
-  let actionClaimed = false;
-  const retireForReplacement = () => presentation.retire();
-  const bannerOwner = new ElementOwner<HTMLDivElement>(retireForReplacement);
-  const messageOwner = new ElementOwner<HTMLSpanElement>(retireForReplacement);
-  const sectionOwner = new ElementOwner<HTMLSpanElement>(retireForReplacement);
-  const separatorOwner = new ElementOwner<HTMLSpanElement>(retireForReplacement);
-  const stopOwner = new ElementOwner<HTMLButtonElement>(retireForReplacement);
-  const iconOwner = new ElementOwner<SVGSVGElement>(retireForReplacement);
-  const shortcutOwner = new ElementOwner<HTMLSpanElement>(retireForReplacement);
+  const refNames: readonly FollowElementName[] =
+    section === null
+      ? ["banner", "message", "separator", "stop", "icon", "shortcut"]
+      : ["banner", "message", "section", "separator", "stop", "icon", "shortcut"];
+  let phase: FollowPhase = "mounting";
+  let grant: FollowGrant | null = null;
+  let history: FollowMutationHistory | null = null;
+  let replay: FollowReplay | null = null;
+  let expiry = 0;
+  const initialRefs = new Set<FollowElementName>();
+
+  const clearGrant = (current: FollowGrant) => {
+    current.retired = true;
+    if (cells.active.current === current) {
+      cells.active.current = null;
+      cells.active.revision++;
+    }
+    if (grant === current) grant = null;
+  };
+
+  const releaseOwnedSuccessor = () => {
+    const pending = cells.replay.current;
+    if (!pending || pending.source !== presentation) return;
+    pending.history.disconnect();
+    cells.replay.current = null;
+  };
+
+  const invalidate = () => {
+    expiry++;
+    phase = "dead";
+    replay = null;
+    releaseOwnedSuccessor();
+    history?.disconnect();
+    history = null;
+    if (grant) clearGrant(grant);
+  };
+
+  const refsComplete = (refs: ReadonlySet<FollowElementName>) =>
+    refNames.every((name) => refs.has(name));
+
+  const onElementChange = (
+    name: FollowElementName,
+    previous: Element | null,
+    element: Element | null,
+  ) => {
+    if (phase === "dead") return;
+    if (history && !history.isPristine()) {
+      invalidate();
+      return;
+    }
+    if (phase === "successor-requested") return;
+    if (phase === "mounting") {
+      if (previous !== null || element === null || initialRefs.has(name)) {
+        invalidate();
+        return;
+      }
+      initialRefs.add(name);
+      return;
+    }
+    if (phase === "active" || phase === "replay-ready") {
+      invalidate();
+      return;
+    }
+    if (!replay) {
+      invalidate();
+      return;
+    }
+    const expected = snapshotElement(replay.committed, name);
+    if (!expected) {
+      invalidate();
+      return;
+    }
+    if (phase === "layout-retired") {
+      if (
+        previous !== expected ||
+        element !== null ||
+        replay.detached.has(name) ||
+        replay.attached.size > 0
+      ) {
+        invalidate();
+        return;
+      }
+      replay.detached.add(name);
+      if (refsComplete(replay.detached)) phase = "refs-detached";
+      return;
+    }
+    if (
+      phase !== "refs-detached" ||
+      previous !== null ||
+      element !== expected ||
+      !replay.detached.has(name) ||
+      replay.attached.has(name)
+    ) {
+      invalidate();
+      return;
+    }
+    replay.attached.add(name);
+    if (refsComplete(replay.attached)) phase = "replay-ready";
+  };
+
+  const bannerOwner = new ElementOwner<HTMLDivElement>("banner", onElementChange);
+  const messageOwner = new ElementOwner<HTMLSpanElement>("message", onElementChange);
+  const sectionOwner = new ElementOwner<HTMLSpanElement>("section", onElementChange);
+  const separatorOwner = new ElementOwner<HTMLSpanElement>("separator", onElementChange);
+  const stopOwner = new ElementOwner<HTMLButtonElement>("stop", onElementChange);
+  const iconOwner = new ElementOwner<SVGSVGElement>("icon", onElementChange);
+  const shortcutOwner = new ElementOwner<HTMLSpanElement>("shortcut", onElementChange);
 
   const authorityMatches = () =>
+    authority.generation === generation &&
+    authority.revision === revision &&
     authority.mount === mount &&
     authority.session === session &&
     authority.followed === followed &&
@@ -209,6 +451,7 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
     if (
       !ownerWindow ||
       !banner.isConnected ||
+      !banner.parentNode ||
       !message.isConnected ||
       !separator.isConnected ||
       !stop.isConnected ||
@@ -291,50 +534,213 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
         snapshot.elements.icon === icon &&
         snapshot.elements.shortcut === shortcut &&
         snapshot.markup === banner.outerHTML &&
+        snapshot.parent === banner.parentNode &&
+        snapshot.previousSibling === banner.previousSibling &&
+        snapshot.nextSibling === banner.nextSibling &&
         sameNodes(snapshot.bannerNodes, banner) &&
         sameNodes(snapshot.stopTargets, stop))
     );
   };
 
-  const retire = () => {
-    if (cells.active.current !== presentation) return false;
-    cells.active.current = null;
-    return true;
+  const createGrant = (committed: FollowDomSnapshot): FollowGrant => {
+    const current: FollowGrant = {
+      generation: Symbol("follow-authority"),
+      publication: presentation,
+      committed,
+      actionClaimed: false,
+      retired: false,
+      retire: () => {
+        if (current.retired) return;
+        if (grant === current) invalidate();
+        else current.retired = true;
+      },
+    };
+    return current;
   };
 
-  const establish = () => {
+  const activate = (
+    committed: FollowDomSnapshot,
+    currentHistory: FollowMutationHistory,
+  ) => {
+    const current = createGrant(committed);
     const previous = cells.active.current;
-    if (previous && previous !== presentation) previous.retire();
-    if (!liveFactsMatch() || !exactDomIsCurrent(null)) {
-      retire();
+    if (previous) previous.retire();
+    if (cells.active.current) {
+      currentHistory.disconnect();
+      current.retired = true;
+      invalidate();
+      return;
+    }
+    history = currentHistory;
+    grant = current;
+    cells.active.current = current;
+    cells.active.revision++;
+    phase = "active";
+  };
+
+  const establishInitial = () => {
+    let successor = cells.replay.current;
+    if (successor && !sameAuthorityFacts(successor.authority, authority)) {
+      successor.history.disconnect();
+      if (cells.replay.current === successor) cells.replay.current = null;
+      successor = null;
+    }
+    if (
+      successor &&
+      (cells.active.current !== null ||
+        cells.active.revision !== successor.revision ||
+        !successor.history.isPristine() ||
+        !exactDomIsCurrent(successor.committed))
+    ) {
+      successor.history.disconnect();
+      if (cells.replay.current === successor) cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    if (
+      !refsComplete(initialRefs) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(null)
+    ) {
+      invalidate();
       return;
     }
     const elements = currentElements();
-    if (!elements) return;
-    const snapshot: FollowDomSnapshot = Object.freeze({
-      elements: Object.freeze(elements),
-      bannerNodes: descendantsOf(elements.banner),
-      stopTargets: descendantsOf(elements.stop),
-      markup: elements.banner.outerHTML,
-    });
-    if (!liveFactsMatch() || !exactDomIsCurrent(snapshot)) {
-      retire();
+    const committed = elements ? snapshotDom(elements) : null;
+    if (!committed) {
+      invalidate();
       return;
     }
-    committed = snapshot;
-    cells.active.current = presentation;
+    const currentHistory = new FollowMutationHistory(committed);
+    if (
+      !currentHistory.isPristine() ||
+      Boolean(successor && !successor.history.isPristine()) ||
+      Boolean(successor && !exactDomIsCurrent(successor.committed)) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed)
+    ) {
+      currentHistory.disconnect();
+      successor?.history.disconnect();
+      if (cells.replay.current === successor) cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    successor?.history.disconnect();
+    if (cells.replay.current === successor) cells.replay.current = null;
+    activate(committed, currentHistory);
+  };
+
+  const establishReplay = () => {
+    const candidate = replay;
+    const previousHistory = history;
+    if (
+      !candidate ||
+      !previousHistory ||
+      phase !== "replay-ready" ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision ||
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch()
+    ) {
+      invalidate();
+      return;
+    }
+    if (
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch() ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision
+    ) {
+      invalidate();
+      return;
+    }
+    if (cells.replay.current) {
+      invalidate();
+      return;
+    }
+    cells.replay.current = Object.freeze({
+      source: presentation,
+      authority,
+      committed: candidate.committed,
+      history: previousHistory,
+      revision: candidate.revision,
+    });
+    history = null;
+    replay = null;
+    phase = "successor-requested";
+    const ticket = ++expiry;
+    requestSuccessor();
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        cells.replay.current?.source === presentation
+      ) {
+        invalidate();
+      }
+    });
+  };
+
+  const establish = () => {
+    if (phase === "mounting") {
+      establishInitial();
+      return;
+    }
+    if (phase === "replay-ready") {
+      establishReplay();
+      return;
+    }
+    invalidate();
+  };
+
+  const retire = () => {
+    if (phase === "successor-requested") return false;
+    if (phase !== "active" || !grant || !history || !history.isPristine()) {
+      invalidate();
+      return false;
+    }
+    const retired = grant;
+    if (cells.active.current !== retired) {
+      invalidate();
+      return false;
+    }
+    clearGrant(retired);
+    replay = {
+      committed: retired.committed,
+      revision: cells.active.revision,
+      detached: new Set<FollowElementName>(),
+      attached: new Set<FollowElementName>(),
+    };
+    phase = "layout-retired";
+    const ticket = ++expiry;
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        (phase === "layout-retired" ||
+         phase === "refs-detached" ||
+         phase === "replay-ready")
+      ) {
+        invalidate();
+      }
+    });
+    return true;
   };
 
   const onStop = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const current = grant;
     if (
-      cells.active.current !== presentation ||
-      actionClaimed ||
-      !committed ||
+      !current ||
+      current.retired ||
+      cells.active.current !== current ||
+      phase !== "active" ||
+      current.actionClaimed ||
       !event ||
       typeof event !== "object"
     ) {
       return;
     }
+    const { committed } = current;
     const stop = committed.elements.stop;
     const ownerDocument = stop.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
@@ -350,6 +756,7 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
       nativeEvent.target !== target ||
       !(target instanceof ownerWindow.Node) ||
       target.ownerDocument !== ownerDocument ||
+      !committed.stopTargets.includes(target) ||
       !stop.isConnected ||
       stop.ownerDocument !== ownerDocument ||
       stop.disabled ||
@@ -359,21 +766,26 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
     ) {
       return;
     }
-    if (!exactDomIsCurrent(committed)) {
-      retire();
-      return;
-    }
-    if (!committed.stopTargets.includes(target)) return;
-    if (!liveFactsMatch()) {
-      retire();
-      return;
-    }
-    if (cells.active.current !== presentation) return;
-
-    actionClaimed = true;
+    current.actionClaimed = true;
     cells.claimedEvents.add(event);
     cells.claimedEvents.add(nativeEvent);
-    retire();
+    if (!exactDomIsCurrent(committed)) {
+      invalidate();
+      return;
+    }
+    if (!liveFactsMatch()) {
+      invalidate();
+      return;
+    }
+    if (
+      current.retired ||
+      cells.active.current !== current ||
+      !exactDomIsCurrent(committed)
+    ) {
+      invalidate();
+      return;
+    }
+    invalidate();
     follow.call(session, null);
   };
 
@@ -400,9 +812,14 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
 export function FollowBanner({ session }: { session: CollabSession }) {
   const [mount] = useState(() => Symbol("follow-banner"));
   const [cells] = useState<FollowCells>(() => ({
-    active: { current: null },
+    active: { current: null, revision: 0 },
+    replay: { current: null },
     claimedEvents: new WeakSet<object>(),
   }));
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const requestSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const followed = useSessionValue(
     session,
     (currentSession) => {
@@ -426,7 +843,9 @@ export function FollowBanner({ session }: { session: CollabSession }) {
     () =>
       followed
         ? Object.freeze({
-            mount,
+            generation: Symbol("follow-publication"),
+          revision: publicationRevision,
+          mount,
             session,
             followed,
             follow,
@@ -437,11 +856,14 @@ export function FollowBanner({ session }: { session: CollabSession }) {
             shortcutClass: SHORTCUT_CLASS,
           })
         : null,
-    [follow, followed, mount, session],
+    [follow, followed, mount, publicationRevision, session],
   );
   const presentation = useMemo(
-    () => (authority ? createFollowPresentation(authority, cells) : null),
-    [authority, cells],
+    () =>
+      authority
+        ? createFollowPresentation(authority, cells, requestSuccessor)
+        : null,
+    [authority, cells, requestSuccessor],
   );
 
   useLayoutEffect(() => {
