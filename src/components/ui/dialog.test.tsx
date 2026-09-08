@@ -1430,6 +1430,62 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
   });
 
+  it("keeps a vetoed root tainted when detached guard lineage is stripped before records drain", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    function DetachedGuardVetoDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
+      const [open, setOpen] = useState(true);
+      const attempts = useRef(0);
+      return (
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            attempts.current += 1;
+            if (tainted && attempts.current === 1) {
+              const wrapper = document.createElement("div");
+              const guard = createFocusGuard();
+              wrapper.append(guard);
+              screen.getByTestId("detached-guard-host").append(wrapper);
+              wrapper.remove();
+              guard.removeAttribute("data-radix-focus-guard");
+              guard.removeAttribute("tabindex");
+              guard.removeAttribute("style");
+              return;
+            }
+            setOpen(next);
+          }}
+        >
+          <DialogContent title="Detached guard veto" onClosed={onClosed}>
+            <div data-testid="detached-guard-host" />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
+      <StrictMode>
+        <DetachedGuardVetoDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", true, taintedClosed));
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Detached guard veto");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", false, cleanClosed)));
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
+
   it("preserves direct body roots and authenticates exported DialogClose controls", async () => {
     const onClosed = vi.fn();
     function OwnedCloseHarness() {
