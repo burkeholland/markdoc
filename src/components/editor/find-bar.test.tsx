@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import { StrictMode, useLayoutEffect, useState, type ReactNode } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import type * as Y from "yjs";
 
 // A CollabSession normally opens a WebSocket through Hocuspocus; stand in a provider that only
@@ -44,6 +45,7 @@ function renderBar(session: CollabSession, replaceVisible: boolean, onReplaceVis
 }
 
 const sessions: CollabSession[] = [];
+const directRoots = new Set<Root>();
 const session = (role: "owner" | "viewer", docId?: string) => {
   const s = makeSession(role, docId);
   sessions.push(s);
@@ -51,6 +53,10 @@ const session = (role: "owner" | "viewer", docId?: string) => {
 };
 
 afterEach(() => {
+  for (const root of directRoots) {
+    act(() => root.unmount());
+  }
+  directRoots.clear();
   cleanup();
   while (sessions.length) sessions.pop()!.destroy();
   vi.restoreAllMocks();
@@ -93,6 +99,17 @@ function FindBoundary({
       />
     </TooltipProvider>
   ) : null;
+}
+
+function LayoutCapture({
+  capture,
+  children,
+}: {
+  capture: () => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(capture, [capture]);
+  return children;
 }
 
 function frameEnvironment(reuseFrameId = false) {
@@ -164,6 +181,20 @@ type BarKeyHandler = (event: {
   preventDefault: () => void;
   stopPropagation: () => void;
 }) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+
+function reactRef<T extends HTMLElement>(element: T): ElementRef<T> {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  const props = propsKey
+    ? (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey]
+    : undefined;
+  if (typeof props?.ref === "function") return props.ref as ElementRef<T>;
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error("React fiber was not attached to the FindBar element");
+  const fiber = (element as unknown as Record<string, { ref?: unknown }>)[fiberKey];
+  if (typeof fiber.ref !== "function") throw new Error("FindBar element does not have a callback ref");
+  return fiber.ref as ElementRef<T>;
+}
 
 function clickActivation(currentTarget: HTMLButtonElement) {
   return { currentTarget, preventDefault: vi.fn() };
@@ -441,6 +472,306 @@ const CONTROL_CASES = [
 ] as const;
 
 describe("FindBar exact publication controls", () => {
+  it("keeps all control families exact through direct-root Strict Mode replay", async () => {
+    const s = session("owner", "strict-control-families");
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacksA = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const callbacksB = { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+    const focus = trackFocus();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    const controlIds = [
+      "find-match-case",
+      "find-whole-word",
+      "find-regex",
+      "find-prev",
+      "find-next",
+      "find-toggle-replace",
+      "find-close",
+      "replace-one",
+      "replace-all",
+    ] as const;
+    const element = <T extends HTMLElement>(testId: string) => {
+      const match = host.querySelector(`[data-testid="${testId}"]`);
+      if (!(match instanceof HTMLElement)) throw new Error(`Missing ${testId}`);
+      return match as T;
+    };
+    const capture = () => {
+      const bar = element<HTMLDivElement>("find-bar");
+      const search = element<HTMLInputElement>("find-input");
+      const replace = element<HTMLInputElement>("replace-input");
+      const controls = Object.fromEntries(controlIds.map((id) => {
+        const button = element<HTMLButtonElement>(id);
+        return [id, {
+          element: button,
+          click: reactHandler<ClickHandler>(button, "onClick"),
+        }];
+      })) as Record<typeof controlIds[number], {
+        element: HTMLButtonElement;
+        click: ClickHandler;
+      }>;
+      const nodes: HTMLElement[] = [
+        bar,
+        search,
+        replace,
+        ...controlIds.map((id) => controls[id].element),
+      ];
+      return {
+        bar,
+        search,
+        replace,
+        searchChange: reactHandler<ChangeHandler>(search, "onChange"),
+        replaceChange: reactHandler<ChangeHandler>(replace, "onChange"),
+        controls,
+        nodes,
+        refs: nodes.map((node) => reactRef(node)),
+      };
+    };
+    const strictCaptures: ReturnType<typeof capture>[] = [];
+    const captureStrictLayout = () => {
+      strictCaptures.push(capture());
+    };
+    const renderVisit = (
+      key: string,
+      callbacks: typeof callbacksA,
+      captureReplay = false,
+    ) => (
+      <StrictMode>
+        <TooltipProvider>
+          <LayoutCapture capture={captureReplay ? captureStrictLayout : () => {}}>
+            <section key={key}>
+              <FindBar
+                session={s}
+                replaceVisible
+                focusNonce={0}
+                {...callbacks}
+              />
+            </section>
+          </LayoutCapture>
+        </TooltipProvider>
+      </StrictMode>
+    );
+
+    act(() => root.render(renderVisit("A", callbacksA, true)));
+    const strictRetired = strictCaptures[0];
+    if (!strictRetired) throw new Error("Strict Mode did not run the first layout setup");
+    const replayed = capture();
+    expect(replayed.bar).toBe(strictRetired.bar);
+    expect(replayed.searchChange).not.toBe(strictRetired.searchChange);
+    expect(replayed.replaceChange).not.toBe(strictRetired.replaceChange);
+    expect(replayed.refs[0]).not.toBe(strictRetired.refs[0]);
+    act(() => {
+      strictRetired.refs.forEach((ref, index) => ref(replayed.nodes[index] ?? null));
+      [...strictRetired.refs].reverse().forEach((ref) => ref(null));
+      invokeChange(strictRetired.searchChange, replayed.search, "mat");
+      invokeChange(strictRetired.replaceChange, replayed.replace, "dog");
+      for (const id of controlIds) {
+        strictRetired.controls[id].click(clickActivation(replayed.controls[id].element));
+      }
+    });
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacksA.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacksA.onReveal).not.toHaveBeenCalled();
+    expect(callbacksA.onClose).not.toHaveBeenCalled();
+    expect(replayed.search).toHaveFocus();
+
+    const stale = replayed;
+    act(() => root.render(renderVisit("B", callbacksB)));
+    const current = capture();
+    expect(current.bar).not.toBe(stale.bar);
+    expect(current.searchChange).not.toBe(stale.searchChange);
+    expect(current.replaceChange).not.toBe(stale.replaceChange);
+    expect(focus.focused.filter((target) => target === "find-input")).toHaveLength(2);
+    expect(focus.selected.filter((target) => target === "find-input")).toHaveLength(2);
+
+    act(() => {
+      stale.refs.forEach((ref, index) => ref(current.nodes[index] ?? null));
+      [...stale.refs].reverse().forEach((ref) => ref(null));
+      current.refs.forEach((ref, index) => ref(stale.nodes[index] ?? null));
+      invokeChange(stale.searchChange, current.search, "mat");
+      invokeChange(stale.replaceChange, current.replace, "dog");
+      invokeChange(current.searchChange, stale.search, "mat");
+      invokeChange(current.replaceChange, stale.replace, "dog");
+      for (const id of controlIds) {
+        stale.controls[id].click(clickActivation(current.controls[id].element));
+        current.controls[id].click(clickActivation(stale.controls[id].element));
+      }
+    });
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacksA.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacksA.onReveal).not.toHaveBeenCalled();
+    expect(callbacksA.onClose).not.toHaveBeenCalled();
+    expect(callbacksB.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacksB.onReveal).not.toHaveBeenCalled();
+    expect(callbacksB.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+    expect(current.search).toHaveFocus();
+
+    const clickCurrentOnce = (testId: typeof controlIds[number]) => {
+      const button = element<HTMLButtonElement>(testId);
+      const click = reactHandler<ClickHandler>(button, "onClick");
+      const event = clickActivation(button);
+      act(() => {
+        click(event);
+        click(event);
+      });
+    };
+    clickCurrentOnce("find-match-case");
+    await act(async () => {});
+    expect(setFind).toHaveBeenCalledOnce();
+
+    const searchInput = element<HTMLInputElement>("find-input");
+    const searchChange = reactHandler<ChangeHandler>(searchInput, "onChange");
+    const searchEvent = { currentTarget: searchInput };
+    searchInput.value = "cat";
+    act(() => {
+      searchChange(searchEvent);
+      searchChange(searchEvent);
+    });
+    await act(async () => {});
+    expect(setFind).toHaveBeenCalledTimes(2);
+
+    const replacementInput = element<HTMLInputElement>("replace-input");
+    const replacementChange = reactHandler<ChangeHandler>(replacementInput, "onChange");
+    const replacementEvent = { currentTarget: replacementInput };
+    replacementInput.value = "dog";
+    act(() => {
+      replacementChange(replacementEvent);
+      replacementChange(replacementEvent);
+    });
+    await act(async () => {});
+    expect(element<HTMLInputElement>("replace-input")).toHaveValue("dog");
+
+    clickCurrentOnce("find-next");
+    await act(async () => {});
+    expect(stepFind).toHaveBeenCalledOnce();
+    clickCurrentOnce("find-toggle-replace");
+    expect(callbacksB.onReplaceVisible).toHaveBeenCalledOnce();
+    expect(callbacksB.onReplaceVisible).toHaveBeenCalledWith(false);
+    clickCurrentOnce("replace-one");
+    await act(async () => {});
+    expect(replaceActive).toHaveBeenCalledOnce();
+    expect(replaceActive).toHaveBeenCalledWith("dog");
+    clickCurrentOnce("replace-all");
+    await act(async () => {});
+    expect(replaceAll).toHaveBeenCalledOnce();
+    expect(replaceAll).toHaveBeenCalledWith("dog");
+    expect(s.ytext.toString()).toBe("The dog sat on the mat. The dog ran.");
+    clickCurrentOnce("find-close");
+    expect(callbacksB.onClose).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("publishes current callback facts after Strict Mode overtakes replay authority", async () => {
+    const s = session("owner", "strict-callback-change");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const retiredReveal = vi.fn();
+    const currentReveal = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    function CallbackChange() {
+      const [onReveal, setOnReveal] = useState(() => retiredReveal);
+      useLayoutEffect(() => {
+        setOnReveal(() => currentReveal);
+      }, []);
+      return (
+        <FindBar
+          session={s}
+          replaceVisible={false}
+          onReplaceVisible={vi.fn()}
+          focusNonce={0}
+          onReveal={onReveal}
+          onClose={vi.fn()}
+        />
+      );
+    }
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <CallbackChange />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    await act(async () => {});
+    const next = host.querySelector('[data-testid="find-next"]');
+    if (!(next instanceof HTMLButtonElement)) throw new Error("Missing current Next control");
+    fireEvent.click(next);
+    expect(stepFind).toHaveBeenCalledOnce();
+    expect(retiredReveal).not.toHaveBeenCalled();
+    expect(currentReveal).toHaveBeenCalledOnce();
+  });
+
+  it("rejects Strict Mode replay after the committed bar is reparented", () => {
+    const s = session("owner", "strict-reparent");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    const host = document.createElement("div");
+    const foreign = document.createElement("div");
+    document.body.append(host, foreign);
+    const root = createRoot(host);
+    directRoots.add(root);
+    function ReparentOnLayout() {
+      useLayoutEffect(() => {
+        const bar =
+          host.querySelector('[data-testid="find-bar"]') ??
+          foreign.querySelector('[data-testid="find-bar"]');
+        if (!(bar instanceof HTMLDivElement)) throw new Error("Missing FindBar root");
+        if (bar.parentNode !== foreign) foreign.append(bar);
+      }, []);
+      return (
+        <section>
+          <FindBar
+            session={s}
+            replaceVisible={false}
+            onReplaceVisible={vi.fn()}
+            focusNonce={0}
+            onReveal={onReveal}
+            onClose={vi.fn()}
+          />
+        </section>
+      );
+    }
+
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <ReparentOnLayout />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    const bar = foreign.querySelector('[data-testid="find-bar"]');
+    const next = foreign.querySelector('[data-testid="find-next"]');
+    if (!(bar instanceof HTMLDivElement) || !(next instanceof HTMLButtonElement)) {
+      throw new Error("FindBar was not reparented");
+    }
+    reactHandler<ClickHandler>(next, "onClick")(clickActivation(next));
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+
+    const section = host.querySelector("section");
+    if (!(section instanceof HTMLElement)) throw new Error("Missing original FindBar parent");
+    section.append(bar);
+    foreign.remove();
+  });
+
   it.each(CONTROL_CASES.flatMap(([testId, destination]) =>
     (["wrong-before-current", "current-before-wrong"] as const).map((order) => [testId, destination, order] as const)
   ))("binds %s only to its exact connected element (%s, %s)", (testId, destination, order) => {
