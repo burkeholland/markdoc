@@ -71,7 +71,7 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 
 type ClickHandler = (event: { currentTarget: HTMLButtonElement }) => void;
 type KeyHandler = (event: { key: string; currentTarget: HTMLButtonElement; preventDefault: () => void }) => void;
-type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void | (() => void);
 type PermissionHintClickHandler = (event: PermissionEvent) => void;
 
 interface PermissionHintProps {
@@ -210,11 +210,26 @@ function copyBlockEvent(
   currentTarget: EventTarget | null = block.button,
   target: EventTarget | null = currentTarget,
   nativeTarget: EventTarget | null = target,
+  button = 0,
 ): CopyBlockEvent {
   const ownerDocument = currentTarget instanceof Node ? currentTarget.ownerDocument ?? document : document;
   const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
-  const nativeEvent = new MouseEventConstructor("click", { bubbles: true, cancelable: true, button: 0 });
+  const nativeEvent = new MouseEventConstructor("click", { bubbles: true, cancelable: true, button });
   Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  const path: EventTarget[] = [];
+  if (nativeTarget instanceof Node) {
+    let current: Node | null = nativeTarget;
+    while (current) {
+      path.push(current);
+      current = current.parentNode;
+    }
+    const view = nativeTarget.ownerDocument?.defaultView;
+    if (view && path.at(-1) === nativeTarget.ownerDocument) path.push(view);
+  }
+  Object.defineProperty(nativeEvent, "composedPath", {
+    configurable: true,
+    value: () => path,
+  });
   return {
     type: "click",
     currentTarget,
@@ -505,6 +520,251 @@ describe("CopyBlock exact control publications", () => {
     copyTestId: "copy-button",
   };
 
+  it("keeps config, stdio, and command successors exact through Strict Mode replay", async () => {
+    vi.useFakeTimers();
+    const families = [
+      {
+        value: "HTTP MCP configuration",
+        label: "MCP configuration",
+        testId: "strict-config-value",
+        copyTestId: "strict-config-copy",
+      },
+      {
+        value: "stdio MCP configuration",
+        label: "stdio MCP configuration",
+        testId: "strict-stdio-value",
+        copyTestId: "strict-stdio-copy",
+      },
+      {
+        value: COPILOT_APP_INSTALL,
+        label: "Copilot app install command",
+        testId: "strict-command-value",
+        copyTestId: "strict-command-copy",
+      },
+    ] satisfies CopyBlockProps[];
+    const attempts = families.map(() => deferred<boolean>());
+    const active = new Map<string, CapturedCopyBlock>();
+    copyText.mockImplementation((value: string) => {
+      const block = active.get(value);
+      if (!block) throw new Error(`No active CopyBlock for ${value}`);
+      block.click(copyBlockEvent(block));
+      block.click(copyBlockEvent(block));
+      return attempts[copyText.mock.calls.length - 1]!.promise;
+    });
+    const view = renderDirect(
+      <StrictMode>
+        <section>
+          {families.map((family) => <CopyBlock key={family.testId} {...family} />)}
+        </section>
+      </StrictMode>,
+    );
+    const blocks = families.map((family) =>
+      captureCopyBlock(view.host, family.testId!, family.copyTestId));
+    families.forEach((family, index) => active.set(family.value, blocks[index]!));
+    const crossed = [
+      copyBlockEvent(blocks[1]!),
+      copyBlockEvent(blocks[2]!),
+      copyBlockEvent(blocks[0]!),
+    ];
+
+    act(() => {
+      blocks[0]!.click(crossed[0]!);
+      blocks[1]!.click(crossed[1]!);
+      blocks[2]!.click(crossed[2]!);
+    });
+    expect(copyText).not.toHaveBeenCalled();
+
+    const accepted = blocks.map((block) => {
+      const icon = block.button.firstElementChild;
+      if (!icon) throw new Error("The Strict Mode CopyBlock button has no icon");
+      return copyBlockEvent(block, block.button, icon, icon);
+    });
+    act(() => {
+      blocks.forEach((block, index) => {
+        block.click(accepted[index]!);
+        block.click(accepted[index]!);
+      });
+    });
+
+    expect(copyText.mock.calls.map(([value]) => value)).toEqual(
+      families.map(({ value }) => value),
+    );
+    for (const event of [...crossed, ...accepted]) expectCopyBlockEventUntouched(event);
+
+    await act(async () => {
+      attempts[0]!.resolve(true);
+      attempts[1]!.reject(new Error("clipboard unavailable"));
+      attempts[2]!.resolve(true);
+      await Promise.allSettled(attempts.map(({ promise }) => promise));
+    });
+
+    expect(within(view.host).getByTestId("strict-config-copy")).toHaveTextContent("Copied");
+    expect(within(view.host).getByTestId("strict-stdio-copy")).toHaveTextContent("Select & press Ctrl+C");
+    expect(within(view.host).getByTestId("strict-command-copy")).toHaveTextContent("Copied");
+    expect(selectContents).toHaveBeenCalledExactlyOnceWith(blocks[1]!.pre);
+    expect(vi.getTimerCount()).toBe(3);
+
+    const current = families.map((family) =>
+      captureCopyBlock(view.host, family.testId!, family.copyTestId));
+    act(() => {
+      blocks.forEach((block, index) => block.click(copyBlockEvent(current[index]!)));
+      current[0]!.click(copyBlockEvent(current[1]!));
+      current[1]!.click(copyBlockEvent(current[2]!));
+      current[2]!.click(copyBlockEvent(current[0]!));
+    });
+    expect(copyText).toHaveBeenCalledTimes(3);
+
+    act(() => vi.advanceTimersByTime(1500));
+    expect(within(view.host).getByTestId("strict-config-copy")).toHaveTextContent("Copy");
+    expect(within(view.host).getByTestId("strict-stdio-copy")).toHaveTextContent("Select & press Ctrl+C");
+    expect(within(view.host).getByTestId("strict-command-copy")).toHaveTextContent("Copy");
+    act(() => vi.advanceTimersByTime(500));
+    expect(within(view.host).getByTestId("strict-stdio-copy")).toHaveTextContent("Copy");
+  });
+
+  it.each(["mutation and restoration", "detach and reinsert", "reorder and restoration"] as const)(
+    "rejects Strict Mode publication %s history and keeps its equal successor independent",
+    (scenario) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      const strictBlock = (key: string) => (
+        <StrictMode>
+          <section key={key}>
+            <CopyBlock {...baseBlock} />
+          </section>
+        </StrictMode>
+      );
+      const view = renderDirect(strictBlock("a"));
+      const stale = captureCopyBlock(view.host, "copy-value", "copy-button");
+      const staleEvent = copyBlockEvent(stale);
+
+      if (scenario === "mutation and restoration") {
+        stale.pre.setAttribute("data-transient", "changed");
+        stale.pre.removeAttribute("data-transient");
+      } else if (scenario === "detach and reinsert") {
+        const parent = stale.wrapper.parentNode;
+        const next = stale.wrapper.nextSibling;
+        if (!parent) throw new Error("The CopyBlock wrapper has no parent");
+        stale.wrapper.remove();
+        parent.insertBefore(stale.wrapper, next);
+      } else {
+        stale.wrapper.insertBefore(stale.button, stale.pre);
+        stale.wrapper.append(stale.button);
+      }
+
+      act(() => stale.click(staleEvent));
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectCopyBlockEventUntouched(staleEvent);
+
+      act(() => view.root.render(strictBlock("b")));
+      const current = captureCopyBlock(view.host, "copy-value", "copy-button");
+      expect(current.wrapper).not.toBe(stale.wrapper);
+      act(() => {
+        stale.wrapperRef(current.wrapper);
+        stale.preRef(current.pre);
+        stale.buttonRef(current.button);
+        stale.wrapperRef(null);
+        stale.preRef(null);
+        stale.buttonRef(null);
+      });
+      fireEvent.click(current.button);
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(baseBlock.value);
+    },
+  );
+
+  it.each(["wrapper", "pre", "button"] as const)(
+    "rejects repeated partial Strict Mode %s ref replay without authorizing it",
+    (role) => {
+      const settlement = deferred<boolean>();
+      copyText.mockReturnValue(settlement.promise);
+      const view = renderDirect(
+        <StrictMode>
+          <CopyBlock {...baseBlock} />
+        </StrictMode>,
+      );
+      const block = captureCopyBlock(view.host, "copy-value", "copy-button");
+      const event = copyBlockEvent(block);
+      const replayRef = (attach: boolean) => {
+        if (role === "wrapper") block.wrapperRef(attach ? block.wrapper : null);
+        else if (role === "pre") block.preRef(attach ? block.pre : null);
+        else block.buttonRef(attach ? block.button : null);
+      };
+
+      act(() => {
+        replayRef(false);
+        replayRef(true);
+        replayRef(false);
+        replayRef(true);
+        block.click(event);
+      });
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expectCopyBlockEventUntouched(event);
+    },
+  );
+
+  it("isolates Strict Mode A/B clipboard settlements and copied-reset timers", async () => {
+    vi.useFakeTimers();
+    const attempts = [deferred<boolean>(), deferred<boolean>(), deferred<boolean>()];
+    copyText.mockImplementation(() => attempts[copyText.mock.calls.length - 1]!.promise);
+    const strictBlock = (value: string) => (
+      <StrictMode>
+        <CopyBlock {...baseBlock} value={value} />
+      </StrictMode>
+    );
+    const view = renderDirect(strictBlock("generation A"));
+    const staleA = captureCopyBlock(view.host, "copy-value", "copy-button");
+    fireEvent.click(staleA.button);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith("generation A");
+
+    act(() => view.root.render(strictBlock("generation B")));
+    const generationB = captureCopyBlock(view.host, "copy-value", "copy-button");
+    const staleWithCurrent = copyBlockEvent(generationB);
+    act(() => staleA.click(staleWithCurrent));
+    expect(copyText).toHaveBeenCalledOnce();
+    expectCopyBlockEventUntouched(staleWithCurrent);
+
+    await act(async () => {
+      attempts[0]!.reject(new Error("late generation A failure"));
+      await Promise.resolve();
+    });
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(generationB.button).toHaveTextContent("Copy");
+
+    fireEvent.click(generationB.button);
+    expect(copyText).toHaveBeenLastCalledWith("generation B");
+    await act(async () => {
+      attempts[1]!.resolve(true);
+      await attempts[1]!.promise;
+    });
+    expect(generationB.button).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => view.root.render(strictBlock("generation A")));
+    const currentA = captureCopyBlock(view.host, "copy-value", "copy-button");
+    expect(currentA.button).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => {
+      generationB.click(copyBlockEvent(currentA));
+      vi.advanceTimersByTime(5000);
+    });
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(currentA.button).toHaveTextContent("Copy");
+
+    fireEvent.click(currentA.button);
+    expect(copyText).toHaveBeenLastCalledWith("generation A");
+    act(() => view.root.render(<StrictMode><div /></StrictMode>));
+    await act(async () => {
+      attempts[2]!.reject(new Error("late unmounted generation A failure"));
+      await Promise.resolve();
+    });
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("preserves the rendered block and claims one exact native click before reentrant producer work", async () => {
     const settlement = deferred<boolean>();
     const currentRef: { value: CapturedCopyBlock | null } = { value: null };
@@ -563,13 +823,20 @@ describe("CopyBlock exact control publications", () => {
     document.body.append(foreign, replacement);
     const observer = observeMutations(view.host);
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const wrongPath = copyBlockEvent(current);
+    Object.defineProperty(wrongPath.nativeEvent, "composedPath", {
+      configurable: true,
+      value: () => [current.button],
+    });
     const events: CopyBlockEvent[] = [
       { ...copyBlockEvent(current), nativeEvent: new Event("click") },
+      copyBlockEvent(current, current.button, current.button, current.button, 1),
       { ...copyBlockEvent(current), type: "pointerdown" },
       copyBlockEvent(current, current.button, icon, current.button),
       copyBlockEvent(current, foreign),
       copyBlockEvent(current, detached),
       copyBlockEvent(current, replacement),
+      wrongPath,
     ];
 
     current.button.disabled = true;
