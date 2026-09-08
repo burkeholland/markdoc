@@ -6300,6 +6300,17 @@ interface FilterDefinition {
   readonly label: string;
 }
 
+interface FilterTrustedAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface FilterActiveElementAuthority {
+  readonly read: (document: Document) => Element | null;
+  readonly isCurrent: () => boolean;
+}
+
 interface FilterRenderPublication {
   readonly identity: symbol;
   readonly mount: symbol;
@@ -6380,6 +6391,7 @@ interface FilterNativeKeyProof {
   readonly composing: boolean;
   readonly destination: Filter;
   readonly destinationButton: HTMLButtonElement;
+  readonly trusted: true;
   readonly propagationStopped: () => boolean;
   crossed: boolean;
 }
@@ -6502,6 +6514,89 @@ const FILTERS = Object.freeze([
 const FILTER_GROUP_CLASS =
   "flex shrink-0 rounded-lg border border-line bg-surface p-0.5 text-xs";
 const FILTER_GROUP_LABEL = "Document filters";
+
+function filterDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return (
+    Boolean(current) &&
+    current?.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.writable === expected.writable &&
+    current.value === expected.value &&
+    current.get === expected.get &&
+    current.set === expected.set
+  );
+}
+
+function captureFilterTrustedAuthority(
+  view: Window & typeof globalThis,
+): FilterTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new view.KeyboardEvent("dashboard-filter-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const apply = view.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    filterDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      view.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureFilterActiveElementAuthority(
+  view: Window & typeof globalThis,
+): FilterActiveElementAuthority | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = view.Document.prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, "activeElement");
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        read: (document: Document) =>
+          apply(descriptor.get as (this: Document) => Element | null, document, []),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, "activeElement"),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
 
 function filterButtonClass(selected: boolean) {
   return cn(
@@ -6782,6 +6877,9 @@ function createFilterPublication(
     ) {
       return null;
     }
+    const trustedAuthority = captureFilterTrustedAuthority(ownerWindow);
+    const activeElementAuthority =
+      captureFilterActiveElementAuthority(ownerWindow);
     const eventCurrentTarget = capturePrototypeGetter<EventTarget | null>(
       ownerWindow.Event.prototype,
       "currentTarget",
@@ -6887,6 +6985,8 @@ function createFilterPublication(
     >(ownerWindow.HTMLElement.prototype, "focus");
     if (
       !eventCurrentTarget ||
+      !trustedAuthority ||
+      !activeElementAuthority ||
       !eventDefaultPrevented ||
       !eventTarget ||
       !eventType ||
@@ -6913,6 +7013,15 @@ function createFilterPublication(
     ) {
       return null;
     }
+    let keyboardAuthorityHistoryIsClean = true;
+    const keyboardAuthorityIsCurrent = () => {
+      if (!keyboardAuthorityHistoryIsClean) return false;
+      keyboardAuthorityHistoryIsClean =
+        ownerDocument.defaultView === ownerWindow &&
+        trustedAuthority.isCurrent() &&
+        activeElementAuthority.isCurrent();
+      return keyboardAuthorityHistoryIsClean;
+    };
 
     const placement = searchControlPlacement(group);
     if (!placement) return null;
@@ -7057,6 +7166,11 @@ function createFilterPublication(
     };
 
     const entryForEvent = (event: Event) => {
+      if (!keyboardAuthorityIsCurrent()) {
+        publication.retire();
+        requestSuccessor();
+        return null;
+      }
       if (
         eventType(event) !== "keydown" ||
         !TRUSTED_IS_PROTOTYPE_OF(
@@ -7072,6 +7186,9 @@ function createFilterPublication(
       );
     };
     const nativeStillMatches = (proof: FilterNativeKeyProof) =>
+      keyboardAuthorityIsCurrent() &&
+      trustedAuthority.matches(proof.event) &&
+      trustedAuthority.read(proof.event) === proof.trusted &&
       eventTarget(proof.event) === proof.target &&
       eventType(proof.event) === "keydown" &&
       eventBubbles(proof.event) &&
@@ -7090,13 +7207,16 @@ function createFilterPublication(
     ): FilterNativeKeyProof | null => {
       if (
         !publicationOwnsCurrentDom() ||
+        !keyboardAuthorityIsCurrent() ||
+        !trustedAuthority.matches(event) ||
+        trustedAuthority.read(event) !== true ||
         eventCurrentTarget(event) !== ownerDocument ||
         eventPhase(event) !== ownerWindow.Event.CAPTURING_PHASE ||
         !eventBubbles(event) ||
         !eventCancelable(event) ||
         eventDefaultPrevented(event) ||
         eventCancelBubble(event) ||
-        ownerDocument.activeElement !== entry.element ||
+        activeElementAuthority.read(ownerDocument) !== entry.element ||
         entry.publicationIdentity !== identity ||
         entry.action.publicationIdentity !== identity ||
         entry.action.entryIdentity !== entry.identity ||
@@ -7174,6 +7294,7 @@ function createFilterPublication(
         composing: false,
         destination: destination.definition.value,
         destinationButton: destination.element,
+        trusted: true,
         propagationStopped: () => propagationStopped,
         crossed: false,
       };
@@ -7217,6 +7338,7 @@ function createFilterPublication(
         searchControlOwnValue(event, "bubbles") === true &&
         searchControlOwnValue(event, "cancelable") === true &&
         searchControlOwnValue(event, "defaultPrevented") === false &&
+        searchControlOwnValue(event, "isTrusted") === proof.trusted &&
         searchControlOwnValue(event, "key") === proof.key &&
         searchControlOwnValue(event, "ctrlKey") === false &&
         searchControlOwnValue(event, "metaKey") === false &&
@@ -7320,7 +7442,7 @@ function createFilterPublication(
         !reactBubbleProof ||
         !nativeStillMatches(proof) ||
         !publicationOwnsCurrentDom() ||
-        ownerDocument.activeElement !== proof.target
+        activeElementAuthority.read(ownerDocument) !== proof.target
       ) {
         return null;
       }
@@ -7345,7 +7467,7 @@ function createFilterPublication(
         eventCancelBubble(native.event) ||
         native.propagationStopped() ||
         native.crossed ||
-        ownerDocument.activeElement !== native.target ||
+        activeElementAuthority.read(ownerDocument) !== native.target ||
         render.currentFilter() !== render.filter ||
         !nativeStillMatches(native) ||
         !publicationOwnsCurrentDom() ||
@@ -7435,7 +7557,8 @@ function createFilterPublication(
           (eventPhase(event) === ownerWindow.Event.CAPTURING_PHASE ||
             eventPhase(event) === ownerWindow.Event.AT_TARGET) &&
           publicationOwnsCurrentDom() &&
-          ownerDocument.activeElement === entry.element
+          keyboardAuthorityIsCurrent() &&
+          activeElementAuthority.read(ownerDocument) === entry.element
         ) {
           boundaryProof = nativeProof;
         }

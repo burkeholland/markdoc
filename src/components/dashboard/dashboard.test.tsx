@@ -556,6 +556,35 @@ function filterRefBindings(host: ParentNode) {
   }));
 }
 
+function markFilterEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
 async function dispatchFilterKey(
   button: HTMLButtonElement,
   key: string,
@@ -569,6 +598,7 @@ async function dispatchFilterKey(
     cancelable: true,
     ...init,
   });
+  markFilterEventTrusted(event);
   await act(async () => {
     button.dispatchEvent(event);
     await Promise.resolve();
@@ -7193,6 +7223,154 @@ describe("dashboard filter keyboard navigation", () => {
     }
   });
 
+  it("rejects a directly dispatched untrusted owner-realm key before accepting a trusted successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      focus.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        all.dispatchEvent(untrusted);
+        await Promise.resolve();
+      });
+
+      expect(untrusted.isTrusted).toBe(false);
+      expect(untrusted.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const trusted = await dispatchFilterKey(all, "ArrowRight");
+      expect(trusted.isTrusted).toBe(true);
+      expect(trusted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects replaced active-element authority and React trust wrappers before clean successors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const activeElementDescriptor = Object.getOwnPropertyDescriptor(
+        Document.prototype,
+        "activeElement",
+      );
+      if (!activeElementDescriptor?.get) {
+        throw new Error("Document.activeElement getter was unavailable");
+      }
+      const replacedGetter = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(replacedGetter);
+      all.focus();
+      focus.mockClear();
+      await act(async () => {
+        Object.defineProperty(Document.prototype, "activeElement", {
+          ...activeElementDescriptor,
+          get: () => all,
+        });
+        try {
+          all.dispatchEvent(replacedGetter);
+        } finally {
+          Object.defineProperty(
+            Document.prototype,
+            "activeElement",
+            activeElementDescriptor,
+          );
+        }
+        await Promise.resolve();
+      });
+      expect(replacedGetter.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = directFilterButton(host, "all");
+      const restore = interceptReactHandler(
+        successor,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") return;
+          const descriptors = Object.getOwnPropertyDescriptors(event);
+          descriptors.isTrusted = {
+            configurable: true,
+            enumerable: true,
+            value: false,
+            writable: true,
+          };
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              descriptors,
+            ) as object,
+          );
+        },
+      );
+      successor.focus();
+      focus.mockClear();
+      const replacedWrapper = await dispatchFilterKey(
+        successor,
+        "ArrowRight",
+      );
+      restore();
+      expect(replacedWrapper.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const current = directFilterButton(host, "all");
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchFilterKey(current, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("rejects modified, repeated, composing, canceled, non-bubbling, non-cancelable, and wrong-focus keys with zero work", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
@@ -7240,6 +7418,7 @@ describe("dashboard filter keyboard navigation", () => {
         bubbles: true,
         cancelable: true,
       });
+      markFilterEventTrusted(canceled);
       canceled.preventDefault();
       await act(async () => {
         all.dispatchEvent(canceled);
@@ -7255,6 +7434,7 @@ describe("dashboard filter keyboard navigation", () => {
         bubbles: true,
         cancelable: true,
       });
+      markFilterEventTrusted(canceledDuringDelivery);
       all.addEventListener(
         "keydown",
         (event) => event.preventDefault(),
@@ -7340,6 +7520,7 @@ describe("dashboard filter keyboard navigation", () => {
         bubbles: true,
         cancelable: true,
       });
+      markFilterEventTrusted(foreign);
       await act(async () => {
         all.dispatchEvent(foreign);
         await Promise.resolve();
@@ -7352,6 +7533,7 @@ describe("dashboard filter keyboard navigation", () => {
         bubbles: true,
         cancelable: true,
       });
+      markFilterEventTrusted(first);
       await act(async () => {
         all.dispatchEvent(first);
         await Promise.resolve();
@@ -7380,6 +7562,8 @@ describe("dashboard filter keyboard navigation", () => {
         bubbles: true,
         cancelable: true,
       });
+      markFilterEventTrusted(outer);
+      markFilterEventTrusted(inner);
       let reentered = false;
       crossedSource.addEventListener(
         "keydown",
