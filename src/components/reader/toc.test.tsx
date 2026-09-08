@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  StrictMode,
   useLayoutEffect,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -119,29 +120,68 @@ function reactHandler<T>(element: Element, name: string): T {
   return handler as T;
 }
 
-function clickEvent<T extends HTMLElement>(currentTarget: T) {
-  const preventDefault = vi.fn();
-  const event = {
-    type: "click",
-    currentTarget,
-    target: currentTarget,
-    nativeEvent: new window.MouseEvent("click", { bubbles: true, cancelable: true }),
+function clickEvent<T extends HTMLElement>(
+  currentTarget: T,
+  target: Element = currentTarget,
+  options: { button?: number; nativeEvent?: MouseEvent } = {},
+) {
+  const nativeEvent = options.nativeEvent ?? new window.MouseEvent("click", {
+    bubbles: true,
+    button: options.button ?? 0,
+    cancelable: true,
+  });
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    nativeEvent,
     preventDefault,
-  } as unknown as ReactMouseEvent<T>;
-  return { event, preventDefault };
+    dispatch: (...handlers: ClickHandler<T>[]) => {
+      target.addEventListener("click", (dispatched) => {
+        dispatched.stopPropagation();
+        const event = {
+          type: "click",
+          currentTarget,
+          target: dispatched.target,
+          nativeEvent: dispatched,
+          preventDefault,
+        } as unknown as ReactMouseEvent<T>;
+        handlers.forEach((handler) => handler(event));
+      }, { capture: true, once: true });
+      target.dispatchEvent(nativeEvent);
+    },
+  };
 }
 
-function escapeEvent(currentTarget: HTMLElement, target: EventTarget) {
-  const preventDefault = vi.fn();
-  const event = {
-    type: "keydown",
+function escapeEvent(
+  currentTarget: HTMLElement,
+  target: Element,
+  options: { nativeEvent?: KeyboardEvent; repeat?: boolean } = {},
+) {
+  const nativeEvent = options.nativeEvent ?? new window.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
     key: "Escape",
-    currentTarget,
-    target,
-    nativeEvent: new window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }),
+    repeat: options.repeat,
+  });
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    nativeEvent,
     preventDefault,
-  } as unknown as ReactKeyboardEvent<HTMLElement>;
-  return { event, preventDefault };
+    dispatch: (...handlers: KeyHandler[]) => {
+      target.addEventListener("keydown", (dispatched) => {
+        dispatched.stopPropagation();
+        const event = {
+          type: "keydown",
+          key: "Escape",
+          currentTarget,
+          target: dispatched.target,
+          nativeEvent: dispatched,
+          preventDefault,
+        } as unknown as ReactKeyboardEvent<HTMLElement>;
+        handlers.forEach((handler) => handler(event));
+      }, { capture: true, once: true });
+      target.dispatchEvent(nativeEvent);
+    },
+  };
 }
 
 function directControls(host: HTMLElement) {
@@ -183,6 +223,39 @@ function DirectReaderBoundary({
       <ReaderToc key={domKey} headings={currentHeadings} />
     </>
   );
+}
+
+type CapturedControls = ReturnType<typeof directControls> & {
+  toggleHandler: ClickHandler<HTMLButtonElement>;
+  linkHandler: ClickHandler<HTMLAnchorElement>;
+  escapeHandler: KeyHandler;
+  refs: RefCallback<Element>[];
+};
+
+function StrictReaderBoundary({
+  currentHeadings,
+  onLayout,
+}: {
+  currentHeadings: TestHeading[];
+  onLayout: (capture: CapturedControls) => void;
+}) {
+  useLayoutEffect(() => {
+    const controls = directControls(document.body);
+    onLayout({
+      ...controls,
+      toggleHandler: reactHandler<ClickHandler<HTMLButtonElement>>(controls.toggle, "onClick"),
+      linkHandler: reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick"),
+      escapeHandler: reactHandler<KeyHandler>(controls.nav, "onKeyDown"),
+      refs: [
+        reactHandler<RefCallback<Element>>(controls.nav, "ref"),
+        reactHandler<RefCallback<Element>>(controls.toggle, "ref"),
+        reactHandler<RefCallback<Element>>(controls.list, "ref"),
+        ...controls.links.map((link) => reactHandler<RefCallback<Element>>(link, "ref")),
+      ],
+    });
+  }, [onLayout]);
+
+  return <DirectReaderBoundary currentHeadings={currentHeadings} />;
 }
 
 beforeEach(() => {
@@ -433,7 +506,7 @@ describe("ReaderToc exact DOM publications", () => {
       observers: InstrumentedIntersectionObserver.instances.length,
       disconnects: InstrumentedIntersectionObserver.instances.map((observer) => observer.disconnect.mock.calls.length),
     };
-    act(() => select(probe.event));
+    act(() => probe.dispatch(select));
 
     expect(probe.preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
@@ -445,11 +518,26 @@ describe("ReaderToc exact DOM publications", () => {
     }).toEqual(before);
 
     restore();
-    const current = clickEvent(first);
-    act(() => select(current.event));
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(list).toHaveClass("hidden");
-    expect(current.preventDefault).not.toHaveBeenCalled();
+    if (sourceKind === "detached" || sourceKind === "replacement" || sourceKind === "wrong-order") {
+      const retired = clickEvent(first);
+      act(() => retired.dispatch(select));
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+      act(() => view.root.render(<DirectReaderBoundary currentHeadings={documentA} boundary={1} />));
+      const current = directControls(view.host);
+      const currentHandler = reactHandler<ClickHandler<HTMLAnchorElement>>(current.links[0], "onClick");
+      const currentEvent = clickEvent(current.links[0]);
+      act(() => currentEvent.dispatch(currentHandler));
+      expect(current.toggle).toHaveAttribute("aria-expanded", "false");
+      expect(current.list).toHaveClass("hidden");
+      expect(currentEvent.preventDefault).not.toHaveBeenCalled();
+    } else {
+      const current = clickEvent(first);
+      act(() => current.dispatch(select));
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(list).toHaveClass("hidden");
+      expect(current.preventDefault).not.toHaveBeenCalled();
+    }
   });
 
   it.each(["A-before-B", "B-before-A"] as const)(
@@ -470,14 +558,14 @@ describe("ReaderToc exact DOM publications", () => {
       const escapeAOnB = escapeEvent(b.nav, b.links[0]);
       const escapeBOnA = escapeEvent(a.nav, a.links[0]);
       const aOnB = () => {
-        aToggle(clickEvent(b.toggle).event);
-        aLink(clickEvent(b.links[0]).event);
-        aEscape(escapeAOnB.event);
+        clickEvent(b.toggle).dispatch(aToggle);
+        clickEvent(b.links[0]).dispatch(aLink);
+        escapeAOnB.dispatch(aEscape);
       };
       const bOnA = () => {
-        bToggle(clickEvent(a.toggle).event);
-        bLink(clickEvent(a.links[0]).event);
-        bEscape(escapeBOnA.event);
+        clickEvent(a.toggle).dispatch(bToggle);
+        clickEvent(a.links[0]).dispatch(bLink);
+        escapeBOnA.dispatch(bEscape);
       };
 
       document.body.append(a.nav);
@@ -497,10 +585,10 @@ describe("ReaderToc exact DOM publications", () => {
         expect(escapeBOnA.preventDefault).not.toHaveBeenCalled();
         expect(focus).not.toHaveBeenCalled();
 
-        act(() => bToggle(clickEvent(b.toggle).event));
+        act(() => clickEvent(b.toggle).dispatch(bToggle));
         expect(b.toggle).toHaveAttribute("aria-expanded", "true");
         const currentLink = reactHandler<ClickHandler<HTMLAnchorElement>>(b.links[0], "onClick");
-        act(() => currentLink(clickEvent(b.links[0]).event));
+        act(() => clickEvent(b.links[0]).dispatch(currentLink));
         expect(b.toggle).toHaveAttribute("aria-expanded", "false");
 
         fireEvent.click(b.toggle);
@@ -508,7 +596,7 @@ describe("ReaderToc exact DOM publications", () => {
         focus.mockClear();
         const currentEscape = reactHandler<KeyHandler>(b.nav, "onKeyDown");
         const currentEvent = escapeEvent(b.nav, b.links[0]);
-        act(() => currentEscape(currentEvent.event));
+        act(() => currentEvent.dispatch(currentEscape));
         expect(currentEvent.preventDefault).toHaveBeenCalledOnce();
         expect(b.toggle).toHaveFocus();
       } finally {
@@ -543,14 +631,14 @@ describe("ReaderToc exact DOM publications", () => {
       const bToggle = reactHandler<ClickHandler<HTMLButtonElement>>(b.toggle, "onClick");
       const staleEscape = escapeEvent(b.nav, b.links[0]);
       const staleWork = () => {
-        aToggle(clickEvent(b.toggle).event);
-        aLink(clickEvent(b.links[0]).event);
-        aEscape(staleEscape.event);
+        clickEvent(b.toggle).dispatch(aToggle);
+        clickEvent(b.links[0]).dispatch(aLink);
+        staleEscape.dispatch(aEscape);
       };
 
       act(() => {
         if (order === "retired-first") staleWork();
-        else bToggle(clickEvent(b.toggle).event);
+        else clickEvent(b.toggle).dispatch(bToggle);
       });
       if (order === "retired-first") expect(b.toggle).toHaveAttribute("aria-expanded", "false");
       else expect(b.toggle).toHaveAttribute("aria-expanded", "true");
@@ -558,13 +646,13 @@ describe("ReaderToc exact DOM publications", () => {
 
       act(() => retiredRefs.forEach((ref) => ref(null)));
       if (order === "retired-first") {
-        act(() => bToggle(clickEvent(b.toggle).event));
+        act(() => clickEvent(b.toggle).dispatch(bToggle));
         expect(b.toggle).toHaveAttribute("aria-expanded", "true");
       } else {
         act(staleWork);
         expect(b.toggle).toHaveAttribute("aria-expanded", "true");
         const currentToggle = reactHandler<ClickHandler<HTMLButtonElement>>(b.toggle, "onClick");
-        act(() => currentToggle(clickEvent(b.toggle).event));
+        act(() => clickEvent(b.toggle).dispatch(currentToggle));
         expect(b.toggle).toHaveAttribute("aria-expanded", "false");
       }
     },
@@ -597,8 +685,8 @@ describe("ReaderToc exact DOM publications", () => {
 
     const before = view.host.innerHTML;
     act(() => {
-      staleToggle(clickEvent(b.toggle).event);
-      staleLink(clickEvent(b.links[0]).event);
+      clickEvent(b.toggle).dispatch(staleToggle);
+      clickEvent(b.links[0]).dispatch(staleLink);
       staleObserver();
     });
     expect(view.host.innerHTML).toBe(before);
@@ -617,18 +705,16 @@ describe("ReaderToc exact DOM publications", () => {
     const toggleA = reactHandler<ClickHandler<HTMLButtonElement>>(controls.toggle, "onClick");
     const toggleEvent = clickEvent(controls.toggle);
     act(() => {
-      toggleA(toggleEvent.event);
-      toggleA(toggleEvent.event);
+      toggleEvent.dispatch(toggleA, toggleA);
     });
     expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
-    act(() => toggleA(toggleEvent.event));
+    act(() => toggleEvent.dispatch(toggleA));
     expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
 
     const linkA = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
     const linkEvent = clickEvent(controls.links[0]);
     act(() => {
-      linkA(linkEvent.event);
-      linkA(linkEvent.event);
+      linkEvent.dispatch(linkA, linkA);
     });
     expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
     expect(linkEvent.preventDefault).not.toHaveBeenCalled();
@@ -641,8 +727,8 @@ describe("ReaderToc exact DOM publications", () => {
     const firstEscape = escapeEvent(controls.nav, controls.links[0]);
     const competingEscape = escapeEvent(controls.nav, controls.links[0]);
     act(() => {
-      escape(firstEscape.event);
-      escape(competingEscape.event);
+      firstEscape.dispatch(escape);
+      competingEscape.dispatch(escape);
     });
     expect(firstEscape.preventDefault).toHaveBeenCalledOnce();
     expect(competingEscape.preventDefault).not.toHaveBeenCalled();
@@ -667,14 +753,14 @@ describe("ReaderToc exact DOM publications", () => {
     if (!icon) throw new Error("The Contents icon was not rendered");
     const descendantEscape = escapeEvent(controls.nav, icon);
 
-    act(() => escape(descendantEscape.event));
+    act(() => descendantEscape.dispatch(escape));
     expect(descendantEscape.preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
     expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
     expect(controls.links[0]).toHaveFocus();
 
     const currentEscape = escapeEvent(controls.nav, controls.links[0]);
-    act(() => escape(currentEscape.event));
+    act(() => currentEscape.dispatch(escape));
     expect(currentEscape.preventDefault).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
     expect(controls.toggle).toHaveFocus();
@@ -707,9 +793,9 @@ describe("ReaderToc exact DOM publications", () => {
               const current = kind === "replacement" ? directControls(view.host) : a;
               const escapeProbe = escapeEvent(current.nav, current.links[0]);
               preventions.push(escapeProbe);
-              staleToggle(clickEvent(current.toggle).event);
-              staleLink(clickEvent(current.links[0]).event);
-              staleEscape(escapeProbe.event);
+              clickEvent(current.toggle).dispatch(staleToggle);
+              clickEvent(current.links[0]).dispatch(staleLink);
+              escapeProbe.dispatch(staleEscape);
               staleObserver();
             }}
           />,
@@ -734,3 +820,235 @@ describe("ReaderToc exact DOM publications", () => {
     },
   );
 });
+
+      describe("ReaderToc direct-root StrictMode replay", () => {
+        it("keeps toggle, link, Escape, and active-heading authority on the exact replay successor", () => {
+          const captures: CapturedControls[] = [];
+          let firstEvent: ReturnType<typeof clickEvent<HTMLAnchorElement>> | null = null;
+          const oldShared = document.createElement("div");
+          const onLayout = (capture: CapturedControls) => {
+            captures.push(capture);
+            if (captures.length !== 1) return;
+            firstEvent = clickEvent(capture.links[0]);
+            firstEvent.dispatch(capture.linkHandler);
+          };
+          const view = directRoot(
+            <StrictMode>
+              <StrictReaderBoundary currentHeadings={documentA} onLayout={onLayout} />
+            </StrictMode>,
+          );
+          const controls = directControls(view.host);
+          const firstObserver = InstrumentedIntersectionObserver.instances[0];
+          const currentObserver = InstrumentedIntersectionObserver.instances.at(-1);
+          const currentShared = document.getElementById("shared");
+          expect(captures).toHaveLength(2);
+          expect(captures[0].nav).toBe(captures[1].nav);
+          expect(firstEvent).not.toBeNull();
+          expect(firstEvent!.preventDefault).not.toHaveBeenCalled();
+          expect(firstObserver.disconnect).toHaveBeenCalledOnce();
+          expect(currentObserver).toBeDefined();
+          expect(currentObserver).not.toBe(firstObserver);
+          expect(currentObserver!.disconnect).not.toHaveBeenCalled();
+          expect(currentShared).not.toBeNull();
+
+          oldShared.id = "shared";
+          const lateFirstUpdate = firstObserver.capture([{ target: oldShared, isIntersecting: true }]);
+          currentObserver!.publish([{ target: currentShared!, isIntersecting: true }]);
+          expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+          expect(controls.links[1]).toHaveClass("bg-accent-soft", "font-medium", "text-accent");
+          act(lateFirstUpdate);
+          expect(controls.links[1]).toHaveAttribute("aria-current", "location");
+
+          act(() => firstEvent!.dispatch(captures[0].linkHandler));
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+          fireEvent.click(controls.toggle);
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+          const currentLink = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+          const currentLinkEvent = clickEvent(controls.links[0]);
+          act(() => currentLinkEvent.dispatch(currentLink));
+          expect(currentLinkEvent.preventDefault).not.toHaveBeenCalled();
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+          fireEvent.click(controls.toggle);
+          controls.links[0].focus();
+          fireEvent.keyDown(controls.links[0], { key: "Escape" });
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+          expect(controls.toggle).toHaveFocus();
+          expect(currentObserver!.disconnect).not.toHaveBeenCalled();
+        });
+
+        it("rejects strict stale/current crosses, partial late refs, forged events, and repeated keys", () => {
+          const captures: CapturedControls[] = [];
+          const onLayout = (capture: CapturedControls) => captures.push(capture);
+          const view = directRoot(
+            <StrictMode>
+              <StrictReaderBoundary currentHeadings={documentA} onLayout={onLayout} />
+            </StrictMode>,
+          );
+          expect(captures).toHaveLength(2);
+          const stale = captures[0];
+          let controls = directControls(view.host);
+          const forgedPreventDefault = vi.fn();
+          const forgedNative = {
+            type: "click",
+            button: 0,
+            bubbles: true,
+            cancelable: true,
+            target: controls.toggle,
+            view: window,
+            composedPath: () => [controls.toggle, controls.nav, document, window],
+            constructor: { name: "MouseEvent" },
+          };
+          const forgedReact = {
+            type: "click",
+            currentTarget: controls.toggle,
+            target: controls.toggle,
+            nativeEvent: forgedNative,
+            preventDefault: forgedPreventDefault,
+          } as unknown as ReactMouseEvent<HTMLButtonElement>;
+          act(() => stale.toggleHandler(forgedReact));
+          expect(forgedPreventDefault).not.toHaveBeenCalled();
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+          const crossedTarget = clickEvent(controls.toggle, controls.links[0]);
+          act(() => crossedTarget.dispatch(stale.toggleHandler));
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+          const secondary = clickEvent(controls.toggle, controls.toggle, { button: 1 });
+          act(() => secondary.dispatch(stale.toggleHandler));
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+          act(() => {
+            stale.refs[0](controls.nav);
+            stale.refs[1](controls.toggle);
+            stale.refs[0](null);
+            stale.refs[1](null);
+          });
+          fireEvent.click(controls.toggle);
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+          controls = directControls(view.host);
+          controls.links[0].focus();
+          const escape = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+          const repeated = escapeEvent(controls.nav, controls.links[0], { repeat: true });
+          act(() => repeated.dispatch(escape));
+          expect(repeated.preventDefault).not.toHaveBeenCalled();
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+          expect(controls.links[0]).toHaveFocus();
+
+          const current = escapeEvent(controls.nav, controls.links[0]);
+          act(() => current.dispatch(escape, escape));
+          expect(current.preventDefault).toHaveBeenCalledOnce();
+          expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+          expect(controls.toggle).toHaveFocus();
+        });
+
+        it.each(["attribute-restore", "detach-reinsert", "reorder-restore"] as const)(
+          "permanently retires a %s publication but accepts an exact later replay",
+          (kind) => {
+            const onLayout = () => {};
+            const view = directRoot(
+              <StrictMode>
+                <StrictReaderBoundary currentHeadings={documentA} onLayout={onLayout} />
+              </StrictMode>,
+            );
+            let controls = directControls(view.host);
+            fireEvent.click(controls.toggle);
+            const handler = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+            const firstItem = controls.links[0].parentElement as HTMLLIElement;
+            const secondItem = controls.links[1].parentElement as HTMLLIElement;
+            if (kind === "attribute-restore") {
+              controls.links[0].setAttribute("href", "#tampered");
+              controls.links[0].setAttribute("href", "#alpha");
+            } else if (kind === "detach-reinsert") {
+              firstItem.remove();
+              controls.list.insertBefore(firstItem, secondItem);
+            } else {
+              controls.list.insertBefore(secondItem, firstItem);
+              controls.list.insertBefore(firstItem, secondItem);
+            }
+
+            const retiredEvent = clickEvent(controls.links[0]);
+            act(() => retiredEvent.dispatch(handler));
+            expect(retiredEvent.preventDefault).not.toHaveBeenCalled();
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+            act(() => view.root.render(
+              <StrictMode>
+                <StrictReaderBoundary currentHeadings={documentA} onLayout={onLayout} />
+              </StrictMode>,
+            ));
+            controls = directControls(view.host);
+            const successor = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+            const successorEvent = clickEvent(controls.links[0]);
+            act(() => successorEvent.dispatch(successor));
+            expect(successorEvent.preventDefault).not.toHaveBeenCalled();
+            expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+          },
+        );
+
+        it("retires heading observation across detach/restore history and republishes on a new visit", () => {
+          const onLayout = () => {};
+          const view = directRoot(
+            <StrictMode>
+              <StrictReaderBoundary currentHeadings={documentA} onLayout={onLayout} />
+            </StrictMode>,
+          );
+          const controls = directControls(view.host);
+          const observer = InstrumentedIntersectionObserver.instances.at(-1)!;
+          const alpha = document.getElementById("alpha")!;
+          const shared = document.getElementById("shared")!;
+          const parent = shared.parentElement!;
+          shared.remove();
+          parent.append(shared);
+
+          observer.publish([{ target: shared, isIntersecting: true }]);
+          expect(observer.disconnect).toHaveBeenCalledOnce();
+          expect(controls.links[0]).toHaveAttribute("aria-current", "location");
+          expect(controls.links[1]).not.toHaveAttribute("aria-current");
+
+          const nextVisit = documentA.map((heading) => ({ ...heading }));
+          act(() => view.root.render(
+            <StrictMode>
+              <StrictReaderBoundary currentHeadings={nextVisit} onLayout={onLayout} />
+            </StrictMode>,
+          ));
+          const successor = InstrumentedIntersectionObserver.instances.at(-1)!;
+          expect(successor).not.toBe(observer);
+          expect([...successor.observed]).toEqual([alpha, shared]);
+          successor.publish([{ target: shared, isIntersecting: true }]);
+          expect(directControls(view.host).links[1]).toHaveAttribute("aria-current", "location");
+        });
+
+        it("prevents only unsafe retired-anchor navigation and leaves the current publication usable", () => {
+          const view = directRoot(<DirectReaderBoundary currentHeadings={documentA} domKey="a" />);
+          const a = directControls(view.host);
+          const staleLink = reactHandler<ClickHandler<HTMLAnchorElement>>(a.links[0], "onClick");
+          act(() => view.root.render(<DirectReaderBoundary currentHeadings={documentB} domKey="b" />));
+          const b = directControls(view.host);
+          document.body.append(a.nav);
+          try {
+            const unsafe = clickEvent(a.links[0]);
+            act(() => unsafe.dispatch(staleLink));
+            expect(unsafe.preventDefault).toHaveBeenCalledOnce();
+            expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+
+            fireEvent.click(b.toggle);
+            expect(b.toggle).toHaveAttribute("aria-expanded", "true");
+            const currentLink = reactHandler<ClickHandler<HTMLAnchorElement>>(b.links[0], "onClick");
+            const current = clickEvent(b.links[0]);
+            act(() => current.dispatch(currentLink));
+            expect(current.preventDefault).not.toHaveBeenCalled();
+            expect(b.toggle).toHaveAttribute("aria-expanded", "false");
+
+            const tamperedHandler = reactHandler<ClickHandler<HTMLAnchorElement>>(b.links[0], "onClick");
+            b.links[0].setAttribute("target", "_blank");
+            const tampered = clickEvent(b.links[0]);
+            act(() => tampered.dispatch(tamperedHandler));
+            expect(tampered.preventDefault).toHaveBeenCalledOnce();
+          } finally {
+            a.nav.remove();
+          }
+        });
+      });
