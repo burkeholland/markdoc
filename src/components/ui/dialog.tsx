@@ -116,6 +116,16 @@ interface DomSnapshot {
   readonly children: readonly DomSnapshot[];
 }
 
+type FocusGuardRole = "leading" | "trailing";
+type FocusGuardPair = readonly [HTMLElement, HTMLElement];
+
+interface FocusGuardBinding {
+  readonly role: FocusGuardRole;
+  readonly marker: string;
+  readonly tabIndex: string;
+  readonly style: string;
+}
+
 interface DialogPublication {
   readonly identity: symbol;
   readonly authority: DialogAuthority;
@@ -331,7 +341,32 @@ function isFocusGuard(node: Node): node is HTMLElement {
     && (node as Element).tagName === "SPAN"
     && (node as Element).getAttribute("data-radix-focus-guard") === ""
     && (node as Element).getAttribute("tabindex") === "0"
+    && (node as HTMLElement).style.outline === "none"
+    && (node as HTMLElement).style.opacity === "0"
+    && (node as HTMLElement).style.position === "fixed"
+    && (node as HTMLElement).style.pointerEvents === "none"
   );
+}
+
+function exactFocusGuards(ownerDocument: Document): FocusGuardPair | null {
+  const guards = [...ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
+  return (
+    guards.length === 2
+    && guards.every(isFocusGuard)
+  )
+    ? [guards[0], guards[1]]
+    : null;
+}
+
+function edgeFocusGuards(ownerDocument: Document): FocusGuardPair | null {
+  const guards = exactFocusGuards(ownerDocument);
+  return (
+    guards
+    && guards[0] === ownerDocument.body.firstElementChild
+    && guards[1] === ownerDocument.body.lastElementChild
+  )
+    ? guards
+    : null;
 }
 
 function styleParts(ownerDocument: Document, value: string | null) {
@@ -354,20 +389,41 @@ class MutationJournal {
   readonly #initialBodyPointerEvents: string;
   readonly #observer: MutationObserver;
   readonly #onInvalid: () => void;
+  readonly #onFocusGuards: (
+    previous: FocusGuardPair | null,
+    current: FocusGuardPair,
+    replacement: boolean,
+  ) => boolean;
+  readonly #onFocusGuardViolation: () => void;
+  readonly #expectedFocusGuards: FocusGuardPair | null;
   readonly #records: MutationRecord[] = [];
   readonly #attributeValues = new WeakMap<Element, Map<string, string | null>>();
-  readonly #focusGuards = new Map<Node, "leading" | "trailing">();
-  readonly #expectedReplayGuardTeardown = new Set<Node>();
+  readonly #focusGuards = new Map<Node, FocusGuardBinding>();
+  readonly #expectedReplayGuardTeardown = new Set<MutationRecord>();
   readonly #nestedRoots = new Set<Node>();
   #processed = 0;
   #replayPreparation: object | null = null;
   #validatingReplayTeardown = false;
+  #focusGuardsInitialized = false;
+  #acceptingReplayGuardReplacement = false;
+  #initialReplayGuardLifecycle: object | null = null;
+  #registeredFocusGuards: FocusGuardPair | null = null;
   #closing = false;
   #replaying = false;
   #invalid = false;
   #released = false;
 
-  constructor(elements: DialogElements, onInvalid: () => void) {
+  constructor(
+    elements: DialogElements,
+    expectedFocusGuards: FocusGuardPair | null,
+    onFocusGuards: (
+      previous: FocusGuardPair | null,
+      current: FocusGuardPair,
+      replacement: boolean,
+    ) => boolean,
+    onFocusGuardViolation: () => void,
+    onInvalid: () => void,
+  ) {
     this.#ownerDocument = elements.content.ownerDocument;
     this.#overlay = elements.overlay;
     this.#content = elements.content;
@@ -375,15 +431,38 @@ class MutationJournal {
     this.#title = elements.title;
     this.#description = elements.description;
     this.#onInvalid = onInvalid;
+    this.#onFocusGuards = onFocusGuards;
+    this.#onFocusGuardViolation = onFocusGuardViolation;
+    this.#expectedFocusGuards = expectedFocusGuards;
     this.#initialBodyPointerEvents = this.#ownerDocument.body.style.pointerEvents;
-    const leadingGuard = this.#ownerDocument.body.firstElementChild;
-    const trailingGuard = this.#ownerDocument.body.lastElementChild;
-    this.#ownerDocument
-      .querySelectorAll("[data-radix-focus-guard]")
-      .forEach((guard) => {
-        if (guard === leadingGuard) this.#focusGuards.set(guard, "leading");
-        else if (guard === trailingGuard) this.#focusGuards.set(guard, "trailing");
-      });
+    const guardNodes = [...this.#ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
+    const guards = edgeFocusGuards(this.#ownerDocument);
+    if (
+      guardNodes.length === 2
+      && guardNodes.every(isFocusGuard)
+      && (expectedFocusGuards === null
+        || (guardNodes[0] === expectedFocusGuards[0]
+          && guardNodes[1] === expectedFocusGuards[1]))
+    ) {
+      this.#focusGuards.set(
+        guardNodes[0],
+        this.#guardBinding(guardNodes[0], "leading"),
+      );
+      this.#focusGuards.set(
+        guardNodes[1],
+        this.#guardBinding(guardNodes[1], "trailing"),
+      );
+      this.#focusGuardsInitialized = guards !== null;
+      if (
+        this.#focusGuardsInitialized
+        && this.#onFocusGuards(null, guards!, false)
+      ) {
+        this.#registeredFocusGuards = guards;
+      } else if (this.#focusGuardsInitialized) {
+        this.#focusGuards.clear();
+        this.#focusGuardsInitialized = false;
+      }
+    }
     const portalParent = elements.content.parentNode;
     if (!portalParent || (elements.overlay && elements.overlay.parentNode !== portalParent)) {
       throw new Error("Cannot publish dialog roots without their shared portal parent");
@@ -399,14 +478,76 @@ class MutationJournal {
       this.#records.push(...records);
       this.#process();
     });
-    this.#observer.observe(this.#ownerDocument, {
-      attributes: true,
-      attributeOldValue: true,
-      characterData: true,
-      characterDataOldValue: true,
-      childList: true,
-      subtree: true,
+    if (
+      (this.#focusGuardsInitialized && this.#registeredFocusGuards !== null)
+      || guardNodes.length === 0
+      || this.#focusGuards.size === 2
+    ) {
+      this.#observer.observe(this.#ownerDocument, {
+        attributes: true,
+        attributeOldValue: true,
+        characterData: true,
+        characterDataOldValue: true,
+        childList: true,
+        subtree: true,
+      });
+    } else {
+      this.#onFocusGuardViolation();
+      this.#invalid = true;
+    }
+  }
+
+  #guardBinding(node: Element, role: FocusGuardRole): FocusGuardBinding {
+    return Object.freeze({
+      role,
+      marker: node.getAttribute("data-radix-focus-guard") ?? "",
+      tabIndex: node.getAttribute("tabindex") ?? "",
+      style: node.getAttribute("style") ?? "",
     });
+  }
+
+  #guardIsExact(node: Node, binding: FocusGuardBinding) {
+    return (
+      node instanceof Element
+      && isFocusGuard(node)
+      && node.getAttribute("data-radix-focus-guard") === binding.marker
+      && node.getAttribute("tabindex") === binding.tabIndex
+      && (node.getAttribute("style") ?? "") === binding.style
+    );
+  }
+
+  #hasExactFocusGuardTopology() {
+    const guards = [...this.#ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
+    if (
+      (this.#validatingReplayTeardown || this.#replaying)
+      && this.#focusGuards.size === 0
+      && guards.length === 0
+    ) {
+      return true;
+    }
+
+    if (guards.length !== 2 || this.#focusGuards.size !== 2) return false;
+    const leading = this.#focusGuards.get(guards[0]);
+    const trailing = this.#focusGuards.get(guards[1]);
+    return Boolean(
+      leading?.role === "leading"
+      && trailing?.role === "trailing"
+      && this.#guardIsExact(guards[0], leading)
+      && this.#guardIsExact(guards[1], trailing),
+    );
+  }
+
+  #hasExactFocusGuardEdges() {
+    const guards = edgeFocusGuards(this.#ownerDocument);
+    if (!guards) return false;
+    const leading = this.#focusGuards.get(guards[0]);
+    const trailing = this.#focusGuards.get(guards[1]);
+    return Boolean(
+      leading?.role === "leading"
+      && trailing?.role === "trailing"
+      && this.#guardIsExact(guards[0], leading)
+      && this.#guardIsExact(guards[1], trailing),
+    );
   }
 
   #nextAttributeValue(index: number, target: Element, name: string): string | null {
@@ -563,90 +704,100 @@ class MutationJournal {
     return allowed;
   }
 
-  #isGuardMutationAtRole(record: MutationRecord, role: "leading" | "trailing") {
+  #isGuardMutationAtRole(record: MutationRecord, role: FocusGuardRole) {
     return role === "leading"
       ? record.previousSibling === null
       : record.nextSibling === null;
   }
 
-  #hasFocusGuardsAtBothEdges() {
-    let leading: Node | null = null;
-    let trailing: Node | null = null;
-    for (const [guard, role] of this.#focusGuards) {
-      if (role === "leading") {
-        if (leading !== null) return false;
-        leading = guard;
-      } else {
-        if (trailing !== null) return false;
-        trailing = guard;
-      }
-    }
-    return (
-      leading !== null
-      && trailing !== null
-      && this.#ownerDocument.body.firstElementChild === leading
-      && this.#ownerDocument.body.lastElementChild === trailing
-    );
-  }
-
   #trackFocusGuardAdditions(record: MutationRecord, added: readonly Node[]) {
     for (const node of added) {
-      const existingRole = this.#focusGuards.get(node);
+      const binding = this.#focusGuards.get(node);
       const role = record.previousSibling === null
         ? "leading"
         : record.nextSibling === null
           ? "trailing"
           : null;
+      const roleIsOccupied = [...this.#focusGuards].some(([guard, candidate]) =>
+        guard !== node && candidate.role === role);
+      if (role === null || roleIsOccupied || !isFocusGuard(node)) {
+        return false;
+      }
+      if (binding) {
+        if (binding.role !== role || !this.#guardIsExact(node, binding)) return false;
+        continue;
+      }
+      if (this.#focusGuardsInitialized && !this.#acceptingReplayGuardReplacement) return false;
       if (
-        role === null
-        || (existingRole !== undefined && existingRole !== role)
-        || [...this.#focusGuards].some(([guard, guardRole]) =>
-          guard !== node && guardRole === role)
+        this.#expectedFocusGuards !== null
+        && !this.#acceptingReplayGuardReplacement
+        && !this.#expectedFocusGuards.includes(node)
       ) {
         return false;
       }
-      this.#focusGuards.set(node, role);
+      this.#focusGuards.set(node, this.#guardBinding(node, role));
+    }
+    if (this.#hasExactFocusGuardEdges()) {
+      const completedReplacement = this.#acceptingReplayGuardReplacement;
+      const current = edgeFocusGuards(this.#ownerDocument);
+      if (
+        !current
+        || !this.#onFocusGuards(
+          this.#registeredFocusGuards,
+          current,
+          completedReplacement,
+        )
+      ) {
+        return false;
+      }
+      this.#registeredFocusGuards = current;
+      this.#focusGuardsInitialized = true;
+      this.#acceptingReplayGuardReplacement = false;
+      if (completedReplacement) this.#initialReplayGuardLifecycle = null;
     }
     return true;
   }
 
   #prepareExpectedReplayGuardTeardown() {
     this.#expectedReplayGuardTeardown.clear();
-    const candidates = this.#records.slice(-2);
-    if (
-      candidates.length !== 2
-      || this.#focusGuards.size !== 2
-      || !candidates.every((record) => (
-        record.type === "childList"
-        && record.target === this.#ownerDocument.body
-        && record.addedNodes.length === 0
-        && record.removedNodes.length === 1
-      ))
-    ) {
-      return;
-    }
-    const roles = new Set<"leading" | "trailing">();
-    for (const record of candidates) {
-      const node = record.removedNodes[0];
-      const role = this.#focusGuards.get(node);
-      if (
-        role === undefined
-        || roles.has(role)
-        || !this.#isGuardMutationAtRole(record, role)
-      ) {
-        this.#expectedReplayGuardTeardown.clear();
-        return;
+    let pair: readonly [MutationRecord, MutationRecord] | null = null;
+    for (let index = this.#processed; index < this.#records.length - 1; index++) {
+      const candidates = [this.#records[index], this.#records[index + 1]] as const;
+      const roles = new Set<FocusGuardRole>();
+      const exactPair = candidates.every((record) => {
+        if (
+          record.type !== "childList"
+          || record.target !== this.#ownerDocument.body
+          || record.addedNodes.length !== 0
+          || record.removedNodes.length !== 1
+        ) {
+          return false;
+        }
+        const binding = this.#focusGuards.get(record.removedNodes[0]);
+        if (
+          !binding
+          || roles.has(binding.role)
+          || !this.#isGuardMutationAtRole(record, binding.role)
+        ) {
+          return false;
+        }
+        roles.add(binding.role);
+        return true;
+      });
+      if (exactPair && roles.size === 2) {
+        if (pair !== null) return;
+        pair = candidates;
       }
-      roles.add(role);
-      this.#expectedReplayGuardTeardown.add(node);
     }
+    pair?.forEach((record) => this.#expectedReplayGuardTeardown.add(record));
+    if (pair) this.#acceptingReplayGuardReplacement = true;
   }
 
   #isReaddedLater(
     index: number,
     target: Node,
     node: Node,
-    role: "leading" | "trailing",
+    role: FocusGuardRole,
   ) {
     for (let cursor = index + 1; cursor < this.#records.length; cursor++) {
       const candidate = this.#records[cursor];
@@ -708,24 +859,24 @@ class MutationJournal {
       && removed.every((node) => this.#focusGuards.has(node))
     ) {
       if (
-        this.#validatingReplayTeardown
-        && removed.every((node) => this.#expectedReplayGuardTeardown.delete(node))
+        (this.#validatingReplayTeardown || this.#initialReplayGuardLifecycle !== null)
+        && this.#expectedReplayGuardTeardown.delete(record)
       ) {
         removed.forEach((node) => this.#focusGuards.delete(node));
         return true;
       }
       if (removed.every((node) => {
-        const role = this.#focusGuards.get(node);
-        return role !== undefined && this.#isReaddedLater(
+        const binding = this.#focusGuards.get(node);
+        return binding !== undefined && this.#isReaddedLater(
           index,
           record.target,
           node,
-          role,
+          binding.role,
         );
-      }) && this.#hasFocusGuardsAtBothEdges()) {
+      }) && this.#hasExactFocusGuardEdges()) {
         return true;
       }
-      if (!this.#closing && !this.#replaying && this.#nestedRoots.size === 0) return false;
+      if (!this.#closing) return false;
       removed.forEach((node) => this.#focusGuards.delete(node));
       return true;
     }
@@ -757,10 +908,13 @@ class MutationJournal {
   #isRelevant(record: MutationRecord) {
     if (this.#isOwned(record.target)) return true;
     if (this.#ancestors.has(record.target)) return true;
+    if (this.#focusGuards.has(record.target)) return true;
     if (record.type === "attributes") {
       const name = record.attributeName;
       return (
         record.target === this.#ownerDocument.body
+        || name === "data-radix-focus-guard"
+        || ((name === "tabindex" || name === "style") && isFocusGuard(record.target))
         || name === "aria-hidden"
         || name === "data-aria-hidden"
       );
@@ -772,6 +926,17 @@ class MutationJournal {
         || Boolean(this.#overlay && node.contains?.(this.#overlay)));
     }
     return false;
+  }
+
+  #isFocusGuardRecord(record: MutationRecord) {
+    return (
+      this.#focusGuards.has(record.target)
+      || record.attributeName === "data-radix-focus-guard"
+      || ((record.attributeName === "tabindex" || record.attributeName === "style")
+        && isFocusGuard(record.target))
+      || [...record.addedNodes, ...record.removedNodes].some((node) =>
+        this.#focusGuards.has(node) || isFocusGuard(node))
+    );
   }
 
   #collectRecords() {
@@ -799,6 +964,12 @@ class MutationJournal {
   #process() {
     if (this.#released || this.#invalid) return;
     this.#collectRecords();
+    if (
+      this.#initialReplayGuardLifecycle !== null
+      && this.#expectedReplayGuardTeardown.size === 0
+    ) {
+      this.#prepareExpectedReplayGuardTeardown();
+    }
     for (; this.#processed < this.#records.length; this.#processed++) {
       const record = this.#records[this.#processed];
       if (!this.#isRelevant(record)) continue;
@@ -808,15 +979,8 @@ class MutationJournal {
           ? this.#isAllowedChildList(record, this.#processed)
           : record.type === "characterData" && this.#isBodyDescendant(record.target);
       if (!allowed) {
-        this.#invalid = true;
-        this.#observer.disconnect();
-        this.#records.length = 0;
-        this.#processed = 0;
-        this.#replayPreparation = null;
-        this.#focusGuards.clear();
-        this.#expectedReplayGuardTeardown.clear();
-        this.#nestedRoots.clear();
-        this.#onInvalid();
+        if (this.#isFocusGuardRecord(record)) this.#onFocusGuardViolation();
+        this.#invalidate();
         return;
       }
     }
@@ -826,7 +990,27 @@ class MutationJournal {
 
   isClean() {
     this.#process();
-    return !this.#invalid && !this.#released;
+    return (
+      !this.#invalid
+      && !this.#released
+      && this.#focusGuardsInitialized
+      && this.#hasExactFocusGuardTopology()
+    );
+  }
+
+  #invalidate() {
+    if (this.#invalid) return;
+    this.#invalid = true;
+    this.#observer.disconnect();
+    this.#records.length = 0;
+    this.#processed = 0;
+    this.#replayPreparation = null;
+    this.#focusGuards.clear();
+    this.#expectedReplayGuardTeardown.clear();
+    this.#acceptingReplayGuardReplacement = false;
+    this.#initialReplayGuardLifecycle = null;
+    this.#nestedRoots.clear();
+    this.#onInvalid();
   }
 
   startClosing() {
@@ -842,6 +1026,15 @@ class MutationJournal {
     if (this.#released || this.#invalid) return false;
     const prepared = this.#replayPreparation !== null;
     this.#replayPreparation = null;
+    const lifecycle = {};
+    this.#initialReplayGuardLifecycle = lifecycle;
+    queueMicrotask(() => {
+      if (this.#initialReplayGuardLifecycle === lifecycle) {
+        this.#initialReplayGuardLifecycle = null;
+        this.#acceptingReplayGuardReplacement = false;
+        this.#expectedReplayGuardTeardown.clear();
+      }
+    });
     this.#collectRecords();
     if (this.#hasPendingCloseTransition()) return false;
     this.#validatingReplayTeardown = prepared;
@@ -851,6 +1044,9 @@ class MutationJournal {
     } finally {
       this.#validatingReplayTeardown = false;
       this.#expectedReplayGuardTeardown.clear();
+      if (this.#initialReplayGuardLifecycle === null) {
+        this.#acceptingReplayGuardReplacement = false;
+      }
     }
     if (this.#released || this.#invalid) return false;
     this.#replaying = true;
@@ -884,6 +1080,8 @@ class MutationJournal {
     this.#replayPreparation = null;
     this.#focusGuards.clear();
     this.#expectedReplayGuardTeardown.clear();
+    this.#acceptingReplayGuardReplacement = false;
+    this.#initialReplayGuardLifecycle = null;
     this.#nestedRoots.clear();
     this.#released = true;
   }
@@ -1205,23 +1403,14 @@ function exactNativeOwnedCloseClick(
     && event.bubbles
     && !event.defaultPrevented
     && (!(close instanceof view.HTMLButtonElement) || !close.disabled)
-    && publication.elements.content.contains(close)
+    && close.ownerDocument === ownerDocument
+    && close.isConnected
     && nativeEvent.target === target
     && isNodeFromDocument(target, ownerDocument)
     && close.contains(target)
     && path[0] === target
     && path.includes(close)
-    && path.includes(publication.elements.content)
-    && contentSnapshotContains(
-      publication.contentDom,
-      publication.elements.header,
-      close,
-    )
-    && contentSnapshotContains(
-      publication.contentDom,
-      publication.elements.header,
-      target,
-    )
+    && path.includes(ownerDocument)
   )
     ? nativeEvent
     : null;
@@ -1448,6 +1637,8 @@ class DialogCoordinator {
   #knownAutoFocusActions = new WeakMap<object, DialogPublication>();
   #ownedActionBindings = new WeakMap<object, OwnedActionBinding>();
   #currentOwnedActions = new WeakMap<HTMLElement, object>();
+  #focusGuards: FocusGuardPair | null = null;
+  #focusGuardIdentityTainted = false;
   #renderedOpen: boolean | null = null;
   #openingTarget: HTMLElement | null = null;
   #managed = false;
@@ -1488,6 +1679,8 @@ class DialogCoordinator {
       this.#transition = null;
       this.#pendingDismiss = null;
       this.#parentDismissBridge = null;
+      this.#focusGuards = null;
+      this.#focusGuardIdentityTainted = false;
     });
   }
 
@@ -1497,6 +1690,29 @@ class DialogCoordinator {
 
   ownsRoot(authority: DialogRootAuthority) {
     return this.#root === authority && authority.mount === this.#mount;
+  }
+
+  manageRoot(authority: DialogRootAuthority) {
+    if (this.ownsRoot(authority) && authority.actualOpen) this.#managed = true;
+  }
+
+  focusGuards() {
+    this.#active?.journal.isClean();
+    this.#successorOf?.journal.isClean();
+    return this.#focusGuardIdentityTainted ? this.#focusGuards : null;
+  }
+
+  taintFocusGuardIdentity() {
+    this.#focusGuardIdentityTainted = true;
+  }
+
+  bindFocusGuards(
+    _previous: FocusGuardPair | null,
+    current: FocusGuardPair,
+  ) {
+    if (this.#focusGuardIdentityTainted) return false;
+    this.#focusGuards = current;
+    return true;
   }
 
   replay() {
@@ -1629,12 +1845,7 @@ class DialogCoordinator {
       return false;
     }
     return binding.kind === "close"
-      ? contentSnapshotContains(
-          publication.contentDom,
-          publication.elements.header,
-          binding.element,
-        )
-      : !publication.elements.content.contains(binding.element);
+      || !publication.elements.content.contains(binding.element);
   }
 
   custodyFor(authority: DialogAuthority, elements: DialogElements) {
@@ -1982,6 +2193,8 @@ class DialogCoordinator {
     transition.custody.returnTarget = null;
     transition.source.journal.release();
     this.#transition = null;
+    this.#focusGuards = null;
+    this.#focusGuardIdentityTainted = false;
     restoreFocus(returnTarget);
     transition.onClosed?.();
   }
@@ -2168,18 +2381,24 @@ function createPublicationRuntime(
   const overlayDom = elements.overlay ? snapshotDom(elements.overlay) : null;
   const contentDom = snapshotDom(elements.content);
   let successorRequested = false;
-  const journal = new MutationJournal(elements, () => {
-    if (
-      successorRequested
-      || (elements.overlay !== null && !elements.overlay.isConnected)
-      || !elements.content.isConnected
-      || contentDomMatches(contentDom, elements.header)
-    ) {
-      return;
-    }
-    successorRequested = true;
-    requestSuccessor();
-  });
+  const journal = new MutationJournal(
+    elements,
+    coordinator.focusGuards(),
+    coordinator.bindFocusGuards.bind(coordinator),
+    coordinator.taintFocusGuardIdentity.bind(coordinator),
+    () => {
+      if (
+        successorRequested
+        || (elements.overlay !== null && !elements.overlay.isConnected)
+        || !elements.content.isConnected
+        || contentDomMatches(contentDom, elements.header)
+      ) {
+        return;
+      }
+      successorRequested = true;
+      requestSuccessor();
+    },
+  );
   const custody = coordinator.custodyFor(authority, elements);
   let retired = false;
   let retirement: Retirement | null = null;
@@ -2540,6 +2759,7 @@ function createDialogPresentation(
       coordinator.stageControlledClose(authority, actions.closeAutoFocus, elements);
       return undefined;
     }
+    coordinator.manageRoot(authority.root);
     if (lastRuntime) {
       if (
         (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay())

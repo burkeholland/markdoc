@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 import {
   StrictMode,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -156,6 +158,25 @@ function RemoveLeadingGuardOnRefReplay() {
       }}
     />
   );
+}
+
+function MutateDescendantOnPassiveReplayCleanup() {
+  const element = useRef<HTMLSpanElement>(null);
+  useEffect(() => () => {
+    element.current?.setAttribute("data-passive-cleanup", "complete");
+  }, []);
+  return <span ref={element} />;
+}
+
+function createFocusGuard() {
+  const guard = document.createElement("span");
+  guard.setAttribute("data-radix-focus-guard", "");
+  guard.tabIndex = 0;
+  guard.style.outline = "none";
+  guard.style.opacity = "0";
+  guard.style.position = "fixed";
+  guard.style.pointerEvents = "none";
+  return guard;
 }
 
 beforeEach(() => {
@@ -395,6 +416,8 @@ describe("DialogContent exact Strict Mode publication", () => {
 
   it("rejects a foreign-document Escape without poisoning the current publication", async () => {
     const onClosed = vi.fn();
+    const foreignFrame = document.createElement("iframe");
+    document.body.append(foreignFrame);
     renderDirect(
       <StrictMode>
         <ControlledDialog onClosed={onClosed}>
@@ -402,8 +425,6 @@ describe("DialogContent exact Strict Mode publication", () => {
         </ControlledDialog>
       </StrictMode>,
     );
-    const foreignFrame = document.createElement("iframe");
-    document.body.append(foreignFrame);
     const foreignDocument = foreignFrame.contentDocument;
     const foreignWindow = foreignFrame.contentWindow;
     if (!foreignDocument || !foreignWindow) throw new Error("The foreign document was not created");
@@ -607,9 +628,9 @@ describe("DialogContent exact Strict Mode publication", () => {
         </Dialog>
       </StrictMode>
     );
-    const view = renderDirect(tree("A"));
     const outside = document.createElement("button");
     document.body.append(outside);
+    const view = renderDirect(tree("A"));
     const callsBeforeFocusOut = timeout.mock.calls.length;
 
     fireEvent.focusOut(screen.getByTestId("recovery-A"), { relatedTarget: outside });
@@ -804,6 +825,89 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(outerClosed).not.toHaveBeenCalled();
   });
 
+  it.each(["replacement", "swap"] as const)(
+    "rejects repeated focus-guard %s while a nested dialog is open",
+    async (mutation) => {
+      const outerClosed = vi.fn();
+      function NestedGuardHarness() {
+        const [outerOpen, setOuterOpen] = useState(true);
+        const [innerOpen, setInnerOpen] = useState(false);
+        return (
+          <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+            <DialogContent title="Outer guard owner" onClosed={outerClosed}>
+              <button type="button" onClick={() => setInnerOpen(true)}>Open guard nested</button>
+              <button type="button" onClick={() => setInnerOpen(false)}>Dismiss nested state</button>
+              <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+                <DialogContent title="Guard nested">
+                  <input autoFocus />
+                </DialogContent>
+              </Dialog>
+            </DialogContent>
+          </Dialog>
+        );
+      }
+      renderDirect(<StrictMode><NestedGuardHarness /></StrictMode>);
+      fireEvent.click(screen.getByRole("button", { name: "Open guard nested" }));
+      const original = [...document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]")];
+      const firstReplacement = [createFocusGuard(), createFocusGuard()];
+      const secondReplacement = [createFocusGuard(), createFocusGuard()];
+
+      act(() => {
+        if (mutation === "replacement") {
+          original.forEach((guard) => guard.remove());
+          document.body.prepend(firstReplacement[0]);
+          document.body.append(firstReplacement[1]);
+          firstReplacement.forEach((guard) => guard.remove());
+          document.body.prepend(secondReplacement[0]);
+          document.body.append(secondReplacement[1]);
+        } else {
+          original.forEach((guard) => guard.remove());
+          document.body.prepend(original[1]);
+          document.body.append(original[0]);
+          original.forEach((guard) => guard.remove());
+          document.body.prepend(original[0]);
+          document.body.append(original[1]);
+        }
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss nested state", hidden: true }));
+      await flushTasks();
+      expect(screen.queryByRole("dialog", { name: "Guard nested" })).toBeNull();
+
+      fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Outer guard owner" })));
+      await flushTasks();
+
+      expect(screen.getByRole("dialog", { name: "Outer guard owner" })).toBeInTheDocument();
+      expect(outerClosed).not.toHaveBeenCalled();
+      if (mutation === "replacement") secondReplacement.forEach((guard) => guard.remove());
+    },
+  );
+
+  it("removes both exact guards after a clean nested close", async () => {
+    function CleanNestedHarness() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(false);
+      return (
+        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+          <DialogContent title="Clean outer">
+            <button type="button" onClick={() => setInnerOpen(true)}>Open clean inner</button>
+            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+              <DialogContent title="Clean inner"><input autoFocus /></DialogContent>
+            </Dialog>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><CleanNestedHarness /></StrictMode>);
+    fireEvent.click(screen.getByRole("button", { name: "Open clean inner" }));
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Clean inner" })));
+    await flushTasks();
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Clean outer" })));
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
+
   it("drains off-state focus-guard removal before synchronous replay and recovers cleanly", async () => {
     const taintedClosed = vi.fn();
     const cleanClosed = vi.fn();
@@ -876,6 +980,24 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(cleanClosed).toHaveBeenCalledOnce();
   });
 
+  it("accepts exact replay guard teardown before a later allowed passive cleanup mutation", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog title="Passive cleanup replay" onClosed={onClosed}>
+          <MutateDescendantOnPassiveReplayCleanup />
+          <input autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
   it.each(["leading", "trailing"] as const)(
     "rejects moving the %s focus guard to the opposite body edge",
     async (edge) => {
@@ -900,6 +1022,75 @@ describe("DialogContent exact Strict Mode publication", () => {
       expect(onClosed).not.toHaveBeenCalled();
     },
   );
+
+  it.each(["marker", "tabindex", "style"] as const)(
+    "rejects tracked focus-guard %s mutation",
+    async (attribute) => {
+      const onClosed = vi.fn();
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog title={`${attribute} guard mutation`} onClosed={onClosed} />
+        </StrictMode>,
+      );
+      const guard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
+      expect(guard).not.toBeNull();
+
+      act(() => {
+        if (attribute === "marker") guard!.setAttribute("data-radix-focus-guard", "changed");
+        else if (attribute === "tabindex") guard!.tabIndex = -1;
+        else guard!.style.opacity = "1";
+      });
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(`${attribute} guard mutation`);
+      expect(onClosed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an unrelated body-edge span becoming a third focus guard", async () => {
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog title="Third guard" onClosed={onClosed} />
+      </StrictMode>,
+    );
+    const third = document.createElement("span");
+
+    act(() => {
+      document.body.append(third);
+      third.setAttribute("data-radix-focus-guard", "");
+      third.tabIndex = 0;
+      third.style.outline = "none";
+      third.style.opacity = "0";
+      third.style.position = "fixed";
+      third.style.pointerEvents = "none";
+    });
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Third guard");
+    expect(onClosed).not.toHaveBeenCalled();
+    third.remove();
+  });
+
+  it("requires exactly two body-edge focus guards before publication", async () => {
+    const extra = createFocusGuard();
+    document.body.append(extra);
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog title="Pre-existing third guard" onClosed={onClosed} />
+      </StrictMode>,
+    );
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Pre-existing third guard");
+    expect(onClosed).not.toHaveBeenCalled();
+    extra.remove();
+  });
 
   it.each(["leading", "trailing"] as const)(
     "preserves %s focus-guard repositioning at its original body edge",
@@ -1060,6 +1251,56 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(onClosed).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    { variant: "regular", type: "submit" as const },
+    { variant: "regular", type: "reset" as const },
+    { variant: "asChild", type: "submit" as const },
+    { variant: "asChild", type: "reset" as const },
+  ])(
+    "closes a non-modal root through an external $variant $type control",
+    async ({ variant, type }) => {
+      const onOpenChange = vi.fn();
+      const onClosed = vi.fn();
+      const onSubmit = vi.fn((event: FormEvent) => event.preventDefault());
+      const onReset = vi.fn((event: FormEvent) => event.preventDefault());
+      function ExternalCloseHarness() {
+        const [open, setOpen] = useState(true);
+        const close = variant === "asChild"
+          ? (
+              <DialogClose asChild>
+                <button type={type}>External {variant} {type}</button>
+              </DialogClose>
+            )
+          : <DialogClose type={type}>External {variant} {type}</DialogClose>;
+        return (
+          <Dialog
+            open={open}
+            onOpenChange={(next) => {
+              onOpenChange(next);
+              setOpen(next);
+            }}
+            modal={false}
+          >
+            <form onSubmit={onSubmit} onReset={onReset}>{close}</form>
+            <DialogContent title={`External ${variant} ${type}`} onClosed={onClosed}>
+              <input autoFocus />
+            </DialogContent>
+          </Dialog>
+        );
+      }
+      renderDirect(<StrictMode><ExternalCloseHarness /></StrictMode>);
+
+      fireEvent.click(screen.getByRole("button", { name: `External ${variant} ${type}` }));
+      await flushTasks();
+
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(onSubmit).toHaveBeenCalledTimes(type === "submit" ? 1 : 0);
+      expect(onReset).toHaveBeenCalledTimes(type === "reset" ? 1 : 0);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onClosed).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(["trigger", "close"] as const)(
     "rejects a stale exported Dialog%s token on the current replacement path",
