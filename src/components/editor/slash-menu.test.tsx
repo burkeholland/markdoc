@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { TextSelection } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
 import type { SlashKey, SlashMenuHandlers, SlashState } from "@/editor/prosemirror/slash-menu";
@@ -110,8 +111,22 @@ container.getBoundingClientRect = () =>
 const containerRef = { current: container };
 
 function makeView(): EditorView {
+  const transaction = {
+    setSelection: vi.fn(),
+  };
+  transaction.setSelection.mockReturnValue(transaction);
   return {
-    state: {},
+    state: {
+      selection: {
+        $from: {
+          start: () => 1,
+          end: () => 2,
+        },
+      },
+      doc: {},
+      tr: transaction,
+    },
+    dispatch: vi.fn(),
     focus: vi.fn(),
   } as unknown as EditorView;
 }
@@ -175,6 +190,109 @@ function BoundaryHarness({
 function open(visit: Visit, state = slashState()) {
   act(() => visit.controller.emit(state));
   expect(screen.getByTestId("slash-menu")).toBeInTheDocument();
+}
+
+type DirectMouseEvent<T extends HTMLElement> = Pick<
+  ReactMouseEvent<T>,
+  "type" | "currentTarget" | "target" | "nativeEvent" | "preventDefault"
+>;
+
+type DirectMouseHandler<T extends HTMLElement> = (event: DirectMouseEvent<T>) => void;
+
+interface CapturedRow {
+  element: HTMLButtonElement;
+  enter: DirectMouseHandler<HTMLButtonElement>;
+  click: DirectMouseHandler<HTMLButtonElement>;
+  ref: RefCallback<HTMLButtonElement>;
+}
+
+interface CapturedRoot {
+  element: HTMLDivElement;
+  down: DirectMouseHandler<HTMLDivElement>;
+  ref: RefCallback<HTMLDivElement>;
+}
+
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return value as T;
+}
+
+function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
+  return fiber.ref as RefCallback<T>;
+}
+
+function captureRow(id: string): CapturedRow {
+  const element = screen.getByTestId(`slash-item-${id}`) as HTMLButtonElement;
+  return {
+    element,
+    enter: reactProp<DirectMouseHandler<HTMLButtonElement>>(element, "onMouseEnter"),
+    click: reactProp<DirectMouseHandler<HTMLButtonElement>>(element, "onClick"),
+    ref: reactRef(element),
+  };
+}
+
+function captureRoot(): CapturedRoot {
+  const element = screen.getByTestId("slash-menu") as HTMLDivElement;
+  return {
+    element,
+    down: reactProp<DirectMouseHandler<HTMLDivElement>>(element, "onMouseDown"),
+    ref: reactRef(element),
+  };
+}
+
+interface MouseOverrides {
+  type?: string;
+  target?: EventTarget;
+  nativeEvent?: Event;
+  nativeType?: string;
+  nativeTarget?: EventTarget;
+}
+
+function ownerMouseEvent(target: EventTarget, type: string): MouseEvent {
+  const node = target as Node;
+  const MouseEventConstructor = node.ownerDocument?.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("Pointer target has no owner-document MouseEvent");
+  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function invokeMouse<T extends HTMLElement>(
+  handler: DirectMouseHandler<T>,
+  currentTarget: T,
+  syntheticType: "mouseenter" | "click" | "mousedown",
+  overrides: MouseOverrides = {},
+) {
+  const nativeType = overrides.nativeType ?? (syntheticType === "mouseenter" ? "mouseover" : syntheticType);
+  const target = overrides.target ?? currentTarget;
+  const nativeEvent = overrides.nativeEvent ?? ownerMouseEvent(overrides.nativeTarget ?? target, nativeType);
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  const event: DirectMouseEvent<T> = {
+    type: overrides.type ?? syntheticType,
+    currentTarget,
+    target,
+    nativeEvent: nativeEvent as ReactMouseEvent<T>["nativeEvent"],
+    preventDefault,
+  };
+  handler(event);
+  return { event, nativeEvent, preventDefault };
+}
+
+function clickRow(row: CapturedRow, target: EventTarget = row.element) {
+  return invokeMouse(row.click, row.element, "click", { target, nativeTarget: target });
+}
+
+function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
+  useEffect(() => onCleanup, [onCleanup]);
+  return null;
 }
 
 let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
@@ -386,5 +504,313 @@ describe("slash-menu visit authority", () => {
 
     clearSecond();
     expect(controller.handlers.onKey?.("Enter")).toBe(false);
+  });
+});
+
+describe("slash-menu pointer presentation", () => {
+  it("binds hover, root prevention, and command application to one exact native interaction", () => {
+    const visit = makeVisit();
+    render(<BoundaryHarness visit={visit} />);
+    open(visit);
+
+    expect(screen.getByText("Basic")).toBeInTheDocument();
+    expect(screen.getByText("Keep an agent here")).toBeInTheDocument();
+    expect(screen.getByText("Get the exact sentence that keeps an agent in this document")).toBeInTheDocument();
+    const initialText = captureRow("text");
+    expect(initialText.element).toHaveAttribute("aria-selected", "true");
+    expect(initialText.element).toHaveClass("bg-accent-soft", "text-ink");
+
+    fireEvent.mouseEnter(screen.getByTestId("slash-item-heading1"));
+    const heading = captureRow("heading1");
+    expect(heading.element).toHaveAttribute("aria-selected", "true");
+    expect(heading.element).toHaveClass("bg-accent-soft", "text-ink");
+    expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "false");
+
+    const root = captureRoot();
+    const title = heading.element.querySelector(".truncate");
+    expect(title).toBeInstanceOf(HTMLSpanElement);
+    const down = invokeMouse(root.down, root.element, "mousedown", {
+      target: title!,
+      nativeTarget: title!,
+    });
+    expect(down.preventDefault).toHaveBeenCalledOnce();
+    root.down(down.event);
+    expect(down.preventDefault).toHaveBeenCalledOnce();
+
+    const click = clickRow(heading, title!);
+    heading.click(click.event);
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+    expect(slashActions.applyCommand.mock.calls[0][0]).toBe(visit.view);
+    expect(slashActions.applyCommand.mock.calls[0][2]).toBe(visit.session.undoManager);
+    expect(visit.view.focus).toHaveBeenCalledOnce();
+    expect(click.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("rejects fabricated, mismatched, sibling, foreign, detached, unpublished, and disabled click sources", () => {
+    const visit = makeVisit();
+    render(<BoundaryHarness visit={visit} />);
+    open(visit, slashState("text"));
+    const current = captureRow("text");
+    const foreign = document.createElement("button");
+    const detached = document.createElement("button");
+    const unpublished = document.createElement("span");
+    document.body.append(foreign);
+    current.element.append(unpublished);
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner);
+    focusOwner.focus();
+    const activeElement = document.activeElement;
+    const markup = document.body.innerHTML;
+
+    const attempts = [
+      invokeMouse(current.click, current.element, "click", {
+        nativeEvent: new Event("click"),
+      }),
+      invokeMouse(current.click, current.element, "click", {
+        type: "mousedown",
+      }),
+      invokeMouse(current.click, current.element, "click", {
+        nativeType: "mousedown",
+      }),
+      invokeMouse(current.click, current.element, "click", {
+        target: current.element,
+        nativeTarget: unpublished,
+      }),
+      invokeMouse(current.click, foreign, "click"),
+      invokeMouse(current.click, detached, "click"),
+      invokeMouse(current.click, current.element, "click", {
+        target: unpublished,
+        nativeTarget: unpublished,
+      }),
+    ];
+    for (const attempt of attempts) expect(attempt.preventDefault).not.toHaveBeenCalled();
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    expect(visit.view.focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(activeElement);
+    expect(document.body.innerHTML).toBe(markup);
+
+    unpublished.remove();
+    current.element.disabled = true;
+    clickRow(current);
+    current.element.disabled = false;
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+
+    act(() => visit.controller.emit(slashState("text")));
+    const successor = captureRow("text");
+    clickRow(successor);
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+    expect(visit.view.focus).toHaveBeenCalledOnce();
+    foreign.remove();
+    focusOwner.remove();
+  });
+
+  it.each([
+    ["stale before current", false],
+    ["current before stale", true],
+  ] as const)("keeps an equal-looking successor usable %s, including after late old refs", (_label, currentFirst) => {
+    const visit = makeVisit();
+    const mounted = render(<BoundaryHarness visit={visit} />);
+    open(visit, slashState("text"));
+    const staleRow = captureRow("text");
+    const staleRoot = captureRoot();
+
+    mounted.rerender(<BoundaryHarness visit={{ ...visit }} boundary={1} />);
+    const currentRow = captureRow("text");
+    const currentRoot = captureRoot();
+    expect(currentRow.element).toBe(staleRow.element);
+    expect(currentRoot.element).toBe(staleRoot.element);
+
+    act(() => {
+      staleRow.ref(currentRow.element);
+      staleRoot.ref(currentRoot.element);
+      staleRow.ref(null);
+      staleRoot.ref(null);
+    });
+
+    const staleClick = () => clickRow({ ...staleRow, element: currentRow.element });
+    const currentClick = () => clickRow(currentRow);
+    if (currentFirst) {
+      currentClick();
+      staleClick();
+    } else {
+      staleClick();
+      currentClick();
+    }
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+
+    const staleDown = () =>
+      invokeMouse(staleRoot.down, currentRoot.element, "mousedown", {
+        target: currentRow.element,
+        nativeTarget: currentRow.element,
+      });
+    const currentDown = () =>
+      invokeMouse(currentRoot.down, currentRoot.element, "mousedown", {
+        target: currentRow.element,
+        nativeTarget: currentRow.element,
+      });
+    const downs = currentFirst ? [currentDown(), staleDown()] : [staleDown(), currentDown()];
+    expect(downs.filter((attempt) => attempt.preventDefault.mock.calls.length === 1)).toHaveLength(1);
+  });
+
+  it("retires stale handlers across state scalars, permissions, callbacks, highlight, and geometry", () => {
+    const visit = makeVisit();
+    const mounted = render(<BoundaryHarness visit={visit} />);
+    const state = slashState("text", 100);
+    open(visit, state);
+    const stateHandler = captureRow("text");
+
+    state.to += 1;
+    clickRow(stateHandler);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    state.to -= 1;
+    act(() => visit.controller.emit(state));
+
+    const permissionHandler = captureRow("text");
+    Object.defineProperty(visit.session, "canEdit", { configurable: true, value: false, writable: true });
+    clickRow(permissionHandler);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    Object.defineProperty(visit.session, "canEdit", { configurable: true, value: true, writable: true });
+    mounted.rerender(<BoundaryHarness visit={visit} boundary={1} />);
+
+    const callbackHandler = captureRow("text");
+    const replacementImage = vi.fn();
+    const callbackVisit = { ...visit, onImage: replacementImage };
+    mounted.rerender(<BoundaryHarness visit={callbackVisit} boundary={2} />);
+    clickRow({ ...callbackHandler, element: screen.getByTestId("slash-item-text") as HTMLButtonElement });
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+
+    act(() => visit.controller.emit(slashState()));
+    const beforeHighlight = captureRow("text");
+    fireEvent.mouseEnter(screen.getByTestId("slash-item-heading1"));
+    const highlighted = captureRow("heading1");
+    clickRow({ ...beforeHighlight, element: screen.getByTestId("slash-item-text") as HTMLButtonElement });
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+
+    act(() => visit.controller.emit(slashState("h1", 640)));
+    clickRow(highlighted);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    const geometrySuccessor = captureRow("heading1");
+    clickRow(geometrySuccessor);
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "640px" });
+  });
+
+  it("rejects row replacement, row reorder, and group crossing before accepting a fresh publication", () => {
+    const visit = makeVisit();
+    render(<BoundaryHarness visit={visit} />);
+    open(visit);
+    let text = captureRow("text");
+    let root = captureRoot().element;
+    let basic = text.element.parentElement as HTMLDivElement;
+    let lists = screen.getByTestId("slash-item-bullet").parentElement as HTMLDivElement;
+    const refresh = () => {
+      text = captureRow("text");
+      root = captureRoot().element;
+      basic = text.element.parentElement as HTMLDivElement;
+      lists = screen.getByTestId("slash-item-bullet").parentElement as HTMLDivElement;
+    };
+    const replacement = text.element.cloneNode(true) as HTMLButtonElement;
+
+    text.element.replaceWith(replacement);
+    invokeMouse(text.click, replacement, "click");
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    replacement.replaceWith(text.element);
+
+    basic.append(text.element);
+    clickRow(text);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    basic.insertBefore(text.element, basic.children[1] ?? null);
+    act(() => visit.controller.emit(slashState()));
+    refresh();
+
+    lists.append(text.element);
+    clickRow(text);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    basic.insertBefore(text.element, basic.children[1] ?? null);
+    act(() => visit.controller.emit(slashState()));
+    refresh();
+
+    root.insertBefore(lists, basic);
+    clickRow(text);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    root.insertBefore(basic, lists);
+    act(() => visit.controller.emit(slashState()));
+    refresh();
+    clickRow(text);
+    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+  });
+
+  it("does no stale pointer or scroll work after removal before passive cleanup", () => {
+    const visit = makeVisit();
+    let staleClick: (() => void) | null = null;
+    let staleDown: (() => void) | null = null;
+    const onCleanup = vi.fn(() => {
+      staleClick?.();
+      staleDown?.();
+    });
+    const mounted = render(
+      <>
+        <BoundaryHarness visit={visit} />
+        <PassiveCleanupProbe onCleanup={onCleanup} />
+      </>,
+    );
+    open(visit, slashState("text"));
+    const row = captureRow("text");
+    const root = captureRoot();
+    staleClick = () => {
+      clickRow(row);
+    };
+    staleDown = () => {
+      invokeMouse(root.down, root.element, "mousedown");
+    };
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    mounted.rerender(
+      <>
+        <BoundaryHarness visit={visit} present={false} />
+        <PassiveCleanupProbe onCleanup={vi.fn()} />
+      </>,
+    );
+    expect(onCleanup).toHaveBeenCalledOnce();
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    expect(visit.view.focus).not.toHaveBeenCalled();
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["image", "onImage"],
+    ["link", "onLink"],
+    ["agent", "onKeepAgent"],
+  ] as const)("applies the frozen %s item context and callback once", (id, callback) => {
+    const visit = makeVisit();
+    render(<BoundaryHarness visit={visit} />);
+    open(visit, slashState(id));
+    const row = captureRow(id);
+
+    const accepted = clickRow(row);
+    row.click(accepted.event);
+    expect(slashActions.applyItem).toHaveBeenCalledOnce();
+    expect(slashActions.applyItem.mock.calls[0][0]).toBe(visit.view);
+    expect(slashActions.applyItem.mock.calls[0][2]).toBe(visit.session.undoManager);
+    expect(visit[callback]).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the comment selection, callback, and exact one-shot application", () => {
+    const createSelection = vi.spyOn(TextSelection, "create").mockReturnValue({} as TextSelection);
+    const visit = makeVisit();
+    try {
+      render(<BoundaryHarness visit={visit} />);
+      open(visit, slashState("comment"));
+      const row = captureRow("comment");
+      const accepted = clickRow(row);
+      row.click(accepted.event);
+
+      expect(slashActions.applyItem).toHaveBeenCalledOnce();
+      expect(createSelection).toHaveBeenCalledOnce();
+      expect(visit.view.dispatch).toHaveBeenCalledOnce();
+      expect(visit.onComment).toHaveBeenCalledOnce();
+    } finally {
+      createSelection.mockRestore();
+    }
   });
 });

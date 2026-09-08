@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { EditorView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
 import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
 import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
-import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems, splitSlashQuery, type SlashItem, type SlashWhere } from "@/editor/slash-items";
+import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems, splitSlashQuery, type SlashGroup, type SlashItem, type SlashWhere } from "@/editor/slash-items";
 import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
@@ -96,13 +96,233 @@ type HighlightOwner = {
 
 type PositionOwner = {
   snapshot: SlashMenuSnapshot;
-  value: { left: number; top: number; width: number; maxHeight: number };
+  value: PositionValue;
 };
 
 type KeyOwner = {
   authority: SlashMenuAuthority;
   retire: () => void;
 };
+
+type PositionValue = Readonly<{
+  left: number;
+  top: number;
+  width: number;
+  maxHeight: number;
+  container: HTMLElement;
+  hostLeft: number;
+  hostTop: number;
+  hostWidth: number;
+  hostHeight: number;
+  scrollTop: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}>;
+
+type SlashStateFacts = Readonly<{
+  source: SlashState;
+  coordsSource: SlashState["coords"];
+  from: number;
+  to: number;
+  query: string;
+  left: number;
+  top: number;
+  bottom: number;
+}>;
+
+type PointerItem = Readonly<{
+  source: SlashItem;
+  sourceKeywords: string[];
+  index: number;
+  groupIndex: number;
+  id: string;
+  title: string;
+  description: string | undefined;
+  keywords: readonly string[];
+  icon: string;
+  group: SlashGroup;
+  acceptsArg: boolean | undefined;
+  hint: string | undefined;
+  available: SlashItem["available"];
+  command: SlashItem["command"];
+  run: SlashItem["run"];
+  height: number;
+}>;
+
+type PointerGroup = Readonly<{
+  group: SlashGroup;
+  order: number;
+  registryOrder: number;
+  items: readonly PointerItem[];
+}>;
+
+type PointerCallbacks = Readonly<{
+  onImage: () => void;
+  onLink: () => void;
+  onComment: () => void;
+  onKeepAgent: () => void;
+}>;
+
+type PointerPresentation = Readonly<{
+  mount: symbol;
+  authority: SlashMenuAuthority;
+  snapshot: SlashMenuSnapshot;
+  state: SlashStateFacts;
+  editorState: EditorView["state"];
+  controllerGetState: SlashMenuController["getState"];
+  sessionUndoManager: CollabSession["undoManager"];
+  viewFocus: EditorView["focus"];
+  viewDispatch: EditorView["dispatch"];
+  canEdit: boolean;
+  canComment: boolean;
+  where: Readonly<SlashWhere>;
+  sourceItems: readonly SlashItem[];
+  sourceGroups: readonly SlashGroup[];
+  items: readonly PointerItem[];
+  groups: readonly PointerGroup[];
+  highlightedIndex: number;
+  argument: string;
+  callbacks: PointerCallbacks;
+  position: PositionValue;
+}>;
+
+interface PointerGroupElements {
+  root: HTMLDivElement | null;
+  heading: HTMLDivElement | null;
+}
+
+interface PointerRowElements {
+  root: HTMLButtonElement | null;
+  icon: SVGSVGElement | null;
+  body: HTMLSpanElement | null;
+  title: HTMLSpanElement | null;
+  description: HTMLSpanElement | null;
+  hint: HTMLSpanElement | null;
+}
+
+interface PointerPresentationRuntime {
+  retired: boolean;
+  root: HTMLDivElement | null;
+  groups: PointerGroupElements[];
+  rows: PointerRowElements[];
+  empty: HTMLDivElement | null;
+  committed: CommittedPointerPresentation | null;
+  highlightClaimed: boolean;
+  itemClaimed: boolean;
+}
+
+type DomTree = Readonly<{
+  node: Node;
+  nodeValue: string | null;
+  attributes: readonly (readonly [string, string])[];
+  children: readonly DomTree[];
+}>;
+
+type CommittedPointerRow = Readonly<{
+  item: PointerItem;
+  elements: Readonly<{
+    root: HTMLButtonElement;
+    icon: SVGSVGElement;
+    body: HTMLSpanElement;
+    title: HTMLSpanElement;
+    description: HTMLSpanElement | null;
+    hint: HTMLSpanElement | null;
+  }>;
+  tree: DomTree;
+}>;
+
+type CommittedPointerGroup = Readonly<{
+  group: PointerGroup;
+  root: HTMLDivElement;
+  heading: HTMLDivElement;
+}>;
+
+type CommittedPointerPresentation = Readonly<{
+  source: PointerPresentation;
+  root: HTMLDivElement;
+  rootTree: DomTree;
+  groups: readonly CommittedPointerGroup[];
+  rows: readonly CommittedPointerRow[];
+  empty: HTMLDivElement | null;
+  emptyTree: DomTree | null;
+}>;
+
+function snapshotDomTree(node: Node): DomTree {
+  const element = node.nodeType === 1 ? (node as Element) : null;
+  const attributes = element
+    ? Object.freeze(element.getAttributeNames().sort().map((name) => Object.freeze([name, element.getAttribute(name) ?? ""] as const)))
+    : Object.freeze([]);
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes,
+    children: Object.freeze(Array.from(node.childNodes, snapshotDomTree)),
+  });
+}
+
+function domTreeIsCurrent(tree: DomTree): boolean {
+  if (tree.node.nodeValue !== tree.nodeValue) return false;
+  const element = tree.node.nodeType === 1 ? (tree.node as Element) : null;
+  if (element) {
+    const names = element.getAttributeNames().sort();
+    if (
+      names.length !== tree.attributes.length ||
+      tree.attributes.some(([name, value], index) => names[index] !== name || element.getAttribute(name) !== value)
+    ) {
+      return false;
+    }
+  } else if (tree.attributes.length !== 0) {
+    return false;
+  }
+  if (tree.node.childNodes.length !== tree.children.length) return false;
+  return tree.children.every((child, index) => tree.node.childNodes.item(index) === child.node && domTreeIsCurrent(child));
+}
+
+function domTreeContains(tree: DomTree, target: Node): boolean {
+  return tree.node === target || tree.children.some((child) => domTreeContains(child, target));
+}
+
+function snapshotPointerItem(item: SlashItem, index: number, groupIndex: number): PointerItem {
+  return Object.freeze({
+    source: item,
+    sourceKeywords: item.keywords,
+    index,
+    groupIndex,
+    id: item.id,
+    title: item.title,
+    description: item.description,
+    keywords: Object.freeze([...item.keywords]),
+    icon: item.icon,
+    group: item.group,
+    acceptsArg: item.acceptsArg,
+    hint: item.hint,
+    available: item.available,
+    command: item.command,
+    run: item.run,
+    height: rowHeight(item),
+  });
+}
+
+function pointerItemIsCurrent(item: PointerItem, source: SlashItem): boolean {
+  if (
+    source !== item.source ||
+    source.keywords !== item.sourceKeywords ||
+    source.id !== item.id ||
+    source.title !== item.title ||
+    source.description !== item.description ||
+    source.icon !== item.icon ||
+    source.group !== item.group ||
+    source.acceptsArg !== item.acceptsArg ||
+    source.hint !== item.hint ||
+    source.available !== item.available ||
+    source.command !== item.command ||
+    source.run !== item.run ||
+    source.keywords.length !== item.keywords.length
+  ) {
+    return false;
+  }
+  return item.keywords.every((keyword, index) => source.keywords[index] === keyword);
+}
 
 export function SlashMenu({
   view,
@@ -124,15 +344,19 @@ export function SlashMenu({
   /** `/agent`: opens the "Keep an agent here" dialog. */
   onKeepAgent: () => void;
 }) {
+  const [mount] = useState(() => Symbol("slash-menu"));
   const authority = useMemo<SlashMenuAuthority | null>(
-    () => (view ? { controller, view, session } : null),
+    () => (view ? Object.freeze({ controller, view, session }) : null),
     [controller, view, session],
   );
   const authorityRef = useRef<SlashMenuAuthority | null>(null);
   const retiredControllersRef = useRef(new WeakSet<SlashMenuController>());
   const keyOwnerRef = useRef<KeyOwner | null>(null);
+  const pointerRuntimesRef = useRef(new WeakMap<PointerPresentation, PointerPresentationRuntime>());
+  const activePointerRef = useRef<CommittedPointerPresentation | null>(null);
+  const claimedNativeEventsRef = useRef(new WeakSet<Event>());
   const [snapshot, setSnapshot] = useState<SlashMenuSnapshot | null>(() =>
-    authority ? { authority, state: controller.getState() } : null,
+    authority ? Object.freeze({ authority, state: controller.getState() }) : null,
   );
   const currentSnapshot = snapshot?.authority === authority ? snapshot : null;
   const state = currentSnapshot?.state ?? null;
@@ -141,7 +365,6 @@ export function SlashMenu({
   const index = highlight?.authority === authority && highlight.query === query ? highlight.index : 0;
   const [position, setPosition] = useState<PositionOwner | null>(null);
   const pos = position?.snapshot === currentSnapshot ? position.value : null;
-  const listRef = useRef<HTMLDivElement>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const canComment = useSessionValue(session, (s) => s.canComment);
 
@@ -155,7 +378,7 @@ export function SlashMenu({
     authorityRef.current = authority;
     const publish = (next: SlashState | null) => {
       if (authorityRef.current !== authority) return;
-      setSnapshot({ authority, state: next });
+      setSnapshot(Object.freeze({ authority, state: next }));
     };
     const unsubscribe = controller.subscribe(publish);
     setSnapshot((current) => {
@@ -164,7 +387,7 @@ export function SlashMenu({
       // Its replacement visit starts closed until that view publishes for itself.
       const retired = current?.authority.controller === controller || retiredControllers.has(controller);
       const next = retired ? null : controller.getState();
-      return { authority, state: next };
+      return Object.freeze({ authority, state: next });
     });
     return () => {
       retiredControllers.add(controller);
@@ -254,12 +477,6 @@ export function SlashMenu({
     return owner.retire;
   }, [open, authority, controller, items, index, apply, setCurrentIndex]);
 
-  // Keep the highlighted row visible while navigating with the keyboard.
-  useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
-    el?.scrollIntoView({ block: "nearest" });
-  }, [index, items]);
-
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!open || !state || !currentSnapshot || !container) {
@@ -276,55 +493,712 @@ export function SlashMenu({
     const box = clampToViewport({ left: state.coords.left, top: below ? state.coords.bottom + 6 : state.coords.top - 6 - height, width: MENU_WIDTH, height }, viewport);
     const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
     const top = box.top - host.top + container.scrollTop;
-    setPosition({ snapshot: currentSnapshot, value: { left, top, width: box.width, maxHeight: box.height } });
+    setPosition({
+      snapshot: currentSnapshot,
+      value: Object.freeze({
+        left,
+        top,
+        width: box.width,
+        maxHeight: box.height,
+        container,
+        hostLeft: host.left,
+        hostTop: host.top,
+        hostWidth: host.width,
+        hostHeight: host.height,
+        scrollTop: container.scrollTop,
+        viewportWidth: viewport.width,
+        viewportHeight: viewport.height,
+      }),
+    });
   }, [open, state, currentSnapshot, items, containerRef]);
 
-  if (!open || !pos) return null;
+  const pointerPresentation = (() => {
+    if (!open || !pos || !authority || !currentSnapshot || !state || !view) return null;
+    const groupIndexes = new Map<SlashGroup, number>();
+    const pointerItems = Object.freeze(
+      items.map((item, itemIndex) => {
+        const groupIndex = groupIndexes.get(item.group) ?? 0;
+        groupIndexes.set(item.group, groupIndex + 1);
+        return snapshotPointerItem(item, itemIndex, groupIndex);
+      }),
+    );
+    const pointerGroups = Object.freeze(
+      SLASH_GROUPS.map((group, registryOrder) => ({
+        group,
+        registryOrder,
+        items: Object.freeze(pointerItems.filter((item) => item.group === group)),
+      }))
+        .filter((group) => group.items.length > 0)
+        .map((group, order) => Object.freeze({ ...group, order })),
+    );
+    const stateFacts: SlashStateFacts = Object.freeze({
+      source: state,
+      coordsSource: state.coords,
+      from: state.from,
+      to: state.to,
+      query: state.query,
+      left: state.coords.left,
+      top: state.coords.top,
+      bottom: state.coords.bottom,
+    });
+    return Object.freeze({
+      mount,
+      authority,
+      snapshot: currentSnapshot,
+      state: stateFacts,
+      editorState: view.state,
+      controllerGetState: controller.getState,
+      sessionUndoManager: session.undoManager,
+      viewFocus: view.focus,
+      viewDispatch: view.dispatch,
+      canEdit,
+      canComment,
+      where: Object.freeze({ inTable: where.inTable, canComment: where.canComment }),
+      sourceItems: Object.freeze([...items]),
+      sourceGroups: Object.freeze([...SLASH_GROUPS]),
+      items: pointerItems,
+      groups: pointerGroups,
+      highlightedIndex: index,
+      argument: splitSlashQuery(state.query).arg,
+      callbacks: Object.freeze({ onImage, onLink, onComment, onKeepAgent }),
+      position: pos,
+    } satisfies PointerPresentation);
+  })();
 
-  const groups = SLASH_GROUPS.map((g) => ({ group: g, items: items.filter((i) => i.group === g) })).filter((g) => g.items.length > 0);
-  const indexOf = new Map(items.map((item, i) => [item.id, i]));
+  function runtimeFor(candidate: PointerPresentation): PointerPresentationRuntime {
+    const runtimes = pointerRuntimesRef.current;
+    let runtime = runtimes.get(candidate);
+    if (!runtime) {
+      runtime = {
+        retired: false,
+        root: null,
+        groups: candidate.groups.map(() => ({ root: null, heading: null })),
+        rows: candidate.items.map(() => ({
+          root: null,
+          icon: null,
+          body: null,
+          title: null,
+          description: null,
+          hint: null,
+        })),
+        empty: null,
+        committed: null,
+        highlightClaimed: false,
+        itemClaimed: false,
+      };
+      runtimes.set(candidate, runtime);
+    }
+    return runtime;
+  }
+
+  function retirePointer(candidate: PointerPresentation): void {
+    const runtime = pointerRuntimesRef.current.get(candidate);
+    if (!runtime) return;
+    runtime.retired = true;
+    const committed = runtime.committed;
+    if (committed && activePointerRef.current === committed) activePointerRef.current = null;
+    runtime.committed = null;
+  }
+
+  function bindPointerRoot(candidate: PointerPresentation, element: HTMLDivElement | null): void {
+    const runtime = runtimeFor(candidate);
+    if (runtime.root === element) return;
+    if (!element) {
+      if (runtime.root) {
+        runtime.root = null;
+        retirePointer(candidate);
+      }
+      return;
+    }
+    if (runtime.root && runtime.root !== element) retirePointer(candidate);
+    runtime.root = element;
+  }
+
+  function bindPointerGroup<K extends keyof PointerGroupElements>(
+    candidate: PointerPresentation,
+    group: PointerGroup,
+    kind: K,
+    element: PointerGroupElements[K],
+  ): void {
+    const runtime = runtimeFor(candidate);
+    const elements = runtime.groups[group.order];
+    if (!elements || candidate.groups[group.order] !== group || elements[kind] === element) return;
+    if (!element) {
+      if (elements[kind]) {
+        elements[kind] = null;
+        retirePointer(candidate);
+      }
+      return;
+    }
+    if (elements[kind] && elements[kind] !== element) retirePointer(candidate);
+    elements[kind] = element;
+  }
+
+  function bindPointerRow<K extends keyof PointerRowElements>(
+    candidate: PointerPresentation,
+    item: PointerItem,
+    kind: K,
+    element: PointerRowElements[K],
+  ): void {
+    const runtime = runtimeFor(candidate);
+    const elements = runtime.rows[item.index];
+    if (!elements || candidate.items[item.index] !== item || elements[kind] === element) return;
+    if (!element) {
+      if (elements[kind]) {
+        elements[kind] = null;
+        retirePointer(candidate);
+      }
+      return;
+    }
+    if (elements[kind] && elements[kind] !== element) retirePointer(candidate);
+    elements[kind] = element;
+  }
+
+  function bindPointerEmpty(candidate: PointerPresentation, element: HTMLDivElement | null): void {
+    const runtime = runtimeFor(candidate);
+    if (runtime.empty === element) return;
+    if (!element) {
+      if (runtime.empty) {
+        runtime.empty = null;
+        retirePointer(candidate);
+      }
+      return;
+    }
+    if (runtime.empty && runtime.empty !== element) retirePointer(candidate);
+    runtime.empty = element;
+  }
+
+  function pointerFactsAreCurrent(candidate: PointerPresentation): boolean {
+    const { authority: owner, state: stateFacts, position: geometry } = candidate;
+    if (
+      candidate.mount !== mount ||
+      authorityRef.current !== owner ||
+      owner.controller !== controller ||
+      owner.view !== view ||
+      owner.session !== session ||
+      owner.controller.getState !== candidate.controllerGetState ||
+      owner.view.state !== candidate.editorState ||
+      owner.view.focus !== candidate.viewFocus ||
+      owner.view.dispatch !== candidate.viewDispatch ||
+      owner.session.undoManager !== candidate.sessionUndoManager ||
+      owner.session.canEdit !== candidate.canEdit ||
+      owner.session.canComment !== candidate.canComment ||
+      !candidate.canEdit ||
+      candidate.where.canComment !== candidate.canComment ||
+      candidate.snapshot.authority !== owner ||
+      candidate.snapshot.state !== stateFacts.source ||
+      containerRef.current !== geometry.container
+    ) {
+      return false;
+    }
+
+    const liveState = owner.controller.getState();
+    if (
+      liveState !== stateFacts.source ||
+      liveState.coords !== stateFacts.coordsSource ||
+      liveState.from !== stateFacts.from ||
+      liveState.to !== stateFacts.to ||
+      liveState.query !== stateFacts.query ||
+      liveState.coords.left !== stateFacts.left ||
+      liveState.coords.top !== stateFacts.top ||
+      liveState.coords.bottom !== stateFacts.bottom ||
+      splitSlashQuery(liveState.query).arg !== candidate.argument
+    ) {
+      return false;
+    }
+
+    const liveWhere = { inTable: !!tableAt(owner.view.state), canComment: owner.session.canComment };
+    if (liveWhere.inTable !== candidate.where.inTable || liveWhere.canComment !== candidate.where.canComment) return false;
+    if (
+      SLASH_GROUPS.length !== candidate.sourceGroups.length ||
+      candidate.sourceGroups.some((group, groupIndex) => SLASH_GROUPS[groupIndex] !== group)
+    ) {
+      return false;
+    }
+
+    const liveItems = filterSlashItems(liveState.query, SLASH_ITEMS, liveWhere);
+    if (liveItems.length !== candidate.items.length || candidate.sourceItems.length !== candidate.items.length) return false;
+    const groupIndexes = new Map<SlashGroup, number>();
+    for (let itemIndex = 0; itemIndex < liveItems.length; itemIndex++) {
+      const liveItem = liveItems[itemIndex];
+      const item = candidate.items[itemIndex];
+      const groupIndex = groupIndexes.get(liveItem.group) ?? 0;
+      groupIndexes.set(liveItem.group, groupIndex + 1);
+      if (
+        !item ||
+        candidate.sourceItems[itemIndex] !== liveItem ||
+        item.index !== itemIndex ||
+        item.groupIndex !== groupIndex ||
+        item.height !== rowHeight(liveItem) ||
+        !pointerItemIsCurrent(item, liveItem)
+      ) {
+        return false;
+      }
+    }
+
+    const currentGroups = candidate.sourceGroups
+      .map((group) => liveItems.filter((item) => item.group === group))
+      .filter((groupItems) => groupItems.length > 0);
+    if (currentGroups.length !== candidate.groups.length) return false;
+    for (let groupIndex = 0; groupIndex < candidate.groups.length; groupIndex++) {
+      const group = candidate.groups[groupIndex];
+      const liveGroupItems = currentGroups[groupIndex];
+      if (
+        !group ||
+        !liveGroupItems ||
+        group.order !== groupIndex ||
+        group.registryOrder !== candidate.sourceGroups.indexOf(group.group) ||
+        group.group !== liveGroupItems[0]?.group ||
+        group.items.length !== liveGroupItems.length ||
+        group.items.some((item, rowIndex) => item.source !== liveGroupItems[rowIndex] || item.groupIndex !== rowIndex)
+      ) {
+        return false;
+      }
+    }
+
+    const host = geometry.container.getBoundingClientRect();
+    return (
+      host.left === geometry.hostLeft &&
+      host.top === geometry.hostTop &&
+      host.width === geometry.hostWidth &&
+      host.height === geometry.hostHeight &&
+      geometry.container.scrollTop === geometry.scrollTop &&
+      window.innerWidth === geometry.viewportWidth &&
+      window.innerHeight === geometry.viewportHeight
+    );
+  }
+
+  function pointerDomIsCurrent(committed: CommittedPointerPresentation): boolean {
+    const candidate = committed.source;
+    const root = committed.root;
+    const ownerWindow = root.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      !(root instanceof ownerWindow.HTMLDivElement) ||
+      !root.isConnected ||
+      root.ownerDocument !== candidate.position.container.ownerDocument ||
+      root.getAttribute("role") !== "listbox" ||
+      root.getAttribute("aria-label") !== "Insert block" ||
+      root.getAttribute("data-testid") !== "slash-menu" ||
+      root.style.left !== `${candidate.position.left}px` ||
+      root.style.top !== `${candidate.position.top}px` ||
+      root.style.width !== `${candidate.position.width}px` ||
+      root.style.maxHeight !== `${Math.min(MENU_MAX_HEIGHT, candidate.position.maxHeight)}px` ||
+      committed.groups.length !== candidate.groups.length ||
+      committed.rows.length !== candidate.items.length ||
+      !domTreeIsCurrent(committed.rootTree)
+    ) {
+      return false;
+    }
+
+    if (candidate.items.length === 0) {
+      return Boolean(
+        committed.empty &&
+        committed.emptyTree &&
+        root.children.length === 1 &&
+        root.firstElementChild === committed.empty &&
+        committed.empty.parentElement === root &&
+        committed.empty.isConnected &&
+        committed.empty.getAttribute("role") === "option" &&
+        committed.empty.getAttribute("aria-selected") === "true" &&
+        committed.empty.getAttribute("data-testid") === "slash-empty" &&
+        committed.empty.style.lineHeight === `${ROW_HEIGHT}px` &&
+        committed.empty.textContent === "No matches" &&
+        domTreeIsCurrent(committed.emptyTree),
+      );
+    }
+    if (committed.empty || committed.emptyTree || root.children.length !== candidate.groups.length) return false;
+
+    const seen = new Set<Element>();
+    for (const group of committed.groups) {
+      const groupFacts = group.group;
+      if (
+        !(group.root instanceof ownerWindow.HTMLDivElement) ||
+        !(group.heading instanceof ownerWindow.HTMLDivElement) ||
+        !group.root.isConnected ||
+        !group.heading.isConnected ||
+        group.root.parentElement !== root ||
+        root.children.item(groupFacts.order) !== group.root ||
+        group.heading.parentElement !== group.root ||
+        group.root.firstElementChild !== group.heading ||
+        group.heading.textContent !== groupFacts.group ||
+        group.root.children.length !== groupFacts.items.length + 1 ||
+        seen.has(group.root) ||
+        seen.has(group.heading)
+      ) {
+        return false;
+      }
+      seen.add(group.root);
+      seen.add(group.heading);
+
+      for (const item of groupFacts.items) {
+        const row = committed.rows[item.index];
+        const elements = row?.elements;
+        if (
+          !row ||
+          row.item !== item ||
+          !elements ||
+          !(elements.root instanceof ownerWindow.HTMLButtonElement) ||
+          !(elements.icon instanceof ownerWindow.SVGSVGElement) ||
+          !(elements.body instanceof ownerWindow.HTMLSpanElement) ||
+          !(elements.title instanceof ownerWindow.HTMLSpanElement) ||
+          (item.description
+            ? !(elements.description instanceof ownerWindow.HTMLSpanElement)
+            : elements.description !== null) ||
+          (item.hint ? !(elements.hint instanceof ownerWindow.HTMLSpanElement) : elements.hint !== null) ||
+          !elements.root.isConnected ||
+          elements.root.disabled ||
+          elements.root.parentElement !== group.root ||
+          group.root.children.item(item.groupIndex + 1) !== elements.root ||
+          elements.root.type !== "button" ||
+          elements.root.getAttribute("role") !== "option" ||
+          elements.root.getAttribute("aria-selected") !== String(item.index === candidate.highlightedIndex) ||
+          elements.root.getAttribute("data-index") !== String(item.index) ||
+          elements.root.getAttribute("data-testid") !== `slash-item-${item.id}` ||
+          elements.root.style.height !== `${item.height}px` ||
+          elements.root.classList.contains("bg-accent-soft") !== (item.index === candidate.highlightedIndex) ||
+          elements.root.classList.contains("text-ink") !== (item.index === candidate.highlightedIndex) ||
+          elements.root.firstElementChild !== elements.icon ||
+          elements.icon.nextElementSibling !== elements.body ||
+          elements.body.parentElement !== elements.root ||
+          elements.body.firstElementChild !== elements.title ||
+          elements.title.parentElement !== elements.body ||
+          elements.title.textContent !== item.title ||
+          elements.title.nextElementSibling !== elements.description ||
+          (!!item.description && elements.description?.parentElement !== elements.body) ||
+          elements.description?.textContent !== item.description ||
+          elements.body.nextElementSibling !== elements.hint ||
+          (!!item.hint && elements.hint?.parentElement !== elements.root) ||
+          elements.hint?.textContent !== item.hint ||
+          elements.root.children.length !== 2 + (item.hint ? 1 : 0) ||
+          elements.body.children.length !== 1 + (item.description ? 1 : 0) ||
+          seen.has(elements.root) ||
+          !domTreeIsCurrent(row.tree)
+        ) {
+          return false;
+        }
+        seen.add(elements.root);
+      }
+    }
+    return true;
+  }
+
+  function buildCommittedPointer(candidate: PointerPresentation): CommittedPointerPresentation | null {
+    const runtime = runtimeFor(candidate);
+    const root = runtime.root;
+    if (runtime.retired || !root) return null;
+    const groups: CommittedPointerGroup[] = [];
+    for (const group of candidate.groups) {
+      const elements = runtime.groups[group.order];
+      if (!elements?.root || !elements.heading) return null;
+      groups.push(Object.freeze({ group, root: elements.root, heading: elements.heading }));
+    }
+    const rows: CommittedPointerRow[] = [];
+    for (const item of candidate.items) {
+      const elements = runtime.rows[item.index];
+      if (!elements?.root || !elements.icon || !elements.body || !elements.title) return null;
+      if (item.description ? !elements.description : elements.description) return null;
+      if (item.hint ? !elements.hint : elements.hint) return null;
+      rows.push(
+        Object.freeze({
+          item,
+          elements: Object.freeze({
+            root: elements.root,
+            icon: elements.icon,
+            body: elements.body,
+            title: elements.title,
+            description: elements.description,
+            hint: elements.hint,
+          }),
+          tree: snapshotDomTree(elements.root),
+        }),
+      );
+    }
+    if (candidate.items.length === 0 ? !runtime.empty : runtime.empty) return null;
+    return Object.freeze({
+      source: candidate,
+      root,
+      rootTree: snapshotDomTree(root),
+      groups: Object.freeze(groups),
+      rows: Object.freeze(rows),
+      empty: runtime.empty,
+      emptyTree: runtime.empty ? snapshotDomTree(runtime.empty) : null,
+    });
+  }
+
+  function establishPointer(candidate: PointerPresentation): void {
+    const previous = activePointerRef.current;
+    if (previous && previous.source !== candidate) retirePointer(previous.source);
+    const runtime = runtimeFor(candidate);
+    const committed = buildCommittedPointer(candidate);
+    const factsCurrent = pointerFactsAreCurrent(candidate);
+    const domCurrent = committed ? pointerDomIsCurrent(committed) : false;
+    if (!committed || !factsCurrent || !domCurrent) {
+      retirePointer(candidate);
+      return;
+    }
+    runtime.committed = committed;
+    activePointerRef.current = committed;
+  }
+
+  function currentPointer(candidate: PointerPresentation): CommittedPointerPresentation | null {
+    const runtime = pointerRuntimesRef.current.get(candidate);
+    const committed = activePointerRef.current;
+    if (
+      !runtime ||
+      runtime.retired ||
+      !committed ||
+      committed.source !== candidate ||
+      runtime.committed !== committed
+    ) {
+      return null;
+    }
+    if (!pointerFactsAreCurrent(candidate) || !pointerDomIsCurrent(committed)) {
+      retirePointer(candidate);
+      return null;
+    }
+    return committed;
+  }
+
+  function claimPointerEvent<T extends HTMLElement>(
+    candidate: PointerPresentation,
+    event: ReactMouseEvent<T>,
+    expected: T,
+    syntheticType: "mouseenter" | "click" | "mousedown",
+    nativeType: "mouseover" | "click" | "mousedown",
+    targetTree: (committed: CommittedPointerPresentation) => DomTree | null,
+  ): CommittedPointerPresentation | null {
+    const active = activePointerRef.current;
+    const runtime = pointerRuntimesRef.current.get(candidate);
+    if (
+      !active ||
+      active.source !== candidate ||
+      !runtime ||
+      runtime.retired ||
+      runtime.committed !== active ||
+      event.type !== syntheticType ||
+      event.currentTarget !== expected
+    ) {
+      return null;
+    }
+    const ownerWindow = expected.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== nativeType ||
+      claimedNativeEventsRef.current.has(nativeEvent) ||
+      !(target instanceof ownerWindow.Node) ||
+      target !== nativeEvent.target ||
+      !target.isConnected ||
+      target.ownerDocument !== expected.ownerDocument ||
+      !expected.contains(target)
+    ) {
+      return null;
+    }
+    const tree = targetTree(active);
+    if (!tree || !domTreeContains(tree, target)) return null;
+    const committed = currentPointer(candidate);
+    if (!committed || committed !== active) return null;
+    claimedNativeEventsRef.current.add(nativeEvent);
+    return committed;
+  }
+
+  function applyPointerItem(candidate: PointerPresentation, item: PointerItem): void {
+    const owner = candidate.authority;
+    const callbacks = candidate.callbacks;
+    if (item.command) {
+      applySlashCommand(owner.view, item.command(candidate.argument), candidate.sessionUndoManager);
+      owner.view.focus();
+      return;
+    }
+    const context = Object.freeze({
+      view: owner.view,
+      where: candidate.where,
+      openImage: callbacks.onImage,
+      openLink: callbacks.onLink,
+      startComment: () => {
+        selectCurrentBlock(owner.view);
+        callbacks.onComment();
+      },
+      keepAgent: callbacks.onKeepAgent,
+    });
+    const run = item.run;
+    if (!run) return;
+    applySlashItem(owner.view, () => run(context, candidate.argument), candidate.sessionUndoManager);
+  }
+
+  useLayoutEffect(() => {
+    if (!pointerPresentation) return;
+    establishPointer(pointerPresentation);
+    return () => retirePointer(pointerPresentation);
+  });
+
+  // Resolve the selected row from this exact committed presentation, never from a successor's DOM.
+  useEffect(() => {
+    if (!pointerPresentation || activePointerRef.current?.source !== pointerPresentation) return;
+    const committed = currentPointer(pointerPresentation);
+    const selected = committed?.rows[pointerPresentation.highlightedIndex];
+    selected?.elements.root.scrollIntoView({ block: "nearest" });
+  });
+
+  if (!pointerPresentation) return null;
 
   return (
     <div
-      ref={listRef}
+      ref={(element) => bindPointerRoot(pointerPresentation, element)}
       className="touch-target scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in"
-      style={{ left: pos.left, top: pos.top, width: pos.width, maxHeight: Math.min(MENU_MAX_HEIGHT, pos.maxHeight) }}
+      style={{
+        left: pointerPresentation.position.left,
+        top: pointerPresentation.position.top,
+        width: pointerPresentation.position.width,
+        maxHeight: Math.min(MENU_MAX_HEIGHT, pointerPresentation.position.maxHeight),
+      }}
       role="listbox"
       aria-label="Insert block"
       data-testid="slash-menu"
-      onMouseDown={(e) => e.preventDefault()}
+      onMouseDown={(event) => {
+        const root = pointerRuntimesRef.current.get(pointerPresentation)?.root;
+        if (!root) return;
+        const committed = claimPointerEvent(
+          pointerPresentation,
+          event,
+          root,
+          "mousedown",
+          "mousedown",
+          (current) =>
+            current.rows.find((row) => domTreeContains(row.tree, event.target as Node))?.tree ??
+            (current.emptyTree && domTreeContains(current.emptyTree, event.target as Node) ? current.emptyTree : null),
+        );
+        if (committed) event.preventDefault();
+      }}
     >
-      {items.length === 0 && (
-        <div className="px-3 text-sm text-ink-3" style={{ lineHeight: `${ROW_HEIGHT}px` }} data-testid="slash-empty" role="option" aria-selected>
+      {pointerPresentation.items.length === 0 && (
+        <div
+          ref={(element) => bindPointerEmpty(pointerPresentation, element)}
+          className="px-3 text-sm text-ink-3"
+          style={{ lineHeight: `${ROW_HEIGHT}px` }}
+          data-testid="slash-empty"
+          role="option"
+          aria-selected
+        >
           No matches
         </div>
       )}
-      {groups.map((g) => (
-        <div key={g.group}>
-          <div className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3">{g.group}</div>
-          {g.items.map((item) => {
-            const i = indexOf.get(item.id) ?? 0;
+      {pointerPresentation.groups.map((group) => (
+        <div
+          ref={(element) => bindPointerGroup(pointerPresentation, group, "root", element)}
+          key={group.group}
+        >
+          <div
+            ref={(element) => bindPointerGroup(pointerPresentation, group, "heading", element)}
+            className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3"
+          >
+            {group.group}
+          </div>
+          {group.items.map((item) => {
             const Icon = ICONS[item.icon] ?? Type;
-            const active = i === index;
+            const active = item.index === pointerPresentation.highlightedIndex;
             return (
               <button
+                ref={(element) => bindPointerRow(pointerPresentation, item, "root", element)}
                 key={item.id}
                 type="button"
                 role="option"
                 aria-selected={active}
-                data-index={i}
+                data-index={item.index}
                 data-testid={`slash-item-${item.id}`}
                 className={cn("flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2", active && "bg-accent-soft text-ink")}
-                style={{ height: rowHeight(item) }}
-                onMouseEnter={() => setCurrentIndex(() => i)}
-                onClick={() => apply(item)}
+                style={{ height: item.height }}
+                onMouseEnter={(event) => {
+                  const pointerRuntime = pointerRuntimesRef.current.get(pointerPresentation);
+                  if (!pointerRuntime) return;
+                  if (
+                    item.index !== pointerPresentation.highlightedIndex &&
+                    pointerRuntime.highlightClaimed
+                  ) {
+                    return;
+                  }
+                  const row = pointerRuntime.rows[item.index]?.root;
+                  if (!row) return;
+                  const committed = claimPointerEvent(
+                    pointerPresentation,
+                    event,
+                    row,
+                    "mouseenter",
+                    "mouseover",
+                    (current) => current.rows[item.index]?.tree ?? null,
+                  );
+                  if (!committed || committed.rows[item.index]?.item !== item) return;
+                  if (item.index === pointerPresentation.highlightedIndex) return;
+                  pointerRuntime.highlightClaimed = true;
+                  setHighlight((current) => {
+                    if (
+                      activePointerRef.current?.source !== pointerPresentation ||
+                      authorityRef.current !== pointerPresentation.authority ||
+                      pointerPresentation.authority.controller.getState() !== pointerPresentation.state.source
+                    ) {
+                      return current;
+                    }
+                    return {
+                      authority: pointerPresentation.authority,
+                      query,
+                      index: item.index,
+                    };
+                  });
+                }}
+                onClick={(event) => {
+                  const pointerRuntime = pointerRuntimesRef.current.get(pointerPresentation);
+                  if (!pointerRuntime) return;
+                  if (pointerRuntime.itemClaimed) return;
+                  const row = pointerRuntime.rows[item.index]?.root;
+                  if (!row) return;
+                  const committed = claimPointerEvent(
+                    pointerPresentation,
+                    event,
+                    row,
+                    "click",
+                    "click",
+                    (current) => current.rows[item.index]?.tree ?? null,
+                  );
+                  if (!committed || committed.rows[item.index]?.item !== item) return;
+                  pointerRuntime.itemClaimed = true;
+                  applyPointerItem(pointerPresentation, item);
+                }}
               >
-                <Icon size={16} className="shrink-0 text-ink-3" />
-                <span className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate">{item.title}</span>
-                  {item.description && <span className="truncate text-xs text-ink-3">{item.description}</span>}
+                <Icon
+                  ref={(element) => bindPointerRow(pointerPresentation, item, "icon", element)}
+                  size={16}
+                  className="shrink-0 text-ink-3"
+                />
+                <span
+                  ref={(element) => bindPointerRow(pointerPresentation, item, "body", element)}
+                  className="flex min-w-0 flex-1 flex-col"
+                >
+                  <span
+                    ref={(element) => bindPointerRow(pointerPresentation, item, "title", element)}
+                    className="truncate"
+                  >
+                    {item.title}
+                  </span>
+                  {item.description && (
+                    <span
+                      ref={(element) => bindPointerRow(pointerPresentation, item, "description", element)}
+                      className="truncate text-xs text-ink-3"
+                    >
+                      {item.description}
+                    </span>
+                  )}
                 </span>
-                {item.hint && <span className="text-xs text-ink-3">{item.hint}</span>}
+                {item.hint && (
+                  <span
+                    ref={(element) => bindPointerRow(pointerPresentation, item, "hint", element)}
+                    className="text-xs text-ink-3"
+                  >
+                    {item.hint}
+                  </span>
+                )}
               </button>
             );
           })}
