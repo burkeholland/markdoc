@@ -291,6 +291,27 @@ afterEach(async () => {
 });
 
 describe("editor header More menu authority", () => {
+  it("keeps genuine selection usable after a pre-mount body decoy", async () => {
+    const session = createSession();
+    const actions = createActions();
+    let history: HTMLElement | null = null;
+    document.body.addEventListener("click", (event) => {
+      if (!history || event.target !== history) return;
+      history.dispatchEvent(new CustomEvent("menu.itemSelect", {
+        bubbles: true,
+        cancelable: true,
+      }));
+    }, { once: true });
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    history = item("history");
+
+    fireEvent.click(history);
+
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it.each([
     ["history", "onHistory"],
     ["name-version", "onNameVersion"],
@@ -309,6 +330,20 @@ describe("editor header More menu authority", () => {
     expect(actions[callback]).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
     await waitFor(() => expect(menuTrigger).toHaveFocus());
+  });
+
+  it("preserves the realm CustomEvent constructor and restores item dispatch", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const CustomEventConstructor = window.CustomEvent;
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+
+    expect(window.CustomEvent).toBe(CustomEventConstructor);
+    fireEvent.click(history);
+
+    expect(history.dispatchEvent).toBe(EventTarget.prototype.dispatchEvent);
   });
 
   it("rejects unadmitted and repeated custom selection without consuming a fresh action", async () => {
@@ -379,24 +414,29 @@ describe("editor header More menu authority", () => {
     expect(confirmDelete).toHaveBeenCalledOnce();
   });
 
-  it("rejects a nested forged selection that consumes Radix's pending one-shot listener", async () => {
+  it("rejects nested selection from a pre-mount window interceptor", async () => {
     const session = createSession();
     const actions = createActions();
     const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(false);
     actions.onDelete = vi.fn(() => {
       confirm(`Move “${DOC.title}” to trash? You can restore it from the dashboard for 30 days.`);
     });
-    await renderStrict(header(headerProps(session, actions)));
-    openMenu();
-    const deleteItem = item("delete");
+    let deleteItem: HTMLElement | null = null;
+    let decoy: CustomEvent | null = null;
     window.addEventListener("menu.itemSelect", (event) => {
-      if (event.target !== deleteItem) return;
+      if (!deleteItem || !decoy || event.target !== deleteItem) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      deleteItem.dispatchEvent(new CustomEvent("menu.itemSelect", {
+      deleteItem.dispatchEvent(decoy);
+    }, { capture: true, once: true });
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    deleteItem = item("delete");
+    deleteItem.addEventListener("click", () => {
+      decoy = new CustomEvent("menu.itemSelect", {
         bubbles: true,
         cancelable: true,
-      }));
+      });
     }, { capture: true, once: true });
 
     fireEvent.click(deleteItem);
@@ -840,16 +880,12 @@ describe("editor header More menu authority", () => {
     },
   );
 
-  it("rejects a nested forged pointer-outside event that consumes Radix's listener", async () => {
+  it("rejects nested pointer-outside from a pre-mount window interceptor", async () => {
     const session = createSession();
     const actions = createActions();
-    await renderStrict(header(headerProps(session, actions), true));
-    const outside = screen.getByRole("button", { name: "Outside menu" });
-    openMenu();
-    const history = item("history");
-    history.focus();
-    await waitForOutsideListener();
+    let outside: HTMLElement | null = null;
     window.addEventListener("dismissableLayer.pointerDownOutside", (event) => {
+      if (!outside || event.target !== outside) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const originalEvent = (event as CustomEvent<{ originalEvent: Event }>).detail.originalEvent;
@@ -859,6 +895,12 @@ describe("editor header More menu authority", () => {
         detail: { originalEvent },
       }));
     }, { capture: true, once: true });
+    await renderStrict(header(headerProps(session, actions), true));
+    outside = screen.getByRole("button", { name: "Outside menu" });
+    openMenu();
+    const history = item("history");
+    history.focus();
+    await waitForOutsideListener();
 
     fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
     expect(screen.getByRole("menu")).toBeInTheDocument();

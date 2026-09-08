@@ -6028,10 +6028,16 @@ class MoreMenuPublicationCoordinator {
   #claimedActions = new WeakSet<MoreMenuAction>();
   #claimedEvents = new WeakSet<Event>();
   #stagedNativeEvents = new WeakSet<Event>();
+  #dispatchedSelectionCustomEvent: Event | null = null;
   #selectionCustomEvent: Event | null = null;
+  #dispatchedOutsideCustomEvents = new WeakMap<Event, Event>();
   #outsideCustomEvents = new WeakMap<Event, Event>();
+  #taintedOutsideNativeEvents = new WeakSet<Event>();
   #requestedSuccessors = new WeakSet<MoreMenuPublication>();
   #unpublishedChangeRequested = false;
+  #dispatchObserverPublication: MoreMenuPublication | null = null;
+  #dispatchObserverRestorers: Array<() => void> = [];
+  #observedOutsideTargets = new WeakSet<EventTarget>();
 
   constructor(private readonly requestSuccessor: () => void) {}
 
@@ -6045,6 +6051,7 @@ class MoreMenuPublicationCoordinator {
 
   publish(publication: MoreMenuPublication) {
     const previous = this.#active ?? this.#successorOf;
+    this.#clearDispatchObservers();
     this.#active = publication;
     this.#successorOf = null;
     this.#unpublishedChangeRequested = false;
@@ -6054,6 +6061,16 @@ class MoreMenuPublicationCoordinator {
       : null;
     if (focus) this.#clearFocus(focus);
     if (previous && previous !== publication) previous.dispose();
+    this.#dispatchObserverPublication = publication;
+    for (const item of Object.values(publication.dom.actions)) {
+      if (!item) continue;
+      const restore = installMoreMenuDispatchObserver(
+        publication.document.defaultView,
+        item,
+        (target, event) => this.observeDispatchedCustom(publication, target, event),
+      );
+      if (restore) this.#dispatchObserverRestorers.push(restore);
+    }
     focusTarget?.focus();
   }
 
@@ -6064,11 +6081,13 @@ class MoreMenuPublicationCoordinator {
     if (this.#disclosureIntent?.publication === publication) this.#disclosureIntent = null;
     if (this.#selectionIntent?.publication === publication) {
       this.#selectionIntent = null;
+      this.#dispatchedSelectionCustomEvent = null;
       this.#selectionCustomEvent = null;
     }
     queueMicrotask(() => {
       if (this.#active !== null || this.#successorOf !== publication) return;
       this.#successorOf = null;
+      this.#clearDispatchObservers(publication);
       publication.dispose();
     });
     return true;
@@ -6179,6 +6198,7 @@ class MoreMenuPublicationCoordinator {
       return false;
     }
     this.#stagedNativeEvents.add(nativeEvent);
+    this.#dispatchedSelectionCustomEvent = null;
     this.#selectionCustomEvent = null;
     const intent = Object.freeze({
       publication,
@@ -6191,9 +6211,125 @@ class MoreMenuPublicationCoordinator {
     queueMicrotask(() => {
       if (this.#selectionIntent === intent) {
         this.#selectionIntent = null;
+        this.#dispatchedSelectionCustomEvent = null;
         this.#selectionCustomEvent = null;
       }
     });
+    return true;
+  }
+
+  observeDispatchedCustom(
+    publication: MoreMenuPublication,
+    dispatchTarget: EventTarget,
+    customEvent: Event,
+  ): MoreMenuDispatchCompletion | null {
+    if (this.#active !== publication || !publication.isExact()) return null;
+    const intent = this.#selectionIntent;
+    const item = intent && publication.dom.actions[intent.action.name];
+    if (
+      intent
+      && intent.publication === publication
+      && item
+      && dispatchTarget === item
+      && exactMoreMenuUndispatchedSelect(publication, item, customEvent)
+      && moreMenuNativeClickIsAtRadixSelection(
+        publication,
+        item,
+        intent.nativeEvent,
+        intent.target,
+        intent.path,
+      )
+    ) {
+      const completeSelection: MoreMenuDispatchCompletion = (reachedTarget) => {
+        if (
+          !reachedTarget
+          && this.#selectionIntent === intent
+          && this.#dispatchedSelectionCustomEvent === customEvent
+        ) {
+          this.#selectionIntent = null;
+          this.#dispatchedSelectionCustomEvent = null;
+          this.#selectionCustomEvent = null;
+        }
+      };
+      const dispatched = this.#dispatchedSelectionCustomEvent;
+      if (dispatched) {
+        if (dispatched === customEvent) return completeSelection;
+        const ownerWindow = publication.document.defaultView;
+        if (
+          ownerWindow
+          && nativeEventGetter<number>(
+            ownerWindow.Event.prototype,
+            "eventPhase",
+            dispatched,
+          ) !== ownerWindow.Event.NONE
+        ) {
+          return null;
+        }
+      }
+      this.#dispatchedSelectionCustomEvent = customEvent;
+      return completeSelection;
+    }
+    const outside = exactMoreMenuUndispatchedOutside(publication, customEvent);
+    if (!outside || this.#taintedOutsideNativeEvents.has(outside.originalEvent)) return null;
+    const ownerWindow = publication.document.defaultView;
+    if (
+      !ownerWindow
+      || nativeEventGetter<EventTarget | null>(
+        ownerWindow.Event.prototype,
+        "target",
+        outside.originalEvent,
+      ) !== dispatchTarget
+    ) {
+      return null;
+    }
+    const completeOutside: MoreMenuDispatchCompletion = (reachedTarget) => {
+      if (
+        !reachedTarget
+        && this.#dispatchedOutsideCustomEvents.get(outside.originalEvent) === customEvent
+      ) {
+        this.#taintedOutsideNativeEvents.add(outside.originalEvent);
+        this.#dispatchedOutsideCustomEvents.delete(outside.originalEvent);
+        this.#outsideCustomEvents.delete(outside.originalEvent);
+      }
+    };
+    const dispatched = this.#dispatchedOutsideCustomEvents.get(outside.originalEvent);
+    if (dispatched) {
+      if (dispatched === customEvent) return completeOutside;
+      const ownerWindow = publication.document.defaultView;
+      if (
+        ownerWindow
+        && nativeEventGetter<number>(
+          ownerWindow.Event.prototype,
+          "eventPhase",
+          dispatched,
+        ) !== ownerWindow.Event.NONE
+      ) {
+        return null;
+      }
+    }
+    this.#dispatchedOutsideCustomEvents.set(outside.originalEvent, customEvent);
+    return completeOutside;
+  }
+
+  observeNativeOutsideTarget(publication: MoreMenuPublication, nativeEvent: Event) {
+    if (
+      this.#active !== publication
+      || this.#dispatchObserverPublication !== publication
+      || !publication.isExact()
+    ) {
+      return false;
+    }
+    const target = exactMoreMenuNativeOutsideAtCapture(publication, nativeEvent);
+    if (!target || this.#observedOutsideTargets.has(target)) return Boolean(target);
+    const restore = installMoreMenuDispatchObserver(
+      publication.document.defaultView,
+      target,
+      (dispatchTarget, event) =>
+        this.observeDispatchedCustom(publication, dispatchTarget, event),
+    );
+    if (!restore) return false;
+    this.#observedOutsideTargets.add(target);
+    this.#dispatchObserverRestorers.push(restore);
     return true;
   }
 
@@ -6205,6 +6341,7 @@ class MoreMenuPublicationCoordinator {
       || intent.publication !== publication
       || this.#active !== publication
       || !item
+      || this.#dispatchedSelectionCustomEvent !== customEvent
       || !moreMenuNativeClickIsAtRadixSelection(
         publication,
         item,
@@ -6216,7 +6353,20 @@ class MoreMenuPublicationCoordinator {
     ) {
       return false;
     }
-    if (this.#selectionCustomEvent) return this.#selectionCustomEvent === customEvent;
+    if (this.#selectionCustomEvent) {
+      if (this.#selectionCustomEvent === customEvent) return true;
+      const ownerWindow = publication.document.defaultView;
+      if (
+        !ownerWindow
+        || nativeEventGetter<number>(
+          ownerWindow.Event.prototype,
+          "eventPhase",
+          this.#selectionCustomEvent,
+        ) !== ownerWindow.Event.NONE
+      ) {
+        return false;
+      }
+    }
     this.#selectionCustomEvent = customEvent;
     return true;
   }
@@ -6248,6 +6398,7 @@ class MoreMenuPublicationCoordinator {
       return null;
     }
     this.#selectionIntent = null;
+    this.#dispatchedSelectionCustomEvent = null;
     this.#selectionCustomEvent = null;
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(action);
@@ -6267,7 +6418,12 @@ class MoreMenuPublicationCoordinator {
       return false;
     }
     const outside = exactMoreMenuOutside(publication, customEvent, "window");
-    if (!outside) return false;
+    if (
+      !outside
+      || this.#dispatchedOutsideCustomEvents.get(outside.originalEvent) !== customEvent
+    ) {
+      return false;
+    }
     const admitted = this.#outsideCustomEvents.get(outside.originalEvent);
     if (admitted) {
       if (admitted === customEvent) return true;
@@ -6300,7 +6456,20 @@ class MoreMenuPublicationCoordinator {
       return false;
     }
     this.#outsideCustomEvents.delete(originalEvent);
+    this.#dispatchedOutsideCustomEvents.delete(originalEvent);
     return true;
+  }
+
+  #clearDispatchObservers(publication?: MoreMenuPublication) {
+    if (
+      publication
+      && this.#dispatchObserverPublication !== publication
+    ) {
+      return;
+    }
+    for (const restore of this.#dispatchObserverRestorers.splice(0).reverse()) restore();
+    this.#dispatchObserverPublication = null;
+    this.#observedOutsideTargets = new WeakSet<EventTarget>();
   }
 
   scheduleFocus(
@@ -6650,6 +6819,101 @@ function nativeEventPath(ownerWindow: Window & typeof globalThis, event: Event) 
     }
     throw error;
   }
+}
+
+type MoreMenuDispatchCompletion = (reachedTarget: boolean) => void;
+
+function installMoreMenuDispatchObserver(
+  ownerWindow: (Window & typeof globalThis) | null,
+  target: EventTarget,
+  observe: (target: EventTarget, event: Event) => MoreMenuDispatchCompletion | null,
+) {
+  if (!ownerWindow || !(target instanceof ownerWindow.EventTarget)) return null;
+  const descriptor = Object.getOwnPropertyDescriptor(target, "dispatchEvent");
+  if (descriptor && !descriptor.configurable) return null;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  const nativeDispatch = eventTargetPrototype.dispatchEvent;
+  const nativeAdd = eventTargetPrototype.addEventListener;
+  const nativeRemove = eventTargetPrototype.removeEventListener;
+  const observedDispatch = function (this: EventTarget, event: Event) {
+    const completion = this === target ? observe(target, event) : null;
+    if (!completion) return Reflect.apply(nativeDispatch, this, [event]) as boolean;
+    let reachedTarget = false;
+    const markTarget = (current: Event) => {
+      if (current === event) reachedTarget = true;
+    };
+    const type = nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event);
+    if (!type) return Reflect.apply(nativeDispatch, this, [event]) as boolean;
+    Reflect.apply(nativeAdd, target, [type, markTarget, { capture: true }]);
+    try {
+      return Reflect.apply(nativeDispatch, this, [event]) as boolean;
+    } finally {
+      Reflect.apply(nativeRemove, target, [type, markTarget, { capture: true }]);
+      completion(reachedTarget);
+    }
+  };
+  Object.defineProperty(target, "dispatchEvent", {
+    configurable: true,
+    value: observedDispatch,
+    writable: true,
+  });
+  return () => {
+    const current = Object.getOwnPropertyDescriptor(target, "dispatchEvent");
+    if (!current || !("value" in current) || current.value !== observedDispatch) return;
+    if (descriptor) Object.defineProperty(target, "dispatchEvent", descriptor);
+    else Reflect.deleteProperty(target, "dispatchEvent");
+  };
+}
+
+function exactMoreMenuUndispatchedSelect(
+  publication: MoreMenuPublication,
+  item: HTMLDivElement,
+  event: Event,
+) {
+  const ownerWindow = publication.document.defaultView;
+  if (!ownerWindow || !(event instanceof ownerWindow.CustomEvent)) return false;
+  return Boolean(
+    nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event)
+      === "menu.itemSelect"
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+      event,
+    ) === null
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) === null
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) === ownerWindow.Event.NONE
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) === false
+    && nativeEventGetter<unknown>(
+      ownerWindow.CustomEvent.prototype,
+      "detail",
+      event,
+    ) === null
+    && nativeEventPath(ownerWindow, event).length === 0
+    && item.ownerDocument === publication.document
+    && item.isConnected
+  );
 }
 
 function isLiveMoreMenuNativeEvent(event: Event, document: Document) {
@@ -7185,6 +7449,206 @@ function moreMenuOutsideOriginalEvent(
     : null;
 }
 
+function exactMoreMenuNativeOutsideAtCapture(
+  publication: MoreMenuPublication,
+  event: Event,
+) {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  const trigger = publication.dom.trigger;
+  if (!ownerWindow || !content || !(event instanceof ownerWindow.Event)) return null;
+  const type = nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event);
+  const pointerOutside = type === "pointerdown" && event instanceof ownerWindow.PointerEvent;
+  const focusOutside = type === "focusin" && event instanceof ownerWindow.FocusEvent;
+  const target = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    event,
+  );
+  const path = nativeEventPath(ownerWindow, event);
+  if (
+    (!pointerOutside && !focusOutside)
+    || nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) !== publication.document
+    || nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) !== ownerWindow.Event.CAPTURING_PHASE
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) !== true
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) !== pointerOutside
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) !== false
+    || !(target instanceof ownerWindow.Node)
+    || target.ownerDocument !== publication.document
+    || !target.isConnected
+    || content.contains(target)
+    || trigger.contains(target)
+    || path[0] !== target
+    || path.indexOf(publication.document) < 0
+  ) {
+    return null;
+  }
+  if (pointerOutside) {
+    const button = nativeEventGetter<number>(
+      ownerWindow.MouseEvent.prototype,
+      "button",
+      event,
+    );
+    const ctrlKey = nativeEventGetter<boolean>(
+      ownerWindow.MouseEvent.prototype,
+      "ctrlKey",
+      event,
+    );
+    if (button === undefined || ctrlKey === undefined) return null;
+  }
+  return target;
+}
+
+function exactMoreMenuUndispatchedOutside(
+  publication: MoreMenuPublication,
+  event: Event,
+): ExactMoreMenuOutside | null {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  const trigger = publication.dom.trigger;
+  if (!ownerWindow || !content || !(event instanceof ownerWindow.CustomEvent)) return null;
+  const type = nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event);
+  if (
+    type !== "dismissableLayer.pointerDownOutside"
+    && type !== "dismissableLayer.focusOutside"
+  ) {
+    return null;
+  }
+  const originalEvent = moreMenuOutsideOriginalEvent(
+    ownerWindow,
+    event as CustomEvent<{ originalEvent: Event }>,
+  );
+  if (!originalEvent) return null;
+  const originalType = nativeEventGetter<string>(
+    ownerWindow.Event.prototype,
+    "type",
+    originalEvent,
+  );
+  const pointerOutside = (
+    type === "dismissableLayer.pointerDownOutside"
+    && originalType === "pointerdown"
+    && originalEvent instanceof ownerWindow.PointerEvent
+  );
+  const focusOutside = (
+    type === "dismissableLayer.focusOutside"
+    && originalType === "focusin"
+    && originalEvent instanceof ownerWindow.FocusEvent
+  );
+  const target = nativeEventGetter<EventTarget | null>(
+    ownerWindow.Event.prototype,
+    "target",
+    originalEvent,
+  );
+  const originalPath = nativeEventPath(ownerWindow, originalEvent);
+  if (
+    (!pointerOutside && !focusOutside)
+    || nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+      event,
+    ) !== null
+    || nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) !== null
+    || nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) !== ownerWindow.Event.NONE
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) !== false
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) !== true
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) !== false
+    || nativeEventPath(ownerWindow, event).length !== 0
+    || nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      originalEvent,
+    ) !== publication.document
+    || nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      originalEvent,
+    ) !== ownerWindow.Event.BUBBLING_PHASE
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      originalEvent,
+    ) !== true
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      originalEvent,
+    ) !== pointerOutside
+    || nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      originalEvent,
+    ) !== false
+    || !(target instanceof ownerWindow.Node)
+    || target.ownerDocument !== publication.document
+    || !target.isConnected
+    || content.contains(target)
+    || trigger.contains(target)
+    || originalPath[0] !== target
+    || originalPath.indexOf(publication.document) < 0
+  ) {
+    return null;
+  }
+  const button = pointerOutside
+    ? nativeEventGetter<number>(
+        ownerWindow.MouseEvent.prototype,
+        "button",
+        originalEvent,
+      )
+    : undefined;
+  const ctrlKey = pointerOutside
+    ? nativeEventGetter<boolean>(
+        ownerWindow.MouseEvent.prototype,
+        "ctrlKey",
+        originalEvent,
+      )
+    : undefined;
+  if (pointerOutside && (button === undefined || ctrlKey === undefined)) return null;
+  return Object.freeze({
+    originalEvent,
+    rightClick: pointerOutside && (button === 2 || (button === 0 && ctrlKey === true)),
+  });
+}
+
 function exactMoreMenuOutside(
   publication: MoreMenuPublication,
   event: CustomEvent<{ originalEvent: Event }>,
@@ -7495,6 +7959,7 @@ function createMoreMenuPresentation({
     let genericSelectListener: ((event: Event) => void) | null = null;
     let selectionCustomListener: ((event: Event) => void) | null = null;
     let outsideCustomListener: ((event: Event) => void) | null = null;
+    let nativeOutsideListener: ((event: Event) => void) | null = null;
     let blurListener: ((event: Event) => void) | null = null;
     let replayInvalid = false;
     let retired = false;
@@ -7626,12 +8091,21 @@ function createMoreMenuPresentation({
             { capture: true },
           );
         }
+        if (nativeOutsideListener) {
+          publication.document.removeEventListener("pointerdown", nativeOutsideListener, {
+            capture: true,
+          });
+          publication.document.removeEventListener("focusin", nativeOutsideListener, {
+            capture: true,
+          });
+        }
         const ownerWindow = publication.document.defaultView;
         if (ownerWindow && blurListener) ownerWindow.removeEventListener("blur", blurListener);
         genericClickListener = null;
         genericSelectListener = null;
         selectionCustomListener = null;
         outsideCustomListener = null;
+        nativeOutsideListener = null;
         blurListener = null;
         genericSelection = null;
       },
@@ -7690,6 +8164,9 @@ function createMoreMenuPresentation({
         event as CustomEvent<{ originalEvent: Event }>,
       );
     };
+    nativeOutsideListener = (event: Event) => {
+      coordinator.observeNativeOutsideTarget(publication, event);
+    };
     publication.document.defaultView?.addEventListener(
       "menu.itemSelect",
       selectionCustomListener,
@@ -7705,6 +8182,12 @@ function createMoreMenuPresentation({
       outsideCustomListener,
       { capture: true },
     );
+    publication.document.addEventListener("pointerdown", nativeOutsideListener, {
+      capture: true,
+    });
+    publication.document.addEventListener("focusin", nativeOutsideListener, {
+      capture: true,
+    });
     if (dom.content) {
       genericClickListener = (event: Event) => {
         const admission = exactMoreMenuGenericNativeClick(publication, event);
