@@ -208,6 +208,15 @@ function isPointerSelectionUpdate(update: ViewUpdate): boolean {
     update.transactions.every((transaction) => transaction.isUserEvent("select.pointer"));
 }
 
+function sourceSelectionMatchesTarget(
+  selection: EditorSelection,
+  target: PositionedHighlightTarget,
+): boolean {
+  return selection.ranges.length === 1 &&
+    selection.main.empty &&
+    selection.main.head === target.sourcePosition;
+}
+
 function installSourceHighlightActivation(
   view: EditorView,
   onClick: HighlightClickHandler,
@@ -378,8 +387,11 @@ function installSourceHighlightActivation(
       if (
         pending &&
         !pending.confirmed &&
+        press?.released &&
+        pending.target === press.target &&
         !pending.selection.eq(update.state.selection) &&
-        isPointerSelectionUpdate(update)
+        isPointerSelectionUpdate(update) &&
+        sourceSelectionMatchesTarget(update.state.selection, pending.target)
       ) {
         // CodeMirror may commit this gesture's native selection after our document-level
         // mouseup listener. The exact click below still has to confirm the same target.
