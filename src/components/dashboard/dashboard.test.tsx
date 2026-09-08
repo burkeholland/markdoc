@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { startTransition, useEffect, useLayoutEffect, useState } from "react";
+import { StrictMode, startTransition, useEffect, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
@@ -110,6 +110,17 @@ function TransitionUnmount({ children }: { children: React.ReactNode }) {
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
+}
+
+function TrashLayoutProbe({
+  capture,
+  children,
+}: {
+  capture: () => void;
+  children: React.ReactNode;
+}) {
+  useLayoutEffect(capture);
+  return children;
 }
 
 function TemplateGridBoundary({
@@ -2152,6 +2163,359 @@ describe("dashboard star recovery", () => {
 });
 
 describe("TrashView publication ownership", () => {
+  it.each(["Retry", "Restore", "Delete forever"] as const)(
+    "mints a fresh exact %s successor after direct-root Strict Mode replay and claims each event before duplicate handler use or reentry",
+    (kind) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const trashDocument = trashedDoc(`strict-${kind}`, `Strict ${kind}`);
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const canRetry = vi.fn(() => true);
+      const canAct = vi.fn(() => true);
+      const layouts: Array<{
+        button: HTMLButtonElement;
+        click: CapturedReactClick;
+        rootRef: CapturedReactRef;
+      }> = [];
+      let currentButton!: HTMLButtonElement;
+      const selectedCallback =
+        kind === "Retry" ? onRetry : kind === "Restore" ? onRestore : onPurge;
+      selectedCallback.mockImplementation(() => currentButton.click());
+      const capture = () => {
+        const button =
+          kind === "Retry"
+            ? directRetryButton(host)
+            : directTrashButton(
+                host,
+                trashDocument.title,
+                kind === "Restore" ? "restore-button" : "purge-button",
+              );
+        layouts.push({
+          button,
+          click: captureReactClick(button),
+          rootRef: captureReactRef(
+            host.querySelector<HTMLElement>('[data-testid="trash-view"]')!,
+          ),
+        });
+      };
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <TrashLayoutProbe capture={capture}>
+                <TrashView
+                  documents={[trashDocument]}
+                  busy={null}
+                  loading={false}
+                  error="Retry this load"
+                  canRetry={canRetry}
+                  canAct={canAct}
+                  onRetry={onRetry}
+                  onRestore={onRestore}
+                  onPurge={onPurge}
+                />
+              </TrashLayoutProbe>
+            </StrictMode>,
+          );
+        });
+        const stale = layouts[0];
+        if (!stale) throw new Error("Strict Mode did not expose the retired Trash layout");
+        currentButton =
+          kind === "Retry"
+            ? directRetryButton(host)
+            : directTrashButton(
+                host,
+                trashDocument.title,
+                kind === "Restore" ? "restore-button" : "purge-button",
+              );
+        const currentClick = captureReactClick(currentButton);
+        expect(stale.button).toBe(currentButton);
+        expect(stale.click).not.toBe(currentClick);
+
+        const currentRoot = host.querySelector<HTMLElement>(
+          '[data-testid="trash-view"]',
+        )!;
+        stale.rootRef(null);
+        stale.rootRef(currentRoot);
+        stale.rootRef(null);
+        const restore = interceptReactClick(currentButton, (original, event) => {
+          stale.click(event);
+          original(event);
+          original(event);
+        });
+        currentButton.click();
+        restore();
+        currentButton.click();
+
+        expect(selectedCallback).toHaveBeenCalledTimes(2);
+        expect(onRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
+        expect(onRestore).toHaveBeenCalledTimes(kind === "Restore" ? 2 : 0);
+        expect(onPurge).toHaveBeenCalledTimes(kind === "Delete forever" ? 2 : 0);
+        expect(canRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
+        expect(canAct).toHaveBeenCalledTimes(kind === "Retry" ? 0 : 2);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("mints exact successors for newly mounted loading, error, empty, list, row, and control subsets", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const first = trashedDoc("subset-first", "Subset first");
+    const second = trashedDoc("subset-second", "Subset second");
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    type SubsetCapture = {
+      element: HTMLElement;
+      authority: CapturedReactClick | CapturedReactRef;
+    };
+    const captures = new Map<string, SubsetCapture[]>();
+    const replayedStages = new Set<string>();
+    let stage = "loading";
+    const record = (
+      element: HTMLElement,
+      authority: CapturedReactClick | CapturedReactRef,
+    ) => {
+      const entries = captures.get(stage) ?? [];
+      entries.push({ element, authority });
+      captures.set(stage, entries);
+    };
+    const replayNewRefs = (elements: HTMLElement[]) => {
+      if (replayedStages.has(stage)) return;
+      replayedStages.add(stage);
+      const refs = elements.map((element) => ({
+        element,
+        ref: captureReactRef(element),
+      }));
+      refs.forEach(({ ref }) => ref(null));
+      refs.forEach(({ element, ref }) => ref(element));
+    };
+    const capture = () => {
+      if (stage === "loading") {
+        const loading = host.querySelector<HTMLElement>('[data-testid="trash-view"] > div');
+        if (loading) record(loading, captureReactRef(loading));
+      } else if (stage === "error") {
+        const retry = directRetryButton(host);
+        record(retry, captureReactClick(retry));
+      } else if (stage === "empty") {
+        const empty = host.querySelector<HTMLElement>('[data-testid="empty-state"]');
+        if (empty) {
+          record(empty, captureReactRef(empty));
+        }
+      } else if (stage === "first-row") {
+        const restore = directTrashButton(host, first.title, "restore-button");
+        record(restore, captureReactClick(restore));
+      } else {
+        const purge = directTrashButton(host, second.title, "purge-button");
+        record(purge, captureReactClick(purge));
+      }
+    };
+    const view = (
+      documents: DocumentSummaryDto[] | null,
+      loading: boolean,
+      error: string | null,
+    ) => (
+      <StrictMode>
+        <TrashLayoutProbe capture={capture}>
+          <TrashView
+            documents={documents}
+            busy={null}
+            loading={loading}
+            error={error}
+            onRetry={onRetry}
+            onRestore={onRestore}
+            onPurge={onPurge}
+          />
+        </TrashLayoutProbe>
+      </StrictMode>
+    );
+    const expectFreshSuccessor = (name: string) => {
+      const entries = captures.get(name) ?? [];
+      expect(entries.length, name).toBeGreaterThanOrEqual(1);
+      const currentElement =
+        name === "loading"
+          ? host.querySelector<HTMLElement>('[data-testid="trash-view"] > div')!
+          : name === "error"
+            ? directRetryButton(host)
+            : name === "empty"
+              ? host.querySelector<HTMLElement>('[data-testid="empty-state"]')!
+              : name === "first-row"
+                ? directTrashButton(host, first.title, "restore-button")
+                : directTrashButton(host, second.title, "purge-button");
+      const currentAuthority =
+        name === "loading" || name === "empty"
+          ? captureReactRef(currentElement)
+          : captureReactClick(currentElement as HTMLButtonElement);
+      expect(entries[0]!.element, name).toBe(currentElement);
+      expect(entries[0]!.authority, name).not.toBe(currentAuthority);
+    };
+
+    try {
+      act(() => root.render(view(null, true, null)));
+      expect(host).toHaveTextContent("Loading trash…");
+      expectFreshSuccessor("loading");
+
+      stage = "error";
+      act(() => root.render(view(null, false, "Subset failure")));
+      act(() =>
+        replayNewRefs([
+          host.querySelector<HTMLElement>('[data-testid="trash-error"]')!,
+          directRetryButton(host),
+        ]),
+      );
+      expect(host.querySelector('[data-testid="trash-error"]')).toHaveTextContent(
+        "Subset failure",
+      );
+      expectFreshSuccessor("error");
+      directRetryButton(host).click();
+      expect(onRetry).toHaveBeenCalledOnce();
+
+      stage = "empty";
+      act(() => root.render(view([], false, null)));
+      act(() =>
+        replayNewRefs([
+          host.querySelector<HTMLElement>('[data-testid="empty-state"]')!,
+        ]),
+      );
+      expect(host).toHaveTextContent("The trash is empty");
+      expectFreshSuccessor("empty");
+
+      stage = "first-row";
+      act(() => root.render(view([first], false, null)));
+      act(() =>
+        replayNewRefs([
+          host.querySelector<HTMLElement>('[data-testid="trash-list"]')!,
+          directTrashCard(host, first.title),
+          directTrashButton(host, first.title, "restore-button"),
+          directTrashButton(host, first.title, "purge-button"),
+        ]),
+      );
+      expectFreshSuccessor("first-row");
+      directTrashButton(host, first.title, "restore-button").click();
+      expect(onRestore).toHaveBeenCalledExactlyOnceWith(first);
+
+      stage = "second-row";
+      act(() => root.render(view([first, second], false, null)));
+      act(() =>
+        replayNewRefs([
+          directTrashCard(host, second.title),
+          directTrashButton(host, second.title, "restore-button"),
+          directTrashButton(host, second.title, "purge-button"),
+        ]),
+      );
+      expectFreshSuccessor("second-row");
+      directTrashButton(host, second.title, "purge-button").click();
+      expect(onPurge).toHaveBeenCalledExactlyOnceWith(second);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["restored descendant mutation", "root detach and reinsert"] as const)(
+    "rejects Strict Mode replay after %s without poisoning the next Trash generation",
+    (change) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const trashDocument = trashedDoc("mutation", "Mutation");
+      const staleRestore = vi.fn();
+      const currentRestore = vi.fn();
+      let layoutSetups = 0;
+      let staleClick: CapturedReactClick | null = null;
+      const perturbReplay = () => {
+        layoutSetups++;
+        const trashRoot = host.querySelector<HTMLElement>(
+          '[data-testid="trash-view"]',
+        )!;
+        const restore = directTrashButton(
+          host,
+          trashDocument.title,
+          "restore-button",
+        );
+        staleClick ??= captureReactClick(restore);
+        if (layoutSetups !== 2) return;
+        if (change === "restored descendant mutation") {
+          const note = host.querySelector<HTMLElement>(
+            '[data-testid="trash-note"]',
+          )!;
+          note.setAttribute("data-replay-change", "true");
+          note.removeAttribute("data-replay-change");
+          return;
+        }
+        const parent = trashRoot.parentNode;
+        const next = trashRoot.nextSibling;
+        if (!parent) throw new Error("Trash root had no parent");
+        trashRoot.remove();
+        parent.insertBefore(trashRoot, next);
+      };
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <TrashLayoutProbe capture={perturbReplay}>
+                <TrashView
+                  documents={[trashDocument]}
+                  busy={null}
+                  loading={false}
+                  error={null}
+                  onRetry={() => {}}
+                  onRestore={staleRestore}
+                  onPurge={() => {}}
+                />
+              </TrashLayoutProbe>
+            </StrictMode>,
+          );
+        });
+        expect(layoutSetups).toBeGreaterThanOrEqual(2);
+        directTrashButton(host, trashDocument.title, "restore-button").click();
+        expect(staleRestore).not.toHaveBeenCalled();
+
+        act(() => {
+          root.render(
+            <TrashView
+              documents={[trashDocument]}
+              busy={null}
+              loading={false}
+              error={null}
+              onRetry={() => {}}
+              onRestore={currentRestore}
+              onPurge={() => {}}
+            />,
+          );
+        });
+        const currentButton = directTrashButton(
+          host,
+          trashDocument.title,
+          "restore-button",
+        );
+        const currentClick = captureReactClick(currentButton);
+        expect(staleClick).not.toBeNull();
+        expect(staleClick).not.toBe(currentClick);
+        const restore = interceptReactClick(currentButton, (original, event) => {
+          staleClick?.(event);
+          original(event);
+        });
+        currentButton.click();
+        restore();
+        expect(staleRestore).not.toHaveBeenCalled();
+        expect(currentRestore).toHaveBeenCalledExactlyOnceWith(trashDocument);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it("preserves every Trash state and gives genuine Retry, Restore, and Delete clicks their exact callbacks once", async () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -2170,22 +2534,23 @@ describe("TrashView publication ownership", () => {
     const onPurge = vi.fn<(document: DocumentSummaryDto) => void>();
     const canRetry = vi.fn(() => true);
     const canAct = vi.fn(() => true);
+    const populated = () => (
+      <TrashView
+        documents={[local, repository]}
+        busy={null}
+        loading={false}
+        error="Trash service unavailable"
+        canRetry={canRetry}
+        canAct={canAct}
+        onRetry={onRetry}
+        onRestore={onRestore}
+        onPurge={onPurge}
+      />
+    );
 
     try {
       await act(async () => {
-        root.render(
-          <TrashView
-            documents={[local, repository]}
-            busy={null}
-            loading={false}
-            error="Trash service unavailable"
-            canRetry={canRetry}
-            canAct={canAct}
-            onRetry={onRetry}
-            onRestore={onRestore}
-            onPurge={onPurge}
-          />,
-        );
+        root.render(populated());
       });
 
       expect(host.querySelector('[data-testid="trash-note"]')).toHaveTextContent("Items are deleted forever after 30 days.");
@@ -2208,7 +2573,9 @@ describe("TrashView publication ownership", () => {
       });
       restore.click();
       restoreIntercept();
+      await act(async () => root.render(populated()));
       directTrashButton(host, repository.title, "purge-button").click();
+      await act(async () => root.render(populated()));
       directRetryButton(host).click();
 
       expect(onRestore).toHaveBeenCalledTimes(1);
@@ -2279,22 +2646,23 @@ describe("TrashView publication ownership", () => {
     };
     const rejectedRetryEvent: { current: RejectedEvent | null } = { current: null };
     const rejectedRestoreEvent: { current: RejectedEvent | null } = { current: null };
+    const currentView = () => (
+      <TrashView
+        documents={[trashDocument]}
+        busy={null}
+        loading={false}
+        error="Retry me"
+        canRetry={canRetry}
+        canAct={canAct}
+        onRetry={onRetry}
+        onRestore={onRestore}
+        onPurge={onPurge}
+      />
+    );
 
     try {
       await act(async () => {
-        root.render(
-          <TrashView
-            documents={[trashDocument]}
-            busy={null}
-            loading={false}
-            error="Retry me"
-            canRetry={canRetry}
-            canAct={canAct}
-            onRetry={onRetry}
-            onRestore={onRestore}
-            onPurge={onPurge}
-          />,
-        );
+        root.render(currentView());
       });
       const retry = directRetryButton(host);
       const restore = directTrashButton(host, trashDocument.title, "restore-button");
@@ -2325,9 +2693,10 @@ describe("TrashView publication ownership", () => {
       retryEligible = true;
       actionEligible = true;
       retry.click();
-      restore.click();
       restoreRetry();
       restoreRestore();
+      await act(async () => root.render(currentView()));
+      directTrashButton(host, trashDocument.title, "restore-button").click();
 
       expect(onRetry).toHaveBeenCalledTimes(1);
       expect(onRestore).toHaveBeenCalledTimes(1);
@@ -2341,7 +2710,7 @@ describe("TrashView publication ownership", () => {
     }
   });
 
-  it("rejects fabricated, wrong-type, mismatched-target, foreign, disabled, detached, and replaced sources without consuming the real click", async () => {
+  it("rejects fabricated, wrong-type, mismatched-target, foreign, disabled, detached, and replaced sources, then keeps the mutation-retired publication inert", async () => {
     const host = document.createElement("div");
     const focusOwner = document.createElement("button");
     document.body.append(focusOwner, host);
@@ -2468,16 +2837,15 @@ describe("TrashView publication ownership", () => {
       replaceDuringClick(button, list);
       replaceDuringClick(button, card);
       replaceDuringClick(button, button);
-      expect(onRestore).toHaveBeenCalledTimes(5);
+      expect(onRestore).toHaveBeenCalledTimes(1);
 
       const retry = directRetryButton(host);
       replaceDuringClick(retry, retry);
-      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onRetry).not.toHaveBeenCalled();
 
       const purge = directTrashButton(host, first.title, "purge-button");
       replaceDuringClick(purge, purge);
-      expect(onPurge).toHaveBeenCalledTimes(1);
-      expect(onPurge).toHaveBeenLastCalledWith(first);
+      expect(onPurge).not.toHaveBeenCalled();
 
       const secondCard = directTrashCard(host, second.title);
       const reorderReset = interceptReactClick(button, (current, event) => {
@@ -2488,21 +2856,21 @@ describe("TrashView publication ownership", () => {
       });
       button.click();
       reorderReset();
-      expect(onRestore).toHaveBeenCalledTimes(6);
+      expect(onRestore).toHaveBeenCalledTimes(1);
 
       const clone = button.cloneNode(true) as HTMLButtonElement;
       button.replaceWith(clone);
       host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(6);
+      expect(onRestore).toHaveBeenCalledTimes(1);
       clone.replaceWith(button);
 
       button.remove();
       host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(6);
+      expect(onRestore).toHaveBeenCalledTimes(1);
       card.querySelector("div:last-child > div")!.prepend(button);
 
       button.click();
-      expect(onRestore).toHaveBeenCalledTimes(7);
+      expect(onRestore).toHaveBeenCalledTimes(1);
       expect(onRestore).toHaveBeenLastCalledWith(first);
     } finally {
       await act(async () => root.unmount());
@@ -2512,7 +2880,7 @@ describe("TrashView publication ownership", () => {
   });
 
   it.each(["wrong-before-current", "current-before-wrong"] as const)(
-    "rejects sibling, cross-action, and sibling-view handlers while the exact control stays usable in %s order",
+    "rejects sibling, cross-action, and sibling-view handlers without consuming the exact control in %s order",
     async (order) => {
       const host = document.createElement("div");
       document.body.append(host);
@@ -2622,7 +2990,7 @@ describe("TrashView publication ownership", () => {
     },
   );
 
-  it("retires callback, document, order, and DOM authority before parent layout while preserving the current view after rejection", async () => {
+  it("retires callback, document, order, and DOM authority before parent layout and keeps mutation-retired current authority inert", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -2707,7 +3075,7 @@ describe("TrashView publication ownership", () => {
       injected.remove();
 
       currentButton.click();
-      expect(currentRestore).toHaveBeenCalledTimes(2);
+      expect(currentRestore).toHaveBeenCalledTimes(1);
       expect(currentRestore).toHaveBeenLastCalledWith(firstB);
     } finally {
       await act(async () => root.unmount());
