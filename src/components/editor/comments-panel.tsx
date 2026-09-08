@@ -6357,6 +6357,8 @@ const seenCommentNavigationNativeEvents = new WeakSet<Event>();
 const claimedCommentNavigationNativeEvents = new WeakSet<Event>();
 const commentNavigationPreventDefault = globalThis.Event.prototype.preventDefault;
 const commentNavigationGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const commentNavigationReflectGet = Reflect.get;
+const COMMENT_NAVIGATION_MAX_MUTATION_NODES = 256;
 
 type CommentNavigationNativeGetter = () => unknown;
 type CommentNavigationNativeGetters<Field extends string> = Readonly<
@@ -6426,6 +6428,7 @@ interface CommentNavigationMutationObserverIntrinsics {
     length: CommentNavigationNativeGetter;
     item: NodeList["item"];
   }>;
+  readonly node: CommentNavigationNativeGetters<"nodeType" | "ownerDocument">;
 }
 
 function captureCommentNavigationGetters<const Fields extends readonly string[]>(
@@ -6570,13 +6573,18 @@ function captureCommentNavigationMutationObserverIntrinsics(
     ownerWindow.NodeList.prototype,
     "item",
   );
+  const node = captureCommentNavigationGetters(ownerWindow.Node.prototype, [
+    "nodeType",
+    "ownerDocument",
+  ] as const);
   if (
     !observe ||
     !takeRecords ||
     !disconnect ||
     !record ||
     !nodeListLength ||
-    !nodeListItem
+    !nodeListItem ||
+    !node
   ) {
     return null;
   }
@@ -6590,6 +6598,7 @@ function captureCommentNavigationMutationObserverIntrinsics(
       length: nodeListLength.length,
       item: nodeListItem,
     }),
+    node,
   });
 }
 
@@ -6665,39 +6674,96 @@ interface CommentNavigationMutationRecordSnapshot {
 function snapshotCommentNavigationMutationRecord(
   record: MutationRecord,
   intrinsics: CommentNavigationMutationObserverIntrinsics,
+  ownerDocument: Document,
 ): CommentNavigationMutationRecordSnapshot | null {
-  const get = <Value,>(field: CommentNavigationMutationRecordField) =>
-    suggestionReflectApply(intrinsics.record[field], record, []) as Value;
-  const snapshotNodes = (nodes: NodeList): readonly Node[] | null => {
-    const length = suggestionReflectApply(
-      intrinsics.nodeList.length,
-      nodes,
-      [],
-    ) as number;
-    if (!Number.isSafeInteger(length) || length < 0) return null;
-    const snapshot: Node[] = [];
-    for (let index = 0; index < length; index += 1) {
-      const node = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
-        index,
-      ]) as Node | null;
-      if (!node) return null;
-      snapshot[index] = node;
+  try {
+    const get = <Value,>(field: CommentNavigationMutationRecordField) =>
+      suggestionReflectApply(intrinsics.record[field], record, []) as Value;
+    const exactNode = (value: unknown): value is Node => {
+      if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+        return false;
+      }
+      const nodeType = suggestionReflectApply(
+        intrinsics.node.nodeType,
+        value,
+        [],
+      ) as number;
+      const document = suggestionReflectApply(
+        intrinsics.node.ownerDocument,
+        value,
+        [],
+      );
+      return (
+        Number.isSafeInteger(nodeType) &&
+        nodeType >= 1 &&
+        nodeType <= 12 &&
+        document === ownerDocument
+      );
+    };
+    const snapshotNodes = (nodes: NodeList): readonly Node[] | null => {
+      const length = suggestionReflectApply(
+        intrinsics.nodeList.length,
+        nodes,
+        [],
+      ) as number;
+      if (
+        !Number.isSafeInteger(length) ||
+        length < 0 ||
+        length > COMMENT_NAVIGATION_MAX_MUTATION_NODES
+      ) {
+        return null;
+      }
+      const snapshot: Node[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const item = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
+          index,
+        ]) as unknown;
+        const indexed = suggestionReflectApply(commentNavigationReflectGet, Reflect, [
+          nodes,
+          String(index),
+          nodes,
+        ]) as unknown;
+        if (item !== indexed || !exactNode(item)) return null;
+        snapshot[index] = item;
+      }
+      const terminalItem = suggestionReflectApply(intrinsics.nodeList.item, nodes, [
+        length,
+      ]) as unknown;
+      const terminalIndex = suggestionReflectApply(
+        commentNavigationReflectGet,
+        Reflect,
+        [nodes, String(length), nodes],
+      ) as unknown;
+      if (terminalItem !== null || terminalIndex !== undefined) return null;
+      return Object.freeze(snapshot);
+    };
+    const target = get<unknown>("target");
+    const previousSibling = get<unknown>("previousSibling");
+    const nextSibling = get<unknown>("nextSibling");
+    const addedNodes = snapshotNodes(get<NodeList>("addedNodes"));
+    const removedNodes = snapshotNodes(get<NodeList>("removedNodes"));
+    if (
+      !exactNode(target) ||
+      (previousSibling !== null && !exactNode(previousSibling)) ||
+      (nextSibling !== null && !exactNode(nextSibling)) ||
+      !addedNodes ||
+      !removedNodes
+    ) {
+      return null;
     }
-    return Object.freeze(snapshot);
-  };
-  const addedNodes = snapshotNodes(get<NodeList>("addedNodes"));
-  const removedNodes = snapshotNodes(get<NodeList>("removedNodes"));
-  if (!addedNodes || !removedNodes) return null;
-  return Object.freeze({
-    type: get<MutationRecordType>("type"),
-    target: get<Node>("target"),
-    previousSibling: get<Node | null>("previousSibling"),
-    nextSibling: get<Node | null>("nextSibling"),
-    addedNodes,
-    removedNodes,
-    attributeName: get<string | null>("attributeName"),
-    oldValue: get<string | null>("oldValue"),
-  });
+    return Object.freeze({
+      type: get<MutationRecordType>("type"),
+      target,
+      previousSibling,
+      nextSibling,
+      addedNodes,
+      removedNodes,
+      attributeName: get<string | null>("attributeName"),
+      oldValue: get<string | null>("oldValue"),
+    });
+  } catch {
+    return null;
+  }
 }
 
 interface CommentNavigationTabFacts {
@@ -7394,6 +7460,7 @@ function createCommentNavigationDomGuard(
       const record = snapshotCommentNavigationMutationRecord(
         records[index]!,
         intrinsics,
+        placement.document,
       );
       if (
         !record ||

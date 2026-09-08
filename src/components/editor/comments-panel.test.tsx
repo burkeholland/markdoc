@@ -1915,6 +1915,121 @@ describe("CommentsPanel", () => {
     },
   );
 
+  it.each([
+    "excessive length",
+    "throwing length",
+    "throwing item",
+    "non-node item",
+    "inconsistent empty length",
+  ] as const)(
+    "fails closed for a pre-publication NodeList %s poison",
+    async (scenario) => {
+      const fixture = reviewSession(
+        `comment-navigation-node-list-${scenario.replaceAll(" ", "-")}`,
+      );
+      session = fixture.session;
+      const ownerWindow = window as Window & typeof globalThis;
+      const prototype = ownerWindow.NodeList.prototype;
+      const lengthDescriptor = Object.getOwnPropertyDescriptor(prototype, "length");
+      const itemDescriptor = Object.getOwnPropertyDescriptor(prototype, "item");
+      if (
+        !lengthDescriptor ||
+        typeof lengthDescriptor.get !== "function" ||
+        !itemDescriptor ||
+        typeof itemDescriptor.value !== "function"
+      ) {
+        throw new Error("NodeList length/item intrinsics were unavailable");
+      }
+      const intrinsicLength = lengthDescriptor.get;
+      const intrinsicItem = itemDescriptor.value as NodeList["item"];
+      let panel: HTMLElement | null = null;
+      const targetsPanel = (nodes: NodeList) => {
+        const length = Reflect.apply(intrinsicLength, nodes, []) as number;
+        return (
+          panel !== null &&
+          length === 1 &&
+          Reflect.apply(intrinsicItem, nodes, [0]) === panel
+        );
+      };
+
+      if (
+        scenario === "excessive length" ||
+        scenario === "throwing length" ||
+        scenario === "inconsistent empty length"
+      ) {
+        Object.defineProperty(prototype, "length", {
+          ...lengthDescriptor,
+          get: function (this: NodeList) {
+            if (!targetsPanel(this)) return Reflect.apply(intrinsicLength, this, []);
+            if (scenario === "throwing length") {
+              throw new Error("poisoned NodeList length");
+            }
+            return scenario === "excessive length" ? Number.MAX_SAFE_INTEGER : 0;
+          },
+        });
+      } else {
+        Object.defineProperty(prototype, "item", {
+          ...itemDescriptor,
+          value: function (this: NodeList, index: number) {
+            if (!targetsPanel(this)) {
+              return Reflect.apply(intrinsicItem, this, [index]);
+            }
+            if (scenario === "throwing item") {
+              throw new Error("poisoned NodeList item");
+            }
+            return index === 0 ? { nodeType: 1 } : null;
+          },
+        });
+      }
+
+      const firstClose = vi.fn();
+      const freshClose = vi.fn();
+      let rendered: ReturnType<typeof render> | null = null;
+      try {
+        rendered = render(
+          <CommentsPanel
+            session={session}
+            onClose={firstClose}
+            onReveal={() => {}}
+            focusTab={{ tab: "open", nonce: 1 }}
+          />,
+        );
+        const stale = captureCommentNavigation();
+        const parent = stale.panel.parentNode;
+        if (!parent) throw new Error("The Comments panel had no parent");
+        expect(Reflect.apply(intrinsicLength, parent.childNodes, [])).toBe(1);
+        panel = stale.panel;
+
+        act(() => {
+          parent.removeChild(stale.panel);
+          parent.appendChild(stale.panel);
+          dispatchReviewClick(stale.resolved.element);
+        });
+        expect(stale.open.element).toHaveAttribute("aria-selected", "true");
+        expect(firstClose).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(prototype, "length", lengthDescriptor);
+        Object.defineProperty(prototype, "item", itemDescriptor);
+      }
+
+      if (!rendered) throw new Error("The Comments panel did not render");
+      rendered.rerender(
+        <CommentsPanel
+          session={session}
+          onClose={freshClose}
+          onReveal={() => {}}
+          focusTab={{ tab: "open", nonce: 1 }}
+        />,
+      );
+      await act(async () => {});
+      const recovered = captureCommentNavigation();
+      act(() => dispatchReviewClick(recovered.resolved.element));
+      expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
+      expect(firstClose).not.toHaveBeenCalled();
+      expect(freshClose).not.toHaveBeenCalled();
+    },
+  );
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({
