@@ -965,9 +965,15 @@ describe("ImageDialog editor-action visits", () => {
           onBoundary={() => {
             passiveCleanupsAtBoundary = passiveCleanups;
             if (transition === "replacement") {
-              const currentFileChange = captured<(event: ChangeEvent<HTMLInputElement>) => void>("Insert image.image-file.onChange");
+              const input = screen.getByTestId("image-file");
               setFileInputValue("current-selection");
-              currentFileChange(fileChange(currentFile));
+              Object.defineProperty(input, "files", {
+                configurable: true,
+                value: [currentFile],
+              });
+              input.dispatchEvent(
+                new Event("change", { bubbles: true, cancelable: true }),
+              );
             }
             if (settlement === "success") oldPending.resolve(oldResult);
             else oldPending.reject(oldError);

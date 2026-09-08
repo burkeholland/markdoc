@@ -332,6 +332,7 @@ describe("ImageDialog upload lifecycle", () => {
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(input.value).toBe("");
+      await act(async () => {});
 
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
@@ -348,6 +349,95 @@ describe("ImageDialog upload lifecycle", () => {
       );
     },
   );
+
+  it("assimilates a hostile upload promise and remains retryable", async () => {
+    const hostile = Promise.resolve<UploadResult>({
+      url: "/api/assets/unreachable",
+    });
+    Object.defineProperty(hostile, "then", {
+      get() {
+        throw new Error("Upload then getter failed");
+      },
+    });
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(hostile)
+      .mockReturnValueOnce(retry.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+
+    choose(new File(["hostile"], "hostile.png", { type: "image/png" }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Upload then getter failed",
+      ),
+    );
+    await act(async () => {});
+    await act(
+      async () =>
+        new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
+  });
+
+  it("clears upload ownership when resetting the current file input throws", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    let value = "failed-selection";
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => value,
+      set: () => {
+        throw new Error("File reset failed");
+      },
+    });
+    await act(async () => {
+      failed.resolve({ url: "/api/assets/failed" });
+      await failed.promise;
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("File reset failed");
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    await act(async () => {});
+    delete (input as unknown as { value?: string }).value;
+    value = "";
+
+    const retryFile = new File(["retry"], "retry.webp", {
+      type: "image/webp",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/reset-retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/reset-retry",
+    );
+  });
 
   it("keeps stale success and finalizer work out of a reopened visit with a newer upload", async () => {
     const stale = deferred<UploadResult>();
@@ -580,6 +670,89 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(readsAtUpload).toBe(1);
   });
 
+  it.each(["files", "index", "name"] as const)(
+    "retires a claimed file choice when its %s getter throws and recovers freshly",
+    async (getter) => {
+      const pending = deferred<UploadResult>();
+      const onUpload = vi.fn(() => pending.promise);
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      const input = screen.getByTestId("image-file") as HTMLInputElement;
+      const selected = new File(["selected"], "selected.png", {
+        type: "image/png",
+      });
+
+      if (getter === "files") {
+        Object.defineProperty(input, "files", {
+          configurable: true,
+          get() {
+            throw new Error("FileList getter failed");
+          },
+        });
+      } else if (getter === "index") {
+        const files = new Proxy(
+          { length: 1, item: () => selected },
+          {
+            get(target, property, receiver) {
+              if (property === "0") throw new Error("File index getter failed");
+              return Reflect.get(target, property, receiver);
+            },
+          },
+        );
+        Object.defineProperty(input, "files", {
+          configurable: true,
+          value: files,
+        });
+      } else {
+        Object.defineProperty(selected, "name", {
+          configurable: true,
+          get() {
+            throw new Error("File name getter failed");
+          },
+        });
+        Object.defineProperty(input, "files", {
+          configurable: true,
+          value: [selected],
+        });
+      }
+      act(() => {
+        input.dispatchEvent(
+          new Event("change", { bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onUpload).not.toHaveBeenCalled();
+
+      await act(async () => {});
+      Object.defineProperty(input, "files", {
+        configurable: true,
+        value: [],
+      });
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      const currentInput = screen.getByTestId(
+        "image-file",
+      ) as HTMLInputElement;
+      const recovered = new File(["recovered"], "recovered.png", {
+        type: "image/png",
+      });
+      fireEvent.change(currentInput, { target: { files: [recovered] } });
+      expect(onUpload).toHaveBeenCalledOnce();
+      expect(onUpload).toHaveBeenCalledWith(recovered);
+    },
+  );
+
   it.each(["close", "cancel", "escape", "outside"] as const)(
     "claims one current %s dismissal after replay",
     async (kind) => {
@@ -765,6 +938,53 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(staleClose).not.toHaveBeenCalled();
     expect(currentClose).toHaveBeenCalledOnce();
   });
+
+  it.each(["radix", "controlled"] as const)(
+    "retires a restored %s reconciliation shape after settlement",
+    async (kind) => {
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const onUpload = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      await act(
+        async () =>
+          new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+      );
+
+      if (kind === "radix") {
+        const content = dialogContent();
+        const labelledBy = content.getAttribute("aria-labelledby");
+        if (!labelledBy) throw new Error("Image dialog was not labelled");
+        content.removeAttribute("aria-labelledby");
+        content.setAttribute("aria-labelledby", labelledBy);
+      } else {
+        const input = screen.getByTestId("image-url");
+        input.setAttribute("name", "");
+        input.removeAttribute("name");
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    },
+  );
 
   it("invalidates an Escape proof when another native event intervenes", async () => {
     const onOpenChange = vi.fn();
@@ -957,8 +1177,14 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     const currentAlt =
       reactProp<ChangeEventHandler<HTMLInputElement>>(alt, "onChange");
 
-    setReactProp(url, "onChange", staleChange);
-    fireEvent.change(url, { target: { value: "https://stale.invalid/a.png" } });
+    staleChange({
+      currentTarget: url,
+      target: url,
+      nativeEvent: new Event("change", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    } as ChangeEvent<HTMLInputElement>);
     url.value = "";
     currentAlt({
       currentTarget: url,
@@ -1144,13 +1370,18 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       ref(input);
     });
     await act(async () => {});
-    const currentChange =
-      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
-    setReactProp(input, "onChange", staleChange);
-    fireEvent.change(input, {
-      target: { value: "https://stale.invalid/partial.png" },
-    });
-    setReactProp(input, "onChange", currentChange);
+    await act(
+      async () =>
+        new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+    staleChange({
+      currentTarget: input,
+      target: input,
+      nativeEvent: new Event("change", {
+        bubbles: true,
+        cancelable: true,
+      }),
+    } as ChangeEvent<HTMLInputElement>);
     fireEvent.change(input, {
       target: { value: "https://example.com/recovered.png" },
     });
@@ -1171,21 +1402,65 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         onUpload={onUpload}
       />,
     );
-    const bridge = view.host.querySelector(".contents");
     const input = screen.getByTestId("image-url") as HTMLInputElement;
-    if (!(bridge instanceof HTMLDivElement)) {
-      throw new Error("Image bridge was not rendered");
-    }
-    const bridgeRef = reactProp<RefCallback<HTMLDivElement>>(bridge, "ref");
     const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+    const alt = screen.getByTestId("image-alt") as HTMLInputElement;
+    const altRef = reactProp<RefCallback<HTMLInputElement>>(alt, "ref");
+    const foreign = document.createElement("input");
+    document.body.append(foreign);
 
+    inputRef(null);
+    inputRef(input);
+    await Promise.resolve();
     act(() => {
-      bridgeRef(null);
-      bridgeRef(bridge);
-      inputRef(null);
-      inputRef(input);
+      altRef(null);
+      altRef(foreign);
     });
     await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+
+    try {
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    } finally {
+      foreign.remove();
+    }
+  });
+
+  it("keeps staged partial replay mutation history live until publication", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    inputRef(null);
+    inputRef(input);
+    await Promise.resolve();
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "mutated-after-partial-stage";
+    content.className = className;
+    await act(async () => {});
+
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(staleClose).not.toHaveBeenCalled();
 

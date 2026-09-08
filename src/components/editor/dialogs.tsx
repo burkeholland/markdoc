@@ -802,6 +802,7 @@ interface ImagePublicationReplay {
   readonly overlayTree: ImageDomSnapshot;
   readonly placement: ImagePlacement;
   readonly historyIsClean: () => boolean;
+  readonly proofIsCurrent: () => boolean;
   readonly release: () => void;
 }
 
@@ -1632,12 +1633,14 @@ function createImageDomGuard(
   const record = (records: readonly MutationRecord[]) => {
     if (changed || records.length === 0) return changed;
     for (let index = 0; index < records.length; index += 1) {
-      const reconciled = exactControlledInputReconciliation(records, index);
-      if (reconciled > 0) {
-        index += reconciled - 1;
-        continue;
+      if (reactCommitSettling) {
+        const reconciled = exactControlledInputReconciliation(records, index);
+        if (reconciled > 0) {
+          index += reconciled - 1;
+          continue;
+        }
+        if (exactRadixMutation(records[index])) continue;
       }
-      if (exactRadixMutation(records[index])) continue;
       changed = true;
       break;
     }
@@ -1687,6 +1690,8 @@ function createImageDomGuard(
       if (!reactCommitSettling) return;
       record(observer.takeRecords());
       reactCommitSettling = false;
+      radixContentSettling.clear();
+      radixOverlaySettling.clear();
     },
     release: () => {
       record(observer.takeRecords());
@@ -1695,12 +1700,18 @@ function createImageDomGuard(
   });
 }
 
-function imageFileFacts(input: HTMLInputElement | null): ImageFileFacts | null {
+function imageFileFacts(
+  input: HTMLInputElement | null,
+): ImageFileFacts | null | undefined {
   if (!input) return null;
-  return Object.freeze({
-    value: input.value,
-    files: Object.freeze(Array.from(input.files ?? [])),
-  });
+  try {
+    return Object.freeze({
+      value: input.value,
+      files: Object.freeze(Array.from(input.files ?? [])),
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function imageFileFactsMatch(
@@ -2271,7 +2282,7 @@ function createImagePublicationRuntime(
   ) => void,
   owners: readonly ImageElementOwnerView[],
   onRetire: () => void,
-): ImagePublicationRuntime {
+): ImagePublicationRuntime | null {
   type Retirement = "element" | "layout" | "other";
   const placement = captureImagePlacement(
     dom.bridge,
@@ -2287,6 +2298,7 @@ function createImagePublicationRuntime(
   const overlayTree = imageSnapshotDom(dom.overlay);
   const bridgeTree = imageSnapshotDom(dom.bridge);
   const fileFacts = imageFileFacts(dom.file);
+  if (fileFacts === undefined) return null;
   let retired = false;
   let retirement: Retirement | null = null;
   let established = false;
@@ -2354,6 +2366,19 @@ function createImagePublicationRuntime(
         entry.owner.element() === entry.element &&
         entry.element.isConnected,
     );
+  const partialReplayIsCurrent = () =>
+    retired &&
+    retirement === "element" &&
+    established &&
+    !layoutRetired &&
+    !invalidReplay &&
+    replayRefs.some((entry) => entry.detached && entry.reattached) &&
+    replayRefs.every(
+      (entry) =>
+        entry.owner.element() === entry.element &&
+        entry.element.isConnected,
+    ) &&
+    currentDomMatches();
   return Object.freeze({
     publication,
     publish: () => {
@@ -2398,10 +2423,7 @@ function createImagePublicationRuntime(
     ) => {
       if (!established) return;
       const proof = replayRefs.find((entry) => entry.owner === owner);
-      if (!proof) {
-        invalidReplay = true;
-        return;
-      }
+      if (!proof) return;
       if (
         element === null &&
         previous === proof.element &&
@@ -2428,18 +2450,7 @@ function createImagePublicationRuntime(
       refsHaveExactReplay() &&
       currentDomMatches(),
     isRecoverablePartialReplay: () =>
-      retired &&
-      retirement === "element" &&
-      established &&
-      !layoutRetired &&
-      !invalidReplay &&
-      replayRefs.some((entry) => entry.detached && entry.reattached) &&
-      replayRefs.every(
-        (entry) =>
-          entry.owner.element() === entry.element &&
-          entry.element.isConnected,
-      ) &&
-      currentDomMatches(),
+      partialReplayIsCurrent(),
     replay: () =>
       guard
         ? Object.freeze({
@@ -2449,6 +2460,7 @@ function createImagePublicationRuntime(
             overlayTree,
             placement,
             historyIsClean: guard.isClean,
+            proofIsCurrent: () => !invalidReplay,
             release: guard.release,
           })
         : null,
@@ -2470,6 +2482,7 @@ function imageReplayAllowsPublication(
   const exactReplay =
     sameAuthority &&
     coordinator.acceptsSuccessorOf(replay.source) &&
+    replay.proofIsCurrent() &&
     replay.historyIsClean() &&
     replay.source.dom.bridge === dom.bridge &&
     replay.source.dom.overlay === dom.overlay &&
@@ -2522,6 +2535,7 @@ function createImagePresentation(
     authority: ImageAuthority,
     file: File,
     input: HTMLInputElement,
+    fallbackAlt: string,
   ) => void,
   afterClose: ImageAfterCloseAuthority,
   completeClose: (closer: object) => void,
@@ -2530,6 +2544,8 @@ function createImagePresentation(
   let lastRuntime: ImagePublicationRuntime | null = null;
   let successorRequested = false;
   let partialRecoveryQueued = false;
+  let portalSettlement = 0;
+  let replayRejected = false;
   let dismissal: ImageDismissalProof | null = null;
   let dismissalTimer: number | null = null;
   let outsidePointer:
@@ -2549,6 +2565,20 @@ function createImagePresentation(
         lastRuntime?.publication.ownerDocument.defaultView;
       ownerWindow?.clearTimeout(dismissalTimer);
       dismissalTimer = null;
+    }
+  };
+  const scheduleCommitFinish = (runtime: ImagePublicationRuntime | null) => {
+    if (!runtime) return;
+    const settlement = ++portalSettlement;
+    const ownerWindow = runtime.publication.ownerDocument.defaultView;
+    if (ownerWindow) {
+      ownerWindow.setTimeout(() => {
+        if (settlement === portalSettlement) runtime.finishCommit();
+      }, 0);
+    } else {
+      queueMicrotask(() => {
+        if (settlement === portalSettlement) runtime.finishCommit();
+      });
     }
   };
   const onElementChange = (
@@ -2577,6 +2607,9 @@ function createImagePresentation(
       runtime?.isRecoverablePartialReplay() &&
       coordinator.acceptsSuccessorOf(runtime.publication)
     ) {
+      const replay = runtime.replay();
+      if (!replay || !coordinator.stageReplay(replay)) return;
+      scheduleCommitFinish(runtime);
       partialRecoveryQueued = true;
       queueMicrotask(() => {
         partialRecoveryQueued = false;
@@ -2586,8 +2619,11 @@ function createImagePresentation(
           !coordinator.acceptsSuccessorOf(runtime.publication) ||
           !factsAreCurrent()
         ) {
+          coordinator.abandonReplay(runtime.publication);
+          replay.release();
           return;
         }
+        scheduleCommitFinish(runtime);
         successorRequested = true;
         requestSuccessor();
       });
@@ -2704,6 +2740,7 @@ function createImagePresentation(
     ) {
       return;
     }
+    scheduleCommitFinish(runtime);
     successorRequested = true;
     requestSuccessor();
   };
@@ -2795,11 +2832,11 @@ function createImagePresentation(
       return undefined;
     }
     const dom = exactDom();
-    if (
-      !factsAreCurrent() ||
-      !dom ||
-      !imageReplayAllowsPublication(coordinator, authority, dom)
-    ) {
+    if (!factsAreCurrent() || !dom || replayRejected) {
+      return undefined;
+    }
+    if (!imageReplayAllowsPublication(coordinator, authority, dom)) {
+      replayRejected = true;
       return undefined;
     }
     const runtime = createImagePublicationRuntime(
@@ -2813,6 +2850,10 @@ function createImagePresentation(
         clearDismissal();
       },
     );
+    if (!runtime) {
+      replayRejected = true;
+      return undefined;
+    }
     currentRuntime = runtime;
     lastRuntime = runtime;
     if (!runtime.publish()) {
@@ -2821,9 +2862,6 @@ function createImagePresentation(
       return undefined;
     }
     return runtime.retireForLayout;
-  };
-  const finishLastCommit = () => {
-    lastRuntime?.finishCommit();
   };
   const currentPublication = (
     changing: "url" | "alt" | "file" | null = null,
@@ -2956,13 +2994,30 @@ function createImagePresentation(
     ) {
       return;
     }
-    const selected = input.files;
-    const chosen = selected?.[0];
-    if (!chosen) {
+    let chosen: File | undefined;
+    let fallbackAlt: string;
+    try {
+      const selected = input.files;
+      chosen = selected?.[0];
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow || !(chosen instanceof ownerWindow.File)) {
+        publication.retire();
+        requestSuccessor();
+        return;
+      }
+      const name = chosen.name;
+      if (typeof name !== "string") {
+        publication.retire();
+        requestSuccessor();
+        return;
+      }
+      fallbackAlt = name.replace(/\.[a-z0-9]{2,5}$/i, "");
+    } catch {
+      publication.retire();
       requestSuccessor();
       return;
     }
-    startUpload(publication, authority, chosen, input);
+    startUpload(publication, authority, chosen, input, fallbackAlt);
   };
   const onPreviewError = (
     event: React.SyntheticEvent<HTMLImageElement>,
@@ -3142,13 +3197,14 @@ function createImagePresentation(
     authority.onOpenChange(false);
   };
   const settlePortal = () => {
+    let cleanup: void | (() => void) = undefined;
     if (!lastRuntime) {
-      const cleanup = establish();
-      finishLastCommit();
-      return cleanup;
+      cleanup = establish();
+    } else {
+      establish();
     }
-    establish();
-    finishLastCommit();
+    scheduleCommitFinish(lastRuntime);
+    return cleanup;
   };
   const captureBridge = (element: HTMLDivElement | null) => {
     if (!element) return bridge.capture(element);
@@ -3344,8 +3400,13 @@ export const ImageDialog = memo(function ImageDialog({
       ) {
         return;
       }
-      input.value = "";
       activeUpload.set(null);
+      try {
+        input.value = "";
+      } catch (error) {
+        succeeded = false;
+        message = imageUploadErrorText(error);
+      }
       setDraft((current) => {
         if (
           current.visit !== owner.visit ||
@@ -3381,6 +3442,7 @@ export const ImageDialog = memo(function ImageDialog({
       authority: ImageAuthority,
       file: File,
       input: HTMLInputElement,
+      fallbackAlt: string,
     ) => {
       const callback = authority.onUpload;
       if (
@@ -3401,7 +3463,7 @@ export const ImageDialog = memo(function ImageDialog({
         file,
         fileInput: input,
         altRevision: authority.altRevision,
-        fallbackAlt: file.name.replace(/\.[a-z0-9]{2,5}$/i, ""),
+        fallbackAlt,
         settlementAction: Object.freeze({
           identity: Symbol("image-upload-settlement"),
         }),
@@ -3415,16 +3477,23 @@ export const ImageDialog = memo(function ImageDialog({
             })
           : current,
       );
-      let pending: Promise<{ url: string; alt?: string }>;
-      try {
-        pending = Promise.resolve(callback(file));
-      } catch (error) {
-        pending = Promise.reject(error);
-      }
-      void pending.then(
-        (result) => settleUpload(owner, { kind: "success", result }),
-        (error: unknown) => settleUpload(owner, { kind: "error", error }),
+      const pending = new Promise<{ url: string; alt?: string }>(
+        (resolve, reject) => {
+          try {
+            resolve(callback(file));
+          } catch (error) {
+            reject(error);
+          }
+        },
       );
+      void pending
+        .then(
+          (result) => settleUpload(owner, { kind: "success", result }),
+          (error: unknown) => settleUpload(owner, { kind: "error", error }),
+        )
+        .catch((error: unknown) => {
+          settleUpload(owner, { kind: "error", error });
+        });
     },
     [
       activeUpload,
