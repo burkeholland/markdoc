@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  StrictMode,
   useEffect,
   useLayoutEffect,
   type MouseEvent as ReactMouseEvent,
@@ -735,6 +736,70 @@ describe("mounted theme controls", () => {
       focusOwner.remove();
     },
   );
+
+  it("keeps the exact successor usable through Strict Mode ref and layout replay", () => {
+    const view = renderDirect(
+      <StrictMode>
+        <section key="a">
+          <ThemeToggle />
+          <ThemePicker />
+        </section>
+      </StrictMode>,
+    );
+    const staleToggleButton = toggle(view.host);
+    const staleLightButton = option(view.host, "light");
+    const staleToggle = captureClick(staleToggleButton);
+    const staleLight = captureClick(staleLightButton);
+    const staleRefs = [
+      captureElementRef(staleToggleButton),
+      captureElementRef(staleToggleButton.querySelector("svg")!),
+      captureElementRef(picker(view.host)),
+      captureElementRef(staleLightButton),
+      captureElementRef(staleLightButton.querySelector("svg")!),
+    ];
+    const effects = trackThemeEffects();
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <section key="b">
+            <ThemeToggle />
+            <ThemePicker />
+          </section>
+        </StrictMode>,
+      );
+    });
+    const currentToggleButton = toggle(view.host);
+    const currentLightButton = option(view.host, "light");
+    const currentElements = [
+      currentToggleButton,
+      currentToggleButton.querySelector("svg")!,
+      picker(view.host),
+      currentLightButton,
+      currentLightButton.querySelector("svg")!,
+    ];
+    let evidence!: StaleEvidence;
+    act(() => {
+      evidence = invokeStale(effects, view.host, [
+        () => staleToggle(clickEvent(currentToggleButton)),
+        () => staleLight(clickEvent(currentLightButton)),
+        () => {
+          staleRefs.forEach((ref, index) => ref(currentElements[index]));
+          [...staleRefs].reverse().forEach((ref) => ref(null));
+        },
+      ]);
+    });
+    expectNoStaleEffects(evidence);
+
+    const currentLight = captureClick(currentLightButton);
+    const currentEvent = clickEvent(currentLightButton, currentLightButton.querySelector("svg"));
+    act(() => {
+      currentLight(currentEvent);
+      currentLight(currentEvent);
+    });
+    expect(toggle(view.host).dataset.themePreference).toBe("light");
+    expect(effectCounts(effects)).toMatchObject({ attribute: 1, emission: 1, storage: 1 });
+  });
 
   it.each([
     ["stale before current", true],
