@@ -115,33 +115,33 @@ type VersionMutationIntent =
 type VersionsRouter = ReturnType<typeof useRouter>;
 
 interface PanelAuthority {
-  mount: symbol;
-  session: CollabSession;
-  documentId: string;
-  role: CollabSession["role"];
-  onClose: () => void;
-  onPreview: (preview: VersionPreview | null) => void;
-  router: VersionsRouter;
-  routerPush: VersionsRouter["push"];
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly role: CollabSession["role"];
+  readonly onClose: () => void;
+  readonly onPreview: (preview: VersionPreview | null) => void;
+  readonly router: VersionsRouter;
+  readonly routerPush: VersionsRouter["push"];
 }
 
 interface VersionRowPublication {
-  index: number;
-  version: VersionSummary;
-  id: string;
-  number: number;
-  title: string | null;
-  kind: VersionSummary["kind"];
-  createdBy: string | null;
-  createdByName: string | null;
-  commitSha: string | null;
-  createdAt: string;
-  size: number;
+  readonly index: number;
+  readonly version: VersionSummary;
+  readonly id: string;
+  readonly number: number;
+  readonly title: string | null;
+  readonly kind: VersionSummary["kind"];
+  readonly createdBy: string | null;
+  readonly createdByName: string | null;
+  readonly commitSha: string | null;
+  readonly createdAt: string;
+  readonly size: number;
 }
 
 interface VersionGroupPublication {
-  day: string;
-  rows: VersionRowPublication[];
+  readonly day: string;
+  readonly rows: readonly VersionRowPublication[];
 }
 
 interface PreviewOperation {
@@ -150,8 +150,8 @@ interface PreviewOperation {
   authority: PanelAuthority;
   root: HTMLElement;
   versions: VersionSummary[] | null;
-  rows: VersionRowPublication[];
-  compare: string[];
+  rows: readonly VersionRowPublication[];
+  compare: readonly string[];
   selected: string | null;
   busyVersionId: string | null;
 }
@@ -176,24 +176,25 @@ interface ListOperation {
 }
 
 interface PanelRenderPublication {
-  mount: symbol;
-  authority: PanelAuthority;
-  refreshKey: number;
-  versions: VersionSummary[] | null;
-  rows: VersionRowPublication[];
-  groups: VersionGroupPublication[];
-  error: string | null;
-  listError: string | null;
-  retry: ListOperation | null;
-  selected: string | null;
-  compare: string[];
-  compareValues: string[];
-  preview: PreviewOperation | null;
-  mutation: VersionMutationOwner | null;
-  renaming: string | null;
-  draft: string;
-  canEdit: boolean;
-  revision: number;
+  readonly mount: symbol;
+  readonly authority: PanelAuthority;
+  readonly refreshKey: number;
+  readonly versions: VersionSummary[] | null;
+  readonly rows: readonly VersionRowPublication[];
+  readonly groups: readonly VersionGroupPublication[];
+  readonly error: string | null;
+  readonly listError: string | null;
+  readonly retry: ListOperation | null;
+  readonly selected: string | null;
+  readonly compare: readonly string[];
+  readonly compareValues: readonly string[];
+  readonly preview: PreviewOperation | null;
+  readonly mutation: VersionMutationOwner | null;
+  readonly mutationPhase: VersionMutationOwner["phase"] | null;
+  readonly renaming: string | null;
+  readonly draft: string;
+  readonly canEdit: boolean;
+  readonly revision: number;
 }
 
 interface VersionRowElements {
@@ -206,21 +207,167 @@ interface VersionRowElements {
   copy: HTMLButtonElement | null;
 }
 
-interface PanelPublicationRuntime {
-  active: boolean;
-  root: HTMLElement | null;
-  close: HTMLButtonElement | null;
-  retry: HTMLButtonElement | null;
-  clear: HTMLButtonElement | null;
-  groupLists: Array<HTMLUListElement | null>;
-  rows: VersionRowElements[];
-}
-
 type PanelControl = "close" | "retry" | "clear";
 type RowControl = Exclude<keyof VersionRowElements, "item">;
+type PanelEventKind = "click" | "checkbox-change" | "input-change" | "blur" | "keydown";
+type PanelReactEvent =
+  | MouseEvent<HTMLButtonElement | HTMLInputElement>
+  | ChangeEvent<HTMLInputElement>
+  | FocusEvent<HTMLInputElement>
+  | KeyboardEvent<HTMLInputElement>;
+
+interface PanelDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly PanelDomSnapshot[];
+}
+
+interface PanelPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface PanelElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface PanelRefReplay {
+  readonly owner: PanelElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface PanelAction {
+  readonly identity: symbol;
+  readonly renderIdentity: symbol;
+  readonly control: PanelControl | RowControl;
+  readonly rowIndex: number | null;
+  readonly eventKind: PanelEventKind;
+}
+
+interface PanelPublicationRuntime {
+  readonly publication: PanelRenderPublication;
+  readonly renderIdentity: symbol;
+  readonly root: HTMLElement;
+  readonly close: HTMLButtonElement;
+  readonly retry: HTMLButtonElement | null;
+  readonly clear: HTMLButtonElement | null;
+  readonly groupLists: readonly HTMLUListElement[];
+  readonly rows: readonly VersionRowElements[];
+  readonly ownerDocument: Document;
+  readonly dom: PanelDomSnapshot;
+  readonly placement: PanelPlacement;
+  readonly publish: (owners: readonly PanelElementOwnerView[]) => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly retireForReplacement: () => void;
+  readonly noteRef: (
+    owner: PanelElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface PanelReplay {
+  readonly source: PanelPublicationRuntime;
+  readonly dom: PanelDomSnapshot;
+  readonly placement: PanelPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface PanelControlledRestore {
+  readonly input: HTMLInputElement;
+  readonly attributes: readonly string[];
+}
+
+interface PanelPublicationCells {
+  readonly active: { value: PanelPublicationRuntime | null };
+  readonly successorOf: { value: PanelPublicationRuntime | null };
+  readonly replay: { value: PanelReplay | null };
+  readonly controlledRestore: { value: PanelControlledRestore | null };
+  readonly retired: WeakSet<PanelRenderPublication>;
+  readonly claimedPublications: WeakSet<PanelRenderPublication>;
+  readonly claimedEvents: WeakSet<object>;
+  readonly claimedActions: WeakSet<PanelAction>;
+}
+
+interface PanelPublicationSet {
+  readonly publication: PanelRenderPublication;
+  readonly captureRoot: (element: HTMLElement | null) => void;
+  readonly capturePanel: Readonly<Record<PanelControl, (element: HTMLButtonElement | null) => void>>;
+  readonly captureGroups: readonly ((element: HTMLUListElement | null) => void)[];
+  readonly captureRows: readonly {
+    readonly item: (element: HTMLDivElement | null) => void;
+    readonly checkbox: (element: HTMLInputElement | null) => void;
+    readonly select: (element: HTMLButtonElement | null) => void;
+    readonly restore: (element: HTMLButtonElement | null) => void;
+    readonly startRename: (element: HTMLButtonElement | null) => void;
+    readonly renameInput: (element: HTMLInputElement | null) => void;
+    readonly copy: (element: HTMLButtonElement | null) => void;
+  }[];
+  readonly root: () => HTMLElement | null;
+  readonly establish: () => void | (() => void);
+  readonly retire: () => boolean;
+  readonly claimPanel: (
+    control: PanelControl,
+    event: MouseEvent<HTMLButtonElement>,
+  ) => boolean;
+  readonly claimRow: (
+    row: VersionRowPublication,
+    control: RowControl,
+    event: PanelReactEvent,
+  ) => boolean;
+}
+
+interface PanelDomGuard {
+  readonly isClean: () => boolean;
+  readonly stageHandoff: () => boolean;
+  readonly release: () => void;
+}
+
+class PanelElementOwner<T extends HTMLElement> implements PanelElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: PanelElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
 
 function snapshotVersion(version: VersionSummary, index: number): VersionRowPublication {
-  return {
+  return Object.freeze({
     index,
     version,
     id: version.id,
@@ -232,7 +379,7 @@ function snapshotVersion(version: VersionSummary, index: number): VersionRowPubl
     commitSha: version.commitSha,
     createdAt: version.createdAt,
     size: version.size,
-  };
+  });
 }
 
 function versionSnapshotIsCurrent(row: VersionRowPublication): boolean {
@@ -252,7 +399,7 @@ function versionSnapshotIsCurrent(row: VersionRowPublication): boolean {
 
 function sameVersionPresentation(
   versions: VersionSummary[] | null,
-  rows: VersionRowPublication[],
+  rows: readonly VersionRowPublication[],
   publication: PanelRenderPublication,
 ): boolean {
   if (
@@ -273,38 +420,40 @@ function sameVersionPresentation(
   });
 }
 
-function groupPublishedVersions(rows: VersionRowPublication[]): VersionGroupPublication[] {
+function groupPublishedVersions(rows: readonly VersionRowPublication[]): VersionGroupPublication[] {
   const groups = new Map<string, VersionRowPublication[]>();
   for (const row of rows) {
     const day = formatDayHeading(row.createdAt);
     if (!groups.has(day)) groups.set(day, []);
     groups.get(day)!.push(row);
   }
-  return Array.from(groups, ([day, groupedRows]) => ({ day, rows: groupedRows }));
+  return Array.from(groups, ([day, groupedRows]) =>
+    Object.freeze({ day, rows: Object.freeze(groupedRows) }),
+  );
+}
+
+function isOwnerInput(element: HTMLElement): element is HTMLInputElement {
+  const Input = element.ownerDocument.defaultView?.HTMLInputElement;
+  return Boolean(Input && element instanceof Input);
 }
 
 function collectInteractiveElements(root: HTMLElement): Array<HTMLButtonElement | HTMLInputElement> {
   const elements: Array<HTMLButtonElement | HTMLInputElement> = [];
+  const ownerWindow = root.ownerDocument.defaultView;
+  if (!ownerWindow) return elements;
   const visit = (parent: Element) => {
     for (const child of parent.children) {
-      if (child instanceof HTMLButtonElement || child instanceof HTMLInputElement) elements.push(child);
+      if (
+        child instanceof ownerWindow.HTMLButtonElement ||
+        child instanceof ownerWindow.HTMLInputElement
+      ) {
+        elements.push(child);
+      }
       visit(child);
     }
   };
   visit(root);
   return elements;
-}
-
-function emptyRowElements(): VersionRowElements {
-  return {
-    item: null,
-    checkbox: null,
-    select: null,
-    restore: null,
-    startRename: null,
-    renameInput: null,
-    copy: null,
-  };
 }
 
 function rowForId(publication: PanelRenderPublication, id: string): VersionRowPublication | undefined {
@@ -335,6 +484,1362 @@ function retryMatchesPresentation(owner: ListOperation, publication: PanelRender
   return publication.authority === owner.authority && publication.refreshKey === owner.refreshKey && owner.retry;
 }
 
+function snapshotPanelAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotPanelDom(node: Node): PanelDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotPanelAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotPanelDom)),
+  });
+}
+
+function panelDomMatches(snapshot: PanelDomSnapshot, ownerDocument: Document): boolean {
+  const { node } = snapshot;
+  if (
+    !node.isConnected ||
+    node.ownerDocument !== ownerDocument ||
+    node.nodeValue !== snapshot.nodeValue
+  ) {
+    return false;
+  }
+  const attributes = snapshotPanelAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node &&
+        panelDomMatches(child, ownerDocument),
+    )
+  );
+}
+
+function panelDomContains(snapshot: PanelDomSnapshot, target: Node): boolean {
+  return (
+    snapshot.node === target ||
+    snapshot.children.some((child) => panelDomContains(child, target))
+  );
+}
+
+function capturePanelPlacement(root: HTMLElement): PanelPlacement | null {
+  const parent = root.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: root.ownerDocument,
+    parent,
+    previousSibling: root.previousSibling,
+    nextSibling: root.nextSibling,
+  });
+}
+
+function panelPlacementMatches(root: HTMLElement, placement: PanelPlacement): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.parentNode === placement.parent &&
+    root.previousSibling === placement.previousSibling &&
+    root.nextSibling === placement.nextSibling
+  );
+}
+
+function createPanelDomGuard(
+  root: HTMLElement,
+  placement: PanelPlacement,
+  controlledRestore: PanelControlledRestore | null,
+  allowInitialInputWrites: boolean,
+): PanelDomGuard | null {
+  const ownerWindow = placement.document.defaultView;
+  if (!ownerWindow) return null;
+  const MutationObserverConstructor = ownerWindow.MutationObserver;
+  let changed = false;
+  let pendingControlledRestore = controlledRestore;
+  let initialInputWrites: ReadonlySet<HTMLInputElement> | null =
+    allowInitialInputWrites
+      ? new Set(root.querySelectorAll<HTMLInputElement>("input"))
+      : null;
+  let handoffInputs: ReadonlySet<HTMLInputElement> | null = null;
+  let handoffWriteBatches = 0;
+  const matchesInputWrites = (
+    records: readonly MutationRecord[],
+    input: HTMLInputElement,
+    attributes: readonly string[],
+    offset = 0,
+  ) =>
+    records.length >= offset + attributes.length &&
+    attributes.every((attribute, index) => {
+      const record = records[offset + index];
+      return (
+        record.type === "attributes" &&
+        record.target === input &&
+        record.attributeName === attribute &&
+        record.oldValue ===
+          (attribute === "name" && index === attributes.length - 1
+            ? ""
+            : input.getAttribute(attribute))
+      );
+    });
+  const matchesInputWriteBatch = (
+    records: readonly MutationRecord[],
+    inputs: ReadonlySet<HTMLInputElement> | null,
+  ) => {
+    if (!inputs || records.length === 0) return false;
+    let offset = 0;
+    while (offset < records.length) {
+      const input = records[offset].target;
+      if (
+        !(input instanceof ownerWindow.HTMLInputElement) ||
+        !inputs.has(input)
+      ) {
+        return false;
+      }
+      const attributes =
+        input.type === "checkbox"
+          ? ["name", "type", "name"]
+          : records[offset + 1]?.attributeName === "value"
+            ? ["name", "value", "name"]
+            : ["name", "name"];
+      if (!matchesInputWrites(records, input, attributes, offset)) return false;
+      offset += attributes.length;
+    }
+    return true;
+  };
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    if (
+      pendingControlledRestore &&
+      records.length === pendingControlledRestore.attributes.length &&
+      matchesInputWrites(
+        records,
+        pendingControlledRestore.input,
+        pendingControlledRestore.attributes,
+      )
+    ) {
+      pendingControlledRestore = null;
+      return;
+    }
+    pendingControlledRestore = null;
+    if (matchesInputWriteBatch(records, initialInputWrites)) {
+      initialInputWrites = null;
+      return;
+    }
+    initialInputWrites = null;
+    if (
+      handoffWriteBatches < 2 &&
+      matchesInputWriteBatch(records, handoffInputs)
+    ) {
+      handoffWriteBatches += 1;
+      return;
+    }
+    handoffInputs = null;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList" || record.target !== placement.parent) {
+        return false;
+      }
+      if (record.previousSibling === root || record.nextSibling === root) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(
+        (node) =>
+          node === root ||
+          (node.nodeType === 1 && (node as Element).contains(root)),
+      );
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      pendingControlledRestore = null;
+      initialInputWrites = null;
+      handoffInputs = null;
+      return !changed;
+    },
+    stageHandoff: () => {
+      recordChanges(observer.takeRecords());
+      if (changed) return false;
+      handoffInputs = new Set(root.querySelectorAll<HTMLInputElement>("input"));
+      handoffWriteBatches = 0;
+      return true;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function panelControlIsEnabled(control: HTMLButtonElement | HTMLInputElement): boolean {
+  if (
+    control.disabled ||
+    control.matches(":disabled") ||
+    control.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (
+      element.hasAttribute("inert") ||
+      element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function panelAuthorityIsCurrent(authority: PanelAuthority): boolean {
+  return (
+    authority.session.docId === authority.documentId &&
+    authority.session.role === authority.role &&
+    authority.router.push === authority.routerPush
+  );
+}
+
+function samePublishedRows(
+  previous: readonly VersionRowPublication[],
+  current: readonly VersionRowPublication[],
+): boolean {
+  return (
+    previous.length === current.length &&
+    previous.every((row, index) => {
+      const candidate = current[index];
+      return Boolean(
+        candidate &&
+          row.index === candidate.index &&
+          row.version === candidate.version &&
+          row.id === candidate.id &&
+          row.number === candidate.number &&
+          row.title === candidate.title &&
+          row.kind === candidate.kind &&
+          row.createdBy === candidate.createdBy &&
+          row.createdByName === candidate.createdByName &&
+          row.commitSha === candidate.commitSha &&
+          row.createdAt === candidate.createdAt &&
+          row.size === candidate.size &&
+          versionSnapshotIsCurrent(row) &&
+          versionSnapshotIsCurrent(candidate),
+      );
+    })
+  );
+}
+
+function samePublishedGroups(
+  previous: readonly VersionGroupPublication[],
+  current: readonly VersionGroupPublication[],
+): boolean {
+  return (
+    previous.length === current.length &&
+    previous.every((group, index) => {
+      const candidate = current[index];
+      return Boolean(
+        candidate &&
+          group.day === candidate.day &&
+          samePublishedRows(group.rows, candidate.rows),
+      );
+    })
+  );
+}
+
+function panelFactsAreCurrent(publication: PanelRenderPublication): boolean {
+  const {
+    authority,
+    versions,
+    rows,
+    groups,
+    compare,
+    compareValues,
+    preview,
+    mutation,
+    retry,
+  } = publication;
+  if (
+    publication.mount !== authority.mount ||
+    !panelAuthorityIsCurrent(authority) ||
+    publication.canEdit !==
+      (authority.role === "owner" || authority.role === "editor") ||
+    compare.length !== compareValues.length ||
+    compare.some((id, index) => id !== compareValues[index]) ||
+    (versions?.length ?? 0) !== rows.length ||
+    rows.some(
+      (row, index) =>
+        row.index !== index ||
+        versions?.[index] !== row.version ||
+        !versionSnapshotIsCurrent(row),
+    ) ||
+    groups.flatMap((group) => group.rows).length !== rows.length ||
+    groups.some(
+      (group) =>
+        group.rows.length === 0 ||
+        group.rows.some(
+          (row) =>
+            rows[row.index] !== row ||
+            formatDayHeading(row.createdAt) !== group.day,
+        ),
+    ) ||
+    !samePublishedGroups(
+      groups,
+      groupPublishedVersions([...rows]),
+    ) ||
+    (retry !== null && !retryMatchesPresentation(retry, publication)) ||
+    (preview !== null && !previewMatchesPresentation(preview, publication)) ||
+    (mutation !== null && !mutationMatchesPresentation(mutation, publication)) ||
+    (mutation === null && publication.mutationPhase !== null)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function panelPublicationsMatch(
+  previous: PanelRenderPublication,
+  current: PanelRenderPublication,
+): boolean {
+  const before = previous.authority;
+  const after = current.authority;
+  return (
+    before.mount === after.mount &&
+    before.session === after.session &&
+    before.documentId === after.documentId &&
+    before.role === after.role &&
+    before.onClose === after.onClose &&
+    before.onPreview === after.onPreview &&
+    before.router === after.router &&
+    before.routerPush === after.routerPush &&
+    previous.refreshKey === current.refreshKey &&
+    previous.versions === current.versions &&
+    samePublishedRows(previous.rows, current.rows) &&
+    samePublishedGroups(previous.groups, current.groups) &&
+    previous.error === current.error &&
+    previous.listError === current.listError &&
+    previous.retry === current.retry &&
+    previous.selected === current.selected &&
+    previous.compare === current.compare &&
+    previous.compareValues.length === current.compareValues.length &&
+    previous.compareValues.every(
+      (id, index) => id === current.compareValues[index],
+    ) &&
+    previous.preview === current.preview &&
+    previous.mutation === current.mutation &&
+    previous.mutationPhase === current.mutationPhase &&
+    previous.renaming === current.renaming &&
+    previous.draft === current.draft &&
+    previous.canEdit === current.canEdit &&
+    panelFactsAreCurrent(previous) &&
+    panelFactsAreCurrent(current)
+  );
+}
+
+function panelExactDomIsCurrent(
+  runtime: PanelPublicationRuntime,
+  pendingInput: HTMLInputElement | null = null,
+): boolean {
+  const publication = runtime.publication;
+  const {
+    root,
+    close,
+    retry,
+    clear,
+    groupLists,
+    rows: elementsByRow,
+    ownerDocument,
+  } = runtime;
+  const ownerWindow = ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !root.isConnected ||
+    root.ownerDocument !== ownerDocument ||
+    root.tagName !== "ASIDE" ||
+    root.dataset.testid !== "versions-panel" ||
+    !close.isConnected ||
+    close.ownerDocument !== ownerDocument ||
+    close.tagName !== "BUTTON" ||
+    close.type !== "button" ||
+    !panelControlIsEnabled(close) ||
+    close.getAttribute("aria-label") !== "Close version history"
+  ) {
+    return false;
+  }
+
+  const header = root.firstElementChild;
+  const body = root.children.item(1);
+  if (
+    root.children.length !== 2 ||
+    header?.parentElement !== root ||
+    body?.parentElement !== root ||
+    header.children.length !== 2 ||
+    header.lastElementChild !== close ||
+    close.parentElement !== header
+  ) {
+    return false;
+  }
+
+  const expected = new Set<HTMLButtonElement | HTMLInputElement>([close]);
+  if (publication.listError) {
+    const alert = retry?.parentElement;
+    if (
+      !retry ||
+      !retry.isConnected ||
+      retry.ownerDocument !== ownerDocument ||
+      retry.type !== "button" ||
+      retry.disabled !== (publication.retry !== null) ||
+      (publication.retry === null && !panelControlIsEnabled(retry)) ||
+      alert?.getAttribute("role") !== "alert" ||
+      alert.parentElement !== body
+    ) {
+      return false;
+    }
+    expected.add(retry);
+  } else if (retry !== null) {
+    return false;
+  }
+  if (publication.compare.length > 0) {
+    const hint = clear?.parentElement;
+    if (
+      !clear ||
+      !clear.isConnected ||
+      clear.ownerDocument !== ownerDocument ||
+      clear.type !== "button" ||
+      !panelControlIsEnabled(clear) ||
+      hint?.getAttribute("data-testid") !== "compare-hint" ||
+      hint.parentElement !== body ||
+      hint.lastElementChild !== clear
+    ) {
+      return false;
+    }
+    expected.add(clear);
+  } else if (clear !== null) {
+    return false;
+  }
+
+  if (
+    groupLists.length !== publication.groups.length ||
+    elementsByRow.length !== publication.rows.length
+  ) {
+    return false;
+  }
+  for (let groupIndex = 0; groupIndex < publication.groups.length; groupIndex++) {
+    const group = publication.groups[groupIndex];
+    const list = groupLists[groupIndex];
+    if (
+      !list ||
+      !list.isConnected ||
+      list.ownerDocument !== ownerDocument ||
+      list.tagName !== "UL" ||
+      list.parentElement?.parentElement !== body ||
+      list.children.length !== group.rows.length
+    ) {
+      return false;
+    }
+    const previousList = groupLists[groupIndex - 1];
+    if (
+      previousList &&
+      !(previousList.compareDocumentPosition(list) &
+        ownerWindow.Node.DOCUMENT_POSITION_FOLLOWING)
+    ) {
+      return false;
+    }
+    for (let rowIndex = 0; rowIndex < group.rows.length; rowIndex++) {
+      const row = group.rows[rowIndex];
+      const elements = elementsByRow[row.index];
+      const item = elements?.item;
+      const checkbox = elements?.checkbox;
+      const selectControl = elements?.select;
+      const listItem = list.children.item(rowIndex);
+      const rowTop = item?.firstElementChild;
+      const checkboxLabel = checkbox?.parentElement;
+      if (
+        !versionSnapshotIsCurrent(row) ||
+        !(listItem instanceof ownerWindow.HTMLLIElement) ||
+        !item?.isConnected ||
+        !checkbox?.isConnected ||
+        !selectControl?.isConnected ||
+        item.ownerDocument !== ownerDocument ||
+        checkbox.ownerDocument !== ownerDocument ||
+        selectControl.ownerDocument !== ownerDocument ||
+        listItem.children.length !== 1 ||
+        listItem.firstElementChild !== item ||
+        item.parentElement !== listItem ||
+        item.dataset.testid !== "version-item" ||
+        item.dataset.versionKind !== row.kind ||
+        item.dataset.versionNumber !== String(row.number) ||
+        rowTop?.parentElement !== item ||
+        rowTop.children.length !== 2 ||
+        rowTop.children.item(0) !== checkboxLabel ||
+        rowTop.children.item(1) !== selectControl ||
+        checkboxLabel?.parentElement !== rowTop ||
+        checkboxLabel.children.length !== 1 ||
+        checkbox.parentElement !== checkboxLabel ||
+        checkbox.type !== "checkbox" ||
+        (checkbox === pendingInput
+          ? checkbox.checked === publication.compare.includes(row.id)
+          : checkbox.checked !== publication.compare.includes(row.id)) ||
+        checkbox.getAttribute("aria-label") !== `Compare v${row.number}` ||
+        !panelControlIsEnabled(checkbox) ||
+        selectControl.parentElement !== rowTop ||
+        selectControl.type !== "button" ||
+        !panelControlIsEnabled(selectControl)
+      ) {
+        return false;
+      }
+      expected.add(checkbox);
+      expected.add(selectControl);
+
+      const isSelected = publication.selected === row.id;
+      const actionContainer = item.children.item(1);
+      if (!isSelected) {
+        if (
+          elements.restore !== null ||
+          elements.startRename !== null ||
+          elements.copy !== null ||
+          actionContainer !== null
+        ) {
+          return false;
+        }
+      } else {
+        if (!actionContainer?.isConnected || actionContainer.parentElement !== item) {
+          return false;
+        }
+        const actionControls = publication.canEdit
+          ? [elements.restore, elements.startRename, elements.copy]
+          : [elements.copy];
+        if (
+          actionControls.some(
+            (element) =>
+              !element?.isConnected ||
+              element.ownerDocument !== ownerDocument ||
+              element.parentElement !== actionContainer,
+          ) ||
+          actionContainer.children.length !== actionControls.length ||
+          actionControls.some(
+            (element, index) => actionContainer.children.item(index) !== element,
+          )
+        ) {
+          return false;
+        }
+        for (const element of actionControls) {
+          const shouldBeEnabled = publication.mutation === null;
+          if (
+            !element ||
+            element.disabled === shouldBeEnabled ||
+            (shouldBeEnabled && !panelControlIsEnabled(element))
+          ) {
+            return false;
+          }
+          expected.add(element);
+        }
+        if (
+          !publication.canEdit &&
+          (elements.restore !== null || elements.startRename !== null)
+        ) {
+          return false;
+        }
+      }
+
+      if (publication.renaming === row.id) {
+        if (
+          !elements.renameInput?.isConnected ||
+          elements.renameInput.ownerDocument !== ownerDocument ||
+          !selectControl.contains(elements.renameInput) ||
+          (elements.renameInput !== pendingInput &&
+            elements.renameInput.value !== publication.draft) ||
+          elements.renameInput.disabled !== (publication.mutation !== null) ||
+          (publication.mutation === null &&
+            !panelControlIsEnabled(elements.renameInput))
+        ) {
+          return false;
+        }
+        expected.add(elements.renameInput);
+      } else if (elements.renameInput !== null) {
+        return false;
+      }
+    }
+  }
+
+  const actual = collectInteractiveElements(root);
+  return (
+    actual.length === expected.size &&
+    actual.every((element) => expected.has(element))
+  );
+}
+
+function panelPublicationIsCurrent(
+  cells: PanelPublicationCells,
+  candidate: PanelRenderPublication,
+  allowClaimed = false,
+  pendingInput: HTMLInputElement | null = null,
+): PanelPublicationRuntime | null {
+  const runtime = cells.active.value;
+  if (
+    !runtime ||
+    runtime.publication !== candidate ||
+    runtime.isRetired() ||
+    cells.retired.has(candidate) ||
+    (!allowClaimed && cells.claimedPublications.has(candidate)) ||
+    !panelFactsAreCurrent(candidate) ||
+    !panelExactDomIsCurrent(runtime, pendingInput) ||
+    !runtime.publishedDomMatches()
+  ) {
+    return null;
+  }
+  return runtime;
+}
+
+function nativePanelEvent(
+  runtime: PanelPublicationRuntime,
+  source: HTMLButtonElement | HTMLInputElement,
+  event: PanelReactEvent,
+  kind: PanelEventKind,
+): globalThis.Event | null {
+  if (!event || typeof event !== "object") return null;
+  const ownerWindow = runtime.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  const reactEvent = event as PanelReactEvent & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  const reactEventPrototype = Object.getPrototypeOf(event) as {
+    constructor?: { name?: unknown };
+  } | null;
+  const expectedReactName =
+    kind === "click"
+      ? "onClick"
+      : kind === "blur"
+        ? "onBlur"
+        : kind === "keydown"
+          ? "onKeyDown"
+          : "onChange";
+  const expectedReactType =
+    kind === "click"
+      ? "click"
+      : kind === "blur"
+        ? "blur"
+        : kind === "keydown"
+          ? "keydown"
+          : "change";
+  if (
+    !ownerWindow ||
+    !(nativeEvent instanceof ownerWindow.Event) ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    event.type !== expectedReactType ||
+    reactEvent._reactName !== expectedReactName ||
+    reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
+    typeof reactEvent.isDefaultPrevented !== "function" ||
+    typeof reactEvent.isPropagationStopped !== "function" ||
+    typeof reactEvent.persist !== "function" ||
+    event.defaultPrevented ||
+    nativeEvent.defaultPrevented ||
+    event.currentTarget !== source ||
+    target !== nativeEvent.target ||
+    !(target instanceof ownerWindow.Node) ||
+    target.ownerDocument !== runtime.ownerDocument ||
+    !nativeEvent.composedPath().includes(source) ||
+    !nativeEvent.composedPath().includes(runtime.root) ||
+    !panelDomContains(runtime.dom, target)
+  ) {
+    return null;
+  }
+  if (kind === "click") {
+    if (
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      !nativeEvent.bubbles ||
+      !event.bubbles ||
+      !(event instanceof Object) ||
+      (event as MouseEvent<HTMLElement>).button !== 0 ||
+      !source.contains(target)
+    ) {
+      return null;
+    }
+  } else if (kind === "checkbox-change") {
+    if (
+      target !== source ||
+      (!(nativeEvent instanceof ownerWindow.MouseEvent) ||
+        nativeEvent.type !== "click" ||
+        nativeEvent.button !== 0 ||
+        !nativeEvent.bubbles)
+    ) {
+      return null;
+    }
+  } else if (kind === "input-change") {
+    const isInput =
+      typeof ownerWindow.InputEvent === "function" &&
+      nativeEvent instanceof ownerWindow.InputEvent &&
+      nativeEvent.type === "input";
+    if (
+      target !== source ||
+      (!isInput && nativeEvent.type !== "change")
+    ) {
+      return null;
+    }
+  } else if (kind === "blur") {
+    if (
+      !(nativeEvent instanceof ownerWindow.FocusEvent) ||
+      (nativeEvent.type !== "focusout" && nativeEvent.type !== "blur") ||
+      target !== source
+    ) {
+      return null;
+    }
+  } else {
+    const keyboardEvent = event as KeyboardEvent<HTMLInputElement>;
+    if (
+      !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
+      nativeEvent.type !== "keydown" ||
+      target !== source ||
+      nativeEvent.key !== keyboardEvent.key
+    ) {
+      return null;
+    }
+  }
+  return nativeEvent;
+}
+
+function createPanelPublicationSet(
+  publication: PanelRenderPublication,
+  cells: PanelPublicationCells,
+  requestSuccessor: () => void,
+): PanelPublicationSet {
+  const renderIdentity = Symbol("versions-panel-render");
+  let currentRuntime: PanelPublicationRuntime | null = null;
+  let lastRuntime: PanelPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+
+  const acceptsSuccessorOf = (runtime: PanelPublicationRuntime) =>
+    cells.active.value === null &&
+    cells.successorOf.value === runtime &&
+    cells.retired.has(runtime.publication) &&
+    runtime.isRetired() &&
+    !cells.claimedPublications.has(runtime.publication);
+
+  const requestReplaySuccessor = (runtime: PanelPublicationRuntime) => {
+    if (
+      successorRequested ||
+      cells.replay.value !== null ||
+      !acceptsSuccessorOf(runtime) ||
+      !panelFactsAreCurrent(publication) ||
+      !panelExactDomIsCurrent(runtime) ||
+      !runtime.publishedDomMatches() ||
+      !runtime.stageSuccessorHandoff()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.value = Object.freeze({
+      source: runtime,
+      dom: runtime.dom,
+      placement: runtime.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: PanelElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+        cells.retired.add(publication);
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime)) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+
+  const rootOwner = new PanelElementOwner<HTMLElement>(onElementChange);
+  const panelOwners = {
+    close: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    retry: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    clear: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+  };
+  const groupOwners = publication.groups.map(
+    () => new PanelElementOwner<HTMLUListElement>(onElementChange),
+  );
+  const rowOwners = publication.rows.map(() => ({
+    item: new PanelElementOwner<HTMLDivElement>(onElementChange),
+    checkbox: new PanelElementOwner<HTMLInputElement>(onElementChange),
+    select: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    restore: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    startRename: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+    renameInput: new PanelElementOwner<HTMLInputElement>(onElementChange),
+    copy: new PanelElementOwner<HTMLButtonElement>(onElementChange),
+  }));
+
+  const eventKindFor = (control: PanelControl | RowControl): PanelEventKind =>
+    control === "checkbox"
+      ? "checkbox-change"
+      : control === "renameInput"
+        ? "input-change"
+        : "click";
+  const action = (
+    control: PanelControl | RowControl,
+    rowIndex: number | null,
+    eventKind = eventKindFor(control),
+  ): PanelAction =>
+    Object.freeze({
+      identity: Symbol(`versions-panel-${control}-${eventKind}`),
+      renderIdentity,
+      control,
+      rowIndex,
+      eventKind,
+    });
+  const panelActions = {
+    close: action("close", null),
+    retry: publication.listError ? action("retry", null) : null,
+    clear: publication.compare.length > 0 ? action("clear", null) : null,
+  };
+  const rowActions = publication.rows.map((row) => {
+    const selected = publication.selected === row.id;
+    return {
+      item: null,
+      checkbox: action("checkbox", row.index, "checkbox-change"),
+      select: action("select", row.index),
+      restore:
+        selected && publication.canEdit ? action("restore", row.index) : null,
+      startRename:
+        selected && publication.canEdit ? action("startRename", row.index) : null,
+      renameInput:
+        publication.renaming === row.id
+          ? {
+              click: action("renameInput", row.index, "click"),
+              change: action("renameInput", row.index, "input-change"),
+              blur: action("renameInput", row.index, "blur"),
+              keydown: action("renameInput", row.index, "keydown"),
+            }
+          : null,
+      copy: selected ? action("copy", row.index) : null,
+    };
+  });
+
+  const expectedOwners = (): readonly PanelElementOwnerView[] => [
+    rootOwner,
+    panelOwners.close,
+    ...(publication.listError ? [panelOwners.retry] : []),
+    ...(publication.compare.length > 0 ? [panelOwners.clear] : []),
+    ...groupOwners,
+    ...publication.rows.flatMap((row) => {
+      const owned = rowOwners[row.index];
+      const selected = publication.selected === row.id;
+      return [
+        owned.item,
+        owned.checkbox,
+        owned.select,
+        ...(selected && publication.canEdit
+          ? [owned.restore, owned.startRename]
+          : []),
+        ...(selected ? [owned.copy] : []),
+        ...(publication.renaming === row.id ? [owned.renameInput] : []),
+      ];
+    }),
+  ];
+
+  const committedElements = () => {
+    const root = rootOwner.element();
+    const close = panelOwners.close.element();
+    const retry = panelOwners.retry.element();
+    const clear = panelOwners.clear.element();
+    const groupLists = groupOwners.map((owner) => owner.element());
+    const rows = publication.rows.map((row) => {
+      const owned = rowOwners[row.index];
+      const elements: VersionRowElements = {
+        item: owned.item.element(),
+        checkbox: owned.checkbox.element(),
+        select: owned.select.element(),
+        restore: owned.restore.element(),
+        startRename: owned.startRename.element(),
+        renameInput: owned.renameInput.element(),
+        copy: owned.copy.element(),
+      };
+      return elements;
+    });
+    if (
+      !root ||
+      !close ||
+      Boolean(publication.listError) !== Boolean(retry) ||
+      (publication.compare.length > 0) !== Boolean(clear) ||
+      groupLists.some((list) => !list) ||
+      rows.some((elements, index) => {
+        const row = publication.rows[index];
+        const selected = publication.selected === row.id;
+        return (
+          !elements.item ||
+          !elements.checkbox ||
+          !elements.select ||
+          (selected && publication.canEdit) !== Boolean(elements.restore) ||
+          (selected && publication.canEdit) !== Boolean(elements.startRename) ||
+          selected !== Boolean(elements.copy) ||
+          (publication.renaming === row.id) !== Boolean(elements.renameInput)
+        );
+      })
+    ) {
+      return null;
+    }
+    return {
+      root,
+      close,
+      retry,
+      clear,
+      groupLists: groupLists as HTMLUListElement[],
+      rows,
+    };
+  };
+
+  const createRuntime = (
+    elements: NonNullable<ReturnType<typeof committedElements>>,
+    dom: PanelDomSnapshot,
+    placement: PanelPlacement,
+    replayOwners: ReadonlySet<PanelElementOwnerView>,
+    allowInitialInputWrites: boolean,
+  ): PanelPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action" | "replacement";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let replayRefs: PanelRefReplay[] = [];
+    let domGuard: PanelDomGuard | null = null;
+
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(publication);
+      if (cells.active.value === runtime) {
+        cells.active.value = null;
+        cells.successorOf.value = runtime;
+      }
+      if (currentRuntime === runtime) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.value?.source !== runtime) domGuard?.release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every(
+        (entry) =>
+          !entry.detached &&
+          !entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached &&
+            entry.reattached &&
+            entry.owner.element() === entry.element
+          : !entry.detached &&
+            !entry.reattached &&
+            entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+          domGuard.isClean() &&
+          elements.root === dom.node &&
+          elements.root.isConnected &&
+          panelPlacementMatches(elements.root, placement) &&
+          panelDomMatches(dom, elements.root.ownerDocument),
+      );
+
+    const runtime: PanelPublicationRuntime = Object.freeze({
+      publication,
+      renderIdentity,
+      ...elements,
+      groupLists: Object.freeze(elements.groupLists),
+      rows: Object.freeze(elements.rows),
+      ownerDocument: elements.root.ownerDocument,
+      dom,
+      placement,
+      publish: (owners: readonly PanelElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        const controlledRestore =
+          cells.controlledRestore.value &&
+          elements.root.contains(cells.controlledRestore.value.input)
+          ? cells.controlledRestore.value
+          : null;
+        cells.controlledRestore.value = null;
+        domGuard = createPanelDomGuard(
+          elements.root,
+          placement,
+          controlledRestore,
+          allowInitialInputWrites,
+        );
+        if (!domGuard) return false;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish version history without every committed ref",
+            );
+          }
+          return {
+            owner,
+            element,
+            detached: false,
+            reattached: false,
+            handoffDetached: false,
+          };
+        });
+        established = true;
+        cells.active.value = runtime;
+        cells.successorOf.value = null;
+        cells.replay.value = null;
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      retireForReplacement: () => {
+        retire("replacement");
+      },
+      noteRef: (
+        owner: PanelElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (
+            element === null &&
+            previous === proof.element &&
+            !proof.handoffDetached
+          ) {
+            proof.handoffDetached = true;
+          } else if (element !== previous) {
+            invalidReplay = true;
+          }
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) ||
+          (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged || !domGuard?.stageHandoff()) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every(
+          (entry) => entry.handoffDetached && entry.owner.element() === null,
+        ),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release: () => {
+        domGuard?.release();
+      },
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() ||
+          lastRuntime.isExactElementReplay()) &&
+        acceptsSuccessorOf(lastRuntime)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (renderRetired || invalidBeforeEstablish || !panelFactsAreCurrent(publication)) {
+      return undefined;
+    }
+    const elements = committedElements();
+    const placement = elements ? capturePanelPlacement(elements.root) : null;
+    if (!elements || !placement) return undefined;
+    const dom = snapshotPanelDom(elements.root);
+    const replay = cells.replay.value;
+    let allowInitialInputWrites = false;
+    if (replay) {
+      const sameGeneration = panelPublicationsMatch(
+        replay.source.publication,
+        publication,
+      );
+      const exactReplay =
+        sameGeneration &&
+        replay.source.isRetired() &&
+        cells.retired.has(replay.source.publication) &&
+        cells.successorOf.value === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.root === replay.dom.node &&
+        panelPlacementMatches(elements.root, replay.placement) &&
+        panelDomMatches(replay.dom, elements.root.ownerDocument);
+      cells.replay.value = null;
+      replay.release();
+      if (cells.successorOf.value === replay.source) {
+        cells.successorOf.value = null;
+      }
+      if (sameGeneration && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(publication);
+        return undefined;
+      }
+      allowInitialInputWrites = exactReplay;
+    }
+
+    const previous = cells.active.value;
+    const transitionSource = cells.successorOf.value;
+    if (previous && previous.publication !== publication) {
+      previous.retireForReplacement();
+    }
+    const owners = expectedOwners();
+    const replayOwners = new Set<PanelElementOwnerView>();
+    if (transitionSource?.publication.mount === publication.mount) {
+      for (const owner of owners) {
+        const element = owner.element();
+        if (element && !panelDomContains(transitionSource.dom, element)) {
+          replayOwners.add(owner);
+        }
+      }
+    }
+    const runtime = createRuntime(
+      elements,
+      dom,
+      placement,
+      replayOwners,
+      allowInitialInputWrites,
+    );
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!panelExactDomIsCurrent(runtime) || !runtime.publish(owners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const actionForRow = (
+    row: VersionRowPublication,
+    control: RowControl,
+    event: PanelReactEvent,
+  ): PanelAction | null => {
+    const actions = rowActions[row.index];
+    if (!actions || publication.rows[row.index] !== row) return null;
+    if (control !== "renameInput") return actions[control];
+    const reactName = (
+      event as PanelReactEvent & { _reactName?: unknown }
+    )._reactName;
+    return reactName === "onClick"
+      ? actions.renameInput?.click ?? null
+      : reactName === "onChange"
+        ? actions.renameInput?.change ?? null
+        : reactName === "onBlur"
+          ? actions.renameInput?.blur ?? null
+          : reactName === "onKeyDown"
+            ? actions.renameInput?.keydown ?? null
+            : null;
+  };
+
+  const claim = (
+    selectedAction: PanelAction | null,
+    source: HTMLButtonElement | HTMLInputElement | null,
+    event: PanelReactEvent,
+  ) => {
+    const pendingInput =
+      selectedAction?.eventKind === "checkbox-change" ||
+      selectedAction?.eventKind === "input-change"
+        ? source && isOwnerInput(source)
+          ? source
+          : null
+        : null;
+    const runtime = panelPublicationIsCurrent(
+      cells,
+      publication,
+      false,
+      pendingInput,
+    );
+    if (
+      !runtime ||
+      runtime.renderIdentity !== renderIdentity ||
+      !selectedAction ||
+      selectedAction.renderIdentity !== renderIdentity ||
+      !source ||
+      !source.isConnected ||
+      !panelControlIsEnabled(source) ||
+      cells.claimedPublications.has(publication) ||
+      cells.claimedActions.has(selectedAction) ||
+      cells.claimedEvents.has(event)
+    ) {
+      return false;
+    }
+    const nativeEvent = nativePanelEvent(
+      runtime,
+      source,
+      event,
+      selectedAction.eventKind,
+    );
+    if (!nativeEvent || cells.claimedEvents.has(nativeEvent)) return false;
+    cells.claimedPublications.add(publication);
+    cells.claimedActions.add(selectedAction);
+    cells.claimedEvents.add(event);
+    cells.claimedEvents.add(nativeEvent);
+    cells.controlledRestore.value =
+      isOwnerInput(source) &&
+      (selectedAction.eventKind === "checkbox-change" ||
+        selectedAction.eventKind === "input-change")
+        ? Object.freeze({
+            input: source,
+            attributes: Object.freeze(
+              selectedAction.eventKind === "checkbox-change"
+                ? ["name", "type", "name"]
+                : ["name", "name"],
+            ),
+          })
+        : null;
+    return true;
+  };
+
+  const set: PanelPublicationSet = {
+    publication,
+    captureRoot: rootOwner.capture,
+    capturePanel: Object.freeze({
+      close: panelOwners.close.capture,
+      retry: panelOwners.retry.capture,
+      clear: panelOwners.clear.capture,
+    }),
+    captureGroups: Object.freeze(groupOwners.map((owner) => owner.capture)),
+    captureRows: Object.freeze(
+      rowOwners.map((owned) =>
+        Object.freeze({
+          item: owned.item.capture,
+          checkbox: owned.checkbox.capture,
+          select: owned.select.capture,
+          restore: owned.restore.capture,
+          startRename: owned.startRename.capture,
+          renameInput: owned.renameInput.capture,
+          copy: owned.copy.capture,
+        }),
+      ),
+    ),
+    root: rootOwner.element,
+    establish,
+    retire: () => {
+      if (renderRetired) return false;
+      if (currentRuntime) {
+        currentRuntime.retireForAction();
+        return true;
+      }
+      renderRetired = true;
+      cells.retired.add(publication);
+      return true;
+    },
+    claimPanel: (control, event) => {
+      const runtime = cells.active.value;
+      const source = event?.currentTarget;
+      const expected =
+        control === "close"
+          ? runtime?.close
+          : control === "retry"
+            ? runtime?.retry
+            : runtime?.clear;
+      return source === expected && claim(panelActions[control], source, event);
+    },
+    claimRow: (row, control, event) => {
+      const runtime = cells.active.value;
+      const source = event?.currentTarget;
+      const expected = runtime?.rows[row.index]?.[control] ?? null;
+      return (
+        source === expected &&
+        claim(actionForRow(row, control, event), source, event)
+      );
+    },
+  };
+  return Object.freeze(set);
+}
+
 function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: VersionsPanelProps) {
   const router = useRouter();
   const routerPush = router.push;
@@ -353,10 +1858,36 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const contentCache = useRef(new Map<string, string>());
   const contentRequests = useRef(new Map<string, Promise<string>>());
   const authorityRef = useRef<PanelAuthority | null>(null);
-  const activePublicationRef = useRef<PanelRenderPublication | null>(null);
   const lastPublicationRef = useRef<PanelRenderPublication | null>(null);
-  const publicationRuntimesRef = useRef(new WeakMap<PanelRenderPublication, PanelPublicationRuntime>());
-  const claimedPublicationsRef = useRef(new WeakSet<PanelRenderPublication>());
+  const lastRootRef = useRef<HTMLElement | null>(null);
+  const [publicationCells] = useState<PanelPublicationCells>(() => ({
+    active: { value: null },
+    successorOf: { value: null },
+    replay: { value: null },
+    controlledRestore: { value: null },
+    retired: new WeakSet<PanelRenderPublication>(),
+    claimedPublications: new WeakSet<PanelRenderPublication>(),
+    claimedEvents: new WeakSet<object>(),
+    claimedActions: new WeakSet<PanelAction>(),
+  }));
+  const replayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    replayCleanup.current += 1;
+    return () => {
+      replayCleanup.current += 1;
+      const cleanup = replayCleanup.current;
+      queueMicrotask(() => {
+        if (replayCleanup.current !== cleanup) return;
+        const replay = publicationCells.replay.value;
+        if (!replay) return;
+        publicationCells.replay.value = null;
+        if (publicationCells.successorOf.value === replay.source) {
+          publicationCells.successorOf.value = null;
+        }
+        replay.release();
+      });
+    };
+  }, [publicationCells]);
   const listOperation = useRef<ListOperation | null>(null);
   const listSequence = useRef(0);
   const previewOperation = useRef<PreviewOperation | null>(null);
@@ -368,7 +1899,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const role = session.role;
   const canEdit = role === "owner" || role === "editor";
   const authority = useMemo<PanelAuthority>(
-    () => ({
+    () => Object.freeze({
       mount,
       session,
       documentId,
@@ -398,6 +1929,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       compareValues: compare,
       preview: previewState,
       mutation: null,
+      mutationPhase: null,
       renaming,
       draft,
       canEdit,
@@ -422,6 +1954,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       compareValues: compare,
       preview: currentPreview,
       mutation: mutationState,
+      mutationPhase: mutationState.phase,
       renaming,
       draft,
       canEdit,
@@ -446,6 +1979,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       compareValues: compare,
       preview: currentPreview,
       mutation: currentMutation,
+      mutationPhase: currentMutation?.phase ?? null,
       renaming,
       draft,
       canEdit,
@@ -456,312 +1990,68 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const mutationBusy = currentMutation !== null;
   const previewBusy = currentPreview?.busyVersionId ?? null;
   const retrying = currentRetry !== null;
-  // Equal-looking renders are separate authorities so retained handlers cannot cross a commit boundary.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const publication: PanelRenderPublication = {
+  const publication: PanelRenderPublication = Object.freeze({
     mount,
     authority,
     refreshKey,
     versions,
-    rows,
-    groups: groupPublishedVersions(rows),
+    rows: Object.freeze(rows),
+    groups: Object.freeze(groupPublishedVersions(rows)),
     error,
     listError,
     retry: currentRetry,
     selected,
     compare,
-    compareValues: [...compare],
+    compareValues: Object.freeze([...compare]),
     preview: currentPreview,
     mutation: currentMutation,
+    mutationPhase: currentMutation?.phase ?? null,
     renaming,
     draft,
     canEdit,
     revision: publicationRevision,
-  };
-
-  const runtimeFor = useCallback((candidate: PanelRenderPublication) => {
-    const runtimes = publicationRuntimesRef.current;
-    let runtime = runtimes.get(candidate);
-    if (!runtime) {
-      runtime = {
-        active: false,
-        root: null,
-        close: null,
-        retry: null,
-        clear: null,
-        groupLists: candidate.groups.map(() => null),
-        rows: candidate.rows.map(() => emptyRowElements()),
-      };
-      runtimes.set(candidate, runtime);
-    }
-    return runtime;
+  });
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
   }, []);
-
-  const retirePublication = useCallback((candidate: PanelRenderPublication) => {
-    const runtime = publicationRuntimesRef.current.get(candidate);
-    if (runtime) runtime.active = false;
-    if (activePublicationRef.current === candidate) activePublicationRef.current = null;
-  }, []);
-
-  const bindPanelControl = useCallback(
-    (candidate: PanelRenderPublication, control: PanelControl, element: HTMLButtonElement | null) => {
-      const runtime = runtimeFor(candidate);
-      runtime[control] = element;
-      if (!element) retirePublication(candidate);
-    },
-    [retirePublication, runtimeFor],
+  const publicationSet = createPanelPublicationSet(
+    publication,
+    publicationCells,
+    requestPublicationSuccessor,
   );
-
-  const bindRoot = useCallback(
-    (candidate: PanelRenderPublication, element: HTMLElement | null) => {
-      const runtime = runtimeFor(candidate);
-      runtime.root = element;
-      if (!element) retirePublication(candidate);
-    },
-    [retirePublication, runtimeFor],
-  );
-
-  const bindGroupList = useCallback(
-    (candidate: PanelRenderPublication, index: number, element: HTMLUListElement | null) => {
-      const runtime = runtimeFor(candidate);
-      runtime.groupLists[index] = element;
-      if (!element) retirePublication(candidate);
-    },
-    [retirePublication, runtimeFor],
-  );
-
-  const bindRowElement = useCallback(
-    <K extends keyof VersionRowElements>(
-      candidate: PanelRenderPublication,
-      row: VersionRowPublication,
-      control: K,
-      element: VersionRowElements[K],
-    ) => {
-      const runtime = runtimeFor(candidate);
-      runtime.rows[row.index][control] = element;
-      if (!element) retirePublication(candidate);
-    },
-    [retirePublication, runtimeFor],
-  );
-
-  const authorityIsCurrent = useCallback((candidate: PanelAuthority) => {
-    return (
-      authorityRef.current === candidate &&
-      candidate.mount === mount &&
-      candidate.session.docId === candidate.documentId &&
-      candidate.session.role === candidate.role &&
-      candidate.router.push === candidate.routerPush
-    );
-  }, [mount]);
-
   const publicationDomIsCurrent = useCallback(
-    (candidate: PanelRenderPublication, allowClaimed = false) => {
-      if (
-        activePublicationRef.current !== candidate ||
-        candidate.mount !== mount ||
-        !authorityIsCurrent(candidate.authority) ||
-        (!allowClaimed && claimedPublicationsRef.current.has(candidate))
-      ) {
-        return false;
-      }
-      if (
-        candidate.compare.length !== candidate.compareValues.length ||
-        candidate.compare.some((id, index) => id !== candidate.compareValues[index]) ||
-        !sameVersionPresentation(candidate.versions, candidate.rows, candidate)
-      ) {
-        return false;
-      }
-
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      const root = runtime?.root;
-      const close = runtime?.close;
-      if (!runtime?.active || !root?.isConnected || !close?.isConnected || !root.contains(close)) return false;
-      const header = root.firstElementChild;
-      const body = root.children.item(1);
-      if (
-        root.children.length !== 2 ||
-        header?.parentElement !== root ||
-        body?.parentElement !== root ||
-        header.children.length !== 2 ||
-        header.lastElementChild !== close ||
-        close.parentElement !== header
-      ) {
-        return false;
-      }
-
-      const expected = new Set<HTMLButtonElement | HTMLInputElement>([close]);
-      if (candidate.listError) {
-        const alert = runtime.retry?.parentElement;
-        if (
-          !runtime.retry?.isConnected ||
-          alert?.getAttribute("role") !== "alert" ||
-          alert.parentElement !== body
-        ) {
-          return false;
-        }
-        expected.add(runtime.retry);
-      } else if (runtime.retry !== null) {
-        return false;
-      }
-      if (candidate.compare.length > 0) {
-        const hint = runtime.clear?.parentElement;
-        if (
-          !runtime.clear?.isConnected ||
-          hint?.getAttribute("data-testid") !== "compare-hint" ||
-          hint.parentElement !== body ||
-          hint.lastElementChild !== runtime.clear
-        ) {
-          return false;
-        }
-        expected.add(runtime.clear);
-      } else if (runtime.clear !== null) {
-        return false;
-      }
-
-      if (runtime.groupLists.length !== candidate.groups.length || runtime.rows.length !== candidate.rows.length) return false;
-      for (let groupIndex = 0; groupIndex < candidate.groups.length; groupIndex++) {
-        const group = candidate.groups[groupIndex];
-        const list = runtime.groupLists[groupIndex];
-        if (
-          !list?.isConnected ||
-          list.parentElement?.parentElement !== body ||
-          list.children.length !== group.rows.length
-        ) {
-          return false;
-        }
-        const previousList = runtime.groupLists[groupIndex - 1];
-        if (
-          previousList &&
-          !(previousList.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING)
-        ) {
-          return false;
-        }
-        for (let rowIndex = 0; rowIndex < group.rows.length; rowIndex++) {
-          const row = group.rows[rowIndex];
-          const elements = runtime.rows[row.index];
-          const item = elements?.item;
-          const checkbox = elements?.checkbox;
-          const selectControl = elements?.select;
-          const listItem = list.children.item(rowIndex);
-          const rowTop = item?.firstElementChild;
-          const checkboxLabel = checkbox?.parentElement;
-          if (
-            !versionSnapshotIsCurrent(row) ||
-            !(listItem instanceof HTMLLIElement) ||
-            !item?.isConnected ||
-            !checkbox?.isConnected ||
-            !selectControl?.isConnected ||
-            listItem.children.length !== 1 ||
-            listItem.firstElementChild !== item ||
-            item.parentElement !== listItem ||
-            rowTop?.parentElement !== item ||
-            rowTop.children.length !== 2 ||
-            rowTop.children.item(0) !== checkboxLabel ||
-            rowTop.children.item(1) !== selectControl ||
-            checkboxLabel?.parentElement !== rowTop ||
-            checkboxLabel.children.length !== 1 ||
-            checkbox.parentElement !== checkboxLabel ||
-            selectControl.parentElement !== rowTop
-          ) {
-            return false;
-          }
-          expected.add(checkbox);
-          expected.add(selectControl);
-
-          const isSelected = candidate.selected === row.id;
-          const actionContainer = item.children.item(1);
-          if (!isSelected) {
-            if (
-              elements.restore !== null ||
-              elements.startRename !== null ||
-              elements.copy !== null ||
-              actionContainer !== null
-            ) {
-              return false;
-            }
-          } else {
-            if (!actionContainer?.isConnected || actionContainer.parentElement !== item) return false;
-            const actionControls = candidate.canEdit
-              ? [elements.restore, elements.startRename, elements.copy]
-              : [elements.copy];
-            if (
-              actionControls.some((element) => !element?.isConnected || element.parentElement !== actionContainer) ||
-              actionContainer.children.length !== actionControls.length ||
-              actionControls.some((element, index) => actionContainer.children.item(index) !== element)
-            ) {
-              return false;
-            }
-            for (const element of actionControls) expected.add(element!);
-            if (!candidate.canEdit && (elements.restore !== null || elements.startRename !== null)) return false;
-          }
-
-          if (candidate.renaming === row.id) {
-            if (!elements.renameInput?.isConnected || !selectControl.contains(elements.renameInput)) return false;
-            expected.add(elements.renameInput);
-          } else if (elements.renameInput !== null) {
-            return false;
-          }
-        }
-      }
-
-      const actual = collectInteractiveElements(root);
-      return actual.length === expected.size && actual.every((element) => expected.has(element));
-    },
-    [authorityIsCurrent, mount],
+    (candidate: PanelRenderPublication, allowClaimed = false) =>
+      panelPublicationIsCurrent(publicationCells, candidate, allowClaimed) !== null,
+    [publicationCells],
   );
-
-  const claimPanelControl = useCallback(
-    (candidate: PanelRenderPublication, control: PanelControl, source: HTMLButtonElement) => {
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      const expected = runtime?.[control];
-      if (
-        expected !== source ||
-        source.disabled ||
-        !publicationDomIsCurrent(candidate)
-      ) {
-        return false;
-      }
-      claimedPublicationsRef.current.add(candidate);
-      return true;
-    },
-    [publicationDomIsCurrent],
-  );
-
-  const claimRowControl = useCallback(
-    (
-      candidate: PanelRenderPublication,
-      row: VersionRowPublication,
-      control: RowControl,
-      source: HTMLButtonElement | HTMLInputElement,
-    ) => {
-      const publishedRow = candidate.rows[row.index];
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      const expected = runtime?.rows[row.index]?.[control];
-      if (
-        publishedRow !== row ||
-        expected !== source ||
-        source.disabled ||
-        !publicationDomIsCurrent(candidate)
-      ) {
-        return false;
-      }
-      claimedPublicationsRef.current.add(candidate);
-      return true;
-    },
-    [publicationDomIsCurrent],
-  );
+  const claimPanelControl = (
+    candidate: PanelRenderPublication,
+    control: PanelControl,
+    event: MouseEvent<HTMLButtonElement>,
+  ) =>
+    candidate === publication &&
+    publicationSet.claimPanel(control, event);
+  const claimRowControl = (
+    candidate: PanelRenderPublication,
+    row: VersionRowPublication,
+    control: RowControl,
+    event: PanelReactEvent,
+  ) =>
+    candidate === publication &&
+    publicationSet.claimRow(row, control, event);
 
   const currentPublicationFor = useCallback(
     (candidate: PanelAuthority, root: HTMLElement, allowClaimed = true) => {
-      const current = activePublicationRef.current;
+      const runtime = publicationCells.active.value;
+      const current = runtime?.publication;
       return current &&
         current.authority === candidate &&
-        publicationRuntimesRef.current.get(current)?.root === root &&
-        publicationDomIsCurrent(current, allowClaimed)
+        runtime.root === root &&
+        panelPublicationIsCurrent(publicationCells, current, allowClaimed)
         ? current
         : null;
     },
-    [publicationDomIsCurrent],
+    [publicationCells],
   );
 
   const ownsMutation = useCallback(
@@ -769,12 +2059,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       const current = currentPublicationFor(owner.authority, owner.root);
       if (!current || mutationOwner.current !== owner) return false;
       if (owner.phase === "request" && owner.kind !== "rename") {
-        const currentSource = publicationRuntimesRef.current.get(current)?.rows[owner.row.index]?.[owner.control];
+        const currentSource =
+          publicationCells.active.value?.rows[owner.row.index]?.[owner.control];
         if (currentSource !== owner.source) return false;
       }
       return mutationMatchesPresentation(owner, current);
     },
-    [currentPublicationFor],
+    [currentPublicationFor, publicationCells],
   );
 
   const ownsListOperation = useCallback(
@@ -796,8 +2087,8 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     loadRefreshKey: number,
     options?: { retry?: boolean; mutation?: VersionMutationOwner },
   ) => {
-    const current = activePublicationRef.current;
-    const runtime = current ? publicationRuntimesRef.current.get(current) : null;
+    const runtime = publicationCells.active.value;
+    const current = runtime?.publication;
     if (
       !current ||
       current.authority !== loadAuthority ||
@@ -825,7 +2116,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
         canCommit: ownsRequest,
       });
       if (!ownsRequest()) return false;
-      const currentPublication = activePublicationRef.current;
+      const currentPublication = publicationCells.active.value?.publication;
       if (currentPublication && currentPublication.versions !== list) {
         previewOperation.current = null;
         setPreviewState((candidate) => (candidate?.authority === loadAuthority ? null : candidate));
@@ -847,7 +2138,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
         if (operation.retry) setRetryState((candidate) => (candidate === operation ? null : candidate));
       }
     }
-  }, [ownsListOperation, ownsMutation, publicationDomIsCurrent]);
+  }, [ownsListOperation, ownsMutation, publicationCells, publicationDomIsCurrent]);
 
   useEffect(() => {
     const previous = automaticLoadRef.current;
@@ -904,11 +2195,17 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   const showPreview = useCallback(
     async (
       candidate: PanelRenderPublication,
-      compareIds: string[],
+      compareIds: readonly string[],
       selectedId: string | null,
+      pendingInput: HTMLInputElement | null = null,
     ) => {
-      const runtime = publicationRuntimesRef.current.get(candidate);
-      if (!runtime?.root) return;
+      const runtime = panelPublicationIsCurrent(
+        publicationCells,
+        candidate,
+        true,
+        pendingInput,
+      );
+      if (!runtime) return;
       const picked = compareIds.map((id) => rowForId(candidate, id)).filter((row): row is VersionRowPublication => Boolean(row));
       const pair = picked.length === 2 ? [...picked].sort((a, b) => a.number - b.number) : null;
       const single = selectedId ? rowForId(candidate, selectedId) : undefined;
@@ -961,7 +2258,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
         }
       }
     },
-    [contentOf, ownsPreview],
+    [contentOf, ownsPreview, publicationCells],
   );
 
   const invalidatePreview = useCallback(() => {
@@ -977,13 +2274,12 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       source: HTMLButtonElement | HTMLInputElement,
       control: "restore" | "renameInput" | "copy",
     ): VersionMutationOwner | null => {
-      const runtime = publicationRuntimesRef.current.get(candidate);
+      const runtime = panelPublicationIsCurrent(publicationCells, candidate, true);
       if (
-        !runtime?.root ||
+        !runtime ||
         mutationOwner.current ||
         runtime.rows[row.index]?.[control] !== source ||
-        source.disabled ||
-        !publicationDomIsCurrent(candidate, true)
+        !panelControlIsEnabled(source)
       ) {
         return null;
       }
@@ -1002,7 +2298,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       setError(null);
       return owner;
     },
-    [publicationDomIsCurrent],
+    [publicationCells],
   );
 
   const releaseMutation = useCallback((owner: VersionMutationOwner) => {
@@ -1021,7 +2317,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: MouseEvent<HTMLButtonElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "select", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "select", event)) return;
     const next = candidate.selected === row.id ? null : row.id;
     const nextCompare = candidate.compare;
     setSelected(next);
@@ -1034,14 +2330,14 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: ChangeEvent<HTMLInputElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "checkbox", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "checkbox", event)) return;
     // Keep at most two ticked; ticking a third replaces the older tick.
     const next = candidate.compare.includes(row.id)
       ? candidate.compare.filter((id) => id !== row.id)
       : [...candidate.compare.slice(-1), row.id];
     setCompare(next);
     setPublicationRevision((current) => current + 1);
-    void showPreview(candidate, next, candidate.selected);
+    void showPreview(candidate, next, candidate.selected, event.currentTarget);
   };
 
   const restore = async (
@@ -1049,7 +2345,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: MouseEvent<HTMLButtonElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "restore", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "restore", event)) return;
     setPublicationRevision((current) => current + 1);
     if (!window.confirm(`Restore version ${row.number}? The current text is saved as a version first.`)) return;
     const owner = claimMutation(
@@ -1110,7 +2406,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: MouseEvent<HTMLButtonElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "copy", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "copy", event)) return;
     setPublicationRevision((current) => current + 1);
     const owner = claimMutation(
       candidate,
@@ -1133,8 +2429,8 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   };
 
   const close = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
-    if (!claimPanelControl(candidate, "close", event.currentTarget)) return;
-    retirePublication(candidate);
+    if (!claimPanelControl(candidate, "close", event)) return;
+    publicationSet.retire();
     listOperation.current = null;
     setRetryState(null);
     invalidatePreview();
@@ -1144,13 +2440,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   };
 
   const retry = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
-    if (!claimPanelControl(candidate, "retry", event.currentTarget)) return;
+    if (!claimPanelControl(candidate, "retry", event)) return;
     setPublicationRevision((current) => current + 1);
     void load(candidate.authority, candidate.refreshKey, { retry: true });
   };
 
   const clearComparison = (candidate: PanelRenderPublication, event: MouseEvent<HTMLButtonElement>) => {
-    if (!claimPanelControl(candidate, "clear", event.currentTarget)) return;
+    if (!claimPanelControl(candidate, "clear", event)) return;
     const next: string[] = [];
     setCompare(next);
     setPublicationRevision((current) => current + 1);
@@ -1162,7 +2458,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: MouseEvent<HTMLButtonElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "startRename", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "startRename", event)) return;
     setDraft(row.title ?? "");
     setRenaming(row.id);
     setPublicationRevision((current) => current + 1);
@@ -1173,7 +2469,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: ChangeEvent<HTMLInputElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "renameInput", event)) return;
     setDraft(event.currentTarget.value);
     setPublicationRevision((current) => current + 1);
   };
@@ -1183,7 +2479,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: FocusEvent<HTMLInputElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "renameInput", event)) return;
     void rename(candidate, row, event.currentTarget);
   };
 
@@ -1193,7 +2489,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     event: KeyboardEvent<HTMLInputElement>,
   ) => {
     if (event.key !== "Enter" && event.key !== "Escape") return;
-    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "renameInput", event)) return;
     if (event.key === "Enter") {
       event.preventDefault();
       void rename(candidate, row, event.currentTarget);
@@ -1208,17 +2504,15 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     row: VersionRowPublication,
     event: MouseEvent<HTMLInputElement>,
   ) => {
-    if (!claimRowControl(candidate, row, "renameInput", event.currentTarget)) return;
+    if (!claimRowControl(candidate, row, "renameInput", event)) return;
     setPublicationRevision((current) => current + 1);
     event.stopPropagation();
   };
 
   useLayoutEffect(() => {
     const previous = lastPublicationRef.current;
-    const runtime = runtimeFor(publication);
-    const previousRoot = previous
-      ? publicationRuntimesRef.current.get(previous)?.root
-      : null;
+    const previousRoot = lastRootRef.current;
+    const currentRoot = publicationSet.root();
     const authorityChanged = authorityRef.current !== publication.authority;
     const refreshChanged =
       previous?.authority === publication.authority &&
@@ -1229,7 +2523,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
     const rootChanged =
       previous?.authority === publication.authority &&
       previousRoot !== null &&
-      previousRoot !== runtime.root;
+      previousRoot !== currentRoot;
 
     if (authorityChanged) {
       authorityRef.current = publication.authority;
@@ -1266,21 +2560,23 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       }
     }
 
-    runtime.active = true;
-    activePublicationRef.current = publication;
-    if (!publicationDomIsCurrent(publication, true)) retirePublication(publication);
     lastPublicationRef.current = publication;
-    return () => retirePublication(publication);
+    lastRootRef.current = currentRoot;
   }, [
     mutationState?.authority,
     previewState?.authority,
     publication,
-    publicationDomIsCurrent,
-    retirePublication,
+    publicationSet,
     retryState?.authority,
-    runtimeFor,
   ]);
+  useLayoutEffect(() => publicationSet.establish(), [publicationSet]);
 
+  const { captureRoot, capturePanel, captureGroups, captureRows } = publicationSet;
+  const {
+    close: captureClose,
+    retry: captureRetry,
+    clear: captureClear,
+  } = capturePanel;
   const compareHint =
     publication.compare.length === 1
       ? "Tick one more version to compare"
@@ -1290,14 +2586,14 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
 
   return (
     <aside
-      ref={(element) => bindRoot(publication, element)}
+      ref={captureRoot}
       className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2"
       data-testid="versions-panel"
     >
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Version history</span>
         <button
-          ref={(element) => bindPanelControl(publication, "close", element)}
+          ref={captureClose}
           type="button"
           className="icon-btn h-8 w-8"
           onClick={(event) => close(publication, event)}
@@ -1311,7 +2607,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
             <div>{listError}</div>
             <button
-              ref={(element) => bindPanelControl(publication, "retry", element)}
+              ref={captureRetry}
               type="button"
               className="btn btn-outline btn-sm mt-2 gap-1.5"
               onClick={(event) => retry(publication, event)}
@@ -1327,7 +2623,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
             <span>{compareHint}</span>
             <button
-              ref={(element) => bindPanelControl(publication, "clear", element)}
+              ref={captureClear}
               type="button"
               className="text-accent hover:underline"
               onClick={(event) => clearComparison(publication, event)}
@@ -1349,13 +2645,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
             <div key={group.day} className="mb-4">
               <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-wider text-ink-4">{group.day}</div>
               <ul
-                ref={(element) => bindGroupList(publication, groupIndex, element)}
+                ref={captureGroups[groupIndex]}
                 className="flex flex-col gap-1"
               >
                 {group.rows.map((row) => (
                   <li key={row.id}>
                     <div
-                      ref={(element) => bindRowElement(publication, row, "item", element)}
+                      ref={captureRows[row.index].item}
                       className={cn(
                         "group rounded-lg border px-2 py-2 transition-colors",
                         selected === row.id || compare.includes(row.id) ? "border-accent bg-surface shadow-sm" : "border-transparent hover:border-line hover:bg-surface",
@@ -1371,7 +2667,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           data-testid="version-compare-target"
                         >
                           <input
-                            ref={(element) => bindRowElement(publication, row, "checkbox", element)}
+                            ref={captureRows[row.index].checkbox}
                             type="checkbox"
                             className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
                             checked={compare.includes(row.id)}
@@ -1382,7 +2678,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           />
                         </label>
                         <button
-                          ref={(element) => bindRowElement(publication, row, "select", element)}
+                          ref={captureRows[row.index].select}
                           type="button"
                           className="flex min-w-0 flex-1 items-start gap-2 text-left"
                           onClick={(event) => select(publication, row, event)}
@@ -1391,7 +2687,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           <div className="min-w-0 flex-1">
                             {renaming === row.id ? (
                               <input
-                                ref={(element) => bindRowElement(publication, row, "renameInput", element)}
+                                ref={captureRows[row.index].renameInput}
                                 autoFocus
                                 className="input h-7 text-[13px]"
                                 value={draft}
@@ -1434,7 +2730,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-5">
                           {canEdit && (
                             <button
-                              ref={(element) => bindRowElement(publication, row, "restore", element)}
+                              ref={captureRows[row.index].restore}
                               type="button"
                               className="btn btn-sm btn-primary gap-1.5"
                               onClick={(event) => void restore(publication, row, event)}
@@ -1446,7 +2742,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                           )}
                           {canEdit && (
                             <button
-                              ref={(element) => bindRowElement(publication, row, "startRename", element)}
+                              ref={captureRows[row.index].startRename}
                               type="button"
                               className="btn btn-sm btn-ghost gap-1.5"
                               onClick={(event) => startRename(publication, row, event)}
@@ -1457,7 +2753,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                             </button>
                           )}
                           <button
-                            ref={(element) => bindRowElement(publication, row, "copy", element)}
+                            ref={captureRows[row.index].copy}
                             type="button"
                             className="btn btn-sm btn-ghost gap-1.5"
                             onClick={(event) => void copyAsNew(publication, row, event)}
