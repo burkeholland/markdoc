@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { Monitor, Moon, Sun } from "lucide-react";
@@ -102,6 +103,7 @@ interface Publication<A extends PublicationAuthority> {
   readonly authority: A;
   readonly root: HTMLElement;
   readonly ownerDocument: Document;
+  readonly ownerRealm: Window & typeof globalThis;
   readonly dom: DomSnapshot;
   readonly placement: Placement;
   readonly retire: () => boolean;
@@ -403,6 +405,8 @@ function createPublicationRuntime<A extends PublicationAuthority>(
   type Retirement = "element" | "layout" | "other";
   const placement = capturePlacement(root);
   if (!placement) throw new Error("Cannot publish a theme control without a committed parent");
+  const ownerRealm = placement.document.defaultView;
+  if (!ownerRealm) throw new Error("Cannot publish a theme control without an owner realm");
   const dom = snapshotDom(root);
   let retired = false;
   let retirement: Retirement | null = null;
@@ -435,6 +439,7 @@ function createPublicationRuntime<A extends PublicationAuthority>(
     authority,
     root,
     ownerDocument: root.ownerDocument,
+    ownerRealm,
     dom,
     placement,
     retire: () => retire("other"),
@@ -846,6 +851,7 @@ interface PickerRowAuthority {
   readonly preference: ThemePreference;
   readonly label: string;
   readonly checked: boolean;
+  readonly tabIndex: 0 | -1;
   readonly className: string;
   readonly size: number;
 }
@@ -863,6 +869,7 @@ interface PickerRowPresentation {
   readonly captureButton: (element: HTMLButtonElement | null) => void;
   readonly captureIcon: (element: SVGSVGElement | null) => void;
   readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }
 
 interface PickerPresentation {
@@ -891,11 +898,214 @@ function pickerAuthoritiesMatch(
         && row.preference === candidate.preference
         && row.label === candidate.label
         && row.checked === candidate.checked
+        && row.tabIndex === candidate.tabIndex
         && row.className === candidate.className
         && row.size === candidate.size
       );
     })
   );
+}
+
+type IntrinsicGetter<T> = (target: object) => T;
+type IntrinsicMethod<A extends readonly unknown[], R> = (target: object, ...args: A) => R;
+
+function captureIntrinsicGetter<T>(prototype: object, property: string): IntrinsicGetter<T> | null {
+  let current: object | null = prototype;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const getter = descriptor.get;
+      return (target) => Reflect.apply(getter, target, []) as T;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return null;
+}
+
+function captureIntrinsicMethod<A extends readonly unknown[], R>(
+  prototype: object,
+  property: string,
+): IntrinsicMethod<A, R> | null {
+  let current: object | null = prototype;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor) {
+      if (typeof descriptor.value !== "function") return null;
+      const method = descriptor.value as (...args: A) => R;
+      return (target, ...args) => Reflect.apply(method, target, args) as R;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return null;
+}
+
+interface PickerKeyboardAuthority {
+  readonly view: Window & typeof globalThis;
+  readonly eventType: IntrinsicGetter<string>;
+  readonly eventTarget: IntrinsicGetter<EventTarget | null>;
+  readonly eventPhase: IntrinsicGetter<number>;
+  readonly eventBubbles: IntrinsicGetter<boolean>;
+  readonly eventCancelable: IntrinsicGetter<boolean>;
+  readonly eventDefaultPrevented: IntrinsicGetter<boolean>;
+  readonly eventCancelBubble: IntrinsicGetter<boolean>;
+  readonly eventPath: IntrinsicMethod<readonly [], EventTarget[]>;
+  readonly preventDefault: IntrinsicMethod<readonly [], void>;
+  readonly key: IntrinsicGetter<string>;
+  readonly repeat: IntrinsicGetter<boolean>;
+  readonly composing: IntrinsicGetter<boolean>;
+  readonly altKey: IntrinsicGetter<boolean>;
+  readonly ctrlKey: IntrinsicGetter<boolean>;
+  readonly metaKey: IntrinsicGetter<boolean>;
+  readonly shiftKey: IntrinsicGetter<boolean>;
+  readonly activeElement: IntrinsicGetter<Element | null>;
+  readonly focus: IntrinsicMethod<readonly [FocusOptions?], void>;
+}
+
+function capturePickerKeyboardAuthority(
+  publication: Publication<PickerAuthority>,
+): PickerKeyboardAuthority | null {
+  const { ownerDocument, ownerRealm: view } = publication;
+  const eventPrototype = view.Event.prototype;
+  const keyboardPrototype = view.KeyboardEvent.prototype;
+  const eventType = captureIntrinsicGetter<string>(eventPrototype, "type");
+  const eventTarget = captureIntrinsicGetter<EventTarget | null>(eventPrototype, "target");
+  const eventPhase = captureIntrinsicGetter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = captureIntrinsicGetter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = captureIntrinsicGetter<boolean>(eventPrototype, "cancelable");
+  const eventDefaultPrevented = captureIntrinsicGetter<boolean>(eventPrototype, "defaultPrevented");
+  const eventCancelBubble = captureIntrinsicGetter<boolean>(eventPrototype, "cancelBubble");
+  const eventPath = captureIntrinsicMethod<readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureIntrinsicMethod<readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const key = captureIntrinsicGetter<string>(keyboardPrototype, "key");
+  const repeat = captureIntrinsicGetter<boolean>(keyboardPrototype, "repeat");
+  const composing = captureIntrinsicGetter<boolean>(keyboardPrototype, "isComposing");
+  const altKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "shiftKey");
+  const activeElement = captureIntrinsicGetter<Element | null>(
+    view.Document.prototype,
+    "activeElement",
+  );
+  const focus = captureIntrinsicMethod<readonly [FocusOptions?], void>(
+    view.HTMLElement.prototype,
+    "focus",
+  );
+  if (
+    !eventType
+    || !eventTarget
+    || !eventPhase
+    || !eventBubbles
+    || !eventCancelable
+    || !eventDefaultPrevented
+    || !eventCancelBubble
+    || !eventPath
+    || !preventDefault
+    || !key
+    || !repeat
+    || !composing
+    || !altKey
+    || !ctrlKey
+    || !metaKey
+    || !shiftKey
+    || !activeElement
+    || !focus
+    || ownerDocument.defaultView !== view
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    view,
+    eventType,
+    eventTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    preventDefault,
+    key,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    focus,
+  });
+}
+
+function pickerDestination(key: string, current: number, count: number): number | null {
+  if (count < 2 || current < 0 || current >= count) return null;
+  if (key === "ArrowRight" || key === "ArrowDown") return (current + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (current - 1 + count) % count;
+  if (key === "Home") return current === 0 ? null : 0;
+  if (key === "End") return current === count - 1 ? null : count - 1;
+  return null;
+}
+
+function exactNativePickerKey(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  publication: Publication<PickerAuthority>,
+  control: HTMLButtonElement,
+  authority: PickerKeyboardAuthority,
+): { readonly event: KeyboardEvent; readonly key: string } | null {
+  if (!event || typeof event !== "object") return null;
+  const nativeEvent = event.nativeEvent;
+  const reactEvent = event as ReactKeyboardEvent<HTMLButtonElement> & {
+    _reactName?: unknown;
+  };
+  const eventPrototype = Object.getPrototypeOf(event) as {
+    constructor?: { name?: unknown };
+  } | null;
+  if (
+    publication.ownerRealm !== authority.view
+    || publication.ownerDocument.defaultView !== authority.view
+    || !(nativeEvent instanceof authority.view.KeyboardEvent)
+  ) {
+    return null;
+  }
+  const nativeTarget = authority.eventTarget(nativeEvent);
+  const path = authority.eventPath(nativeEvent);
+  const key = authority.key(nativeEvent);
+  return (
+    authority.eventType(nativeEvent) === "keydown"
+    && authority.eventPhase(nativeEvent) !== authority.view.Event.NONE
+    && authority.eventBubbles(nativeEvent)
+    && authority.eventCancelable(nativeEvent)
+    && !authority.eventDefaultPrevented(nativeEvent)
+    && !authority.eventCancelBubble(nativeEvent)
+    && !authority.repeat(nativeEvent)
+    && !authority.composing(nativeEvent)
+    && !authority.altKey(nativeEvent)
+    && !authority.ctrlKey(nativeEvent)
+    && !authority.metaKey(nativeEvent)
+    && !authority.shiftKey(nativeEvent)
+    && event.type === "keydown"
+    && event.currentTarget === control
+    && event.target === nativeTarget
+    && nativeTarget instanceof authority.view.Node
+    && nativeTarget.ownerDocument === publication.ownerDocument
+    && control.contains(nativeTarget)
+    && path[0] === nativeTarget
+    && path.includes(control)
+    && path.includes(publication.root)
+    && snapshotContains(publication.dom, nativeTarget)
+    && authority.activeElement(publication.ownerDocument) === control
+    && eventPrototype?.constructor?.name === "SyntheticBaseEvent"
+    && reactEvent._reactName === "onKeyDown"
+  )
+    ? Object.freeze({ event: nativeEvent, key })
+    : null;
 }
 
 function createPickerPresentation(
@@ -905,6 +1115,7 @@ function createPickerPresentation(
 ): PickerPresentation {
   let currentRuntime: PublicationRuntime<PickerAuthority> | null = null;
   let lastRuntime: PublicationRuntime<PickerAuthority> | null = null;
+  let keyboardAuthority: PickerKeyboardAuthority | null = null;
   let successorRequested = false;
   const { mount, revision, preference, setPreference, rootClassName, rows } = authority;
   const onElementChange = (
@@ -932,6 +1143,9 @@ function createPickerPresentation(
     const iconOwner = new ElementOwner<SVGSVGElement>(onElementChange);
     const action = Object.freeze({
       identity: Symbol(`theme-picker-${row.preference}-action`),
+    });
+    const keyboardAction = Object.freeze({
+      identity: Symbol(`theme-picker-${row.preference}-keyboard-action`),
     });
     const onClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
       const publication = coordinator.active();
@@ -962,6 +1176,70 @@ function createPickerPresentation(
       }
       setPreference(row.preference);
     };
+    const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      const publication = coordinator.active();
+      const button = buttonOwner.element();
+      if (
+        !publication
+        || publication.isRetired()
+        || !pickerAuthoritiesMatch(publication.authority, authority)
+        || !row.checked
+        || row.preference !== preference
+        || rows[row.index] !== row
+        || !button
+        || button.tabIndex !== 0
+        || !coordinator.isCurrent(publication)
+        || !factsAreCurrent()
+        || !exactDomIsCurrent()
+        || !publication.publishedDomMatches()
+        || themeStore.getSnapshot() !== preference
+        || !keyboardAuthority
+      ) {
+        return;
+      }
+      const exactEvent = exactNativePickerKey(
+        event,
+        publication,
+        button,
+        keyboardAuthority,
+      );
+      const destinationIndex = exactEvent
+        ? pickerDestination(exactEvent.key, row.index, rows.length)
+        : null;
+      const destination = destinationIndex === null
+        ? null
+        : rowPresentations[destinationIndex];
+      const destinationButton = destination?.buttonOwner.element();
+      if (
+        !exactEvent
+        || destinationIndex === null
+        || !destination
+        || destination.authority !== rows[destinationIndex]
+        || destination.authority.checked
+        || destination.authority.preference === preference
+        || !destinationButton
+        || destinationButton.ownerDocument !== publication.ownerDocument
+        || destinationButton.parentElement !== publication.root
+        || publication.root.children.item(destinationIndex) !== destinationButton
+        || coordinator.hasClaimed(
+          publication,
+          keyboardAction,
+          event,
+          exactEvent.event,
+        )
+        || !coordinator.claim(
+          publication,
+          keyboardAction,
+          event,
+          exactEvent.event,
+        )
+      ) {
+        return;
+      }
+      keyboardAuthority.preventDefault(exactEvent.event);
+      setPreference(destination.authority.preference);
+      keyboardAuthority.focus(destinationButton, { preventScroll: true });
+    };
     return Object.freeze({
       authority: row,
       captureButton: buttonOwner.capture,
@@ -969,6 +1247,7 @@ function createPickerPresentation(
       buttonOwner,
       iconOwner,
       onClick,
+      onKeyDown,
     });
   });
   const expectedOwners = () => Object.freeze([
@@ -989,6 +1268,7 @@ function createPickerPresentation(
       && row.preference === THEME_OPTIONS[index]
       && row.label === themeLabel(row.preference)
       && row.checked === (row.preference === preference)
+      && row.tabIndex === (row.checked ? 0 : -1)
       && row.className === cn(
         PICKER_ROW_BASE_CLASS_NAME,
         row.checked ? PICKER_ROW_ACTIVE_CLASS_NAME : PICKER_ROW_INACTIVE_CLASS_NAME,
@@ -1028,6 +1308,8 @@ function createPickerPresentation(
           && !button.matches(":disabled")
           && button.getAttribute("role") === "radio"
           && button.getAttribute("aria-checked") === String(row.checked)
+          && button.tabIndex === row.tabIndex
+          && button.getAttribute("tabindex") === String(row.tabIndex)
           && button.getAttribute("class") === row.className
           && button.dataset.testid === `theme-option-${row.preference}`
           && button.textContent?.trim() === row.label
@@ -1078,9 +1360,11 @@ function createPickerPresentation(
     const runtime = createPublicationRuntime(authority, coordinator, root, expectedOwners());
     currentRuntime = runtime;
     lastRuntime = runtime;
-    if (!runtime.publish()) {
+    keyboardAuthority = capturePickerKeyboardAuthority(runtime.publication);
+    if (!keyboardAuthority || !runtime.publish()) {
       runtime.retireForElement();
       currentRuntime = null;
+      keyboardAuthority = null;
       return undefined;
     }
     return runtime.retireForLayout;
@@ -1180,6 +1464,7 @@ export function ThemePicker() {
         preference: rowPreference,
         label: themeLabel(rowPreference),
         checked,
+        tabIndex: checked ? 0 : -1,
         className: cn(
           PICKER_ROW_BASE_CLASS_NAME,
           checked ? PICKER_ROW_ACTIVE_CLASS_NAME : PICKER_ROW_INACTIVE_CLASS_NAME,
@@ -1228,8 +1513,10 @@ export function ThemePicker() {
             type="button"
             role="radio"
             aria-checked={row.authority.checked}
+            tabIndex={row.authority.tabIndex}
             className={row.authority.className}
             onClick={row.onClick}
+            onKeyDown={row.onKeyDown}
             data-testid={`theme-option-${option}`}
           >
             <Icon ref={row.captureIcon} size={row.authority.size} /> {row.authority.label}
