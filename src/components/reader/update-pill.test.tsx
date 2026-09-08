@@ -134,9 +134,13 @@ function clickEvent(
 
 function controls(host: ParentNode = document) {
   const pill = host.querySelector<HTMLDivElement>('[data-testid="reader-updated"]');
-  const button = pill?.querySelector<HTMLButtonElement>("button");
-  if (!pill || !button) throw new Error("The complete reader update control was not rendered");
-  return { pill, button };
+  const buttons = pill?.querySelectorAll<HTMLButtonElement>("button");
+  const button = buttons?.item(0);
+  const dismissButton = buttons?.item(1);
+  if (!pill || buttons?.length !== 2 || !button || !dismissButton) {
+    throw new Error("The complete reader update control was not rendered");
+  }
+  return { pill, button, dismissButton };
 }
 
 function trackVisibilityListeners() {
@@ -471,6 +475,205 @@ describe("UpdatePill polling", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("dismisses one immutable hash in Strict Mode, suppresses it, and publishes one later hash", async () => {
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+
+    await withNavigation(navigation, async () => {
+      render(
+        <StrictMode>
+          <UpdatePill docId={DOC_ID} initialHash={INITIAL_HASH} pollMs={POLL_MS} />
+        </StrictMode>,
+      );
+      await advance(0);
+    });
+
+    const first = controls();
+    expect(first.dismissButton).toHaveAccessibleName("Dismiss update notice");
+    const refresh = captureClick(first.button);
+    const dismiss = captureClick(first.dismissButton);
+    const publishedFetches = fetchMock.mock.calls.length;
+
+    act(() => {
+      dismiss(clickEvent(first.button));
+      refresh(clickEvent(first.dismissButton));
+    });
+    expect(screen.getByTestId("reader-updated")).toBe(first.pill);
+    expect(fetchMock).toHaveBeenCalledTimes(publishedFetches);
+    expect(navigation.reload).not.toHaveBeenCalled();
+
+    act(() => dismiss(clickEvent(first.dismissButton)));
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+    expect(navigation.reload).not.toHaveBeenCalled();
+    expect(navigation.assign).not.toHaveBeenCalled();
+    expect(navigation.replace).not.toHaveBeenCalled();
+
+    await advance(0);
+    await advance(POLL_MS - 1);
+    expect(fetchMock).toHaveBeenCalledTimes(publishedFetches);
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+    await advance(1);
+    await advance(0);
+    expect(fetchMock).toHaveBeenCalledTimes(publishedFetches + 1);
+    const suppressedFetches = fetchMock.mock.calls.length;
+
+    act(() => {
+      dismiss(clickEvent(first.dismissButton));
+      refresh(clickEvent(first.button));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(suppressedFetches);
+    expect(navigation.reload).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValue(response("hash-later"));
+    await advance(POLL_MS);
+    await advance(0);
+
+    const later = controls();
+    expect(later.pill).not.toBe(first.pill);
+    expect(screen.getAllByTestId("reader-updated")).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(suppressedFetches + 1);
+    expect(later.dismissButton).toHaveAccessibleName("Dismiss update notice");
+  });
+
+  it("clears a dismissed hash after observing the initial hash", async () => {
+    fetchMock.mockResolvedValue(response("hash-after"));
+    mount();
+    await advance(0);
+
+    fireEvent.click(controls().dismissButton);
+    await advance(0);
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+
+    fetchMock.mockResolvedValue(response(INITIAL_HASH));
+    await advance(POLL_MS);
+    await advance(0);
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+
+    fetchMock.mockResolvedValue(response("hash-after"));
+    await advance(POLL_MS);
+    await advance(0);
+    expect(screen.getAllByTestId("reader-updated")).toHaveLength(1);
+  });
+
+  it("ignores malformed remote hashes until one valid immutable hash is observed", async () => {
+    const values: unknown[] = [undefined, null, 17, {}, "", "hash-after"];
+    fetchMock.mockImplementation(async () => {
+      const contentHash = values.shift();
+      return {
+        ok: true,
+        json: vi.fn().mockResolvedValue({ contentHash }),
+      } as unknown as Response;
+    });
+    mount();
+
+    for (let index = 0; index < 5; index++) {
+      await advance(0);
+      expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+      await advance(POLL_MS);
+    }
+    await advance(0);
+
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(screen.getAllByTestId("reader-updated")).toHaveLength(1);
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "keeps a dismissed hash hidden when a hidden follow-up request settles by %s",
+    async (settlement) => {
+      const late = deferred<Response>();
+      fetchMock
+        .mockResolvedValueOnce(response("hash-after"))
+        .mockReturnValueOnce(late.promise)
+        .mockResolvedValue(response("hash-later"));
+      mount();
+      await advance(0);
+
+      fireEvent.click(controls().dismissButton);
+      await advance(POLL_MS);
+      const lateSignal = requestSignal(1);
+      setVisibility("hidden");
+      expect(lateSignal.aborted).toBe(true);
+
+      if (settlement === "resolve") {
+        late.resolve(response("hash-after"));
+      } else {
+        late.reject(new TypeError("retired dismissed-hash request failed"));
+      }
+      await advance(0);
+      expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+      expect(unhandledRejection).not.toHaveBeenCalled();
+
+      setVisibility("visible");
+      await advance(0);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(screen.getAllByTestId("reader-updated")).toHaveLength(1);
+    },
+  );
+
+  it("does not carry dismissal or stale controls into a replacement document", async () => {
+    const late = deferred<Response>();
+    const navigation = createNavigationSpies();
+    fetchMock
+      .mockResolvedValueOnce(response("hash-after"))
+      .mockReturnValueOnce(late.promise)
+      .mockResolvedValueOnce(response("hash-after"));
+    const view = render(<ReaderBoundary />);
+    await advance(0);
+    const stale = controls();
+    const staleDismiss = captureClick(stale.dismissButton);
+
+    fireEvent.click(stale.dismissButton);
+    await advance(POLL_MS);
+    const staleSignal = requestSignal(1);
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+
+    await withNavigation(navigation, async () => {
+      view.rerender(
+        <ReaderBoundary
+          docId={REPLACEMENT_DOC_ID}
+          initialHash={REPLACEMENT_HASH}
+        />,
+      );
+      expect(staleSignal.aborted).toBe(true);
+      late.resolve(response("hash-after"));
+      await advance(0);
+    });
+
+    const current = controls();
+    const fetches = fetchMock.mock.calls.length;
+    staleDismiss(clickEvent(current.dismissButton));
+    expect(screen.getByTestId("reader-updated")).toBe(current.pill);
+    expect(fetchMock).toHaveBeenCalledTimes(fetches);
+    expect(navigation.reload).not.toHaveBeenCalled();
+
+    fireEvent.click(current.dismissButton);
+    expect(screen.queryByTestId("reader-updated")).not.toBeInTheDocument();
+    expect(navigation.reload).not.toHaveBeenCalled();
+  });
+
+  it("aborts and retires polling when unmounted after dismissal", async () => {
+    const late = deferred<Response>();
+    const activeListeners = trackVisibilityListeners();
+    fetchMock
+      .mockResolvedValueOnce(response("hash-after"))
+      .mockReturnValueOnce(late.promise);
+    const view = mount();
+    await advance(0);
+
+    fireEvent.click(controls().dismissButton);
+    await advance(POLL_MS);
+    const signal = requestSignal(1);
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    expect(activeListeners.size).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    late.reject(new TypeError("request rejected after dismissed visit cleanup"));
+    await advance(POLL_MS * 4);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(unhandledRejection).not.toHaveBeenCalled();
+  });
+
   it("lets the exact current Refresh publication reload only once without other changes", async () => {
     const activeListeners = trackVisibilityListeners();
     const focusOwner = document.createElement("button");
@@ -752,6 +955,85 @@ describe("UpdatePill polling", () => {
         currentClick(activation);
       });
       expect(navigation.reload).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    {
+      name: "transient Dismiss mutation and restoration",
+      alter: ({ dismissButton }: ReturnType<typeof controls>) => {
+        dismissButton.setAttribute("data-transient", "true");
+        dismissButton.removeAttribute("data-transient");
+      },
+    },
+    {
+      name: "Dismiss replacement and restoration",
+      alter: ({ pill, dismissButton }: ReturnType<typeof controls>) => {
+        const replacement = dismissButton.cloneNode(true);
+        pill.replaceChild(replacement, dismissButton);
+        pill.replaceChild(dismissButton, replacement);
+      },
+    },
+    {
+      name: "control reordering and restoration",
+      alter: ({ pill, button, dismissButton }: ReturnType<typeof controls>) => {
+        pill.insertBefore(dismissButton, button);
+        pill.append(dismissButton);
+      },
+    },
+    {
+      name: "partial Dismiss callback-ref replay",
+      alter: ({ dismissButton }: ReturnType<typeof controls>) => {
+        const dismissRef = captureRef(dismissButton);
+        dismissRef(null);
+        dismissRef(dismissButton);
+      },
+    },
+  ])("rejects Dismiss after $name and leaves a fresh publication usable", async ({ alter }) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+
+    try {
+      await withNavigation(navigation, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const stale = controls(host);
+      const staleDismiss = captureClick(stale.dismissButton);
+      const fetches = fetchMock.mock.calls.length;
+      const markup = host.innerHTML;
+
+      act(() => alter(stale));
+      expect(host.innerHTML).toBe(markup);
+      act(() => staleDismiss(clickEvent(stale.dismissButton)));
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBe(stale.pill);
+      expect(fetchMock).toHaveBeenCalledTimes(fetches);
+      expect(navigation.reload).not.toHaveBeenCalled();
+
+      await withNavigation(navigation, async () => {
+        await act(async () =>
+          root.render(<ReaderBoundary visit="replacement" />),
+        );
+        await advance(0);
+      });
+      const current = controls(host);
+      expect(current.pill).not.toBe(stale.pill);
+      expect(current.dismissButton).not.toBe(stale.dismissButton);
+      const currentDismiss = captureClick(current.dismissButton);
+
+      staleDismiss(clickEvent(current.dismissButton));
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBe(current.pill);
+      act(() => currentDismiss(clickEvent(current.dismissButton)));
+      expect(host.querySelector('[data-testid="reader-updated"]')).toBeNull();
+      expect(navigation.reload).not.toHaveBeenCalled();
+      expect(navigation.assign).not.toHaveBeenCalled();
+      expect(navigation.replace).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       host.remove();
