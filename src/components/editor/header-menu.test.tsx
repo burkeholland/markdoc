@@ -379,6 +379,36 @@ describe("editor header More menu authority", () => {
     expect(confirmDelete).toHaveBeenCalledOnce();
   });
 
+  it("rejects a nested forged selection that consumes Radix's pending one-shot listener", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(false);
+    actions.onDelete = vi.fn(() => {
+      confirm(`Move “${DOC.title}” to trash? You can restore it from the dashboard for 30 days.`);
+    });
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const deleteItem = item("delete");
+    window.addEventListener("menu.itemSelect", (event) => {
+      if (event.target !== deleteItem) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      deleteItem.dispatchEvent(new CustomEvent("menu.itemSelect", {
+        bubbles: true,
+        cancelable: true,
+      }));
+    }, { capture: true, once: true });
+
+    fireEvent.click(deleteItem);
+    expect(actions.onDelete).not.toHaveBeenCalled();
+    expect(confirmDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(deleteItem);
+    expect(actions.onDelete).toHaveBeenCalledOnce();
+    expect(confirmDelete).toHaveBeenCalledOnce();
+  });
+
   it("rejects plain and prototype-only public event shells without throwing", async () => {
     const session = createSession();
     const actions = createActions();
@@ -806,6 +836,98 @@ describe("editor header More menu authority", () => {
         document.addEventListener("focusin", freshIntercept);
         outside.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
       }
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    },
+  );
+
+  it("rejects a nested forged pointer-outside event that consumes Radix's listener", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions), true));
+    const outside = screen.getByRole("button", { name: "Outside menu" });
+    openMenu();
+    const history = item("history");
+    history.focus();
+    await waitForOutsideListener();
+    window.addEventListener("dismissableLayer.pointerDownOutside", (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const originalEvent = (event as CustomEvent<{ originalEvent: Event }>).detail.originalEvent;
+      outside.dispatchEvent(new CustomEvent("dismissableLayer.pointerDownOutside", {
+        bubbles: false,
+        cancelable: true,
+        detail: { originalEvent },
+      }));
+    }, { capture: true, once: true });
+
+    fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(history).toHaveFocus();
+
+    await waitForOutsideListener();
+    fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it.each(["pointer", "focus"] as const)(
+    "accepts its own %s-outside event after another layer's event for the same native event",
+    async (family) => {
+      const session = createSession();
+      const actions = createActions();
+      await renderStrict(header(headerProps(session, actions), true));
+      const outside = screen.getByRole("button", { name: "Outside menu" });
+      const eventName = family === "pointer" ? "pointerdown" : "focusin";
+      const handlers: {
+        outside: OutsideHandler | null;
+        close: OpenHandler | null;
+      } = { outside: null, close: null };
+      const injectForeignLayerEvent = (originalEvent: Event) => {
+        if (originalEvent.target !== outside) return;
+        document.removeEventListener(eventName, injectForeignLayerEvent);
+        outside.dispatchEvent(new CustomEvent(
+          family === "pointer"
+            ? "dismissableLayer.pointerDownOutside"
+            : "dismissableLayer.focusOutside",
+          {
+            bubbles: false,
+            cancelable: true,
+            detail: { originalEvent },
+          },
+        ));
+        if (family === "focus") {
+          const ownEvent = new CustomEvent("dismissableLayer.focusOutside", {
+            bubbles: false,
+            cancelable: true,
+            detail: { originalEvent },
+          });
+          outside.addEventListener(ownEvent.type, (event) => {
+            event.stopImmediatePropagation();
+            if (!handlers.outside || !handlers.close) {
+              throw new Error("Outside handlers were not captured");
+            }
+            handlers.outside(event as CustomEvent<{ originalEvent: Event }>);
+            handlers.close(false);
+          }, { once: true });
+          outside.dispatchEvent(ownEvent);
+          originalEvent.stopImmediatePropagation();
+        }
+      };
+      document.addEventListener(eventName, injectForeignLayerEvent);
+      openMenu();
+      item("history").focus();
+      if (family === "pointer") {
+        await waitForOutsideListener();
+      } else {
+        handlers.outside = captureFocusOutside();
+        handlers.close = captureOpenChange();
+      }
+
+      if (family === "pointer") {
+        fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+      } else {
+        outside.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      }
+
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     },
   );

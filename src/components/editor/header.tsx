@@ -6028,6 +6028,8 @@ class MoreMenuPublicationCoordinator {
   #claimedActions = new WeakSet<MoreMenuAction>();
   #claimedEvents = new WeakSet<Event>();
   #stagedNativeEvents = new WeakSet<Event>();
+  #selectionCustomEvent: Event | null = null;
+  #outsideCustomEvents = new WeakMap<Event, Event>();
   #requestedSuccessors = new WeakSet<MoreMenuPublication>();
   #unpublishedChangeRequested = false;
 
@@ -6060,7 +6062,10 @@ class MoreMenuPublicationCoordinator {
     this.#active = null;
     this.#successorOf = publication;
     if (this.#disclosureIntent?.publication === publication) this.#disclosureIntent = null;
-    if (this.#selectionIntent?.publication === publication) this.#selectionIntent = null;
+    if (this.#selectionIntent?.publication === publication) {
+      this.#selectionIntent = null;
+      this.#selectionCustomEvent = null;
+    }
     queueMicrotask(() => {
       if (this.#active !== null || this.#successorOf !== publication) return;
       this.#successorOf = null;
@@ -6174,6 +6179,7 @@ class MoreMenuPublicationCoordinator {
       return false;
     }
     this.#stagedNativeEvents.add(nativeEvent);
+    this.#selectionCustomEvent = null;
     const intent = Object.freeze({
       publication,
       action,
@@ -6183,8 +6189,35 @@ class MoreMenuPublicationCoordinator {
     });
     this.#selectionIntent = intent;
     queueMicrotask(() => {
-      if (this.#selectionIntent === intent) this.#selectionIntent = null;
+      if (this.#selectionIntent === intent) {
+        this.#selectionIntent = null;
+        this.#selectionCustomEvent = null;
+      }
     });
+    return true;
+  }
+
+  bindSelectionCustom(publication: MoreMenuPublication, customEvent: Event) {
+    const intent = this.#selectionIntent;
+    const item = intent && publication.dom.actions[intent.action.name];
+    if (
+      !intent
+      || intent.publication !== publication
+      || this.#active !== publication
+      || !item
+      || !moreMenuNativeClickIsAtRadixSelection(
+        publication,
+        item,
+        intent.nativeEvent,
+        intent.target,
+        intent.path,
+      )
+      || !exactMoreMenuCustomSelectAtWindow(publication, item, customEvent)
+    ) {
+      return false;
+    }
+    if (this.#selectionCustomEvent) return this.#selectionCustomEvent === customEvent;
+    this.#selectionCustomEvent = customEvent;
     return true;
   }
 
@@ -6202,6 +6235,7 @@ class MoreMenuPublicationCoordinator {
       || this.#claimedActions.has(action)
       || this.#claimedEvents.has(customEvent)
       || this.#claimedEvents.has(intent.nativeEvent)
+      || this.#selectionCustomEvent !== customEvent
       || !moreMenuNativeClickIsAtRadixSelection(
         publication,
         publication.dom.actions[action.name],
@@ -6214,11 +6248,59 @@ class MoreMenuPublicationCoordinator {
       return null;
     }
     this.#selectionIntent = null;
+    this.#selectionCustomEvent = null;
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(action);
     this.#claimedEvents.add(customEvent);
     this.#claimedEvents.add(intent.nativeEvent);
     return intent;
+  }
+
+  bindOutsideCustom(
+    publication: MoreMenuPublication,
+    customEvent: CustomEvent<{ originalEvent: Event }>,
+  ) {
+    if (
+      this.#active !== publication
+      || !publication.isExact()
+    ) {
+      return false;
+    }
+    const outside = exactMoreMenuOutside(publication, customEvent, "window");
+    if (!outside) return false;
+    const admitted = this.#outsideCustomEvents.get(outside.originalEvent);
+    if (admitted) {
+      if (admitted === customEvent) return true;
+      const ownerWindow = publication.document.defaultView;
+      if (
+        ownerWindow
+        && nativeEventGetter<number>(
+          ownerWindow.Event.prototype,
+          "eventPhase",
+          admitted,
+        ) !== ownerWindow.Event.NONE
+      ) {
+        return false;
+      }
+    }
+    this.#outsideCustomEvents.set(outside.originalEvent, customEvent);
+    return true;
+  }
+
+  claimOutsideCustom(
+    publication: MoreMenuPublication,
+    customEvent: CustomEvent<{ originalEvent: Event }>,
+    originalEvent: Event,
+  ) {
+    if (
+      this.#active !== publication
+      || this.#outsideCustomEvents.get(originalEvent) !== customEvent
+      || !this.claimDisclosure([customEvent, originalEvent])
+    ) {
+      return false;
+    }
+    this.#outsideCustomEvents.delete(originalEvent);
+    return true;
   }
 
   scheduleFocus(
@@ -6791,6 +6873,66 @@ function exactMoreMenuCustomSelect(
   );
 }
 
+function exactMoreMenuCustomSelectAtWindow(
+  publication: MoreMenuPublication,
+  item: HTMLDivElement,
+  event: Event,
+) {
+  const ownerWindow = publication.document.defaultView;
+  const content = publication.dom.content;
+  if (!ownerWindow || !content || !(event instanceof ownerWindow.CustomEvent)) return false;
+  const path = nativeEventPath(ownerWindow, event);
+  return Boolean(
+    nativeEventGetter<string>(ownerWindow.Event.prototype, "type", event)
+      === "menu.itemSelect"
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+      event,
+    ) === item
+    && nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    ) instanceof ownerWindow.Window
+    && nativeEventGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+      event,
+    ) === ownerWindow.Event.CAPTURING_PHASE
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+      event,
+    ) === true
+    && nativeEventGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+      event,
+    ) === false
+    && nativeEventGetter<unknown>(
+      ownerWindow.CustomEvent.prototype,
+      "detail",
+      event,
+    ) === null
+    && path[0] === item
+    && path.indexOf(content) > path.indexOf(item)
+    && path.indexOf(publication.document) > path.indexOf(content)
+    && path[path.length - 1] === nativeEventGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+      event,
+    )
+    && path.indexOf(publication.document) < path.length - 1
+    && publication.isExact()
+  );
+}
+
 function exactMoreMenuGenericNativeClick(
   publication: MoreMenuPublication,
   event: Event,
@@ -7046,6 +7188,7 @@ function moreMenuOutsideOriginalEvent(
 function exactMoreMenuOutside(
   publication: MoreMenuPublication,
   event: CustomEvent<{ originalEvent: Event }>,
+  boundary: "window" | "target" = "target",
 ): ExactMoreMenuOutside | null {
   const ownerWindow = publication.document.defaultView;
   const content = publication.dom.content;
@@ -7091,16 +7234,25 @@ function exactMoreMenuOutside(
     && originalType === "focusin"
     && originalEvent instanceof ownerWindow.FocusEvent
   );
+  const exactCustomBoundary = boundary === "window"
+    ? currentTarget instanceof ownerWindow.Window
+      && currentTarget === path[path.length - 1]
+      && nativeEventGetter<number>(
+        ownerWindow.Event.prototype,
+        "eventPhase",
+        event,
+      ) === ownerWindow.Event.CAPTURING_PHASE
+    : currentTarget === target
+      && nativeEventGetter<number>(
+        ownerWindow.Event.prototype,
+        "eventPhase",
+        event,
+      ) === ownerWindow.Event.AT_TARGET;
   if (
     (!pointerOutside && !focusOutside)
     || target !== originalTarget
-    || currentTarget !== target
+    || !exactCustomBoundary
     || originalCurrentTarget !== publication.document
-    || nativeEventGetter<number>(
-      ownerWindow.Event.prototype,
-      "eventPhase",
-      event,
-    ) !== ownerWindow.Event.AT_TARGET
     || nativeEventGetter<number>(
       ownerWindow.Event.prototype,
       "eventPhase",
@@ -7145,6 +7297,8 @@ function exactMoreMenuOutside(
     || !path.every((entry, index) => entry === originalPath[index])
     || path[0] !== target
     || path.indexOf(publication.document) < 0
+    || !(path[path.length - 1] instanceof ownerWindow.Window)
+    || path.indexOf(publication.document) >= path.length - 1
   ) {
     return null;
   }
@@ -7339,6 +7493,8 @@ function createMoreMenuPresentation({
     let genericSelection: MoreMenuGenericSelectionIntent | null = null;
     let genericClickListener: ((event: Event) => void) | null = null;
     let genericSelectListener: ((event: Event) => void) | null = null;
+    let selectionCustomListener: ((event: Event) => void) | null = null;
+    let outsideCustomListener: ((event: Event) => void) | null = null;
     let blurListener: ((event: Event) => void) | null = null;
     let replayInvalid = false;
     let retired = false;
@@ -7451,10 +7607,31 @@ function createMoreMenuPresentation({
             { capture: true },
           );
         }
+        if (selectionCustomListener) {
+          publication.document.defaultView?.removeEventListener(
+            "menu.itemSelect",
+            selectionCustomListener,
+            { capture: true },
+          );
+        }
+        if (outsideCustomListener) {
+          publication.document.defaultView?.removeEventListener(
+            "dismissableLayer.pointerDownOutside",
+            outsideCustomListener,
+            { capture: true },
+          );
+          publication.document.defaultView?.removeEventListener(
+            "dismissableLayer.focusOutside",
+            outsideCustomListener,
+            { capture: true },
+          );
+        }
         const ownerWindow = publication.document.defaultView;
         if (ownerWindow && blurListener) ownerWindow.removeEventListener("blur", blurListener);
         genericClickListener = null;
         genericSelectListener = null;
+        selectionCustomListener = null;
+        outsideCustomListener = null;
         blurListener = null;
         genericSelection = null;
       },
@@ -7502,6 +7679,32 @@ function createMoreMenuPresentation({
         }
       }
     }
+    selectionCustomListener = (event: Event) => {
+      coordinator.bindSelectionCustom(publication, event);
+    };
+    outsideCustomListener = (event: Event) => {
+      const ownerWindow = publication.document.defaultView;
+      if (!ownerWindow || !(event instanceof ownerWindow.CustomEvent)) return;
+      coordinator.bindOutsideCustom(
+        publication,
+        event as CustomEvent<{ originalEvent: Event }>,
+      );
+    };
+    publication.document.defaultView?.addEventListener(
+      "menu.itemSelect",
+      selectionCustomListener,
+      { capture: true },
+    );
+    publication.document.defaultView?.addEventListener(
+      "dismissableLayer.pointerDownOutside",
+      outsideCustomListener,
+      { capture: true },
+    );
+    publication.document.defaultView?.addEventListener(
+      "dismissableLayer.focusOutside",
+      outsideCustomListener,
+      { capture: true },
+    );
     if (dom.content) {
       genericClickListener = (event: Event) => {
         const admission = exactMoreMenuGenericNativeClick(publication, event);
@@ -7780,7 +7983,11 @@ function createMoreMenuPresentation({
     if (
       !publication
       || !outside
-      || !coordinator.claimDisclosure([event, outside.originalEvent])
+      || !coordinator.claimOutsideCustom(
+        publication,
+        event,
+        outside.originalEvent,
+      )
     ) {
       return;
     }
