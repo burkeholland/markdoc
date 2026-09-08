@@ -25,6 +25,19 @@ interface ChecklistProgress extends ChecklistState {
   tried: boolean;
 }
 
+interface PollRequest {
+  readonly identity: symbol;
+  settled: boolean;
+}
+
+interface PollVisit {
+  readonly cadence: symbol;
+  readonly document: Document;
+  readonly mount: symbol;
+  request: PollRequest | null;
+  retired: boolean;
+}
+
 export function checklistState(tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "lastMcpCallAt">[]): ChecklistState {
   return { hasToken: tokens.length > 0, mcpSeen: tokens.some((t) => !!t.lastMcpSeenAt), mcpCalled: tokens.some((t) => !!t.lastMcpCallAt) };
 }
@@ -54,8 +67,9 @@ function advanceChecklistState(
  * through (`lastMcpCallAt`, so the permission prompt was answered) or a request was sent from the editor.
  */
 export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 5000 }: CopilotChecklistProps) {
-  const settlementAuthority = useRef({ generation: 0 });
-  const requestOwner = useRef<symbol | null>(null);
+  const activeVisit = useRef<PollVisit | null>(null);
+  const [mount] = useState(() => Symbol("copilot-checklist-mount"));
+  const section = useRef<HTMLElement | null>(null);
   const initial = checklistState(initialTokens ?? []);
   const [state, setState] = useState<ChecklistProgress>(() => ({ ...initial, tried: initial.mcpCalled || hasAgentRequests }));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
@@ -87,11 +101,11 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
       done: state.tried,
     },
   ];
-  const allDone = steps.every((s) => s.done);
+  const effectiveState = advanceChecklistState(state, initial, hasAgentRequests);
+  const effectivelyAllDone =
+    effectiveState.hasToken && effectiveState.mcpSeen && effectiveState.mcpCalled && effectiveState.tried;
 
   useLayoutEffect(() => {
-    const authority = settlementAuthority.current;
-    authority.generation++;
     setState((current) =>
       advanceChecklistState(
         current,
@@ -99,43 +113,71 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
         hasAgentRequests,
       ),
     );
-    return () => {
-      authority.generation++;
-    };
   }, [hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen]);
 
   useLayoutEffect(() => {
-    if (allDone || pollMs <= 0) return;
-    let effectRetired = false;
+    if (effectivelyAllDone || pollMs <= 0) return;
+    const ownerDocument = section.current?.ownerDocument;
+    if (!ownerDocument) return;
+
+    const cadence = Symbol("copilot-checklist-cadence");
+    const visit: PollVisit = {
+      cadence,
+      document: ownerDocument,
+      mount,
+      request: null,
+      retired: false,
+    };
+    if (activeVisit.current) activeVisit.current.retired = true;
+    activeVisit.current = visit;
+
+    const ownsCadence = () =>
+      !visit.retired &&
+      activeVisit.current === visit &&
+      visit.cadence === cadence &&
+      visit.mount === mount &&
+      section.current?.ownerDocument === visit.document;
+
     const load = () => {
-      if (effectRetired || requestOwner.current !== null) return;
-      const owner = Symbol("copilot-checklist-poll");
-      requestOwner.current = owner;
-      const authority = settlementAuthority.current;
-      const generation = authority.generation;
+      if (!ownsCadence() || visit.request !== null) return;
+      const request: PollRequest = {
+        identity: Symbol("copilot-checklist-request"),
+        settled: false,
+      };
+      visit.request = request;
+
+      const claimSettlement = () => {
+        if (!ownsCadence() || visit.request !== request || request.settled) return false;
+        request.settled = true;
+        return true;
+      };
+
       void api.tokens
         .list()
         .then((r) => {
-          if (!effectRetired && generation === authority.generation) {
+          if (claimSettlement()) {
             setState((current) => advanceChecklistState(current, checklistState(r.tokens)));
           }
         })
-        .catch(() => {})
+        .catch(() => {
+          claimSettlement();
+        })
         .finally(() => {
-          if (requestOwner.current === owner) requestOwner.current = null;
+          if (visit.request?.identity === request.identity) visit.request = null;
         });
     };
     load();
     const timer = setInterval(load, pollMs);
     return () => {
-      effectRetired = true;
+      visit.retired = true;
+      if (activeVisit.current === visit) activeVisit.current = null;
       clearInterval(timer);
     };
-  }, [allDone, pollMs]);
+  }, [effectivelyAllDone, hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen, mount, pollMs]);
 
   const doneCount = steps.filter((s) => s.done).length;
   return (
-    <section className="rounded-2xl border border-line bg-surface p-5" aria-labelledby="copilot-checklist-title" data-testid="copilot-checklist" data-done={doneCount}>
+    <section ref={section} className="rounded-2xl border border-line bg-surface p-5" aria-labelledby="copilot-checklist-title" data-testid="copilot-checklist" data-done={doneCount}>
       <div className="mb-3 flex items-center gap-2">
         <ListChecks size={16} className="text-accent" aria-hidden />
         <h2 id="copilot-checklist-title" className="text-sm font-semibold text-ink">
