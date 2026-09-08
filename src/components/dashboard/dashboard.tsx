@@ -31,6 +31,10 @@ const EVENT_DEFAULT_PREVENTED_GETTER = Object.getOwnPropertyDescriptor(
   Event.prototype,
   "defaultPrevented",
 )?.get;
+const EVENT_TARGET_GETTER = Object.getOwnPropertyDescriptor(
+  Event.prototype,
+  "target",
+)?.get;
 const TRUSTED_EVENT_CURRENT_TARGET = EVENT_CURRENT_TARGET_GETTER
   ? (Function.prototype.call.bind(
       EVENT_CURRENT_TARGET_GETTER,
@@ -40,6 +44,11 @@ const TRUSTED_EVENT_DEFAULT_PREVENTED = EVENT_DEFAULT_PREVENTED_GETTER
   ? (Function.prototype.call.bind(
       EVENT_DEFAULT_PREVENTED_GETTER,
     ) as (event: Event) => boolean)
+  : null;
+const TRUSTED_EVENT_TARGET = EVENT_TARGET_GETTER
+  ? (Function.prototype.call.bind(
+      EVENT_TARGET_GETTER,
+    ) as (event: Event) => EventTarget | null)
   : null;
 const TRUSTED_EVENT_COMPOSED_PATH = Function.prototype.call.bind(
   Event.prototype.composedPath,
@@ -349,6 +358,8 @@ interface TemplateGridPublicationCells {
 }
 
 interface TemplateGridNativeClickProof {
+  readonly attempt: symbol;
+  readonly origin: "document-capture" | "document-root-react-capture";
   readonly event: MouseEvent;
   readonly entry: TemplateGridDomPublication;
   readonly action: TemplateGridActionPublication;
@@ -368,10 +379,16 @@ interface TemplateGridReactEntryClickProof extends TemplateGridReactClickProof {
 }
 
 interface TemplateGridTerminalClickProof {
+  readonly attempt: symbol;
   readonly react: TemplateGridReactEntryClickProof;
   readonly native: TemplateGridNativeClickProof;
   readonly event: MouseEvent;
   readonly ownerDocument: Document;
+}
+
+interface TemplateGridTerminalClickBarrier {
+  readonly event: MouseEvent;
+  readonly listener: (event: Event) => void;
 }
 
 interface TemplateGridPublicationRuntime {
@@ -1122,6 +1139,7 @@ function createTemplateGridPublication(
       !(grid instanceof ownerWindow.HTMLUListElement) ||
       !TRUSTED_EVENT_CURRENT_TARGET ||
       !TRUSTED_EVENT_DEFAULT_PREVENTED ||
+      !TRUSTED_EVENT_TARGET ||
       !placement ||
       !templateGridElementsAreCurrent(render, gridOwner, entryOwners)
     ) {
@@ -1129,6 +1147,7 @@ function createTemplateGridPublication(
     }
     const nativeCurrentTarget = TRUSTED_EVENT_CURRENT_TARGET;
     const nativeWasPrevented = TRUSTED_EVENT_DEFAULT_PREVENTED;
+    const nativeTarget = TRUSTED_EVENT_TARGET;
     const predecessor = cells.active.current ?? cells.successorOf.current;
     const predecessorElements =
       predecessor?.render.mount === render.mount
@@ -1197,10 +1216,8 @@ function createTemplateGridPublication(
     let reactButtonClick: TemplateGridReactEntryClickProof | null = null;
     let reactBubbleClick: TemplateGridReactEntryClickProof | null = null;
     let nativeBoundaryClick: TemplateGridNativeClickProof | null = null;
-    let terminalClickBarrier: {
-      readonly event: MouseEvent;
-      readonly listener: (event: Event) => void;
-    } | null = null;
+    const terminalClickBarriers =
+      new Set<TemplateGridTerminalClickBarrier>();
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -1238,8 +1255,11 @@ function createTemplateGridPublication(
         currentTarget.contains(grid)
       );
     };
-    const exactNativeClick = (event: MouseEvent) => {
-      const target = event.target;
+    const exactNativeClick = (
+      event: MouseEvent,
+      origin: TemplateGridNativeClickProof["origin"],
+    ) => {
+      const target = nativeTarget(event);
       if (
         !publicationOwnsCurrentDom() ||
         !(event instanceof ownerWindow.MouseEvent) ||
@@ -1267,6 +1287,8 @@ function createTemplateGridPublication(
         path.includes(grid) &&
         path.includes(ownerDocument)
         ? Object.freeze({
+            attempt: Symbol("template-grid-native-attempt"),
+            origin,
             event,
             entry,
             action: entry.action,
@@ -1277,8 +1299,9 @@ function createTemplateGridPublication(
     };
     const onNativeClickCapture = (event: MouseEvent) => {
       if (
-        terminalClickBarrier &&
-        terminalClickBarrier.event !== event
+        Array.from(terminalClickBarriers).some(
+          (barrier) => barrier.event !== event,
+        )
       ) {
         TRUSTED_PREVENT_DEFAULT(event);
         TRUSTED_STOP_IMMEDIATE_PROPAGATION(event);
@@ -1287,9 +1310,10 @@ function createTemplateGridPublication(
       const reactNative = reactGridClick?.native;
       if (
         reactNative &&
+        reactNative.origin === "document-root-react-capture" &&
         nativeClick === reactNative &&
         reactNative.event === event &&
-        reactNative.target === event.target &&
+        reactNative.target === nativeTarget(event) &&
         nativeCurrentTarget(event) === ownerDocument &&
         event.eventPhase === ownerWindow.Event.CAPTURING_PHASE
       ) {
@@ -1302,7 +1326,7 @@ function createTemplateGridPublication(
       reactButtonClick = null;
       reactBubbleClick = null;
       nativeBoundaryClick = null;
-      nativeClick = exactNativeClick(event);
+      nativeClick = exactNativeClick(event, "document-capture");
     };
     const onNativeClickBubble = (event: MouseEvent) => {
       const proof = reactBubbleClick;
@@ -1316,6 +1340,7 @@ function createTemplateGridPublication(
         !nativeWasPrevented(event)
       ) {
         const terminal = Object.freeze({
+          attempt: capturedNative.attempt,
           react: proof,
           native: capturedNative,
           event,
@@ -1327,7 +1352,7 @@ function createTemplateGridPublication(
           TRUSTED_STOP_IMMEDIATE_PROPAGATION(nextEvent);
         };
         const barrier = Object.freeze({ event, listener });
-        terminalClickBarrier = barrier;
+        terminalClickBarriers.add(barrier);
         TRUSTED_ADD_EVENT_LISTENER(
           ownerDocument,
           "click",
@@ -1341,9 +1366,7 @@ function createTemplateGridPublication(
             listener,
             true,
           );
-          if (terminalClickBarrier === barrier) {
-            terminalClickBarrier = null;
-          }
+          terminalClickBarriers.delete(barrier);
           if (
             nativeClick === capturedNative &&
             reactBubbleClick === proof
@@ -1381,7 +1404,7 @@ function createTemplateGridPublication(
           nativeCurrentTarget(event) === entry.button &&
           (event.eventPhase === ownerWindow.Event.CAPTURING_PHASE ||
             event.eventPhase === ownerWindow.Event.AT_TARGET) &&
-          event.target === nativeClick.target &&
+          nativeTarget(event) === nativeClick.target &&
           templateGridIsEffectivelyEnabled(grid, entry.button) &&
           publicationOwnsCurrentDom()
         ) {
@@ -1431,15 +1454,15 @@ function createTemplateGridPublication(
           true,
         );
       }
-      if (terminalClickBarrier) {
+      for (const barrier of terminalClickBarriers) {
         TRUSTED_REMOVE_EVENT_LISTENER(
           ownerDocument,
           "click",
-          terminalClickBarrier.listener,
+          barrier.listener,
           true,
         );
-        terminalClickBarrier = null;
       }
+      terminalClickBarriers.clear();
     };
     const publishedDomMatches = () =>
       Boolean(
@@ -1573,6 +1596,7 @@ function createTemplateGridPublication(
       if (cells.delivery.current !== null) return false;
       const { react: proof, native, event } = terminal;
       const { entry, action } = proof;
+      const finalTarget = nativeTarget(event);
       if (
         !publicationOwnsCurrentDom() ||
         publication.render !== render ||
@@ -1583,9 +1607,20 @@ function createTemplateGridPublication(
         action.index !== entry.entry.index ||
         !templateGridIsEffectivelyEnabled(grid, entry.button) ||
         terminal.ownerDocument !== ownerDocument ||
+        terminal.attempt !== native.attempt ||
         native !== nativeClick ||
         proof.native !== native ||
         native.event !== event ||
+        finalTarget !== native.target ||
+        !(finalTarget instanceof ownerWindow.Node) ||
+        !finalTarget.isConnected ||
+        finalTarget.ownerDocument !== ownerDocument ||
+        !entry.targets.includes(finalTarget) ||
+        !templateGridEventPathMatches(
+          ownerDocument,
+          finalTarget,
+          native.path,
+        ) ||
         nativeWasPrevented(event) ||
         nativeWasPrevented(native.event) ||
         cells.claimedPublications.has(publication) ||
@@ -1723,7 +1758,10 @@ function createTemplateGridPublication(
           nativeEvent.eventPhase === ownerWindow.Event.CAPTURING_PHASE;
         const capturedNative =
           atOwnerDocument
-            ? exactNativeClick(nativeEvent)
+            ? exactNativeClick(
+                nativeEvent,
+                "document-root-react-capture",
+              )
             : nativeClick?.event === nativeEvent
               ? nativeClick
               : null;

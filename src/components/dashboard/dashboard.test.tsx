@@ -1674,6 +1674,222 @@ describe("TemplateGrid publication ownership", () => {
     },
   );
 
+  it.each(["container", "document"] as const)(
+    "claims one %s-root traversal when the same event reaches the same button twice and releases every barrier on unmount",
+    async (rootKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test frame has no window");
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      const renderGrid = (key: string) =>
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid key={key} onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid key={key} onPick={onPick} busy={null} />
+          </StrictMode>
+        );
+      let mounted = true;
+
+      try {
+        await act(async () => {
+          root.render(renderGrid("repeated"));
+        });
+        const repeatedButton =
+          ownerDocument.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${template.id}"]`,
+          );
+        if (!repeatedButton) {
+          throw new Error("The repeated-dispatch button was not rendered");
+        }
+        const repeatedEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        await act(async () => {
+          repeatedButton.dispatchEvent(repeatedEvent);
+          repeatedButton.dispatchEvent(repeatedEvent);
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+
+        await act(async () => {
+          root.render(renderGrid("pending-unmount"));
+        });
+        const pendingButton =
+          ownerDocument.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${template.id}"]`,
+          );
+        if (!pendingButton) {
+          throw new Error("The pending-unmount button was not rendered");
+        }
+        const pendingEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        const unrelatedPick = vi.fn();
+        act(() => {
+          pendingButton.dispatchEvent(pendingEvent);
+          root.unmount();
+          mounted = false;
+          const unrelated = ownerDocument.createElement("button");
+          unrelated.addEventListener("click", unrelatedPick);
+          ownerDocument.body.append(unrelated);
+          unrelated.click();
+        });
+        await act(async () => {});
+        expect(unrelatedPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenCalledTimes(1);
+      } finally {
+        if (mounted) await act(async () => root.unmount());
+        frame.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["container", "owner window"],
+    ["container", "disconnected node"],
+    ["container", "another document"],
+    ["document", "owner window"],
+    ["document", "disconnected node"],
+    ["document", "another document"],
+  ] as const)(
+    "rejects a completed %s-root traversal when its event is dispatched to %s before finalization",
+    async (rootKind, foreignKind) => {
+      const frame = document.createElement("iframe");
+      const foreignFrame = document.createElement("iframe");
+      document.body.append(frame, foreignFrame);
+      const ownerDocument = frame.contentDocument;
+      const foreignDocument = foreignFrame.contentDocument;
+      if (!ownerDocument || !foreignDocument) {
+        throw new Error("The test frames have no documents");
+      }
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      foreignDocument.open();
+      foreignDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      foreignDocument.close();
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test frame has no window");
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const foreignPick = vi.fn();
+      const template = PICKER_TEMPLATES[0];
+      const foreignTarget =
+        foreignKind === "owner window"
+          ? ownerWindow
+          : foreignKind === "disconnected node"
+            ? ownerDocument.createElement("button")
+            : foreignDocument.body.appendChild(
+                foreignDocument.createElement("button"),
+              );
+      const recordForeignPick = (event: Event) => {
+        if (event.target === foreignTarget) foreignPick();
+      };
+      foreignTarget.addEventListener("click", recordForeignPick);
+      const tree =
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>
+        );
+
+      try {
+        await act(async () => {
+          root.render(tree);
+        });
+        const button = ownerDocument.querySelector<HTMLButtonElement>(
+          `[data-testid="template-${template.id}"]`,
+        );
+        if (!button) {
+          throw new Error("The foreign-dispatch button was not rendered");
+        }
+        const reusedEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        await act(async () => {
+          button.dispatchEvent(reusedEvent);
+          foreignTarget.dispatchEvent(reusedEvent);
+        });
+        expect(foreignPick).toHaveBeenCalledTimes(1);
+        expect(onPick).not.toHaveBeenCalled();
+
+        await act(async () => {
+          button.dispatchEvent(
+            new ownerWindow.MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        foreignTarget.removeEventListener("click", recordForeignPick);
+        await act(async () => root.unmount());
+        frame.remove();
+        foreignFrame.remove();
+      }
+    },
+  );
+
   it.each([
     ["container", "document"],
     ["container", "window"],
