@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { useLayoutEffect } from "react";
+import {
+  StrictMode,
+  useLayoutEffect,
+  type ComponentProps,
+  type SyntheticEvent,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -71,6 +76,91 @@ function capturedProps<T extends HTMLElement>(element: T): CapturedProps<T> {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the element");
   return (element as unknown as Record<string, CapturedProps<T>>)[propsKey];
+}
+
+function interceptClick(
+  element: HTMLButtonElement,
+  invokeHandler: (
+    original: NonNullable<CapturedProps<HTMLButtonElement>["onClick"]>,
+    event: CapturedEvent<HTMLButtonElement>,
+  ) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the element");
+  const record = element as unknown as Record<
+    string,
+    CapturedProps<HTMLButtonElement>
+  >;
+  const props = record[propsKey];
+  const original = props.onClick;
+  if (!original) throw new Error("React click handler was not attached");
+  record[propsKey] = {
+    ...props,
+    onClick: (event) => invokeHandler(original, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+type CapturedEventProp = "onClick" | "onChange" | "onBlur" | "onKeyDown";
+
+function interceptEvent<T extends HTMLElement>(
+  element: T,
+  prop: CapturedEventProp,
+  invokeHandler: (
+    original: (event: CapturedEvent<T>) => void,
+    event: CapturedEvent<T>,
+  ) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the element");
+  const record = element as unknown as Record<string, CapturedProps<T>>;
+  const props = record[propsKey];
+  const original = props[prop] as ((event: CapturedEvent<T>) => void) | undefined;
+  if (!original) throw new Error(`React ${prop} handler was not attached`);
+  record[propsKey] = {
+    ...props,
+    [prop]: (event: CapturedEvent<T>) => invokeHandler(original, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+type ExactSyntheticEvent<T extends HTMLElement> = SyntheticEvent<T> & {
+  _reactName?: unknown;
+};
+
+const MangledSyntheticEvent = class a {};
+
+function cloneSyntheticEvent<T extends HTMLElement>(
+  event: CapturedEvent<T>,
+  overrides: Partial<ExactSyntheticEvent<T>> = {},
+  syntheticConstructor: new () => object = MangledSyntheticEvent,
+): CapturedEvent<T> {
+  const prototype = Object.create(Object.getPrototypeOf(event), {
+    constructor: { value: syntheticConstructor },
+  });
+  return Object.assign(
+    Object.create(prototype) as CapturedEvent<T>,
+    event,
+    overrides,
+  );
+}
+
+function interceptMangledEvent<T extends HTMLElement>(
+  element: T,
+  prop: CapturedEventProp,
+) {
+  return interceptEvent(element, prop, (original, event) => {
+    const mangled = cloneSyntheticEvent(event);
+    expect(Object.getPrototypeOf(mangled).constructor).toBe(
+      MangledSyntheticEvent,
+    );
+    expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+    original(mangled);
+  });
 }
 
 function capturedEvent<T extends HTMLElement>(currentTarget: T, key?: string): CapturedEvent<T> {
@@ -148,6 +238,22 @@ function SettleInLayout({ settle }: { settle: () => void }) {
   return null;
 }
 
+type StrictVersionsProps = ComponentProps<typeof VersionsPanel>;
+
+async function renderStrictVersions(
+  root: ReturnType<typeof createRoot>,
+  props: StrictVersionsProps,
+  generation = "panel",
+) {
+  await act(async () => {
+    root.render(
+      <StrictMode>
+        <VersionsPanel key={generation} {...props} />
+      </StrictMode>,
+    );
+  });
+}
+
 function session(docId: string): CollabSession {
   return { docId, role: "owner" } as unknown as CollabSession;
 }
@@ -202,6 +308,56 @@ afterEach(() => {
 });
 
 describe("VersionsPanel · exact panel publications", () => {
+  it("gives Close to a fresh publication after direct-root Strict Mode replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    let retiredClose:
+      | ((event: CapturedEvent<HTMLButtonElement>) => void)
+      | undefined;
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <VersionsBoundary
+              session={session("strict-close")}
+              onClose={onClose}
+              onPreview={vi.fn()}
+              boundary={1}
+              onBoundary={() => {
+                retiredClose ??= capturedProps(
+                  host.querySelector<HTMLButtonElement>(
+                    '[aria-label="Close version history"]',
+                  )!,
+                ).onClick;
+              }}
+            />
+          </StrictMode>,
+        );
+      });
+      const currentButton = host.querySelector<HTMLButtonElement>(
+        '[aria-label="Close version history"]',
+      )!;
+      const currentClose = capturedProps(currentButton).onClick;
+      expect(currentClose).not.toBe(retiredClose);
+
+      const restore = interceptClick(currentButton, (original, event) => {
+        retiredClose?.(event);
+        original(event);
+        original(event);
+      });
+      act(() => currentButton.click());
+      restore();
+
+      expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each(["sibling row", "foreign connected", "detached source", "replacement source"] as const)(
     "rejects a %s Select source without consuming the exact current activation",
     async (sourceKind) => {
@@ -263,8 +419,23 @@ describe("VersionsPanel · exact panel publications", () => {
         expect(onPreview).not.toHaveBeenCalled();
 
         restoreDom();
-        invoke(exactHandler, exact);
-        invoke(exactHandler, exact);
+        let currentExact = exact;
+        if (sourceKind === "detached source" || sourceKind === "replacement source") {
+          await act(async () => {
+            root.render(
+              <VersionsPanel
+                session={session(docId)}
+                onClose={vi.fn()}
+                onPreview={onPreview}
+                refreshKey={0}
+              />,
+            );
+          });
+          currentExact = host
+            .querySelectorAll<HTMLElement>('[data-testid="version-item"]')[0]
+            .querySelector<HTMLButtonElement>("button")!;
+        }
+        fireEvent.click(currentExact);
         await act(async () => {});
 
         expect(version).toHaveBeenCalledOnce();
@@ -392,6 +563,7 @@ describe("VersionsPanel · exact panel publications", () => {
             expectInert(staleInput.onKeyDown, currentInput, currentPanel, "Enter");
             expectInert(staleInput.onKeyDown, currentInput, currentPanel, "Escape");
             expectInert(staleInput.onClick, currentInput, currentPanel);
+            currentInput.value = "Boundary first";
 
             expect(window.confirm).not.toHaveBeenCalled();
             expect(versions).not.toHaveBeenCalled();
@@ -407,8 +579,8 @@ describe("VersionsPanel · exact panel publications", () => {
             expect(push).not.toHaveBeenCalled();
             expect(nextPush).not.toHaveBeenCalled();
 
-            invoke(capturedProps(currentCopy).onClick, currentCopy);
-            invoke(capturedProps(currentCopy).onClick, currentCopy);
+            currentCopy.click();
+            currentCopy.click();
             expect(copyVersion).toHaveBeenCalledOnce();
             boundaryReached();
           }}
@@ -478,8 +650,8 @@ describe("VersionsPanel · exact panel publications", () => {
             expectInert(oldHandler, newButton, newPanel);
             expectInert(newHandler, oldButton, newPanel);
             oldRef?.(null);
-            invoke(newHandler, newButton);
-            invoke(newHandler, newButton);
+            newButton.click();
+            newButton.click();
             expect(staleClose).not.toHaveBeenCalled();
             expect(currentClose).toHaveBeenCalledOnce();
             boundaryReached();
@@ -508,13 +680,12 @@ describe("VersionsPanel · exact panel publications", () => {
     );
     fireEvent.click(await screen.findByText("Confirmation version"));
     const restore = screen.getByTestId("version-restore");
-    const handler = capturedProps(restore).onClick;
     vi.spyOn(window, "confirm").mockImplementation(() => {
       current.title = "Changed during confirmation";
       return true;
     });
 
-    invoke(handler, restore);
+    fireEvent.click(restore);
     current.title = "Confirmation version";
 
     expect(window.confirm).toHaveBeenCalledOnce();
@@ -575,6 +746,702 @@ describe("VersionsPanel · exact panel publications", () => {
     await waitFor(() => expect(nextPush).toHaveBeenCalledOnce());
     expect(pendingNotice).toHaveBeenCalledOnce();
     expect(nextPush).toHaveBeenCalledWith("/d/current-copy");
+  });
+});
+
+describe("VersionsPanel · direct-root Strict Mode authority", () => {
+  it("accepts every exact React event family with a production-mangled constructor", async () => {
+    const docId = "strict-minified-events";
+    const newer = {
+      ...named,
+      id: `${docId}-newer`,
+      number: 2,
+      title: "Minified newer",
+    };
+    const older = {
+      ...named,
+      id: `${docId}-older`,
+      number: 1,
+      title: "Minified older",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions.mockResolvedValue({ versions: [newer, older] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === newer.id ? newer : older),
+        content: `# ${versionId}`,
+      },
+    }));
+    renameVersion.mockResolvedValue({ ok: true });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(newer.title);
+
+      let checkbox = host.querySelector<HTMLInputElement>(
+        `[aria-label="Compare v${newer.number}"]`,
+      )!;
+      interceptMangledEvent(checkbox, "onChange");
+      await act(async () => checkbox.click());
+      expect(checkbox).toBeChecked();
+
+      const select = (await screen.findByText(newer.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      interceptMangledEvent(select, "onClick");
+      act(() => select.click());
+      await waitFor(() =>
+        expect(onPreview).toHaveBeenLastCalledWith({
+          version: newer,
+          content: `# ${newer.id}`,
+        }),
+      );
+
+      let rename = await screen.findByTestId<HTMLButtonElement>(
+        "version-rename",
+      );
+      interceptMangledEvent(rename, "onClick");
+      act(() => rename.click());
+
+      let input = screen.getByTestId<HTMLInputElement>(
+        "version-rename-input",
+      );
+      interceptMangledEvent(input, "onChange");
+      fireEvent.change(input, { target: { value: "Cancelled minified title" } });
+      expect(input).toHaveValue("Cancelled minified title");
+
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onKeyDown");
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(screen.queryByTestId("version-rename-input")).toBeNull();
+
+      rename = screen.getByTestId<HTMLButtonElement>("version-rename");
+      fireEvent.click(rename);
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onChange");
+      fireEvent.change(input, { target: { value: "Final minified title" } });
+
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptMangledEvent(input, "onBlur");
+      fireEvent.blur(input);
+      await waitFor(() =>
+        expect(renameVersion).toHaveBeenCalledExactlyOnceWith(
+          docId,
+          newer.id,
+          "Final minified title",
+        ),
+      );
+
+      checkbox = host.querySelector<HTMLInputElement>(
+        `[aria-label="Compare v${newer.number}"]`,
+      )!;
+      expect(checkbox).toBeChecked();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects malformed React method fields without consuming the exact event", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("strict-malformed-event"),
+        onClose,
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      const close = host.querySelector<HTMLButtonElement>(
+        '[aria-label="Close version history"]',
+      )!;
+      for (const field of [
+        "isDefaultPrevented",
+        "isPropagationStopped",
+        "persist",
+      ] as const) {
+        const restore = interceptClick(close, (original, event) => {
+          const overrides: Partial<
+            ExactSyntheticEvent<HTMLButtonElement>
+          > = {};
+          overrides[field] = undefined;
+          original(cloneSyntheticEvent(event, overrides));
+        });
+        act(() => close.click());
+        restore();
+        expect(onClose).not.toHaveBeenCalled();
+      }
+
+      act(() => close.click());
+      expect(onClose).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects crossed native linkage without consuming the exact current action", async () => {
+    const docId = "strict-crossed-native-event";
+    const first = {
+      ...named,
+      id: `${docId}-first`,
+      number: 2,
+      title: "Crossed first",
+    };
+    const second = {
+      ...named,
+      id: `${docId}-second`,
+      number: 1,
+      title: "Crossed second",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions.mockResolvedValue({ versions: [first, second] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === first.id ? first : second),
+        content: `# ${versionId}`,
+      },
+    }));
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      const firstControl = (await screen.findByText(first.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      const secondControl = (await screen.findByText(second.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      const firstHandler = capturedProps(firstControl).onClick!;
+      const restore = interceptClick(secondControl, (_original, event) => {
+        firstHandler(
+          cloneSyntheticEvent(event, {
+            currentTarget: firstControl,
+            target: firstControl,
+          }),
+        );
+      });
+
+      act(() => secondControl.click());
+      restore();
+      expect(version).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+
+      act(() => firstControl.click());
+      await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+      expect(version).toHaveBeenCalledExactlyOnceWith(docId, first.id);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Retry exact and one-use after a Strict Mode remount", async () => {
+    const docId = "strict-retry";
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session(docId),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+    versions.mockReset().mockRejectedValue(new Error("strict list unavailable"));
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      const staleButton = await screen.findByRole<HTMLButtonElement>("button", {
+        name: "Retry",
+      });
+      const staleRetry = capturedProps(staleButton).onClick;
+
+      await renderStrictVersions(root, props, "B");
+      const currentButton = await screen.findByRole<HTMLButtonElement>("button", {
+        name: "Retry",
+      });
+      const callsBeforeRetry = versions.mock.calls.length;
+      const restore = interceptClick(currentButton, (original, event) => {
+        staleRetry?.(event);
+        original(event);
+        original(event);
+      });
+      act(() => currentButton.click());
+      restore();
+
+      await waitFor(() =>
+        expect(versions).toHaveBeenCalledTimes(callsBeforeRetry + 1),
+      );
+      expect(host.querySelector('[role="alert"]')).toHaveTextContent(
+        "strict list unavailable",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Select and preview exact across stale and consumed genuine events", async () => {
+    const docId = "strict-select";
+    const first = {
+      ...named,
+      id: `${docId}-first`,
+      number: 2,
+      title: "Strict select",
+    };
+    const second = {
+      ...named,
+      id: `${docId}-second`,
+      number: 1,
+      title: "Strict sibling",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    const props = {
+      session: session(docId),
+      onClose: vi.fn(),
+      onPreview,
+      refreshKey: 0,
+    };
+    versions.mockResolvedValue({ versions: [first, second] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === first.id ? first : second),
+        content: `# ${versionId}`,
+      },
+    }));
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      const staleButton = await screen.findByText(first.title);
+      const staleSelect = capturedProps(
+        staleButton.closest("button") as HTMLButtonElement,
+      ).onClick;
+
+      await renderStrictVersions(root, props, "B");
+      const currentButton = (await screen.findByText(first.title)).closest(
+        "button",
+      ) as HTMLButtonElement;
+      const restore = interceptClick(currentButton, (original, event) => {
+        staleSelect?.(event);
+        original(event);
+        original(event);
+      });
+      act(() => currentButton.click());
+      restore();
+
+      await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+      expect(version).toHaveBeenCalledExactlyOnceWith(docId, first.id);
+      expect(onPreview).toHaveBeenCalledWith({
+        version: first,
+        content: `# ${first.id}`,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Compare and Clear exact through controlled-input replay", async () => {
+    const docId = "strict-compare";
+    const newer = {
+      ...named,
+      id: `${docId}-newer`,
+      number: 2,
+      title: "Strict newer",
+    };
+    const older = {
+      ...named,
+      id: `${docId}-older`,
+      number: 1,
+      title: "Strict older",
+    };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPreview = vi.fn();
+    versions.mockResolvedValue({ versions: [newer, older] });
+    version.mockImplementation(async (_docId: string, versionId: string) => ({
+      version: {
+        ...(versionId === newer.id ? newer : older),
+        content: `# ${versionId}`,
+      },
+    }));
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(newer.title);
+      await act(async () => {});
+      const [newerCheckbox, olderCheckbox] = Array.from(
+        host.querySelectorAll<HTMLInputElement>('[data-testid="version-compare"]'),
+      );
+      for (const checkbox of [newerCheckbox, olderCheckbox]) {
+        interceptEvent(checkbox, "onChange", (original, event) => {
+          original(event);
+          original(event);
+        });
+        await act(async () => checkbox.click());
+      }
+
+      expect(newerCheckbox).toBeChecked();
+      expect(olderCheckbox).toBeChecked();
+      await waitFor(() =>
+        expect(onPreview).toHaveBeenLastCalledWith({
+          version: newer,
+          content: `# ${newer.id}`,
+          base: { version: older, content: `# ${older.id}` },
+          range: [newer],
+        }),
+      );
+
+      onPreview.mockClear();
+      const clear = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(
+        (button) => button.textContent === "Clear",
+      )!;
+      const restore = interceptClick(clear, (original, event) => {
+        original(event);
+        original(event);
+      });
+      act(() => clear.click());
+      restore();
+
+      expect(newerCheckbox).not.toBeChecked();
+      expect(olderCheckbox).not.toBeChecked();
+      expect(onPreview).toHaveBeenCalledExactlyOnceWith(null);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Restore exact before confirmation and reentrant request work", async () => {
+    const docId = "strict-restore";
+    const current = {
+      ...named,
+      id: `${docId}-version`,
+      title: "Strict restore",
+    };
+    const request = deferred<{ ok: boolean }>();
+    const reload = deferred<{ versions: VersionSummary[] }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    versions.mockReset()
+      .mockResolvedValueOnce({ versions: [current] })
+      .mockReturnValueOnce(reload.promise);
+    let restoreButton!: HTMLButtonElement;
+    restoreVersion.mockImplementationOnce(() => {
+      restoreButton.click();
+      return request.promise;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      fireEvent.click(await screen.findByText(current.title));
+      restoreButton = await screen.findByTestId("version-restore");
+      const restore = interceptClick(restoreButton, (original, event) => {
+        original(event);
+        original(event);
+      });
+      act(() => restoreButton.click());
+      restore();
+
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(restoreVersion).toHaveBeenCalledExactlyOnceWith(docId, current.id);
+      request.resolve({ ok: true });
+      await waitFor(() => expect(versions).toHaveBeenCalledTimes(2));
+      reload.resolve({ versions: [current] });
+      await waitFor(() =>
+        expect(screen.queryByTestId("version-restore")).toBeNull(),
+      );
+      expect(spinnerFor(current.title)).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Rename change, cancel, submit, and blur exact after replay", async () => {
+    const docId = "strict-rename";
+    const current = {
+      ...named,
+      id: `${docId}-version`,
+      title: "Strict rename",
+    };
+    const request = deferred<{ ok: boolean }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    versions.mockResolvedValue({ versions: [current] });
+    renameVersion.mockReturnValueOnce(request.promise);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      fireEvent.click(await screen.findByText(current.title));
+      fireEvent.click(await screen.findByTestId("version-rename"));
+      let input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      fireEvent.change(input, { target: { value: "Cancelled title" } });
+      fireEvent.keyDown(input, { key: "Escape" });
+      expect(screen.queryByTestId("version-rename-input")).toBeNull();
+      expect(renameVersion).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByTestId("version-rename"));
+      input = screen.getByTestId<HTMLInputElement>("version-rename-input");
+      interceptEvent(input, "onChange", (original, event) => {
+        original(event);
+        original(event);
+      });
+      fireEvent.change(input, { target: { value: "  Final strict title  " } });
+      interceptEvent(input, "onKeyDown", (original, event) => {
+        original(event);
+        original(event);
+      });
+      act(() => {
+        fireEvent.keyDown(input, { key: "Enter" });
+        fireEvent.blur(input);
+      });
+
+      expect(renameVersion).toHaveBeenCalledExactlyOnceWith(
+        docId,
+        current.id,
+        "Final strict title",
+      );
+      request.resolve({ ok: true });
+      await act(async () => {});
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps Copy and navigation exact through synchronous reentry", async () => {
+    const docId = "strict-copy";
+    const current = {
+      ...named,
+      id: `${docId}-version`,
+      title: "Strict copy",
+    };
+    const request = deferred<{ id: string; title: string }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    versions.mockResolvedValue({ versions: [current] });
+    let copyButton!: HTMLButtonElement;
+    copyVersion.mockImplementationOnce(() => {
+      copyButton.click();
+      return request.promise;
+    });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      fireEvent.click(await screen.findByText(current.title));
+      copyButton = await screen.findByTestId("version-copy");
+      const restore = interceptClick(copyButton, (original, event) => {
+        original(event);
+        original(event);
+      });
+      act(() => copyButton.click());
+      restore();
+
+      expect(copyVersion).toHaveBeenCalledExactlyOnceWith(docId, current.id);
+      request.resolve({ id: "strict-copy-result", title: "Strict copy result" });
+      await waitFor(() =>
+        expect(push).toHaveBeenCalledExactlyOnceWith("/d/strict-copy-result"),
+      );
+      expect(pendingNotice).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["attribute", "descendant", "placement", "row order"] as const)(
+    "permanently retires a Strict publication after restored %s mutation without poisoning a fresh mount",
+    async (tamper) => {
+      const docId = `strict-tamper-${tamper.replace(" ", "-")}`;
+      const first = {
+        ...named,
+        id: `${docId}-first`,
+        number: 2,
+        title: "Tamper first",
+      };
+      const second = {
+        ...named,
+        id: `${docId}-second`,
+        number: 1,
+        title: "Tamper second",
+      };
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onPreview = vi.fn();
+      const props = {
+        session: session(docId),
+        onClose: vi.fn(),
+        onPreview,
+        refreshKey: 0,
+      };
+      versions.mockResolvedValue({ versions: [first, second] });
+      version.mockResolvedValue({
+        version: { ...first, content: "# tamper first" },
+      });
+
+      try {
+        await renderStrictVersions(root, props, "A");
+        const panel = host.querySelector<HTMLElement>(
+          '[data-testid="versions-panel"]',
+        )!;
+        const firstButton = (await screen.findByText(first.title)).closest(
+          "button",
+        ) as HTMLButtonElement;
+        const staleSelect = capturedProps(firstButton).onClick;
+        const stalePanelRef = capturedProps(panel).ref;
+        const list = firstButton.closest("ul")!;
+        const firstItem = firstButton.closest("li")!;
+
+        if (tamper === "attribute") {
+          const className = panel.className;
+          panel.className = `${className} altered`;
+          panel.className = className;
+        } else if (tamper === "descendant") {
+          const text = firstButton.querySelector("span")!.firstChild!;
+          const replacement = text.cloneNode(true);
+          const parent = text.parentNode!;
+          parent.replaceChild(replacement, text);
+          parent.replaceChild(text, replacement);
+        } else if (tamper === "placement") {
+          const parent = panel.parentNode!;
+          const nextSibling = panel.nextSibling;
+          panel.remove();
+          parent.insertBefore(panel, nextSibling);
+        } else {
+          const secondItem = list.children.item(1)!;
+          list.insertBefore(secondItem, firstItem);
+          list.insertBefore(firstItem, secondItem);
+        }
+
+        act(() => firstButton.click());
+        expect(version).not.toHaveBeenCalled();
+        expect(onPreview).not.toHaveBeenCalled();
+
+        await renderStrictVersions(root, props, "B");
+        const currentPanel = host.querySelector<HTMLElement>(
+          '[data-testid="versions-panel"]',
+        )!;
+        const currentButton = (await screen.findByText(first.title)).closest(
+          "button",
+        ) as HTMLButtonElement;
+        act(() => {
+          stalePanelRef?.(currentPanel);
+          stalePanelRef?.(null);
+        });
+        const restore = interceptClick(currentButton, (original, event) => {
+          staleSelect?.(event);
+          original(event);
+          original(event);
+        });
+        act(() => currentButton.click());
+        restore();
+
+        await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+        expect(version).toHaveBeenCalledExactlyOnceWith(docId, first.id);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("isolates late Strict Copy settlement from the current mount", async () => {
+    const docId = "strict-copy-settlement";
+    const current = {
+      ...named,
+      id: `${docId}-version`,
+      title: "Strict settlement",
+    };
+    const staleRequest = deferred<{ id: string; title: string }>();
+    const currentRequest = deferred<{ id: string; title: string }>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session(docId),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+    versions.mockResolvedValue({ versions: [current] });
+    copyVersion
+      .mockReturnValueOnce(staleRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise);
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      fireEvent.click(await screen.findByText(current.title));
+      fireEvent.click(screen.getByTestId("version-copy"));
+      expect(copyVersion).toHaveBeenCalledOnce();
+
+      await renderStrictVersions(root, props, "B");
+      fireEvent.click(await screen.findByText(current.title));
+      fireEvent.click(screen.getByTestId("version-copy"));
+      expect(copyVersion).toHaveBeenCalledTimes(2);
+
+      staleRequest.resolve({ id: "stale-strict-copy", title: "Stale" });
+      await act(async () => {});
+      expect(push).not.toHaveBeenCalled();
+      expect(pendingNotice).not.toHaveBeenCalled();
+      expect(screen.getByTestId("version-copy")).toBeDisabled();
+
+      currentRequest.resolve({ id: "current-strict-copy", title: "Current" });
+      await waitFor(() =>
+        expect(push).toHaveBeenCalledExactlyOnceWith("/d/current-strict-copy"),
+      );
+      expect(pendingNotice).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ComponentProps } from "react";
+import { StrictMode, useEffect, useLayoutEffect, useState, type ComponentProps } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import * as Y from "yjs";
 
 vi.mock("@hocuspocus/provider", async () => {
@@ -18,19 +19,25 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/dynamic", () => ({ default: () => () => null }));
 vi.mock("./lazy-on-first-use", async () => {
   const { createElement, useEffect, useState } = await import("react");
+  const loadedModules = new WeakMap<() => Promise<unknown>, unknown>();
   return {
     lazyOnFirstUse: <M, P extends object>(load: () => Promise<M>, pick: (mod: M) => React.ComponentType<P>, loading?: () => React.ReactElement | null) => {
       return function LazyTestComponent(props: P) {
-        const [Component, setComponent] = useState<React.ComponentType<P> | null>(null);
+        const [Component, setComponent] = useState<React.ComponentType<P> | null>(() => {
+          const loaded = loadedModules.get(load) as M | undefined;
+          return loaded ? pick(loaded) : null;
+        });
         useEffect(() => {
+          if (Component) return;
           let live = true;
           void load().then((mod) => {
+            loadedModules.set(load, mod);
             if (live) setComponent(() => pick(mod));
           });
           return () => {
             live = false;
           };
-        }, []);
+        }, [Component]);
         return Component ? createElement(Component, props) : (loading?.() ?? null);
       };
     },
@@ -177,14 +184,39 @@ vi.mock("./sync-dialog", async () => {
 });
 vi.mock("./versions-panel", () => ({
   VersionDiffView: (props: ComponentProps<typeof import("./versions-panel").VersionDiffView>) => {
+    const [active, setActive] = useState(0);
+    const [current, setCurrent] = useState(() => props.session.ytext.toString());
+    useEffect(() => {
+      const update = () => setCurrent(props.session.ytext.toString());
+      props.session.ytext.observe(update);
+      return () => props.session.ytext.unobserve(update);
+    }, [props.session]);
     versionDiffProps = props;
     return (
       <div
         data-testid="version-diff-mock"
         data-document={props.session.docId}
         data-version={props.preview.version.id}
+        data-active={active}
+        className={`diff-active-${active}`}
       >
-        {props.preview.content}
+        <button
+          type="button"
+          disabled={active === 0}
+          onClick={() => setActive(0)}
+        >
+          Previous
+        </button>
+        <span data-testid="diff-counter">{active + 1} of 2</span>
+        <button
+          type="button"
+          disabled={active === 1}
+          onClick={() => setActive(1)}
+        >
+          Next
+        </button>
+        <div data-testid="diff-session-content">{current}</div>
+        <div>{props.preview.content}</div>
       </div>
     );
   },
@@ -310,6 +342,8 @@ let commitDialogSequence = 0;
 let syncDialogSequence = 0;
 let commitDialogRuns: Promise<void>[] = [];
 let syncDialogRuns: Promise<void>[] = [];
+const directRoots = new Set<Root>();
+const directHosts = new Set<HTMLElement>();
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -458,6 +492,27 @@ async function mountBoundary(
   return view;
 }
 
+async function mountStrict(doc: DocumentDto = DOC, user: EditorUser = USER) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  directRoots.add(root);
+  directHosts.add(host);
+  await act(async () => {
+    root.render(<StrictMode>{shell(doc, user)}</StrictMode>);
+  });
+  await waitFor(() => expect(headerProps.doc.id).toBe(doc.id));
+  fireEvent.click(screen.getByTestId("header-history"));
+  await screen.findByTestId("versions-panel-mock");
+  return {
+    host,
+    root,
+    rerender(nextDoc: DocumentDto, nextUser: EditorUser) {
+      act(() => root.render(<StrictMode>{shell(nextDoc, nextUser)}</StrictMode>));
+    },
+  };
+}
+
 async function openCommit() {
   fireEvent.click(screen.getByTestId("header-publish"));
   await waitFor(() => expect(commitProps.open).toBe(true));
@@ -490,8 +545,22 @@ function startCompare(producer: CompareProducer = syncDialogProps.actions.compar
 
 type BackMouseHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
 
-function backMouseEvent(currentTarget: HTMLButtonElement): React.MouseEvent<HTMLButtonElement> {
-  return { currentTarget } as unknown as React.MouseEvent<HTMLButtonElement>;
+function backMouseEvent(
+  currentTarget: HTMLButtonElement,
+  target: EventTarget | null = currentTarget,
+): React.MouseEvent<HTMLButtonElement> {
+  const ownerDocument = currentTarget.ownerDocument;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor("click", { bubbles: true, button: 0 });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: target });
+  return {
+    type: "click",
+    button: 0,
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+  } as unknown as React.MouseEvent<HTMLButtonElement>;
 }
 
 function captureClick(element: HTMLButtonElement): BackMouseHandler {
@@ -529,6 +598,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const root of directRoots) act(() => root.unmount());
+  directRoots.clear();
+  for (const host of directHosts) host.remove();
+  directHosts.clear();
   cleanup();
   for (const item of sessions) item.destroy();
   vi.restoreAllMocks();
@@ -1056,7 +1129,9 @@ describe("EditorShell comparison preview ownership", () => {
   });
 
   it("requires the current Back handler's exact connected control inside its recorded preview root", async () => {
-    vi.mocked(api.documents.sync).mockResolvedValueOnce(syncResponse("Control-bound preview"));
+    vi.mocked(api.documents.sync)
+      .mockResolvedValueOnce(syncResponse("Control-bound preview"))
+      .mockResolvedValueOnce(syncResponse("Successor preview"));
     const view = await mount();
     await openSync();
     await act(async () => {
@@ -1106,14 +1181,31 @@ describe("EditorShell comparison preview ownership", () => {
         back(backMouseEvent(control));
         back(backMouseEvent(control));
       });
-      expectEditingPanes();
-      const editingMarkup = view.container.innerHTML;
+      expect(versionDiffProps.preview).toBe(preview);
+      expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("Control-bound preview");
+      const poisonedMarkup = view.container.innerHTML;
       act(() => {
         back(backMouseEvent(control));
         back(backMouseEvent(replacement));
       });
-      expect(view.container.innerHTML).toBe(editingMarkup);
+      expect(view.container.innerHTML).toBe(poisonedMarkup);
       expect(focusOwner).toHaveFocus();
+
+      sibling.remove();
+      await act(async () => {
+        await startCompare();
+      });
+      const successorControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+      const successorBack = captureClick(successorControl);
+      expect(successorControl).toBe(control);
+      expect(successorBack).not.toBe(back);
+      act(() => {
+        back(backMouseEvent(successorControl));
+        successorBack(backMouseEvent(successorControl));
+        successorBack(backMouseEvent(successorControl));
+      });
+      expectEditingPanes();
+      expect(api.documents.sync).toHaveBeenCalledTimes(2);
     } finally {
       foreign.remove();
       sibling.remove();
@@ -1546,5 +1638,208 @@ describe("EditorShell comparison preview ownership", () => {
     expect(api.documents.sync).toHaveBeenCalledTimes(2);
     expect(focusOwner).toHaveFocus();
     focusOwner.remove();
+  });
+
+  it("keeps the exact Versions producer current through direct-root Strict Mode replay", async () => {
+    const view = await mountStrict();
+    const staleProducer = versionPreviewProducers.at(-1)!;
+    const staleValue = versionPreview("Strict stale version");
+
+    session = createSession(SECOND_DOC, SECOND_USER);
+    view.rerender(SECOND_DOC, SECOND_USER);
+    await waitFor(() => expect(headerProps.doc.id).toBe(SECOND_DOC.id));
+    const currentProducer = versionPreviewProducers.at(-1)!;
+    expect(currentProducer).not.toBe(staleProducer);
+
+    act(() => {
+      staleProducer(staleValue);
+      staleProducer(null);
+    });
+    expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+
+    const currentValue = versionPreview("Strict current version");
+    let producerReentries = 0;
+    Object.defineProperty(currentValue.version, "id", {
+      configurable: true,
+      get: () => {
+        if (producerReentries++ === 0) currentProducer(currentValue);
+        return "version-7";
+      },
+    });
+    act(() => {
+      currentProducer(currentValue);
+      currentProducer(currentValue);
+      staleProducer(currentValue);
+    });
+    expect(versionDiffProps.preview).toBe(currentValue);
+    expect(versionDiffProps.session).toBe(session);
+    expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("Strict current version");
+
+    currentValue.content = "Mutated after publication";
+    act(() => currentProducer(null));
+    expect(versionDiffProps.preview).toBe(currentValue);
+    currentValue.content = "Strict current version";
+    const replacement = versionPreview("Strict replacement version");
+    act(() => currentProducer(replacement));
+    expect(versionDiffProps.preview).toBe(replacement);
+    act(() => {
+      currentProducer(null);
+      currentProducer(null);
+      staleProducer(null);
+    });
+    expectEditingPanes();
+  });
+
+  it("keeps only the exact GitHub producer current through direct-root Strict Mode replay", async () => {
+    vi.mocked(api.documents.sync).mockResolvedValueOnce(
+      syncResponse("Strict GitHub preview", { ...REMOTE, url: SECOND_DOC.githubUrl }),
+    );
+    const view = await mountStrict();
+    await openSync();
+    const staleCompare = syncCompareProducers.at(-1)!;
+
+    session = createSession(SECOND_DOC, SECOND_USER);
+    view.rerender(SECOND_DOC, SECOND_USER);
+    await waitFor(() => expect(syncDialogProps.doc.id).toBe(SECOND_DOC.id));
+    const currentCompare = syncCompareProducers.at(-1)!;
+    expect(currentCompare).not.toBe(staleCompare);
+
+    await act(async () => {
+      await startCompare(staleCompare);
+    });
+    expect(api.documents.sync).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("version-diff-mock")).toBeNull();
+
+    await act(async () => {
+      await startCompare(currentCompare);
+    });
+    expect(api.documents.sync).toHaveBeenCalledExactlyOnceWith(
+      SECOND_DOC.id,
+      { fresh: true, content: true },
+    );
+    expect(versionDiffProps.session).toBe(session);
+    expect(versionDiffProps.preview.content).toBe("Strict GitHub preview");
+    expect(screen.getByTestId("sync-compare-bar")).toBeInTheDocument();
+  });
+
+  it("keeps Back current through live diff navigation, session replacement, and adjacent loading changes", async () => {
+    vi.mocked(api.documents.sync).mockResolvedValueOnce(
+      syncResponse("Mutation-faithful GitHub preview"),
+    );
+    const view = await mountStrict();
+    await openSync();
+    await act(async () => {
+      await startCompare();
+    });
+    const control = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const back = captureClick(control);
+    const root = screen.getByTestId("sync-compare-bar").parentElement;
+    if (!(root instanceof HTMLDivElement) || !root.parentElement) {
+      throw new Error("The live diff preview root was not rendered");
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByTestId("version-diff-mock")).toHaveAttribute("data-active", "1");
+    expect(screen.getByTestId("version-diff-mock")).toHaveClass("diff-active-1");
+    expect(screen.getByTestId("diff-counter")).toHaveTextContent("2 of 2");
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+    expect(captureClick(control)).toBe(back);
+
+    act(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, "Session-driven replacement");
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("diff-session-content"))
+        .toHaveTextContent("Session-driven replacement"),
+    );
+    expect(captureClick(control)).toBe(back);
+
+    const loading = document.createElement("div");
+    loading.dataset.testid = "doc-loading";
+    root.parentElement.insertBefore(loading, root);
+    loading.remove();
+    await act(async () => {});
+    expect(view.host.querySelector("[data-testid='sync-compare-close']")).toBe(control);
+    expect(captureClick(control)).toBe(back);
+
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
+    expect(screen.getByTestId("version-diff-mock")).toHaveAttribute("data-active", "0");
+    expect(screen.getByTestId("diff-counter")).toHaveTextContent("1 of 2");
+    expect(captureClick(control)).toBe(back);
+    const focusOwner = document.createElement("button");
+    document.body.append(focusOwner);
+    focusOwner.focus();
+    const event = backMouseEvent(control);
+    act(() => {
+      back(event);
+      back(event);
+    });
+    expectEditingPanes();
+    expect(focusOwner).toHaveFocus();
+    expect(api.documents.sync).toHaveBeenCalledOnce();
+    focusOwner.remove();
+  });
+
+  it("keeps direct-root Strict Mode Back exact across mutation, successor, repetition, and reentry", async () => {
+    vi.mocked(api.documents.sync)
+      .mockResolvedValueOnce(syncResponse("Strict poisoned preview"))
+      .mockResolvedValueOnce(syncResponse("Strict current preview"));
+    const view = await mountStrict();
+    await openSync();
+    await act(async () => {
+      await startCompare();
+    });
+
+    const staleControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const staleBack = captureClick(staleControl);
+    const previewRoot = screen.getByTestId("sync-compare-bar").parentElement;
+    if (!(previewRoot instanceof HTMLDivElement) || !previewRoot.parentNode) {
+      throw new Error("The Strict Mode preview root was not placed");
+    }
+    const parent = previewRoot.parentNode;
+    const next = previewRoot.nextSibling;
+    parent.removeChild(previewRoot);
+    parent.insertBefore(previewRoot, next);
+    const staleEvent = backMouseEvent(staleControl);
+    act(() => {
+      staleBack(staleEvent);
+      staleBack(staleEvent);
+    });
+    expect(screen.getByTestId("version-diff-mock")).toHaveTextContent("Strict poisoned preview");
+
+    await act(async () => {
+      await startCompare();
+    });
+    const currentControl = screen.getByTestId("sync-compare-close") as HTMLButtonElement;
+    const currentBack = captureClick(currentControl);
+    expect(currentControl).toBe(staleControl);
+    expect(currentBack).not.toBe(staleBack);
+    const fabricated = {
+      ...backMouseEvent(currentControl),
+      nativeEvent: new Event("click"),
+    } as unknown as React.MouseEvent<HTMLButtonElement>;
+    const currentEvent = backMouseEvent(currentControl);
+    const currentRoot = screen.getByTestId("sync-compare-bar").parentElement;
+    if (!(currentRoot instanceof HTMLDivElement)) {
+      throw new Error("The current Strict Mode preview root was not rendered");
+    }
+    const readAttribute = currentRoot.getAttribute.bind(currentRoot);
+    let backReentries = 0;
+    vi.spyOn(currentRoot, "getAttribute").mockImplementation((name) => {
+      if (name === "class" && backReentries++ === 0) currentBack(currentEvent);
+      return readAttribute(name);
+    });
+    act(() => {
+      staleBack(currentEvent);
+      currentBack(fabricated);
+      currentBack(currentEvent);
+      currentBack(currentEvent);
+      staleBack(currentEvent);
+    });
+    expectEditingPanes();
+    expect(api.documents.sync).toHaveBeenCalledTimes(2);
+    expect(view.host.querySelector("[data-testid='sync-compare-close']")).toBeNull();
   });
 });

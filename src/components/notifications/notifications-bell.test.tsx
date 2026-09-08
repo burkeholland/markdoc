@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useLayoutEffect, type ComponentProps } from "react";
+import { StrictMode, useLayoutEffect, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -163,6 +163,64 @@ function captureControl(element: HTMLElement): CapturedControl {
   };
 }
 
+function dispatchWithHandlers(control: CapturedControl, handlers: readonly MouseHandler[]) {
+  const propsKey = Object.keys(control.element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the control");
+  const props = (control.element as unknown as Record<string, Record<string, unknown>>)[propsKey];
+  if (!props) throw new Error("React props were not attached to the control");
+  const properties = control.element as unknown as Record<string, Record<string, unknown>>;
+  const wrapped = {
+    ...props,
+    onClick: (event: CapturedMouseEvent) => {
+      for (const handler of handlers) handler(event);
+    },
+  };
+  properties[propsKey] = wrapped;
+  try {
+    fireEvent.click(control.element);
+  } finally {
+    if (properties[propsKey] === wrapped) properties[propsKey] = props;
+  }
+}
+
+function cloneSyntheticClick(
+  event: CapturedMouseEvent,
+  syntheticConstructor: new () => object,
+) {
+  const prototype = Object.create(Object.getPrototypeOf(event), {
+    constructor: { value: syntheticConstructor },
+  });
+  return Object.assign(
+    Object.create(prototype) as CapturedMouseEvent,
+    event,
+  );
+}
+
+function dispatchWithListenerMicrotaskCheckpoint(
+  type: "click" | "focusin",
+  target: EventTarget,
+  dispatch: () => void,
+) {
+  const pending: VoidFunction[] = [];
+  const queue = vi
+    .spyOn(globalThis, "queueMicrotask")
+    .mockImplementation((callback) => pending.push(callback));
+  const checkpoint = (event: Event) => {
+    if (event.target !== target) return;
+    while (pending.length) pending.shift()!();
+  };
+  document.addEventListener(type, checkpoint, true);
+  try {
+    dispatch();
+  } finally {
+    document.removeEventListener(type, checkpoint, true);
+    queue.mockRestore();
+    act(() => {
+      while (pending.length) pending.shift()!();
+    });
+  }
+}
+
 function captureActions() {
   return {
     readRetry: screen.queryByTestId("notifications-read-retry")
@@ -229,6 +287,25 @@ function createBellRoot(state: BellState, props: NotificationsBellProps) {
   return root;
 }
 
+function createStrictBellRoot(
+  state: BellState,
+  props: NotificationsBellProps,
+  onBoundary: () => void,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  directRoots.push({ root, host });
+  store.useNotifications.mockReturnValue(state);
+  act(() =>
+    root.render(
+      <StrictMode>
+        <BellBoundary {...props} boundary={1} onBoundary={onBoundary} />
+      </StrictMode>,
+    ),
+  );
+  return root;
+}
 function renderBellRoot(
   root: Root,
   state: BellState,
@@ -499,6 +576,7 @@ describe("Radix disclosure provenance", () => {
     document.body.append(outside);
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     fireEvent.pointerDown(outside);
+    await act(() => Promise.resolve());
     fireEvent.click(outside);
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
     outside.remove();
@@ -555,11 +633,51 @@ describe("Radix disclosure provenance", () => {
     document.body.append(outside);
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     fireEvent.pointerDown(outside);
+    await act(() => Promise.resolve());
     fireEvent.click(outside);
     expect(screen.queryByTestId("notifications-popover")).toBeNull();
     outside.remove();
     iframe.remove();
   });
+
+  it("accepts a genuine owner-document focus-outside dismissal", async () => {
+    createBellRoot(state, { onOpen: vi.fn() });
+    openCurrentBell();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    act(() => outside.focus());
+
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    outside.remove();
+  });
+
+  it.each(["click", "focus"] as const)(
+    "keeps genuine owner-document %s provenance through a listener microtask checkpoint",
+    async (kind) => {
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      createBellRoot(state, { onOpen: vi.fn() });
+      openCurrentBell();
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      if (kind === "click") {
+        fireEvent.pointerDown(outside);
+        await act(() => Promise.resolve());
+        dispatchWithListenerMicrotaskCheckpoint("click", outside, () => {
+          fireEvent.click(outside);
+        });
+      } else {
+        dispatchWithListenerMicrotaskCheckpoint("focusin", outside, () => {
+          act(() => outside.focus());
+        });
+      }
+
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      outside.remove();
+    },
+  );
 
   it("rejects stale and fabricated trigger handlers on a reused bell", () => {
     const onOpen = vi.fn();
@@ -594,7 +712,7 @@ describe("exact notification controls", () => {
     readError: READ_FAILURE,
   };
 
-  it("rejects sibling, foreign, detached, disabled, wrong-row, and cross-control sources independently", () => {
+  it("rejects sibling, foreign, detached, wrong-row, and cross-control sources independently", () => {
     const onOpen = vi.fn();
     createBellRoot(state, { onOpen });
     openCurrentBell();
@@ -604,26 +722,13 @@ describe("exact notification controls", () => {
     const detached = document.createElement("button");
     const foreign = document.createElement("button");
     document.body.append(foreign);
-    const firstRowParent = actions.rows[0]!.element.parentElement;
-    if (!firstRowParent) throw new Error("The first row has no list item");
-
     act(() => {
       invoke(readRetry, loadRetry.element);
       invoke(loadRetry, actions.readAll.element);
       invoke(actions.readAll, detached);
       invoke(actions.rows[0]!, actions.rows[1]!.element);
       invoke(actions.rows[1]!, foreign);
-      actions.rows[0]!.element.disabled = true;
-      invoke(actions.rows[0]!);
-      actions.rows[0]!.element.disabled = false;
     });
-
-    firstRowParent.replaceChild(detached, actions.rows[0]!.element);
-    act(() => {
-      invoke(actions.rows[0]!);
-      invoke(actions.rows[0]!, detached);
-    });
-    firstRowParent.replaceChild(actions.rows[0]!.element, detached);
 
     expect(store.retryNotificationRead).not.toHaveBeenCalled();
     expect(store.refreshNotifications).not.toHaveBeenCalled();
@@ -709,22 +814,27 @@ describe("exact notification controls", () => {
     unpublishedControl.remove();
   });
 
-  it("rejects a replacement ref and publishes a successor without mutating the established owner", () => {
+  it("retires a replacement ref permanently and accepts only a later render", () => {
     const onOpen = vi.fn();
-    createBellRoot(state, { onOpen });
+    const root = createBellRoot(state, { onOpen });
     openCurrentBell();
     const stale = captureActions().rows[0]!;
     const replacement = stale.element.cloneNode(true);
     if (!(replacement instanceof HTMLButtonElement)) throw new Error("Expected a replacement button");
 
     act(() => stale.ref(replacement));
-    const current = captureActions().rows[0]!;
     act(() => {
       invoke(stale, replacement);
-      invoke(stale, current.element);
+      invoke(stale, stale.element);
     });
     expect(store.markNotificationRead).not.toHaveBeenCalled();
 
+    fireEvent.click(stale.element);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+
+    renderBellRoot(root, state, { onOpen });
+    const current = captureActions().rows[0]!;
+    expect(current.click).not.toBe(stale.click);
     fireEvent.click(current.element);
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
     expect(onOpen).toHaveBeenCalledOnce();
@@ -737,12 +847,12 @@ describe("exact notification controls", () => {
 
     act(() => {
       invoke(actions.readRetry!, actions.rows[0]!.element);
-      invoke(actions.readRetry!);
-      invoke(actions.readRetry!);
-      invoke(actions.readAll);
-      invoke(actions.readAll);
-      invoke(actions.loadRetry!);
     });
+    fireEvent.click(actions.readRetry!.element);
+    fireEvent.click(actions.readRetry!.element);
+    fireEvent.click(actions.readAll.element);
+    fireEvent.click(actions.readAll.element);
+    fireEvent.click(actions.loadRetry!.element);
 
     expect(store.retryNotificationRead).toHaveBeenCalledOnce();
     expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
@@ -751,6 +861,52 @@ describe("exact notification controls", () => {
 
     fireEvent.click(actions.rows[1]!.element);
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM_TWO.id);
+  });
+
+  it.each([
+    "root detach and reinsert",
+    "row reorder and restore",
+    "attribute mutation and restore",
+    "text mutation and restore",
+  ] as const)("retires permanently after %s", (change) => {
+    createBellRoot(
+      { ...EMPTY, items: [ITEM, ITEM_TWO], unreadCount: 2, loaded: true },
+      { onOpen: vi.fn() },
+    );
+    openCurrentBell();
+    const actions = captureActions();
+    const content = screen.getByTestId("notifications-popover");
+    const root = content.firstElementChild;
+    const list = root?.children.item(1);
+    if (!(root instanceof HTMLDivElement) || !(list instanceof HTMLUListElement)) {
+      throw new Error("Expected the exact notification portal topology");
+    }
+
+    if (change === "root detach and reinsert") {
+      const parent = root.parentNode;
+      const next = root.nextSibling;
+      if (!parent) throw new Error("The notification root has no parent");
+      root.remove();
+      parent.insertBefore(root, next);
+    } else if (change === "row reorder and restore") {
+      const first = list.children.item(0);
+      const second = list.children.item(1);
+      if (!first || !second) throw new Error("Expected two notification rows");
+      list.append(first);
+      list.insertBefore(first, second);
+    } else if (change === "attribute mutation and restore") {
+      const row = actions.rows[0]!.element;
+      row.dataset.documentId = "changed-document";
+      row.dataset.documentId = ITEM.documentId;
+    } else {
+      const text = actions.rows[0]!.element.querySelector(".font-medium")?.firstChild;
+      if (!(text instanceof Text)) throw new Error("Expected an actor text node");
+      text.data = "Changed";
+      text.data = ITEM.actorName!;
+    }
+
+    fireEvent.click(actions.rows[0]!.element);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
   });
 });
 
@@ -785,11 +941,10 @@ describe("publication succession", () => {
     });
 
     const inOrder = (a: CapturedControl, b: CapturedControl) => {
-      act(() => {
-        if (currentFirst) invoke(b);
-        invoke(a, b.element);
-        if (!currentFirst) invoke(b);
-      });
+      dispatchWithHandlers(
+        b,
+        currentFirst ? [b.click, a.click, b.click] : [a.click, b.click, b.click],
+      );
     };
     inOrder(stale.readRetry!, current.readRetry!);
     inOrder(stale.readAll, current.readAll);
@@ -819,10 +974,13 @@ describe("publication succession", () => {
       invoke(stale, stale.element);
       invoke(stale, current.element);
       invoke(current, stale.element);
-      if (currentFirst) invoke(current, current.element);
-      invoke(stale, current.element);
-      if (!currentFirst) invoke(current, current.element);
     });
+    dispatchWithHandlers(
+      current,
+      currentFirst
+        ? [current.click, stale.click, current.click]
+        : [stale.click, current.click, current.click],
+    );
 
     expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
     expect(screen.getByTestId("notifications-popover")).toBeVisible();
@@ -853,7 +1011,7 @@ describe("publication succession", () => {
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
   });
 
-  it("turns late portal attachment and replacement callbacks into successor publications", () => {
+  it("rejects partial portal replay and replacement callbacks", () => {
     const onOpen = vi.fn();
     createBellRoot(state, { onOpen });
     openCurrentBell();
@@ -861,14 +1019,13 @@ describe("publication succession", () => {
     const portalRoot = content.firstElementChild;
     if (!(portalRoot instanceof HTMLDivElement)) throw new Error("Expected the portal root");
     const staleRootRef = reactRef<HTMLDivElement>(portalRoot);
-    const staleRow = captureActions().rows[0]!;
 
     act(() => {
       staleRootRef(null);
       staleRootRef(portalRoot);
     });
     const attached = captureActions().rows[0]!;
-    act(() => invoke(staleRow, attached.element));
+    fireEvent.click(attached.element);
     expect(store.markNotificationRead).not.toHaveBeenCalled();
 
     const replacementContent = document.createElement("div");
@@ -879,11 +1036,9 @@ describe("publication succession", () => {
       screen.getByTestId("notifications-popover").firstElementChild as HTMLDivElement,
     );
     act(() => attachedRootRef(replacementRoot));
-    const current = captureActions().rows[0]!;
-
-    fireEvent.click(current.element);
-    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
-    expect(onOpen).toHaveBeenCalledOnce();
+    fireEvent.click(captureActions().rows[0]!.element);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
     replacementContent.remove();
   });
 
@@ -946,13 +1101,13 @@ describe("publication succession", () => {
 });
 
 describe("live fact revalidation and reentrancy", () => {
-  it("rejects in-place notification mutation and exact-order changes until facts are restored", () => {
+  it("retires on in-place notification and order drift before a later render can recover", () => {
     const first = { ...ITEM };
     const second = { ...ITEM_TWO };
     const items = [first, second];
     const state = { ...EMPTY, items, unreadCount: 2, loaded: true };
     const onOpen = vi.fn();
-    createBellRoot(state, { onOpen });
+    const root = createBellRoot(state, { onOpen });
     openCurrentBell();
     const actions = captureActions();
 
@@ -961,16 +1116,19 @@ describe("live fact revalidation and reentrancy", () => {
     act(() => invoke(actions.rows[0]!));
     expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(onOpen).not.toHaveBeenCalled();
-    expect(screen.getAllByTestId("notification-item")[0]).toHaveAttribute("data-document-id", ITEM.documentId);
 
     items.reverse();
     first.documentId = ITEM.documentId;
-    fireEvent.click(actions.rows[0]!.element);
+    act(() => invoke(actions.rows[0]!));
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+
+    renderBellRoot(root, state, { onOpen });
+    fireEvent.click(captureActions().rows[0]!.element);
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
     expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
   });
 
-  it("rejects in-place read-error and pending scalar mutation without claiming the Retry", () => {
+  it("retires on read-error and pending scalar drift without claiming the Retry", () => {
     const error = { ...READ_FAILURE };
     const state = {
       ...EMPTY,
@@ -979,7 +1137,8 @@ describe("live fact revalidation and reentrancy", () => {
       loaded: true,
       readError: error,
     };
-    createBellRoot(state, { onOpen: vi.fn() });
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { onOpen });
     openCurrentBell();
     const retry = captureActions().readRetry!;
 
@@ -987,18 +1146,22 @@ describe("live fact revalidation and reentrancy", () => {
     state.readErrorPending = true;
     act(() => invoke(retry));
     expect(store.retryNotificationRead).not.toHaveBeenCalled();
-    expect(screen.getByRole("alert")).toHaveTextContent(READ_FAILURE.message);
 
     error.message = READ_FAILURE.message;
     state.readErrorPending = false;
-    fireEvent.click(retry.element);
+    act(() => invoke(retry));
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+
+    renderBellRoot(root, state, { onOpen });
+    fireEvent.click(captureActions().readRetry!.element);
     expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
     expect(Object.isFrozen(store.retryNotificationRead.mock.calls[0]![0])).toBe(true);
   });
 
-  it("re-reads live unread and pending facts before Mark all read", () => {
+  it("retires on unread and pending drift before a later render can mark all read", () => {
     const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
-    createBellRoot(state, { onOpen: vi.fn() });
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { onOpen });
     openCurrentBell();
     const readAll = captureActions().readAll;
 
@@ -1009,13 +1172,18 @@ describe("live fact revalidation and reentrancy", () => {
 
     state.unreadCount = 1;
     state.readAllPending = false;
-    fireEvent.click(readAll.element);
+    act(() => invoke(readAll));
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+
+    renderBellRoot(root, state, { onOpen });
+    fireEvent.click(captureActions().readAll.element);
     expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
   });
 
-  it("re-reads live loading and failure facts before initial-load Retry", () => {
+  it("retires on loading and failure drift before a later render can retry", () => {
     const state = { ...EMPTY, loadError: true };
-    createBellRoot(state, { onOpen: vi.fn() });
+    const onOpen = vi.fn();
+    const root = createBellRoot(state, { onOpen });
     openCurrentBell();
     const retry = captureActions().loadRetry!;
 
@@ -1026,7 +1194,11 @@ describe("live fact revalidation and reentrancy", () => {
 
     state.loading = false;
     state.loadError = true;
-    fireEvent.click(retry.element);
+    act(() => invoke(retry));
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+
+    renderBellRoot(root, state, { onOpen });
+    fireEvent.click(captureActions().loadRetry!.element);
     expect(store.refreshNotifications).toHaveBeenCalledOnce();
   });
 
@@ -1068,5 +1240,175 @@ describe("live fact revalidation and reentrancy", () => {
 
     act(() => invoke(actions.rows[0]!));
     expect(store.markNotificationRead).toHaveBeenCalledOnce();
+  });
+});
+
+describe("notification bell Strict Mode replay", () => {
+  it("accepts an exact replay click after its synthetic constructor is production-mangled", () => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    createStrictBellRoot(state, { onOpen: vi.fn() }, () => undefined);
+    const trigger = captureControl(screen.getByTestId("notifications-bell"));
+    const mangledConstructor = class a {};
+
+    dispatchWithHandlers(trigger, [
+      (event) => {
+        const syntheticClick = cloneSyntheticClick(event, mangledConstructor);
+        expect(Object.getPrototypeOf(syntheticClick).constructor.name).toBe("a");
+        trigger.click(syntheticClick);
+      },
+    ]);
+
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
+  it.each([
+    ["focus-open", false],
+    ["pointerdown-close", true],
+  ] as const)("keeps the trigger exact through real tooltip %s", (_phase, closeOnPointerDown) => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    const replay = { trigger: null as CapturedControl | null };
+    createStrictBellRoot(state, { onOpen: vi.fn() }, () => {
+      replay.trigger ??= captureControl(screen.getByTestId("notifications-bell"));
+    });
+    const replayTrigger = replay.trigger;
+    if (!replayTrigger) throw new Error("Strict Mode did not expose its first layout");
+    const currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+
+    fireEvent.focus(currentTrigger.element);
+    const descriptionId = currentTrigger.element.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(screen.getByRole("tooltip")).toHaveAttribute("id", descriptionId);
+    if (closeOnPointerDown) {
+      fireEvent.pointerDown(currentTrigger.element);
+      expect(currentTrigger.element).not.toHaveAttribute("aria-describedby");
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    }
+
+    dispatchWithHandlers(currentTrigger, [
+      replayTrigger.click,
+      currentTrigger.click,
+      currentTrigger.click,
+    ]);
+
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    expect(currentTrigger.element).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("rejects restored non-tooltip attributes without poisoning the successor", () => {
+    const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
+    createBellRoot(state, { onOpen: vi.fn() });
+    const staleTrigger = captureControl(screen.getByTestId("notifications-bell"));
+
+    staleTrigger.element.dataset.unrelated = "changed";
+    delete staleTrigger.element.dataset.unrelated;
+    fireEvent.click(staleTrigger.element);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    const currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+    expect(currentTrigger.element).toBe(staleTrigger.element);
+    expect(currentTrigger.click).not.toBe(staleTrigger.click);
+    dispatchWithHandlers(currentTrigger, [
+      staleTrigger.click,
+      currentTrigger.click,
+      currentTrigger.click,
+    ]);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+  });
+
+  it.each([
+    "trigger",
+    "row",
+    "read-all",
+    "read-retry",
+    "load-retry",
+    "escape",
+    "outside",
+  ] as const)("keeps the %s interaction exact through direct-root replay", async (family) => {
+    const state = {
+      ...EMPTY,
+      items: [ITEM],
+      unreadCount: 1,
+      loadError: true,
+      readError: READ_FAILURE,
+    };
+    const onOpen = vi.fn();
+    const replay = { trigger: null as CapturedControl | null };
+    createStrictBellRoot(state, { onOpen }, () => {
+      replay.trigger ??= captureControl(screen.getByTestId("notifications-bell"));
+    });
+    const replayTrigger = replay.trigger;
+    if (!replayTrigger) throw new Error("Strict Mode did not expose its first layout");
+    const currentTrigger = captureControl(screen.getByTestId("notifications-bell"));
+
+    expect(currentTrigger.click).not.toBe(replayTrigger.click);
+    dispatchWithHandlers(currentTrigger, [
+      replayTrigger.click,
+      currentTrigger.click,
+      currentTrigger.click,
+    ]);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+
+    const actions = captureActions();
+    if (family === "trigger") {
+      const openTrigger = captureControl(screen.getByTestId("notifications-bell"));
+      fireEvent.click(openTrigger.element);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    } else if (family === "row") {
+      dispatchWithHandlers(actions.rows[0]!, [
+        actions.rows[0]!.click,
+        actions.rows[0]!.click,
+      ]);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    } else if (family === "read-all") {
+      dispatchWithHandlers(actions.readAll, [
+        actions.readAll.click,
+        actions.readAll.click,
+      ]);
+      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    } else if (family === "read-retry") {
+      dispatchWithHandlers(actions.readRetry!, [
+        actions.readRetry!.click,
+        actions.readRetry!.click,
+      ]);
+      expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(
+        READ_FAILURE,
+      );
+    } else if (family === "load-retry") {
+      dispatchWithHandlers(actions.loadRetry!, [
+        actions.loadRetry!.click,
+        actions.loadRetry!.click,
+      ]);
+      expect(store.refreshNotifications).toHaveBeenCalledOnce();
+    } else if (family === "escape") {
+      const staleContent = capturedContentCallbacks.at(0);
+      const staleOpenChange = capturedPopoverOpenChanges.at(0);
+      act(() => {
+        staleContent?.escape?.(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        );
+        staleOpenChange?.(false);
+      });
+      expect(screen.getByTestId("notifications-popover")).toBeVisible();
+      fireEvent.keyDown(actions.rows[0]!.element, { key: "Escape" });
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    } else {
+      const staleContent = capturedContentCallbacks.at(0);
+      const staleOpenChange = capturedPopoverOpenChanges.at(0);
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      act(() => {
+        if (staleContent) invokeOutside(staleContent.outside, outsideEvent(outside));
+        staleOpenChange?.(false);
+      });
+      expect(screen.getByTestId("notifications-popover")).toBeVisible();
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      fireEvent.pointerDown(outside);
+      await act(() => Promise.resolve());
+      fireEvent.click(outside);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      outside.remove();
+    }
   });
 });

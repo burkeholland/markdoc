@@ -2,8 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
+  StrictMode,
   useEffect,
   useLayoutEffect,
+  useRef,
   type ChangeEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
@@ -183,6 +185,21 @@ function PickerLayoutBoundary({
   return children;
 }
 
+function StrictPickerReplayProbe({
+  onReplay,
+  children,
+}: {
+  onReplay: () => void;
+  children: ReactNode;
+}) {
+  const layouts = useRef(0);
+  useLayoutEffect(() => {
+    layouts.current++;
+    if (layouts.current === 2) onReplay();
+  }, [onReplay]);
+  return children;
+}
+
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
@@ -201,16 +218,48 @@ function pickerSlot(name: string) {
 }
 
 function reactProp<T>(element: HTMLElement, name: string): T {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  const value = props?.[name];
+  const props = reactProps(element);
+  const value = props[name];
   if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
   return value as T;
 }
 
+function reactProps(element: HTMLElement): Record<string, unknown> {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  if (!props) throw new Error(`React props were empty on ${element.dataset.testid ?? element.tagName}`);
+  return props;
+}
+
+function replaceReactProp(element: HTMLElement, name: string, value: unknown) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const record = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const original = record[propsKey];
+  if (!original) throw new Error(`React props were empty on ${element.dataset.testid ?? element.tagName}`);
+  record[propsKey] = { ...original, [name]: value };
+  return () => {
+    record[propsKey] = original;
+  };
+}
+
+function clonePickerSyntheticEvent<T extends object>(
+  event: T,
+  overrides: Partial<T> = {},
+  syntheticConstructor?: new () => object,
+): T {
+  const prototype = syntheticConstructor
+    ? Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: syntheticConstructor },
+      })
+    : Object.getPrototypeOf(event);
+  return Object.assign(Object.create(prototype) as T, event, overrides);
+}
+
 type PickerClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type PickerChangeHandler<T extends HTMLInputElement | HTMLSelectElement> = (event: ChangeEvent<T>) => void;
+type PickerSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
 
 function nativePickerClick(control: HTMLButtonElement, target: EventTarget | null = control, type = "click") {
   const MouseEventConstructor = control.ownerDocument.defaultView?.MouseEvent;
@@ -275,13 +324,41 @@ function directPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
 function dispatchPickerSubmit(form: HTMLFormElement, submitter: HTMLButtonElement) {
   const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
   if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
-  form.dispatchEvent(
-    new SubmitEventConstructor("submit", {
-      bubbles: true,
-      cancelable: true,
-      submitter,
-    }),
-  );
+  const event = new SubmitEventConstructor("submit", {
+    bubbles: true,
+    cancelable: true,
+    submitter,
+  });
+  form.dispatchEvent(event);
+  return event;
+}
+
+async function renderStrictPicker(children: ReactNode) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<StrictMode>{children}</StrictMode>);
+  });
+  return {
+    host,
+    root,
+    picker: within(host),
+    unmount: async () => {
+      await act(async () => root.unmount());
+      host.remove();
+    },
+  };
+}
+
+async function selectStrictRepository(host: HTMLElement, name = currentRepo.fullName) {
+  const picker = within(host);
+  fireEvent.click(picker.getByTestId("picker-tab-repo"));
+  const items = await picker.findAllByTestId("repo-item");
+  const item = items.find((candidate) => candidate.textContent?.includes(name));
+  expect(item).toBeDefined();
+  await act(async () => {});
+  fireEvent.click(item!);
 }
 
 // The empty state of the GitHub picker for an account without a GitHub token (#162): it used to be a
@@ -917,6 +994,490 @@ describe("GitHubPicker list recovery", () => {
 });
 
 describe("GitHubPicker exact control publication", () => {
+  it("accepts each production-mangled React event family once while rejecting invalid provenance", async () => {
+    const doc = documentDto();
+    const mangledConstructor = class a {};
+    branches.mockResolvedValue({ branches: ["main", "next"] });
+    const view = render(
+      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
+    );
+    const foreignButton = document.createElement("button");
+    const foreignSelect = document.createElement("select");
+    const foreignForm = document.createElement("form");
+    document.body.append(foreignButton, foreignSelect, foreignForm);
+
+    try {
+      const repoTab = view.getByTestId("picker-tab-repo") as HTMLButtonElement;
+      const click = reactProp<PickerClickHandler>(repoTab, "onClick");
+      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
+        click(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        click(clonePickerSyntheticEvent(event, { currentTarget: foreignButton }, mangledConstructor));
+        click(
+          clonePickerSyntheticEvent(
+            event,
+            { nativeEvent: nativePickerClick(repoTab) },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      fireEvent.click(repoTab);
+      expect(repos).not.toHaveBeenCalled();
+      expect(view.queryByTestId("repo-list")).toBeNull();
+
+      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        click(structuralEvent);
+        click(structuralEvent);
+      });
+      fireEvent.click(repoTab);
+      expect(await view.findByTestId("repo-list")).toBeInTheDocument();
+      expect(repos).toHaveBeenCalledOnce();
+
+      fireEvent.click(await view.findByTestId("repo-item"));
+      const branch = (await view.findByTestId("branch-select")) as HTMLSelectElement;
+      await waitFor(() =>
+        expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"),
+      );
+      const change = reactProp<PickerChangeHandler<HTMLSelectElement>>(branch, "onChange");
+      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
+        change(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        change(clonePickerSyntheticEvent(event, { currentTarget: foreignSelect }, mangledConstructor));
+        change(
+          clonePickerSyntheticEvent(
+            event,
+            { nativeEvent: nativePickerChange(branch) },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      fireEvent.change(branch, { target: { value: "next" } });
+      expect(files).toHaveBeenCalledOnce();
+
+      branch.value = "main";
+      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        change(structuralEvent);
+        change(structuralEvent);
+      });
+      fireEvent.change(branch, { target: { value: "next" } });
+      await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
+      expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
+
+      const path = view.getByTestId("repo-path") as HTMLInputElement;
+      fireEvent.change(path, { target: { value: "docs/production.md" } });
+      const form = path.form;
+      const submit = view.getByTestId("repo-link") as HTMLButtonElement;
+      if (!form) throw new Error("The production-mangled repository path has no form");
+      const submitHandler = reactProp<PickerSubmitHandler>(form, "onSubmit");
+      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
+        submitHandler(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
+        submitHandler(clonePickerSyntheticEvent(event, { currentTarget: foreignForm }, mangledConstructor));
+        const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+        if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
+        submitHandler(
+          clonePickerSyntheticEvent(
+            event,
+            {
+              nativeEvent: new SubmitEventConstructor("submit", {
+                bubbles: true,
+                cancelable: true,
+                submitter: submit,
+              }),
+            },
+            mangledConstructor,
+          ),
+        );
+      });
+
+      const rejectedSubmit = dispatchPickerSubmit(form, submit);
+      expect(rejectedSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
+        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
+        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
+        submitHandler(structuralEvent);
+        submitHandler(structuralEvent);
+      });
+      const acceptedSubmit = dispatchPickerSubmit(form, submit);
+
+      expect(acceptedSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
+        storage: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "next",
+        path: "docs/production.md",
+      });
+    } finally {
+      foreignButton.remove();
+      foreignSelect.remove();
+      foreignForm.remove();
+    }
+  });
+
+  it("retires the first Strict Mode publication before an exact successor handles the replayed tab", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onReplay = vi.fn(() => {
+      const tab = host.querySelector<HTMLButtonElement>('[data-testid="picker-tab-repo"]');
+      if (!tab) throw new Error("The replayed picker has no repository tab");
+      const MouseEventConstructor = tab.ownerDocument.defaultView?.MouseEvent;
+      if (!MouseEventConstructor) throw new Error("The replayed tab has no owner-document MouseEvent");
+      tab.dispatchEvent(new MouseEventConstructor("click", { bubbles: true, cancelable: true, button: 0 }));
+    });
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <StrictPickerReplayProbe onReplay={onReplay}>
+              <GitHubPicker mode="import" githubAvailable githubConfigured />
+            </StrictPickerReplayProbe>
+          </StrictMode>,
+        );
+      });
+
+      expect(onReplay).toHaveBeenCalledOnce();
+      expect(repos).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="picker-tab-gist"]')).toBeInTheDocument();
+      expect(host.querySelector('[data-testid="repo-list"]')).toBeNull();
+
+      const currentTab = host.querySelector<HTMLButtonElement>('[data-testid="picker-tab-repo"]');
+      if (!currentTab) throw new Error("The exact successor has no repository tab");
+      fireEvent.click(currentTab);
+      await waitFor(() => expect(repos).toHaveBeenCalledOnce());
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts one exact filter change after direct-root Strict Mode replay", async () => {
+    gists.mockResolvedValue({ gists: [gist("gist-alpha", "alpha.md"), gist("gist-beta", "beta.md")] });
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured />,
+    );
+
+    try {
+      expect(await view.picker.findAllByTestId("gist-item")).toHaveLength(2);
+      const filter = view.picker.getByPlaceholderText("Filter gists");
+      fireEvent.change(filter, { target: { value: "beta" } });
+
+      expect(filter).toHaveValue("beta");
+      expect(view.picker.getAllByTestId("gist-item")).toHaveLength(1);
+      expect(view.picker.getByText("beta.md")).toBeInTheDocument();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one exact gist-choice change after direct-root Strict Mode replay", async () => {
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured />,
+    );
+
+    try {
+      const existing = view.picker.getByRole("radio", { name: "Use an existing gist" });
+      fireEvent.click(existing);
+
+      expect(existing).toBeChecked();
+      expect(view.picker.getByRole("radio", { name: "Create a new gist" })).not.toBeChecked();
+      expect(await view.picker.findByTestId("gist-list")).toBeInTheDocument();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one exact gist row after direct-root Strict Mode replay", async () => {
+    const onImported = vi.fn();
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />,
+    );
+
+    try {
+      fireEvent.click(await view.picker.findByTestId("gist-item"));
+
+      expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+        source: "gist",
+        gistId: "gist-current",
+        filename: "current.md",
+      });
+      await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one exact repository row after direct-root Strict Mode replay", async () => {
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured />,
+    );
+
+    try {
+      await selectStrictRepository(view.host);
+
+      await waitFor(() => {
+        expect(branches).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name);
+        expect(files).toHaveBeenCalledExactlyOnceWith(
+          currentRepo.owner,
+          currentRepo.name,
+          currentRepo.defaultBranch,
+        );
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one exact branch option after direct-root Strict Mode replay", async () => {
+    branches.mockResolvedValue({ branches: ["main", "next"] });
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured />,
+    );
+
+    try {
+      await selectStrictRepository(view.host);
+      const branch = await view.picker.findByTestId("branch-select");
+      await waitFor(() =>
+        expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"),
+      );
+      await act(async () => {});
+      fireEvent.change(branch, { target: { value: "next" } });
+
+      await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
+      expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
+      expect(branch).toHaveValue("next");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one exact file row after direct-root Strict Mode replay", async () => {
+    const onImported = vi.fn();
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />,
+    );
+
+    try {
+      await selectStrictRepository(view.host);
+      const file = await view.picker.findByTestId("repo-file");
+      await act(async () => {});
+      fireEvent.click(file);
+
+      expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+        source: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "main",
+        path: "README.md",
+      });
+      await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("accepts one implicit repository submit after direct-root Strict Mode replay", async () => {
+    const doc = documentDto();
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
+    );
+
+    try {
+      await selectStrictRepository(view.host);
+      const path = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
+      const form = path.form;
+      if (!form) throw new Error("The Strict Mode repository path has no form");
+      fireEvent.change(path, { target: { value: "docs/strict.md" } });
+      fireEvent.keyDown(path, { key: "Enter", code: "Enter" });
+      const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+      if (!SubmitEventConstructor) throw new Error("The Strict Mode form has no owner-document SubmitEvent");
+      form.dispatchEvent(
+        new SubmitEventConstructor("submit", {
+          bubbles: true,
+          cancelable: true,
+          submitter: null,
+        }),
+      );
+
+      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
+        storage: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "main",
+        path: "docs/strict.md",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("prevents a retired implicit repository submit before a fresh picker submits once", async () => {
+    const doc = documentDto();
+    const picker = (key: string) => (
+      <GitHubPicker
+        key={key}
+        mode="link"
+        doc={doc}
+        githubAvailable
+        githubConfigured
+      />
+    );
+    const view = await renderStrictPicker(picker("retired-form"));
+
+    try {
+      await selectStrictRepository(view.host);
+      const stalePath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
+      const staleForm = stalePath.form;
+      if (!staleForm) throw new Error("The retired repository path has no form");
+      fireEvent.change(stalePath, { target: { value: "docs/retired.md" } });
+      await act(async () => {});
+      stalePath.setAttribute("name", "transient");
+      stalePath.removeAttribute("name");
+
+      fireEvent.keyDown(stalePath, { key: "Enter", code: "Enter" });
+      const SubmitEventConstructor = staleForm.ownerDocument.defaultView?.SubmitEvent;
+      if (!SubmitEventConstructor) throw new Error("The retired form has no owner-document SubmitEvent");
+      const staleSubmit = new SubmitEventConstructor("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      });
+      const preventDefault = vi.spyOn(staleSubmit, "preventDefault");
+      let dispatched = true;
+      act(() => {
+        dispatched = staleForm.dispatchEvent(staleSubmit);
+      });
+
+      expect(dispatched).toBe(false);
+      expect(staleSubmit.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.root.render(<StrictMode>{picker("fresh-form")}</StrictMode>);
+      });
+      await selectStrictRepository(view.host);
+      const currentPath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
+      const currentForm = currentPath.form;
+      if (!currentForm) throw new Error("The fresh repository path has no form");
+      fireEvent.change(currentPath, { target: { value: "docs/current.md" } });
+      await act(async () => {});
+      const currentSubmit = new SubmitEventConstructor("submit", {
+        bubbles: true,
+        cancelable: true,
+        submitter: null,
+      });
+      act(() => {
+        currentForm.dispatchEvent(currentSubmit);
+      });
+
+      expect(currentSubmit.defaultPrevented).toBe(true);
+      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
+        storage: "repo",
+        owner: currentRepo.owner,
+        repo: currentRepo.name,
+        branch: "main",
+        path: "docs/current.md",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it("rejects Strict Mode mutation, detach, stale crossing, repetition, and reentry without poisoning a remount", async () => {
+    const onImported = vi.fn();
+    const picker = (key: string) => (
+      <StrictMode>
+        <GitHubPicker
+          key={key}
+          mode="import"
+          githubAvailable
+          githubConfigured
+          onImported={onImported}
+        />
+      </StrictMode>
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(picker("A")));
+      const staleRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
+      const staleHandler = reactProp<PickerClickHandler>(staleRow, "onClick");
+      const staleRef = reactProp<RefCallback<HTMLButtonElement>>(staleRow, "ref");
+
+      const staleFilter = within(host).getByPlaceholderText("Filter gists");
+      staleFilter.setAttribute("name", "transient");
+      staleFilter.removeAttribute("name");
+      fireEvent.click(staleRow);
+      expect(importDocument).not.toHaveBeenCalled();
+
+      await act(async () => root.render(picker("B")));
+      const detachedRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
+      const detachedItem = detachedRow.parentElement;
+      const detachedList = detachedItem?.parentElement;
+      const detachedNext = detachedItem?.nextSibling ?? null;
+      if (!detachedItem || !detachedList) throw new Error("The detachable Strict Mode row has no list");
+      detachedItem.remove();
+      detachedList.insertBefore(detachedItem, detachedNext);
+      fireEvent.click(detachedRow);
+      expect(importDocument).not.toHaveBeenCalled();
+
+      await act(async () => root.render(picker("A")));
+      const currentRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
+      staleRef(currentRow);
+      const restoreCurrentHandler = replaceReactProp(currentRow, "onClick", staleHandler);
+      fireEvent.click(currentRow);
+      restoreCurrentHandler();
+      staleRef(null);
+      expect(importDocument).not.toHaveBeenCalled();
+
+      importDocument.mockImplementationOnce(() => {
+        const tab = within(host).getByTestId("picker-tab-repo") as HTMLButtonElement;
+        const MouseEventConstructor = tab.ownerDocument.defaultView?.MouseEvent;
+        if (!MouseEventConstructor) throw new Error("The reentrant tab has no owner-document MouseEvent");
+        tab.dispatchEvent(
+          new MouseEventConstructor("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+        return Promise.resolve({ document: { id: "imported", title: "Imported" } });
+      });
+      const MouseEventConstructor = currentRow.ownerDocument.defaultView?.MouseEvent;
+      if (!MouseEventConstructor) throw new Error("The repeated row has no owner-document MouseEvent");
+      const repeatedEvent = new MouseEventConstructor("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => {
+        currentRow.dispatchEvent(repeatedEvent);
+        currentRow.dispatchEvent(repeatedEvent);
+      });
+
+      expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+        source: "gist",
+        gistId: "gist-current",
+        filename: "current.md",
+      });
+      expect(repos).not.toHaveBeenCalled();
+      await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("uses one stable radio group per link picker and switches both destinations independently", async () => {
     render(
       <>
@@ -1039,14 +1600,16 @@ describe("GitHubPicker exact control publication", () => {
     }
   });
 
-  it("rejects in-place gist mutation and DOM reorder without poisoning the restored exact row", async () => {
+  it("keeps a restored mutated or reordered gist publication retired while a fresh picker works", async () => {
     const first = gist("gist-first", "first.md");
     const second = gist("gist-second", "second.md");
     const mutableGists = [first, second];
     const onImported = vi.fn();
     gists.mockResolvedValue({ gists: mutableGists });
 
-    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    const view = render(
+      <GitHubPicker key="gist-a" mode="import" githubAvailable githubConfigured onImported={onImported} />,
+    );
     const rows = await screen.findAllByTestId("gist-item");
     const firstRow = rows[0] as HTMLButtonElement;
     const list = firstRow.parentElement?.parentElement;
@@ -1067,6 +1630,13 @@ describe("GitHubPicker exact control publication", () => {
     list!.insertBefore(firstItem!, secondItem!);
 
     fireEvent.click(firstRow);
+    expect(importDocument).not.toHaveBeenCalled();
+
+    view.rerender(
+      <GitHubPicker key="gist-b" mode="import" githubAvailable githubConfigured onImported={onImported} />,
+    );
+    const currentRow = (await screen.findAllByTestId("gist-item"))[0] as HTMLButtonElement;
+    fireEvent.click(currentRow);
     expect(importDocument).toHaveBeenCalledExactlyOnceWith({
       source: "gist",
       gistId: "gist-first",
@@ -1166,7 +1736,7 @@ describe("GitHubPicker exact control publication", () => {
     expect(screen.getByText(beta.fullName)).toBeInTheDocument();
   });
 
-  it("rejects fabricated field changes and mutable branch options while each restored control stays usable", async () => {
+  it("rejects fabricated field changes and keeps restored branch facts retired until a fresh picker", async () => {
     const doc = documentDto();
     const linkView = render(
       <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
@@ -1196,7 +1766,9 @@ describe("GitHubPicker exact control publication", () => {
 
     const mutableBranches = ["main", "next"];
     branches.mockResolvedValue({ branches: mutableBranches });
-    renderPicker();
+    const branchView = render(
+      <GitHubPicker key="branch-a" mode="import" githubAvailable githubConfigured />,
+    );
     await selectRepository();
     const branchSelect = (await screen.findByTestId("branch-select")) as HTMLSelectElement;
     await waitFor(() => expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"));
@@ -1208,7 +1780,17 @@ describe("GitHubPicker exact control publication", () => {
     mutableBranches[1] = "next";
     branchSelect.value = "main";
     fireEvent.change(branchSelect, { target: { value: "next" } });
-    await waitFor(() => expect(files).toHaveBeenCalledWith(currentRepo.owner, currentRepo.name, "next"));
+    expect(files).toHaveBeenCalledTimes(1);
+
+    branchView.rerender(
+      <GitHubPicker key="branch-b" mode="import" githubAvailable githubConfigured />,
+    );
+    await selectRepository();
+    const currentBranch = (await screen.findByTestId("branch-select")) as HTMLSelectElement;
+    await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
+    fireEvent.change(currentBranch, { target: { value: "next" } });
+    await waitFor(() => expect(files).toHaveBeenCalledTimes(3));
+    expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
     expect(screen.getByTestId("branch-select")).toHaveValue("next");
   });
 });
