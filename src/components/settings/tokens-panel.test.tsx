@@ -3,6 +3,7 @@ import {
   StrictMode,
   useEffect,
   useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -222,6 +223,48 @@ async function showStrictSecret(created = createdSecret) {
     copy: screen.getByRole("button", { name: "Copy token" }) as HTMLButtonElement,
     hide: screen.getByRole("button", { name: "I stored it - hide secret" }) as HTMLButtonElement,
   };
+}
+
+async function showStrictRename(row = token) {
+  fetchMock
+    .mockResolvedValueOnce(response({ tokens: [row] }))
+    .mockResolvedValueOnce(response({ tokens: [row] }));
+  const view = renderDirectSecret(
+    <StrictMode>
+      <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+    </StrictMode>,
+  );
+  const rename = await screen.findByRole("button", { name: `Rename ${row.name}` });
+  fireEvent.click(rename);
+  const input = screen.getByLabelText("Token name") as HTMLInputElement;
+  expect(input).toHaveFocus();
+  return {
+    ...view,
+    row,
+    rename: rename as HTMLButtonElement,
+    form: input.form as HTMLFormElement,
+    input,
+  };
+}
+
+function renameEscape(
+  target: HTMLElement,
+  init: KeyboardEventInit & { type?: string } = {},
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The token rename input has no owner window");
+  const { type = "keydown", ...eventInit } = init;
+  const event = new ownerWindow.KeyboardEvent(type, {
+    key: "Escape",
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    ...eventInit,
+  });
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
 }
 
 describe("Settings → Agents: account-session authority", () => {
@@ -526,6 +569,252 @@ describe("Settings → Agents: account-session authority", () => {
       }
     },
   );
+});
+
+describe("Settings → Agents: token rename Escape authority", () => {
+  it("cancels one direct-root Strict Mode rename, prevents once, and preserves the persisted name without a request", async () => {
+    const rename = await showStrictRename();
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    fireEvent.change(rename.input, { target: { value: "Unsaved agent name" } });
+    const currentInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    const accepted = renameEscape(currentInput);
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault.mock.contexts.filter((context) => context === accepted)).toHaveLength(1);
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(screen.getByRole("button", { name: `Rename ${token.name}` })).toHaveFocus();
+    expect(screen.getByTestId("token-row")).toHaveTextContent(token.name);
+    expect(screen.queryByText("Unsaved agent name")).toBeNull();
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("leaves outside and pending Escape events inert without adding a request", async () => {
+    const rename = await showStrictRename();
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const outside = renameEscape(screen.getByTestId("token-row"));
+    expect(outside.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === outside)).toHaveLength(0);
+    expect(screen.getByLabelText("Token name")).toBe(rename.input);
+
+    const pending = deferred();
+    fetchMock.mockReturnValueOnce(pending.later);
+    fireEvent.change(rename.input, { target: { value: "Pending agent name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(callsFor("PATCH")).toHaveLength(1);
+    const pendingInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    expect(pendingInput).toBeDisabled();
+    const rejected = renameEscape(pendingInput);
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === rejected)).toHaveLength(0);
+    expect(screen.getByLabelText("Token name")).toBe(pendingInput);
+    expect(callsFor("PATCH")).toHaveLength(1);
+    expect(callsFor("POST")).toHaveLength(0);
+  });
+
+  it("rejects modified, repeated, composing, non-bubbling, non-cancelable, stopped, prevented, fabricated, and foreign keys", async () => {
+    const rename = await showStrictRename();
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const assertOpen = () => {
+      expect(screen.getByLabelText("Token name")).toBe(rename.input);
+      expect(callsFor("PATCH")).toHaveLength(0);
+      expect(callsFor("POST")).toHaveLength(0);
+    };
+
+    for (const init of [
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { repeat: true },
+      { isComposing: true },
+      { bubbles: false },
+      { cancelable: false },
+    ] satisfies KeyboardEventInit[]) {
+      const event = renameEscape(rename.input, init);
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault.mock.contexts.filter((context) => context === event)).toHaveLength(0);
+      assertOpen();
+    }
+
+    const wrongType = renameEscape(rename.input, { type: "keyup" });
+    const wrongKey = renameEscape(rename.input, { key: "Tab" });
+    expect(wrongType.defaultPrevented).toBe(false);
+    expect(wrongKey.defaultPrevented).toBe(false);
+    assertOpen();
+
+    const prevented = new window.KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    prevented.preventDefault();
+    const preventedBeforeDispatch = preventDefault.mock.contexts.filter(
+      (context) => context === prevented,
+    ).length;
+    act(() => {
+      rename.input.dispatchEvent(prevented);
+    });
+    expect(preventDefault.mock.contexts.filter((context) => context === prevented)).toHaveLength(
+      preventedBeforeDispatch,
+    );
+    assertOpen();
+
+    const stopped = new window.KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    rename.input.addEventListener("keydown", (event) => event.stopPropagation(), { once: true });
+    act(() => {
+      rename.input.dispatchEvent(stopped);
+    });
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === stopped)).toHaveLength(0);
+    assertOpen();
+
+    const inputHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLInputElement>) => void
+    >(rename.input, "onKeyDown");
+    const fabricatedPrevent = vi.fn();
+    const fabricatedNative = new window.KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      inputHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        key: "Escape",
+        currentTarget: rename.input,
+        target: rename.input,
+        nativeEvent: fabricatedNative,
+        preventDefault: fabricatedPrevent,
+      } as unknown as ReactKeyboardEvent<HTMLInputElement>);
+    });
+    expect(fabricatedPrevent).not.toHaveBeenCalled();
+    assertOpen();
+
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!foreignWindow) throw new Error("The foreign token rename realm was unavailable");
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    act(() => {
+      rename.input.dispatchEvent(foreign);
+    });
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === foreign)).toHaveLength(0);
+    assertOpen();
+    frame.remove();
+  });
+
+  it.each([
+    "restored input attribute",
+    "restored form order",
+    "replaced and restored input",
+  ] as const)("retires %s history with no prevention, state, or request work", async (mutation) => {
+    const rename = await showStrictRename();
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    if (mutation === "restored input attribute") {
+      rename.input.setAttribute("data-transient", "true");
+      rename.input.removeAttribute("data-transient");
+    } else if (mutation === "restored form order") {
+      const guidance = rename.form.children.item(1);
+      if (!guidance) throw new Error("The rename guidance is missing");
+      rename.form.append(guidance);
+      rename.form.insertBefore(guidance, rename.form.children.item(1));
+    } else {
+      const replacement = rename.input.cloneNode(true);
+      rename.input.replaceWith(replacement);
+      replacement.replaceWith(rename.input);
+    }
+
+    const event = renameEscape(rename.input);
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === event)).toHaveLength(0);
+    expect(screen.getByLabelText("Token name")).toBe(rename.input);
+    expect(callsFor("PATCH")).toHaveLength(0);
+    expect(callsFor("POST")).toHaveLength(0);
+  });
+
+  it("rejects a partial ref replay and post-cleanup handlers, then admits a clean keyed successor", async () => {
+    const rename = await showStrictRename();
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const staleInput = reactProp<
+      (event: ReactKeyboardEvent<HTMLInputElement>) => void
+    >(rename.input, "onKeyDown");
+    const staleForm = reactProp<
+      (event: ReactKeyboardEvent<HTMLFormElement>) => void
+    >(rename.form, "onKeyDown");
+    const inputRef = reactProp<(element: HTMLInputElement | null) => void>(
+      rename.input,
+      "ref",
+    );
+    act(() => {
+      inputRef(null);
+      inputRef(rename.input);
+    });
+    const replayedInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    const replayed = renameEscape(replayedInput);
+    expect(replayed.defaultPrevented).toBe(false);
+    expect(preventDefault.mock.contexts.filter((context) => context === replayed)).toHaveLength(0);
+    expect(screen.getByLabelText("Token name")).toBe(replayedInput);
+
+    fetchMock
+      .mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    act(() => rename.root.render(
+      <StrictMode>
+        <TokensPanel key="clean-successor" origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+    ));
+    const currentRename = await screen.findByRole("button", { name: `Rename ${token.name}` });
+    fireEvent.click(currentRename);
+    const currentInput = screen.getByLabelText("Token name") as HTMLInputElement;
+    expect(currentInput).not.toBe(replayedInput);
+
+    const staleNative = new window.KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    const stalePrevent = vi.fn();
+    const staleWrapper = {
+      _reactName: "onKeyDown",
+      type: "keydown",
+      key: "Escape",
+      currentTarget: replayedInput,
+      target: replayedInput,
+      nativeEvent: staleNative,
+      preventDefault: stalePrevent,
+    } as unknown as ReactKeyboardEvent<HTMLInputElement>;
+    act(() => {
+      staleInput(staleWrapper);
+      staleForm({
+        ...staleWrapper,
+        currentTarget: rename.form,
+      } as unknown as ReactKeyboardEvent<HTMLFormElement>);
+    });
+    expect(stalePrevent).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Token name")).toBe(currentInput);
+
+    const accepted = renameEscape(currentInput);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault.mock.contexts.filter((context) => context === accepted)).toHaveLength(1);
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(callsFor("PATCH")).toHaveLength(0);
+    expect(callsFor("POST")).toHaveLength(0);
+  });
 });
 
 describe("Settings → Agents: 'Collaborators may ask this agent' (#1296)", () => {
