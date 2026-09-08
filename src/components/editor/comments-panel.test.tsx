@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, useEffect, useLayoutEffect } from "react";
+import { StrictMode, createElement, useEffect, useLayoutEffect } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
@@ -557,7 +557,7 @@ describe("CommentsPanel", () => {
         if (!ownerDocument?.defaultView) throw new Error("The hydration frame did not have a document window");
         const page = (
           <html>
-            <head />
+            {createElement("head")}
             <body>
               <StrictMode>{suggestionPanel(session)}</StrictMode>
             </body>
