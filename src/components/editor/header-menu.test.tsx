@@ -285,12 +285,14 @@ beforeEach(() => {
   // jsdom's Window methods do not delegate through EventTarget.prototype.
   vi.spyOn(EventTarget.prototype, "addEventListener").mockImplementation(
     function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
       if (this === window) windowAdd.call(window, type, callback, options);
       else eventTargetAdd.call(this, type, callback, options);
     },
   );
   vi.spyOn(EventTarget.prototype, "removeEventListener").mockImplementation(
     function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
       if (this === window) windowRemove.call(window, type, callback, options);
       else eventTargetRemove.call(this, type, callback, options);
     },
