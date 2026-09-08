@@ -156,6 +156,22 @@ function reactProp<T>(element: Element, name: string): T {
   return value as T;
 }
 
+async function waitForCommittedReactProp<T>(
+  element: () => Element,
+  name: string,
+  previous: T,
+) {
+  let candidate: T | undefined;
+  await waitFor(() => {
+    const current = reactProp<T>(element(), name);
+    if (current === previous || current !== candidate) {
+      candidate = current;
+      throw new Error(`Waiting for committed React ${name}`);
+    }
+  });
+  return candidate as T;
+}
+
 function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
   element: Element,
   name: string,
@@ -512,13 +528,10 @@ describe("ImageDialog upload lifecycle", () => {
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(input.value).toBe("");
-      await waitFor(() =>
-        expect(
-          reactProp<ChangeEventHandler<HTMLInputElement>>(
-            screen.getByTestId("image-file"),
-            "onChange",
-          ),
-        ).not.toBe(oldOnChange),
+      await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
+        () => screen.getByTestId("image-file"),
+        "onChange",
+        oldOnChange,
       );
 
       const retryFile = new File(["retry"], "retry.png", {
@@ -564,13 +577,10 @@ describe("ImageDialog upload lifecycle", () => {
       ),
     );
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    await waitFor(() =>
-      expect(
-        reactProp<ChangeEventHandler<HTMLInputElement>>(
-          screen.getByTestId("image-file"),
-          "onChange",
-        ),
-      ).not.toBe(oldOnChange),
+    await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
+      () => screen.getByTestId("image-file"),
+      "onChange",
+      oldOnChange,
     );
 
     const retryFile = new File(["retry"], "retry.png", {
