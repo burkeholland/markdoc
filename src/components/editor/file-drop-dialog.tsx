@@ -727,9 +727,6 @@ function exactNativeClick(
     isPropagationStopped?: unknown;
     persist?: unknown;
   };
-  const eventPrototype = Object.getPrototypeOf(event) as {
-    constructor?: { name?: unknown };
-  } | null;
   return view &&
     nativeEvent instanceof view.MouseEvent &&
     nativeEvent.type === "click" &&
@@ -749,7 +746,6 @@ function exactNativeClick(
     nativeEvent.composedPath().includes(expectedControl) &&
     nativeEvent.composedPath().includes(publication.content) &&
     snapshotContains(publication.dom, target) &&
-    eventPrototype?.constructor?.name === "SyntheticBaseEvent" &&
     reactEvent._reactName === "onClick" &&
     typeof reactEvent.isDefaultPrevented === "function" &&
     !reactEvent.isDefaultPrevented() &&

@@ -3,6 +3,7 @@ import {
   StrictMode,
   useEffect,
   useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
 } from "react";
@@ -130,7 +131,7 @@ interface DirectView {
   root: Root;
 }
 
-type OptionHandler = (event: { currentTarget: HTMLButtonElement }) => void;
+type OptionHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 
 interface CapturedOption {
   element: HTMLButtonElement;
@@ -254,6 +255,32 @@ function reactProp<T>(element: HTMLElement, name: string): T {
   return value as T;
 }
 
+function setReactProp<T>(element: HTMLElement, name: string, value: T) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const attached = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const props = attached[propsKey];
+  if (!props) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  attached[propsKey] = { ...props, [name]: value };
+}
+
+function cloneSyntheticClick(
+  event: ReactMouseEvent<HTMLButtonElement>,
+  overrides: Partial<ReactMouseEvent<HTMLButtonElement>> = {},
+  syntheticConstructor?: new () => object,
+) {
+  const prototype = syntheticConstructor
+    ? Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: syntheticConstructor },
+      })
+    : Object.getPrototypeOf(event);
+  return Object.assign(
+    Object.create(prototype) as ReactMouseEvent<HTMLButtonElement>,
+    event,
+    overrides,
+  );
+}
+
 function captureOption(action: "replace" | "insert" | "new"): CapturedOption {
   const element = screen.getByTestId(`file-drop-${action}`) as HTMLButtonElement;
   return {
@@ -270,7 +297,7 @@ function captureOpenChange() {
 }
 
 function invoke(option: CapturedOption, currentTarget = option.element) {
-  option.onClick({ currentTarget });
+  option.onClick({ currentTarget } as ReactMouseEvent<HTMLButtonElement>);
 }
 
 function activate(option: CapturedOption) {
@@ -1007,6 +1034,78 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
       expect(handlers.onError).not.toHaveBeenCalled();
     },
   );
+
+  it("accepts an exact synthetic click after its constructor name is production-mangled", async () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-minified-click.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    const mangledConstructor = class a {};
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      const syntheticClick = cloneSyntheticClick(
+        event,
+        {},
+        mangledConstructor,
+      );
+      expect(Object.getPrototypeOf(syntheticClick).constructor.name).toBe("a");
+      option.onClick(syntheticClick);
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Production click");
+    expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+      "Production click",
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a synthetic-looking click without the complete React event structure", () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-fabricated-structure.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      option.onClick(
+        cloneSyntheticClick(event, {
+          persist: undefined,
+        }),
+      );
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+    expect(handlers.onClose).not.toHaveBeenCalled();
+  });
+
+  it("rejects a synthetic-looking click without the exact dispatched native event", () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-fabricated-native.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      option.onClick(
+        cloneSyntheticClick(event, {
+          nativeEvent: new MouseEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        }),
+      );
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+    expect(handlers.onClose).not.toHaveBeenCalled();
+  });
 
   it.each(["close", "escape", "outside"] as const)(
     "publishes one permanent successor for %s dismissal",
