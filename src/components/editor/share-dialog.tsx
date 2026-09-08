@@ -1588,7 +1588,6 @@ export const ShareDialog = memo(function ShareDialog({
       if (
         handoff &&
         handoff.successor === null &&
-        source !== handoff.predecessor &&
         candidate !== handoff.predecessor
       ) {
         handoff.successor = candidate;
@@ -2751,7 +2750,6 @@ export const ShareDialog = memo(function ShareDialog({
       if (
         handoff &&
         handoff.successor === null &&
-        source !== handoff.predecessor &&
         candidate !== handoff.predecessor
       ) {
         handoff.successor = candidate;

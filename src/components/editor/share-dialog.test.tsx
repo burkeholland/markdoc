@@ -136,6 +136,19 @@ function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
   return fiber.ref as RefCallback<T>;
 }
 
+function reactAlternateRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<
+    string,
+    { ref?: unknown; alternate?: { ref?: unknown } | null } | undefined
+  >)[fiberKey];
+  if (typeof fiber?.alternate?.ref !== "function") {
+    throw new Error(`An alternate callback ref was not attached to ${element.tagName}`);
+  }
+  return fiber.alternate.ref as RefCallback<T>;
+}
+
 function captureClick(element: HTMLButtonElement): CapturedControl<HTMLButtonElement> {
   return { element, handler: reactProp<DirectHandler<HTMLButtonElement>>(element, "onClick") };
 }
@@ -629,6 +642,51 @@ describe("ShareDialog exact control publications", () => {
     await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
     expect(copyText).toHaveBeenCalledTimes(2);
     expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${DOC_ID}`);
+  });
+
+  it("retires a pending copy when its same-generation Strict replay fails", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const linkValue = screen.getByTestId("editor-link").querySelector("code")!;
+    const copy = screen.getByTestId("copy-link") as HTMLButtonElement;
+    const card = screen.getByTestId("share-agent-card");
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    const panel = toggle.nextElementSibling as HTMLDivElement;
+    const replay = [
+      { ref: reactAlternateRef(copy) as RefCallback<HTMLElement>, element: copy },
+      { ref: reactAlternateRef(linkValue) as RefCallback<HTMLElement>, element: linkValue },
+      { ref: reactAlternateRef(card), element: card },
+      { ref: reactAlternateRef(toggle) as RefCallback<HTMLElement>, element: toggle },
+      { ref: reactAlternateRef(panel) as RefCallback<HTMLElement>, element: panel },
+    ];
+
+    fireEvent.click(copy);
+    expect(copyText).toHaveBeenCalledTimes(1);
+    act(() => {
+      for (const { ref } of replay) ref(null);
+      for (const { ref, element } of replay) ref(element);
+    });
+    await act(async () => Promise.resolve());
+
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "after-failed-replay" } });
+    act(() => settle?.(true));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+
+    copyText.mockClear();
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
   });
 
   it("owns each setup expand and collapse transition after direct-root Strict Mode replay", async () => {
