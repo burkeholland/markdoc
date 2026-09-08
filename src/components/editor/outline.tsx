@@ -8,7 +8,16 @@ import { rovingIndex } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 import { useSessionValue } from "./use-session";
 import { RAIL_BOX, RAIL_COLLAPSED_BOX } from "./chrome-classes";
-import { memo, type KeyboardEvent, type MouseEvent, useCallback, useLayoutEffect, useRef, useState } from "react";
+import {
+  memo,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 export interface OutlineProps {
   session: CollabSession;
@@ -22,9 +31,9 @@ export interface OutlineProps {
 const EMPTY_HEADINGS: HeadingInfo[] = [];
 
 interface OutlineVisit {
-  session: CollabSession;
-  open: boolean;
-  identity: number;
+  readonly session: CollabSession;
+  readonly open: boolean;
+  readonly identity: number;
 }
 
 interface HeadingPublication {
@@ -39,6 +48,7 @@ interface HeadingPublication {
 
 interface OutlinePresentation {
   readonly mount: symbol;
+  readonly visit: OutlineVisit;
   readonly visitIdentity: number;
   readonly session: CollabSession;
   readonly open: boolean;
@@ -59,18 +69,40 @@ interface OutlineRowElements {
 }
 
 interface OutlinePresentationRuntime {
+  retired: boolean;
   active: boolean;
   root: HTMLElement | null;
   toggle: HTMLButtonElement | null;
   nav: HTMLElement | null;
   list: HTMLUListElement | null;
   rows: OutlineRowElements[];
+  proof: OutlineDomProof | null;
+}
+
+interface OutlineDomNodeProof {
+  readonly node: Node;
+  readonly parent: Node | null;
+  readonly value: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly childCount: number;
+}
+
+interface OutlineDomProof {
+  readonly root: HTMLElement;
+  readonly nodes: readonly OutlineDomNodeProof[];
+}
+
+interface OutlineAuthority {
+  readonly presentation: OutlinePresentation;
+  readonly runtime: OutlinePresentationRuntime;
+  retired: boolean;
+  layoutCleaned: boolean;
 }
 
 function useOutlineVisit(session: CollabSession, open: boolean): OutlineVisit {
-  const [visit, setVisit] = useState<OutlineVisit>(() => ({ session, open, identity: 0 }));
+  const [visit, setVisit] = useState<OutlineVisit>(() => Object.freeze({ session, open, identity: 0 }));
   if (visit.session === session && visit.open === open) return visit;
-  const next = { session, open, identity: visit.identity + 1 };
+  const next = Object.freeze({ session, open, identity: visit.identity + 1 });
   setVisit(next);
   return next;
 }
@@ -111,6 +143,173 @@ function sameHeadings(a: HeadingInfo[], b: HeadingInfo[]): boolean {
   return true;
 }
 
+function captureDomProof(root: HTMLElement): OutlineDomProof {
+  const nodes: OutlineDomNodeProof[] = [];
+  const visit = (node: Node) => {
+    const element = node.nodeType === 1 ? (node as Element) : null;
+    nodes.push(
+      Object.freeze({
+        node,
+        parent: node.parentNode,
+        value: node.nodeValue,
+        attributes: element
+          ? Object.freeze(Array.from(element.attributes, ({ name, value }) => Object.freeze([name, value] as const)))
+          : null,
+        childCount: node.childNodes.length,
+      }),
+    );
+    for (const child of node.childNodes) visit(child);
+  };
+  visit(root);
+  return Object.freeze({ root, nodes: Object.freeze(nodes) });
+}
+
+function nodeProofMatches(node: Node, proof: OutlineDomNodeProof): boolean {
+  if (
+    node !== proof.node ||
+    node.parentNode !== proof.parent ||
+    node.nodeValue !== proof.value ||
+    node.childNodes.length !== proof.childCount
+  ) {
+    return false;
+  }
+  if (proof.attributes === null) return node.nodeType !== 1;
+  if (node.nodeType !== 1) return false;
+  const attributes = (node as Element).attributes;
+  if (attributes.length !== proof.attributes.length) return false;
+  for (let index = 0; index < attributes.length; index++) {
+    const expected = proof.attributes[index];
+    const actual = attributes.item(index);
+    if (!actual || actual.name !== expected[0] || actual.value !== expected[1]) return false;
+  }
+  return true;
+}
+
+function domProofIsCurrent(proof: OutlineDomProof): boolean {
+  let index = 0;
+  const visit = (node: Node): boolean => {
+    const expected = proof.nodes[index++];
+    if (!expected || !nodeProofMatches(node, expected)) return false;
+    for (const child of node.childNodes) {
+      if (!visit(child)) return false;
+    }
+    return true;
+  };
+  return proof.root.isConnected && visit(proof.root) && index === proof.nodes.length;
+}
+
+function sameDomProof(a: OutlineDomProof, b: OutlineDomProof): boolean {
+  if (a.root !== b.root || a.nodes.length !== b.nodes.length) return false;
+  for (let index = 0; index < a.nodes.length; index++) {
+    const x = a.nodes[index];
+    const y = b.nodes[index];
+    if (
+      x.node !== y.node ||
+      x.parent !== y.parent ||
+      x.value !== y.value ||
+      x.childCount !== y.childCount ||
+      x.attributes?.length !== y.attributes?.length
+    ) {
+      return false;
+    }
+    for (let attributeIndex = 0; attributeIndex < (x.attributes?.length ?? 0); attributeIndex++) {
+      const xAttribute = x.attributes?.[attributeIndex];
+      const yAttribute = y.attributes?.[attributeIndex];
+      if (xAttribute?.[0] !== yAttribute?.[0] || xAttribute?.[1] !== yAttribute?.[1]) return false;
+    }
+  }
+  return true;
+}
+
+function sameRuntimeElements(a: OutlinePresentationRuntime, b: OutlinePresentationRuntime): boolean {
+  return (
+    a.root === b.root &&
+    a.toggle === b.toggle &&
+    a.nav === b.nav &&
+    a.list === b.list &&
+    a.rows.length === b.rows.length &&
+    a.rows.every(
+      (elements, index) =>
+        elements.item === b.rows[index]?.item &&
+        elements.button === b.rows[index]?.button,
+    )
+  );
+}
+
+function runtimePublicationIsComplete(
+  candidate: OutlinePresentation,
+  runtime: OutlinePresentationRuntime,
+): boolean {
+  if (!runtime.root || !runtime.toggle || runtime.rows.length !== candidate.rows.length) return false;
+  if (!candidate.open) {
+    return (
+      runtime.nav === null &&
+      runtime.list === null &&
+      runtime.rows.every(({ item, button }) => item === null && button === null)
+    );
+  }
+  return (
+    runtime.nav !== null &&
+    runtime.list !== null &&
+    runtime.rows.every(({ item, button }) => item !== null && button !== null)
+  );
+}
+
+function nativeClickFor(
+  event: ReactMouseEvent<HTMLButtonElement>,
+  source: HTMLButtonElement,
+  proof: OutlineDomProof,
+): globalThis.MouseEvent | null {
+  const ownerWindow = source.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  if (
+    !ownerWindow ||
+    !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+    nativeEvent.type !== "click" ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    event.currentTarget !== source ||
+    target !== nativeEvent.target ||
+    !(target instanceof ownerWindow.Node) ||
+    target.ownerDocument !== source.ownerDocument ||
+    !source.contains(target) ||
+    !nativeEvent.composedPath().includes(source) ||
+    !nativeEvent.composedPath().includes(proof.root) ||
+    !proof.nodes.some(({ node }) => node === target)
+  ) {
+    return null;
+  }
+  return nativeEvent;
+}
+
+function nativeKeyFor(
+  event: ReactKeyboardEvent<HTMLUListElement>,
+  list: HTMLUListElement,
+  proof: OutlineDomProof,
+): globalThis.KeyboardEvent | null {
+  const ownerWindow = list.ownerDocument.defaultView;
+  const nativeEvent = event.nativeEvent;
+  const target = event.target;
+  if (
+    !ownerWindow ||
+    !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
+    nativeEvent.type !== "keydown" ||
+    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+    nativeEvent.key !== event.key ||
+    event.currentTarget !== list ||
+    target !== nativeEvent.target ||
+    !(target instanceof ownerWindow.Node) ||
+    target.ownerDocument !== list.ownerDocument ||
+    !list.contains(target) ||
+    !nativeEvent.composedPath().includes(list) ||
+    !nativeEvent.composedPath().includes(proof.root) ||
+    !proof.nodes.some(({ node }) => node === target)
+  ) {
+    return null;
+  }
+  return nativeEvent;
+}
+
 export function useHeadings(session: CollabSession): HeadingInfo[] {
   return useSessionValue(session, (s) => s.binding.getHeadings(), sameHeadings);
 }
@@ -148,6 +347,7 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   // Equal-looking renders remain distinct authorities so retained handlers cannot cross a commit boundary.
   const presentation: OutlinePresentation = Object.freeze({
     mount,
+    visit,
     visitIdentity: visit.identity,
     session,
     open,
@@ -162,111 +362,61 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
     revision,
   });
 
-  const activePresentationRef = useRef<OutlinePresentation | null>(null);
-  const lastCommittedPresentationRef = useRef<OutlinePresentation | null>(null);
+  const activeAuthorityRef = useRef<OutlineAuthority | null>(null);
+  const lastCommittedAuthorityRef = useRef<OutlineAuthority | null>(null);
   const presentationRuntimesRef = useRef(new WeakMap<OutlinePresentation, OutlinePresentationRuntime>());
-  const claimedTogglePresentationsRef = useRef(new WeakSet<OutlinePresentation>());
-  const claimedListPresentationsRef = useRef(new WeakSet<OutlinePresentation>());
-  const claimedRowsRef = useRef(new WeakSet<HeadingPublication>());
+  const disqualifiedPresentationsRef = useRef(new WeakSet<OutlinePresentation>());
+  const replayedPresentationsRef = useRef(new WeakSet<OutlinePresentation>());
+  const supersededPresentationsRef = useRef(new WeakSet<OutlinePresentation>());
+  const claimedNativeEventsRef = useRef(new WeakSet<Event>());
   const revealedPresentationsRef = useRef(new WeakSet<OutlinePresentation>());
+  const callbackReplayWindowRef = useRef<OutlinePresentation | null>(null);
 
-  const runtimeFor = useCallback((candidate: OutlinePresentation) => {
+  const runtimeForBinding = useCallback((candidate: OutlinePresentation) => {
     const runtimes = presentationRuntimesRef.current;
     let runtime = runtimes.get(candidate);
-    if (!runtime) {
+    if (!runtime || runtime.retired) {
       runtime = {
+        retired: false,
         active: false,
         root: null,
         toggle: null,
         nav: null,
         list: null,
         rows: candidate.rows.map(() => ({ item: null, button: null })),
+        proof: null,
       };
       runtimes.set(candidate, runtime);
     }
     return runtime;
   }, []);
 
-  const retirePresentation = useCallback((candidate: OutlinePresentation) => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
-    if (runtime) runtime.active = false;
-    if (activePresentationRef.current === candidate) activePresentationRef.current = null;
+  const retireRuntime = useCallback((runtime: OutlinePresentationRuntime) => {
+    runtime.active = false;
+    runtime.retired = true;
+    const authority = activeAuthorityRef.current;
+    if (authority?.runtime === runtime) {
+      authority.retired = true;
+      activeAuthorityRef.current = null;
+    }
   }, []);
 
-  const bindRoot = useCallback(
-    (candidate: OutlinePresentation, element: HTMLElement | null) => {
-      const runtime = runtimeFor(candidate);
-      if (element) {
-        if (!runtime.active || runtime.root === null || runtime.root === element) runtime.root = element;
-      } else {
-        retirePresentation(candidate);
-      }
-    },
-    [retirePresentation, runtimeFor],
-  );
+  const retirePresentation = useCallback((candidate: OutlinePresentation) => {
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    if (runtime) retireRuntime(runtime);
+  }, [retireRuntime]);
 
-  const bindToggle = useCallback(
-    (candidate: OutlinePresentation, element: HTMLButtonElement | null) => {
-      const runtime = runtimeFor(candidate);
-      if (element) {
-        if (!runtime.active || runtime.toggle === null || runtime.toggle === element) runtime.toggle = element;
-      } else {
-        retirePresentation(candidate);
-      }
-    },
-    [retirePresentation, runtimeFor],
-  );
-
-  const bindNav = useCallback(
-    (candidate: OutlinePresentation, element: HTMLElement | null) => {
-      const runtime = runtimeFor(candidate);
-      if (element) {
-        if (!runtime.active || runtime.nav === null || runtime.nav === element) runtime.nav = element;
-      } else {
-        retirePresentation(candidate);
-      }
-    },
-    [retirePresentation, runtimeFor],
-  );
-
-  const bindList = useCallback(
-    (candidate: OutlinePresentation, element: HTMLUListElement | null) => {
-      const runtime = runtimeFor(candidate);
-      if (element) {
-        if (!runtime.active || runtime.list === null || runtime.list === element) runtime.list = element;
-      } else {
-        retirePresentation(candidate);
-      }
-    },
-    [retirePresentation, runtimeFor],
-  );
-
-  const bindRowElement = useCallback(
-    <K extends keyof OutlineRowElements>(
-      candidate: OutlinePresentation,
-      row: HeadingPublication,
-      control: K,
-      element: OutlineRowElements[K],
-    ) => {
-      const runtime = runtimeFor(candidate);
-      const elements = runtime.rows[row.index];
-      if (element) {
-        if (!runtime.active || elements[control] === null || elements[control] === element) {
-          elements[control] = element;
-        }
-      } else {
-        retirePresentation(candidate);
-      }
-    },
-    [retirePresentation, runtimeFor],
-  );
-
-  const presentationDomIsValid = useCallback((candidate: OutlinePresentation) => {
+  const presentationDomIsValid = useCallback((candidate: OutlinePresentation, runtime: OutlinePresentationRuntime, requireProof: boolean) => {
     if (
       candidate.mount !== mount ||
+      candidate.visit.session !== candidate.session ||
+      candidate.visit.open !== candidate.open ||
+      candidate.visit.identity !== candidate.visitIdentity ||
       candidate.rows.length !== candidate.headings.length ||
       candidate.active !== activeHeadingIndex(candidate.headings, candidate.session.cursorSource) ||
-      candidate.tabStop !== (candidate.active >= 0 ? candidate.active : 0)
+      candidate.tabStop !== (candidate.active >= 0 ? candidate.active : 0) ||
+      runtime.retired ||
+      (requireProof && (!runtime.proof || !domProofIsCurrent(runtime.proof)))
     ) {
       return false;
     }
@@ -278,10 +428,19 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
     }
     if (candidate.minLevel !== expectedMinLevel) return false;
 
-    const runtime = presentationRuntimesRef.current.get(candidate);
-    const root = runtime?.root;
-    const toggle = runtime?.toggle;
-    if (!runtime || !root?.isConnected || !toggle?.isConnected || toggle.disabled) return false;
+    const root = runtime.root;
+    const toggle = runtime.toggle;
+    const ownerDocument = root?.ownerDocument;
+    if (
+      !root?.isConnected ||
+      !toggle?.isConnected ||
+      !ownerDocument?.defaultView ||
+      toggle.ownerDocument !== ownerDocument ||
+      toggle.disabled ||
+      toggle.type !== "button"
+    ) {
+      return false;
+    }
 
     if (!candidate.open) {
       return (
@@ -289,6 +448,8 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
         root.children.length === 1 &&
         root.firstElementChild === toggle &&
         toggle.parentElement === root &&
+        toggle.getAttribute("aria-label") === "Show outline" &&
+        toggle.title === "Show outline" &&
         runtime.nav === null &&
         runtime.list === null &&
         runtime.rows.every((elements) => elements.item === null && elements.button === null)
@@ -309,7 +470,11 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
       header.children.length !== 2 ||
       header.lastElementChild !== toggle ||
       toggle.parentElement !== header ||
+      toggle.getAttribute("aria-label") !== "Hide outline" ||
+      toggle.title !== "Hide outline" ||
       !list?.isConnected ||
+      nav.ownerDocument !== ownerDocument ||
+      list.ownerDocument !== ownerDocument ||
       list.parentElement !== nav ||
       nav.firstElementChild !== list ||
       nav.children.length !== (candidate.hydrated && candidate.rows.length === 0 ? 2 : 1) ||
@@ -328,7 +493,10 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
         !(item instanceof HTMLLIElement) ||
         !item.isConnected ||
         !button?.isConnected ||
+        item.ownerDocument !== ownerDocument ||
+        button.ownerDocument !== ownerDocument ||
         button.disabled ||
+        button.type !== "button" ||
         list.children.item(row.index) !== item ||
         item.parentElement !== list ||
         item.children.length !== 1 ||
@@ -347,63 +515,232 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
   }, [mount]);
 
   const presentationIsCurrent = useCallback(
-    (candidate: OutlinePresentation) =>
-      activePresentationRef.current === candidate &&
-      presentationRuntimesRef.current.get(candidate)?.active === true &&
-      presentationDomIsValid(candidate),
+    (candidate: OutlinePresentation, runtime: OutlinePresentationRuntime) => {
+      const authority = activeAuthorityRef.current;
+      return (
+        authority?.presentation === candidate &&
+        authority.runtime === runtime &&
+        !authority.retired &&
+        !runtime.retired &&
+        runtime.active &&
+        presentationRuntimesRef.current.get(candidate) === runtime &&
+        presentationDomIsValid(candidate, runtime, true)
+      );
+    },
     [presentationDomIsValid],
   );
 
-  const claimToggle = useCallback(
-    (candidate: OutlinePresentation, source: HTMLButtonElement) => {
+  const admitCallbackReplay = useCallback(
+    (candidate: OutlinePresentation) => {
+      const current = activeAuthorityRef.current;
+      if (current?.presentation === candidate && presentationIsCurrent(candidate, current.runtime)) return;
+
+      const before = lastCommittedAuthorityRef.current;
       const runtime = presentationRuntimesRef.current.get(candidate);
       if (
-        claimedTogglePresentationsRef.current.has(candidate) ||
+        callbackReplayWindowRef.current !== candidate ||
+        !before ||
+        before.presentation !== candidate ||
+        !before.retired ||
+        before.layoutCleaned ||
+        before.runtime === runtime ||
+        !before.runtime.proof ||
+        !runtime ||
+        runtime.retired ||
+        !runtimePublicationIsComplete(candidate, runtime) ||
+        replayedPresentationsRef.current.has(candidate) ||
+        supersededPresentationsRef.current.has(candidate) ||
+        disqualifiedPresentationsRef.current.has(candidate)
+      ) {
+        return;
+      }
+
+      if (!presentationDomIsValid(candidate, runtime, false)) {
+        retireRuntime(runtime);
+        disqualifiedPresentationsRef.current.add(candidate);
+        callbackReplayWindowRef.current = null;
+        return;
+      }
+      const proof = captureDomProof(runtime.root!);
+      if (
+        !sameRuntimeElements(before.runtime, runtime) ||
+        !sameDomProof(before.runtime.proof, proof)
+      ) {
+        retireRuntime(runtime);
+        disqualifiedPresentationsRef.current.add(candidate);
+        callbackReplayWindowRef.current = null;
+        return;
+      }
+
+      runtime.proof = proof;
+      runtime.active = true;
+      const authority: OutlineAuthority = {
+        presentation: candidate,
+        runtime,
+        retired: false,
+        layoutCleaned: false,
+      };
+      activeAuthorityRef.current = authority;
+      lastCommittedAuthorityRef.current = authority;
+      replayedPresentationsRef.current.add(candidate);
+      callbackReplayWindowRef.current = null;
+      if (!presentationIsCurrent(candidate, runtime)) {
+        retireRuntime(runtime);
+        disqualifiedPresentationsRef.current.add(candidate);
+      }
+    },
+    [presentationDomIsValid, presentationIsCurrent, retireRuntime],
+  );
+
+  const bindRoot = useCallback(
+    (candidate: OutlinePresentation, element: HTMLElement | null) => {
+      if (element) {
+        const runtime = runtimeForBinding(candidate);
+        if (runtime.root === null) runtime.root = element;
+        else if (runtime.root !== element) retireRuntime(runtime);
+        if (!runtime.retired) admitCallbackReplay(candidate);
+      } else {
+        const runtime = presentationRuntimesRef.current.get(candidate);
+        if (runtime?.root) retireRuntime(runtime);
+      }
+    },
+    [admitCallbackReplay, retireRuntime, runtimeForBinding],
+  );
+
+  const bindToggle = useCallback(
+    (candidate: OutlinePresentation, element: HTMLButtonElement | null) => {
+      if (element) {
+        const runtime = runtimeForBinding(candidate);
+        if (runtime.toggle === null) runtime.toggle = element;
+        else if (runtime.toggle !== element) retireRuntime(runtime);
+        if (!runtime.retired) admitCallbackReplay(candidate);
+      } else {
+        const runtime = presentationRuntimesRef.current.get(candidate);
+        if (runtime?.toggle) retireRuntime(runtime);
+      }
+    },
+    [admitCallbackReplay, retireRuntime, runtimeForBinding],
+  );
+
+  const bindNav = useCallback(
+    (candidate: OutlinePresentation, element: HTMLElement | null) => {
+      if (element) {
+        const runtime = runtimeForBinding(candidate);
+        if (runtime.nav === null) runtime.nav = element;
+        else if (runtime.nav !== element) retireRuntime(runtime);
+        if (!runtime.retired) admitCallbackReplay(candidate);
+      } else {
+        const runtime = presentationRuntimesRef.current.get(candidate);
+        if (runtime?.nav) retireRuntime(runtime);
+      }
+    },
+    [admitCallbackReplay, retireRuntime, runtimeForBinding],
+  );
+
+  const bindList = useCallback(
+    (candidate: OutlinePresentation, element: HTMLUListElement | null) => {
+      if (element) {
+        const runtime = runtimeForBinding(candidate);
+        if (runtime.list === null) runtime.list = element;
+        else if (runtime.list !== element) retireRuntime(runtime);
+        if (!runtime.retired) admitCallbackReplay(candidate);
+      } else {
+        const runtime = presentationRuntimesRef.current.get(candidate);
+        if (runtime?.list) retireRuntime(runtime);
+      }
+    },
+    [admitCallbackReplay, retireRuntime, runtimeForBinding],
+  );
+
+  const bindRowElement = useCallback(
+    <K extends keyof OutlineRowElements>(
+      candidate: OutlinePresentation,
+      row: HeadingPublication,
+      control: K,
+      element: OutlineRowElements[K],
+    ) => {
+      const runtime = runtimeForBinding(candidate);
+      const elements = runtime.rows[row.index];
+      if (!elements) {
+        retireRuntime(runtime);
+        return;
+      }
+      if (element) {
+        if (elements[control] === null) elements[control] = element;
+        else if (elements[control] !== element) retireRuntime(runtime);
+        if (!runtime.retired) admitCallbackReplay(candidate);
+      } else if (elements[control]) {
+        retireRuntime(runtime);
+      }
+    },
+    [admitCallbackReplay, retireRuntime, runtimeForBinding],
+  );
+
+  const claimToggle = useCallback(
+    (candidate: OutlinePresentation, event: ReactMouseEvent<HTMLButtonElement>) => {
+      const runtime = presentationRuntimesRef.current.get(candidate);
+      const source = event.currentTarget;
+      if (
+        !runtime ||
         runtime?.toggle !== source ||
-        source.disabled
+        source.disabled ||
+        !runtime.proof
       ) {
         return false;
       }
-      if (!presentationIsCurrent(candidate)) {
+      if (!presentationIsCurrent(candidate, runtime)) {
         retirePresentation(candidate);
         return false;
       }
-      claimedTogglePresentationsRef.current.add(candidate);
+      const nativeEvent = nativeClickFor(event, source, runtime.proof);
+      if (!nativeEvent || claimedNativeEventsRef.current.has(nativeEvent)) return false;
+      claimedNativeEventsRef.current.add(nativeEvent);
       return true;
     },
     [presentationIsCurrent, retirePresentation],
   );
 
   const claimHeading = useCallback(
-    (candidate: OutlinePresentation, row: HeadingPublication, source: HTMLButtonElement) => {
+    (candidate: OutlinePresentation, row: HeadingPublication, event: ReactMouseEvent<HTMLButtonElement>) => {
       const runtime = presentationRuntimesRef.current.get(candidate);
+      const source = event.currentTarget;
       if (
-        claimedRowsRef.current.has(row) ||
+        !runtime ||
         candidate.rows[row.index] !== row ||
         runtime?.rows[row.index]?.button !== source ||
-        source.disabled
+        source.disabled ||
+        !runtime.proof
       ) {
         return false;
       }
-      if (!presentationIsCurrent(candidate)) {
+      if (!presentationIsCurrent(candidate, runtime)) {
         retirePresentation(candidate);
         return false;
       }
-      claimedRowsRef.current.add(row);
+      const nativeEvent = nativeClickFor(event, source, runtime.proof);
+      if (!nativeEvent || claimedNativeEventsRef.current.has(nativeEvent)) return false;
+      claimedNativeEventsRef.current.add(nativeEvent);
       return true;
     },
     [presentationIsCurrent, retirePresentation],
   );
 
   const claimListKey = useCallback(
-    (candidate: OutlinePresentation, event: KeyboardEvent<HTMLUListElement>) => {
+    (candidate: OutlinePresentation, event: ReactKeyboardEvent<HTMLUListElement>) => {
       if (nextOutlineIndex(event.key, 0, candidate.rows.length) < 0) return null;
       const runtime = presentationRuntimesRef.current.get(candidate);
+      const list = event.currentTarget;
+      const proof = runtime?.proof;
+      const ownerWindow = list.ownerDocument.defaultView;
+      const nativeEvent = proof ? nativeKeyFor(event, list, proof) : null;
       if (
-        runtime?.list !== event.currentTarget ||
-        !(event.target instanceof HTMLButtonElement) ||
-        event.target !== document.activeElement ||
-        claimedListPresentationsRef.current.has(candidate) ||
+        !runtime ||
+        runtime.list !== list ||
+        !ownerWindow ||
+        !(event.target instanceof ownerWindow.HTMLButtonElement) ||
+        event.target !== list.ownerDocument.activeElement ||
+        !nativeEvent ||
+        claimedNativeEventsRef.current.has(nativeEvent) ||
         !runtime.rows.some(({ button }) => button === event.target)
       ) {
         return null;
@@ -423,74 +760,134 @@ export function OutlinePanel({ session, open, onToggle, onSelect, className }: O
       ) {
         return null;
       }
-      if (!presentationIsCurrent(candidate)) {
+      if (!presentationIsCurrent(candidate, runtime)) {
         retirePresentation(candidate);
         return null;
       }
-      claimedListPresentationsRef.current.add(candidate);
+      claimedNativeEventsRef.current.add(nativeEvent);
       return destination;
     },
     [presentationIsCurrent, retirePresentation],
   );
 
   useLayoutEffect(() => {
-    const existing = activePresentationRef.current;
-    if (existing && existing !== presentation) retirePresentation(existing);
-    const runtime = runtimeFor(presentation);
-    if (!presentationDomIsValid(presentation)) {
-      retirePresentation(presentation);
-      lastCommittedPresentationRef.current = null;
+    const existing = activeAuthorityRef.current;
+    if (existing && existing.presentation !== presentation) {
+      supersededPresentationsRef.current.add(existing.presentation);
+      retireRuntime(existing.runtime);
+    }
+    const before = lastCommittedAuthorityRef.current;
+    if (before && before.presentation !== presentation) {
+      supersededPresentationsRef.current.add(before.presentation);
+    }
+
+    const runtime = presentationRuntimesRef.current.get(presentation);
+    if (
+      !runtime ||
+      supersededPresentationsRef.current.has(presentation) ||
+      disqualifiedPresentationsRef.current.has(presentation) ||
+      !presentationDomIsValid(presentation, runtime, false)
+    ) {
+      if (runtime) retireRuntime(runtime);
+      disqualifiedPresentationsRef.current.add(presentation);
+      lastCommittedAuthorityRef.current = null;
       return () => retirePresentation(presentation);
     }
 
-    const before = lastCommittedPresentationRef.current;
+    const proof = captureDomProof(runtime.root!);
+    if (before?.presentation === presentation) {
+      if (
+        before.runtime === runtime ||
+        !before.retired ||
+        !before.layoutCleaned ||
+        replayedPresentationsRef.current.has(presentation) ||
+        !before.runtime.proof ||
+        !sameRuntimeElements(before.runtime, runtime) ||
+        !sameDomProof(before.runtime.proof, proof)
+      ) {
+        retireRuntime(runtime);
+        disqualifiedPresentationsRef.current.add(presentation);
+        lastCommittedAuthorityRef.current = null;
+        return () => retirePresentation(presentation);
+      }
+      replayedPresentationsRef.current.add(presentation);
+    }
+
+    runtime.proof = proof;
+    const authority: OutlineAuthority = {
+      presentation,
+      runtime,
+      retired: false,
+      layoutCleaned: false,
+    };
     runtime.active = true;
-    activePresentationRef.current = presentation;
-    lastCommittedPresentationRef.current = presentation;
+    activeAuthorityRef.current = authority;
+    lastCommittedAuthorityRef.current = authority;
+
+    if (!presentationDomIsValid(presentation, runtime, true)) {
+      retireRuntime(runtime);
+      disqualifiedPresentationsRef.current.add(presentation);
+      lastCommittedAuthorityRef.current = null;
+      return () => retirePresentation(presentation);
+    }
 
     if (
       presentation.open &&
       presentation.hydrated &&
       presentation.active >= 0 &&
       before &&
-      before !== presentation &&
-      before.session === presentation.session &&
-      before.open &&
-      before.hydrated === presentation.hydrated &&
-      before.headings === presentation.headings &&
-      before.active !== presentation.active &&
+      before.presentation !== presentation &&
+      before.presentation.session === presentation.session &&
+      before.presentation.open &&
+      before.presentation.hydrated === presentation.hydrated &&
+      before.presentation.headings === presentation.headings &&
+      before.presentation.active !== presentation.active &&
       !revealedPresentationsRef.current.has(presentation)
     ) {
-      const beforeRuntime = presentationRuntimesRef.current.get(before);
+      const beforeRuntime = before.runtime;
       const activeButton = runtime.rows[presentation.active]?.button;
-      const sameDom =
-        beforeRuntime?.root === runtime.root &&
-        beforeRuntime.toggle === runtime.toggle &&
-        beforeRuntime.nav === runtime.nav &&
-        beforeRuntime.list === runtime.list &&
-        beforeRuntime.rows.length === runtime.rows.length &&
-        beforeRuntime.rows.every(
-          (elements, index) =>
-            elements.item === runtime.rows[index]?.item &&
-            elements.button === runtime.rows[index]?.button,
-        );
-      if (sameDom && activeButton && presentationIsCurrent(presentation)) {
+      if (
+        sameRuntimeElements(beforeRuntime, runtime) &&
+        activeButton &&
+        presentationIsCurrent(presentation, runtime)
+      ) {
         revealedPresentationsRef.current.add(presentation);
         activeButton.scrollIntoView({ block: "nearest" });
       }
     }
 
-    return () => retirePresentation(presentation);
+    return () => {
+      authority.layoutCleaned = true;
+      retireRuntime(runtime);
+    };
   }, [
     presentation,
     presentationDomIsValid,
     presentationIsCurrent,
     retirePresentation,
-    runtimeFor,
+    retireRuntime,
   ]);
 
-  const toggle = (event: MouseEvent<HTMLButtonElement>) => {
-    if (!claimToggle(presentation, event.currentTarget)) return;
+  useEffect(() => {
+    const authority = activeAuthorityRef.current;
+    if (
+      replayedPresentationsRef.current.has(presentation) ||
+      !authority ||
+      authority.presentation !== presentation ||
+      !presentationIsCurrent(presentation, authority.runtime)
+    ) {
+      return;
+    }
+    callbackReplayWindowRef.current = presentation;
+    queueMicrotask(() => {
+      if (callbackReplayWindowRef.current === presentation) {
+        callbackReplayWindowRef.current = null;
+      }
+    });
+  }, [presentation, presentationIsCurrent]);
+
+  const toggle = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (!claimToggle(presentation, event)) return;
     presentation.onToggle();
   };
 
@@ -575,14 +972,18 @@ const OutlineList = memo(function OutlineList({
     control: K,
     element: OutlineRowElements[K],
   ) => void;
-  claimHeading: (presentation: OutlinePresentation, row: HeadingPublication, source: HTMLButtonElement) => boolean;
+  claimHeading: (
+    presentation: OutlinePresentation,
+    row: HeadingPublication,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => boolean;
   claimListKey: (
     presentation: OutlinePresentation,
-    event: KeyboardEvent<HTMLUListElement>,
+    event: ReactKeyboardEvent<HTMLUListElement>,
   ) => HTMLButtonElement | null;
   republish: () => void;
 }) {
-  const onListKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
+  const onListKeyDown = (event: ReactKeyboardEvent<HTMLUListElement>) => {
     const destination = claimListKey(presentation, event);
     if (!destination) return;
     republish();
@@ -605,7 +1006,7 @@ const OutlineList = memo(function OutlineList({
             type="button"
             ref={(element) => bindRowElement(presentation, row, "button", element)}
             onClick={(event) => {
-              if (claimHeading(presentation, row, event.currentTarget)) {
+              if (claimHeading(presentation, row, event)) {
                 presentation.onSelect(row.heading);
               }
             }}
