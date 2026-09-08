@@ -756,7 +756,7 @@ function captureNavigationIntrinsics(ownerDocument: Document): NavigationIntrins
     const composedPathMethod = captureMethod(eventPrototype, "composedPath", getOwnPropertyDescriptor);
     const preventDefaultMethod = captureMethod(eventPrototype, "preventDefault", getOwnPropertyDescriptor);
     const focusMethod = captureMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor);
-    const trustProbe = new eventConstructor("reader-toc-intrinsic-probe");
+    const trustProbe = new keyboardEventConstructor("reader-toc-intrinsic-probe");
     const isTrusted = getOwnPropertyDescriptor(trustProbe, "isTrusted");
     if (
       !type ||

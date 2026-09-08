@@ -418,6 +418,22 @@ describe("ReaderToc mobile disclosure", () => {
 });
 
 describe("ReaderToc keyboard navigation", () => {
+  it("uses the stable KeyboardEvent-specific trust getter as keyboard authority", () => {
+    const firstKeyboard = new window.KeyboardEvent("keydown", { key: "ArrowDown" });
+    const secondKeyboard = new window.KeyboardEvent("keydown", { key: "ArrowUp" });
+    const plainEvent = new window.Event("keydown");
+    const firstDescriptor = Object.getOwnPropertyDescriptor(firstKeyboard, "isTrusted");
+    const secondDescriptor = Object.getOwnPropertyDescriptor(secondKeyboard, "isTrusted");
+    const plainDescriptor = Object.getOwnPropertyDescriptor(plainEvent, "isTrusted");
+
+    expect(firstDescriptor?.get).toBeTypeOf("function");
+    expect(secondDescriptor?.get).toBe(firstDescriptor?.get);
+    expect(firstDescriptor?.configurable).toBe(false);
+    if (plainDescriptor?.get !== firstDescriptor?.get) {
+      expect(plainDescriptor?.get).not.toBe(firstDescriptor?.get);
+    }
+  });
+
   it.each(["ArrowDown", "ArrowUp", "Home", "End"] as const)(
     "rejects a unit-created untrusted %s event before prevention or focus",
     (key) => {
