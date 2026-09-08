@@ -48,6 +48,7 @@ type ElementRef<T extends HTMLElement> = (element: T | null) => void;
 
 interface CapturedClick {
   type: string;
+  button: number;
   currentTarget: EventTarget | null;
   target: EventTarget | null;
   nativeEvent: Event;
@@ -149,8 +150,25 @@ function capturedClick(
   const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
   const nativeEvent = new MouseEventConstructor("click", { bubbles: true });
   Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  const path: EventTarget[] = [];
+  if (nativeTarget instanceof Node) {
+    let current: Node | null = nativeTarget;
+    while (current) {
+      path.push(current);
+      if (current === ownerDocument) break;
+      current = current.parentNode;
+    }
+    if (path.at(-1) === ownerDocument && ownerDocument.defaultView) {
+      path.push(ownerDocument.defaultView);
+    }
+  }
+  Object.defineProperty(nativeEvent, "composedPath", {
+    configurable: true,
+    value: () => path,
+  });
   return {
     type: "click",
+    button: 0,
     currentTarget,
     target,
     nativeEvent,
@@ -644,6 +662,67 @@ describe("KeepAgentHerePanel exact control publications", () => {
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
   });
 
+  it.each([
+    ["zero-token setup", 0],
+    ["existing-token setup", 1],
+  ] as const)(
+    "mints an exact direct-root Strict Mode successor for the %s copy family",
+    async (_family, tokenCount) => {
+      const firstCopy = deferred<boolean>();
+      const onBack = vi.fn();
+      listTokens.mockReset().mockResolvedValue(tokenResponse(tokenCount));
+      const current: { panel: CapturedPanel | null; reentry: CapturedClick | null } = {
+        panel: null,
+        reentry: null,
+      };
+      copyText.mockImplementation(() => {
+        if (!current.panel || !current.reentry) throw new Error("The Strict Mode Copy control was not captured");
+        current.panel.copy.click(current.reentry);
+        return firstCopy.promise;
+      });
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC, onBack })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      if (tokenCount === 0) {
+        await waitFor(() => expect(within(view.host).getByTestId("agent-connect-card")).toBeInTheDocument());
+      } else {
+        expect(within(view.host).queryByTestId("agent-connect-card")).toBeNull();
+      }
+      const retained = capturePanel(view.host);
+      const icon = retained.copy.element.firstElementChild;
+      if (!icon) throw new Error("The Strict Mode Copy control has no icon");
+      const reentry = capturedClick(retained.copy, retained.copy.element, icon, icon);
+      current.panel = retained;
+      current.reentry = reentry;
+      vi.useFakeTimers();
+
+      fireEvent.click(retained.copy.element);
+      act(() => {
+        retained.copy.click(reentry);
+        retained.copy.click(reentry);
+      });
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+      expect(onBack).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await resolve(firstCopy, true);
+      const copied = capturePanel(view.host);
+      expect(copied.copy.element).toBe(retained.copy.element);
+      expect(copied.copy.click).not.toBe(retained.copy.click);
+      expect(copied.copy.element).toHaveTextContent("Copied");
+      expect(vi.getTimerCount()).toBe(1);
+
+      act(() => {
+        retained.copy.click(capturedClick(copied.copy));
+      });
+      expect(copyText).toHaveBeenCalledOnce();
+      act(() => vi.advanceTimersByTime(1500));
+      expect(capturePanel(view.host).copy.element).toHaveTextContent("Copy");
+    },
+  );
+
   it("keeps exact actions available through Strict Mode's ref and layout replays", async () => {
     const onBack = vi.fn();
     const view = renderDirect(
@@ -658,6 +737,80 @@ describe("KeepAgentHerePanel exact control publications", () => {
     expect(onBack).toHaveBeenCalledOnce();
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
     expect(listTokens).toHaveBeenCalledOnce();
+  });
+
+  it("rejects restored and detached Strict Mode copy topology until an exact successor renders", async () => {
+    const docB = { id: "doc-2", title: "Successor" };
+    const docC = { id: "doc-3", title: "Recovered" };
+    const strictPanel = (doc: typeof DOC) =>
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc }));
+    const view = renderDirect(strictPanel(DOC));
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const mutated = capturePanel(view.host);
+    const originalPrompt = mutated.prompt.textContent;
+
+    mutated.prompt.textContent = "mutated";
+    mutated.prompt.textContent = originalPrompt;
+    fireEvent.click(mutated.copy.element);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+
+    act(() => view.root.render(strictPanel(docB)));
+    const detached = capturePanel(view.host);
+    const wrapper = detached.prompt.parentElement;
+    if (!(wrapper instanceof HTMLDivElement)) throw new Error("Expected the prompt wrapper");
+    detached.copy.element.remove();
+    wrapper.append(detached.copy.element);
+    fireEvent.click(detached.copy.element);
+    expect(copyText).not.toHaveBeenCalled();
+
+    act(() => view.root.render(strictPanel(docC)));
+    const current = capturePanel(view.host);
+    fireEvent.click(current.copy.element);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(docC));
+  });
+
+  it("isolates late clipboard settlement and copied-reset timers across Strict Mode A/B authorities", async () => {
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const docB = { id: "doc-2", title: "Current" };
+    const docC = { id: "doc-3", title: "After timer" };
+    copyText.mockReset()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const strictPanel = (doc: typeof DOC) =>
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc }));
+    const view = renderDirect(strictPanel(DOC));
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    vi.useFakeTimers();
+
+    const stale = capturePanel(view.host);
+    fireEvent.click(stale.copy.element);
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+    act(() => view.root.render(strictPanel(docB)));
+    const current = capturePanel(view.host);
+
+    await reject(first, new Error("late A clipboard failure"));
+    expect(selectContents).not.toHaveBeenCalled();
+    expect(current.copy.element).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => {
+      stale.copy.click(capturedClick(current.copy));
+    });
+    expect(copyText).toHaveBeenCalledOnce();
+
+    fireEvent.click(current.copy.element);
+    expect(copyText).toHaveBeenLastCalledWith(keepAgentPrompt(docB));
+    await resolve(second, true);
+    expect(capturePanel(view.host).copy.element).toHaveTextContent("Copied");
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => view.root.render(strictPanel(docC)));
+    expect(capturePanel(view.host).copy.element).toHaveTextContent("Copy");
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(2000));
+    expect(capturePanel(view.host).copy.element).toHaveTextContent("Copy");
+    expect(selectContents).not.toHaveBeenCalled();
   });
 
   it("retires pending and setup publications when token settlement changes the same DOM", async () => {
@@ -799,8 +952,12 @@ describe("KeepAgentHerePanel exact control publications", () => {
 
     injected.remove();
     observer.takeRecords();
-    fireEvent.click(back.element);
-    fireEvent.click(current.copy.element);
+    act(() => {
+      view.root.render(createElement(KeepAgentHerePanel, { doc: DOC, onBack }));
+    });
+    const recovered = capturePanel(view.host);
+    fireEvent.click(recovered.back!.element);
+    fireEvent.click(recovered.copy.element);
     expect(onBack).toHaveBeenCalledOnce();
     expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
     foreign.remove();
