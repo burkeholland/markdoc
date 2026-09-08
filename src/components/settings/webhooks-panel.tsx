@@ -208,6 +208,25 @@ interface ElementSlot<T extends HTMLElement> {
   binding: RefCallback<T> | null;
 }
 
+type FormKeyboardRefTarget = Readonly<{
+  owner: ElementSlot<HTMLElement>;
+  element: HTMLElement;
+  binding: RefCallback<HTMLElement>;
+}>;
+
+interface FormKeyboardRefReplayTarget extends FormKeyboardRefTarget {
+  released: boolean;
+  rebound: boolean;
+}
+
+interface FormKeyboardRefReplay {
+  readonly generation: MountGeneration;
+  readonly targets: readonly FormKeyboardRefReplayTarget[];
+  layoutReleased: boolean;
+  layoutRebound: boolean;
+  expired: boolean;
+}
+
 interface RowElements {
   root: ElementSlot<HTMLLIElement>;
   enable: ElementSlot<HTMLButtonElement>;
@@ -250,6 +269,10 @@ interface PanelPublication {
   placement: PanelPlacement | null;
   guard: PanelDomGuard | null;
   keyboard: FormKeyboardAuthority | null;
+  keyboardSuspended: boolean;
+  keyboardLayoutReplayAvailable: boolean;
+  keyboardReplay: FormKeyboardRefReplay | null;
+  keyboardReplayExpiryQueued: boolean;
   guardExpiryQueued: boolean;
   factsAreCurrent: (() => boolean) | null;
   domIsExact: ((override?: InputDomOverride) => boolean) | null;
@@ -296,6 +319,7 @@ type FormKeyboardAuthority = Readonly<{
   root: HTMLDivElement;
   document: Document;
   targets: readonly HTMLElement[];
+  refTargets: readonly FormKeyboardRefTarget[];
   KeyboardEvent: typeof KeyboardEvent;
   preventDefault: (this: Event) => void;
 }>;
@@ -348,6 +372,7 @@ class PanelPublicationCoordinator {
         if (publication) {
           publication.guard = null;
           publication.keyboard = null;
+          publication.keyboardReplay = null;
         }
       }
       this.#current = null;
@@ -363,13 +388,24 @@ class PanelPublicationCoordinator {
     if (owner.element === element) return;
     const previous = owner.element;
     const last = owner.last;
+    const slotOwner = owner as ElementSlot<HTMLElement>;
+    const proof = candidate.established
+      ? candidate.replayRefs.find((entry) => entry.owner === slotOwner)
+      : null;
+    const deferRetirement = proof
+      ? this.#trackFormKeyboardRefReplay(
+          candidate,
+          slotOwner,
+          previous,
+          element,
+          proof,
+        )
+      : false;
     owner.mouseTargets = null;
     owner.element = element;
     if (element) owner.last = element;
     if (!candidate.established) return;
 
-    const slotOwner = owner as ElementSlot<HTMLElement>;
-    const proof = candidate.replayRefs.find((entry) => entry.owner === slotOwner);
     if (!proof) {
       candidate.invalidReplay = true;
       this.retire(candidate, "element");
@@ -396,7 +432,8 @@ class PanelPublicationCoordinator {
     if (
       candidate.stableSlots.has(slotOwner) &&
       (element === null || (element !== null && last !== null && element !== last)) &&
-      !candidate.introducedSlots.has(slotOwner)
+      !candidate.introducedSlots.has(slotOwner) &&
+      !deferRetirement
     ) {
       this.retire(candidate, "element");
     }
@@ -411,6 +448,109 @@ class PanelPublicationCoordinator {
     this.#requestReplaySuccessor(candidate);
   }
 
+  #trackFormKeyboardRefReplay(
+    candidate: PanelPublication,
+    owner: ElementSlot<HTMLElement>,
+    previous: HTMLElement | null,
+    element: HTMLElement | null,
+    proof: RefReplay,
+  ) {
+    if (candidate.successorRequested) return false;
+    const authority = candidate.keyboard;
+    const currentKeyboardPublication =
+      candidate.established &&
+      candidate.presentation.adding &&
+      candidate.presentation.generation === this.#mount &&
+      this.#current === candidate &&
+      !this.#retired.has(candidate) &&
+      authority !== null;
+    const captured = authority?.refTargets.find(
+      (target) => target.owner === owner,
+    );
+
+    if (
+      !candidate.keyboardReplay &&
+      currentKeyboardPublication &&
+      captured &&
+      element === null &&
+      previous === captured.element &&
+      previous === proof.element &&
+      previous.isConnected &&
+      authority.refTargets.every(
+        (target) =>
+          target.owner.element === target.element &&
+          target.owner.binding === target.binding &&
+          target.element.isConnected,
+      )
+    ) {
+      const replayedLayout = candidate.keyboardLayoutReplayAvailable;
+      candidate.keyboardLayoutReplayAvailable = false;
+      const replay: FormKeyboardRefReplay = {
+        generation: candidate.presentation.generation,
+        targets: Object.freeze(
+          authority.refTargets.map((target) => ({
+            ...target,
+            released: false,
+            rebound: false,
+          })),
+        ),
+        layoutReleased: candidate.layoutRetired || replayedLayout,
+        layoutRebound: replayedLayout,
+        expired: false,
+      };
+      candidate.keyboardReplay = replay;
+      candidate.keyboardSuspended = true;
+      this.#scheduleFormKeyboardReplayExpiry(candidate);
+      this.retire(candidate, "element");
+    } else if (
+      !candidate.keyboardReplay &&
+      currentKeyboardPublication &&
+      !captured &&
+      element === null &&
+      previous === proof.element &&
+      previous.isConnected
+    ) {
+      // Strict ref cleanup reaches the panel shell before the form. Suspend
+      // keyboard work until the first form target can open the full replay.
+      candidate.keyboardSuspended = true;
+      this.#scheduleFormKeyboardReplayExpiry(candidate);
+      return true;
+    }
+
+    const replay = candidate.keyboardReplay;
+    if (!replay || replay.expired) return false;
+    const target = replay.targets.find((entry) => entry.owner === owner);
+    if (!target) return false;
+    if (
+      replay.generation !== candidate.presentation.generation ||
+      replay.generation !== this.#mount ||
+      owner.binding !== target.binding
+    ) {
+      this.#expireFormKeyboardReplay(candidate);
+      return false;
+    }
+    if (
+      element === null &&
+      previous === target.element &&
+      !target.released &&
+      !target.rebound &&
+      target.element.isConnected
+    ) {
+      target.released = true;
+    } else if (
+      element === target.element &&
+      previous === null &&
+      target.released &&
+      !target.rebound &&
+      target.element.isConnected
+    ) {
+      target.rebound = true;
+    } else {
+      this.#expireFormKeyboardReplay(candidate);
+    }
+    return false;
+  }
+
   establish(
     candidate: PanelPublication,
     factsAreCurrent: () => boolean,
@@ -421,6 +561,14 @@ class PanelPublicationCoordinator {
     candidate.domIsExact = domIsExact;
     candidate.requestSuccessor = requestSuccessor;
     if (candidate.established) {
+      const keyboardReplay = candidate.keyboardReplay;
+      if (
+        keyboardReplay &&
+        !keyboardReplay.expired &&
+        keyboardReplay.layoutReleased
+      ) {
+        keyboardReplay.layoutRebound = true;
+      }
       this.#requestReplaySuccessor(candidate);
       return undefined;
     }
@@ -449,6 +597,7 @@ class PanelPublicationCoordinator {
         panelDomMatches(pendingReplay.dom);
       this.#replay = null;
       pendingReplay.release();
+      pendingReplay.source.keyboardReplay = null;
       if (this.#successorOf === pendingReplay.source) this.#successorOf = null;
       if (sameAuthority && !exactReplay) return undefined;
     }
@@ -468,6 +617,15 @@ class PanelPublicationCoordinator {
       return undefined;
     }
     const predecessor = this.#current ?? this.#successorOf;
+    const hasMatchingIntroducedFormLayout =
+      keyboard !== null &&
+      predecessor !== null &&
+      predecessor.presentation.generation === candidate.presentation.generation &&
+      !predecessor.presentation.adding &&
+      predecessor.consumed &&
+      predecessor.layoutRetired &&
+      this.#retired.has(predecessor) &&
+      this.#claimedPublications.has(predecessor);
     if (
       predecessor &&
       predecessor.presentation.generation === candidate.presentation.generation
@@ -520,6 +678,7 @@ class PanelPublicationCoordinator {
     candidate.placement = placement;
     candidate.guard = guard;
     candidate.keyboard = keyboard;
+    candidate.keyboardLayoutReplayAvailable = hasMatchingIntroducedFormLayout;
     for (const owner of panelButtonSlots(candidate)) {
       owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
     }
@@ -527,12 +686,27 @@ class PanelPublicationCoordinator {
     this.#successorOf = null;
     queueMicrotask(() => {
       if (this.#current === candidate && !this.#retired.has(candidate)) {
+        candidate.keyboardLayoutReplayAvailable = false;
         this.#acceptInputReconciliation(candidate);
       }
     });
     return () => {
       candidate.layoutRetired = true;
-      this.retire(candidate, "layout");
+      const keyboardReplay = candidate.keyboardReplay;
+      if (keyboardReplay && !keyboardReplay.expired) {
+        keyboardReplay.layoutReleased = true;
+      }
+      if (
+        this.#current === candidate &&
+        !this.#retired.has(candidate) &&
+        candidate.presentation.adding &&
+        candidate.keyboard
+      ) {
+        candidate.keyboardSuspended = true;
+        this.#scheduleFormKeyboardReplayExpiry(candidate);
+      } else {
+        this.retire(candidate, "layout");
+      }
       this.#requestReplaySuccessor(candidate);
     };
   }
@@ -560,6 +734,7 @@ class PanelPublicationCoordinator {
     const result =
       this.#current === candidate &&
       !this.#retired.has(candidate) &&
+      !candidate.keyboardSuspended &&
       !this.#claimedPublications.has(candidate) &&
       candidate.guard?.isClean() === true;
     return result;
@@ -685,7 +860,52 @@ class PanelPublicationCoordinator {
     });
   }
 
+  #scheduleFormKeyboardReplayExpiry(candidate: PanelPublication) {
+    if (candidate.keyboardReplayExpiryQueued) return;
+    candidate.keyboardReplayExpiryQueued = true;
+    queueMicrotask(() => {
+      candidate.keyboardReplayExpiryQueued = false;
+      if (candidate.successorRequested) return;
+      this.#expireFormKeyboardReplay(candidate);
+      candidate.invalidReplay = true;
+      candidate.keyboardSuspended = true;
+      candidate.keyboard = null;
+      this.retire(candidate, "element");
+    });
+  }
+
+  #expireFormKeyboardReplay(candidate: PanelPublication) {
+    const replay = candidate.keyboardReplay;
+    if (replay) replay.expired = true;
+    candidate.keyboardReplay = null;
+    candidate.invalidReplay = true;
+  }
+
   #requestReplaySuccessor(candidate: PanelPublication) {
+    const keyboardReplay = candidate.keyboardReplay;
+    const keyboardOwners = new Set(
+      keyboardReplay?.targets.map((target) => target.owner) ?? [],
+    );
+    const exactKeyboardReplay =
+      !candidate.presentation.adding ||
+      (
+        keyboardReplay !== null &&
+        !keyboardReplay.expired &&
+        keyboardReplay.generation === candidate.presentation.generation &&
+        keyboardReplay.generation === this.#mount &&
+        keyboardReplay.layoutReleased &&
+        keyboardReplay.layoutRebound &&
+        candidate.keyboard === null &&
+        keyboardReplay.targets.length > 0 &&
+        keyboardReplay.targets.every(
+          (target) =>
+            target.released &&
+            target.rebound &&
+            target.owner.element === target.element &&
+            target.owner.binding === target.binding &&
+            target.element.isConnected,
+        )
+      );
     const exactReplay =
       this.#acceptsSuccessorOf(candidate) &&
       candidate.layoutRetired &&
@@ -695,11 +915,15 @@ class PanelPublicationCoordinator {
       candidate.replayRefs.length > 0 &&
       candidate.replayRefs.every(
         (entry) =>
-          entry.detached &&
-          entry.reattached &&
-          entry.owner.element === entry.element &&
-          entry.element.isConnected,
+          keyboardOwners.has(entry.owner) ||
+          (
+            entry.detached &&
+            entry.reattached &&
+            entry.owner.element === entry.element &&
+            entry.element.isConnected
+          ),
       ) &&
+      exactKeyboardReplay &&
       candidate.factsAreCurrent?.() === true &&
       candidate.domIsExact?.() === true &&
       candidate.dom !== null &&
@@ -1234,11 +1458,26 @@ function captureFormKeyboardAuthority(
         target instanceof ownerWindow.HTMLElement,
     ),
   ];
+  const refTargets: FormKeyboardRefTarget[] = [];
+  for (const owner of formKeyboardSlots(publication)) {
+    const element = owner.element;
+    const binding = owner.binding;
+    if (
+      !element ||
+      !binding ||
+      element.ownerDocument !== document ||
+      !targets.includes(element)
+    ) {
+      return null;
+    }
+    refTargets.push(Object.freeze({ owner, element, binding }));
+  }
   return Object.freeze({
     form,
     root,
     document,
     targets: Object.freeze(targets),
+    refTargets: Object.freeze(refTargets),
     KeyboardEvent: ownerWindow.KeyboardEvent,
     preventDefault: preventDefault as (this: Event) => void,
   });
@@ -1378,6 +1617,10 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
     placement: null,
     guard: null,
     keyboard: null,
+    keyboardSuspended: false,
+    keyboardLayoutReplayAvailable: false,
+    keyboardReplay: null,
+    keyboardReplayExpiryQueued: false,
     guardExpiryQueued: false,
     factsAreCurrent: null,
     domIsExact: null,
@@ -1451,6 +1694,19 @@ function panelButtonSlots(
     slots.push(elements.test, elements.delete);
   }
   return slots;
+}
+
+function formKeyboardSlots(
+  publication: PanelPublication,
+): ElementSlot<HTMLElement>[] {
+  return [
+    publication.form,
+    publication.url,
+    ...publication.choices,
+    publication.docs,
+    publication.create,
+    publication.cancel,
+  ];
 }
 
 export function WebhooksPanel() {
@@ -2469,7 +2725,14 @@ export function WebhooksPanel() {
     nativeEvent: KeyboardEvent;
   }> | null => {
     const authority = candidate.keyboard;
-    if (!action.eligible || !authority) return null;
+    if (
+      !action.eligible ||
+      !authority ||
+      candidate.keyboardSuspended ||
+      candidate.keyboardReplay
+    ) {
+      return null;
+    }
     const nativeEvent = isNativeReactEscapeEvent(event, authority);
     if (!nativeEvent) return null;
     publicationCoordinator.prepareControlClaim(candidate);
