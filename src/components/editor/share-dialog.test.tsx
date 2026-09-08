@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type RefCallback } from "react";
+import { StrictMode, useEffect, useLayoutEffect, type RefCallback } from "react";
 import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
@@ -177,6 +177,7 @@ function directInvoke<T extends HTMLElement>(
     type: string;
     target: EventTarget;
     nativeEvent: unknown;
+    defaultPrevented: boolean;
   }> = {},
 ): DirectReactEvent<T> {
   const nativeEvent =
@@ -197,7 +198,7 @@ function directInvoke<T extends HTMLElement>(
     currentTarget,
     target: overrides.target ?? currentTarget,
     nativeEvent,
-    defaultPrevented: false,
+    defaultPrevented: overrides.defaultPrevented ?? false,
     preventDefault: vi.fn(),
     stopPropagation: vi.fn(),
   };
@@ -277,6 +278,213 @@ afterEach(() => {
 });
 
 describe("ShareDialog exact control publications", () => {
+  it("publishes a fresh exact successor for direct-root Strict Mode replay", async () => {
+    let done: CapturedControl<HTMLButtonElement> | null = null;
+    const onClose = vi.fn(() => {
+      if (done) directInvoke(done);
+    });
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    done = captureClick(screen.getByRole("button", { name: "Done" }));
+    directInvoke(done);
+    directInvoke(done);
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("owns one direct-root Strict Mode Add submit after replay", async () => {
+    const pending = deferred<unknown>();
+    addCollaborator.mockReturnValueOnce(pending.promise);
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "strict-add" } });
+    fireEvent.change(screen.getByTestId("share-role"), { target: { value: "commenter" } });
+    const addButton = screen.getByTestId("share-add") as HTMLButtonElement;
+    const submit = captureSubmit(addButton.form!);
+
+    directInvoke(submit, submit.element, { nativeEvent: nativeSubmit(submit.element, addButton) });
+    directInvoke(submit, submit.element, { nativeEvent: nativeSubmit(submit.element, addButton) });
+
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "strict-add", "commenter");
+    await act(async () => {
+      pending.resolve({});
+      await pending.promise;
+    });
+  });
+
+  it("owns one direct-root Strict Mode Retry click after replay", async () => {
+    collaborators.mockRejectedValue(new ApiError(503, "Try again"));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    const retry = captureClick(await screen.findByRole("button", { name: "Retry" }) as HTMLButtonElement);
+    const callsBeforeRetry = collaborators.mock.calls.length;
+
+    directInvoke(retry);
+    directInvoke(retry);
+
+    expect(collaborators).toHaveBeenCalledTimes(callsBeforeRetry + 1);
+  });
+
+  it("keeps direct-root Strict Mode new-role replay and stale/current handlers exact", async () => {
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const stale = captureChange(screen.getByTestId("share-role") as HTMLSelectElement);
+    stale.element.value = "viewer";
+    act(() => directInvoke(stale));
+    expect(screen.getByTestId("share-role")).toHaveValue("viewer");
+
+    const current = captureChange(screen.getByTestId("share-role") as HTMLSelectElement);
+    current.element.value = "commenter";
+    act(() => directInvoke(stale, current.element));
+    expect(current.element).toHaveValue("commenter");
+    act(() => directInvoke(current));
+    expect(screen.getByTestId("share-role")).toHaveValue("commenter");
+  });
+
+  it("owns one direct-root Strict Mode collaborator-role change after replay", async () => {
+    const pending = deferred<unknown>();
+    addCollaborator.mockReturnValueOnce(pending.promise);
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const row = collaboratorRow("bob");
+    const roleControl = captureChange(within(row).getByRole("combobox") as HTMLSelectElement);
+    roleControl.element.value = "viewer";
+
+    directInvoke(roleControl);
+    directInvoke(roleControl);
+
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob", "viewer");
+    await act(async () => {
+      pending.resolve({});
+      await pending.promise;
+    });
+  });
+
+  it("owns one direct-root Strict Mode Remove click after replay", async () => {
+    const pending = deferred<unknown>();
+    removeCollaborator.mockReturnValueOnce(pending.promise);
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const remove = captureClick(
+      within(collaboratorRow("bob")).getByRole("button", { name: "Remove bob" }),
+    );
+
+    directInvoke(remove);
+    directInvoke(remove);
+
+    expect(removeCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob");
+    await act(async () => {
+      pending.resolve({});
+      await pending.promise;
+    });
+  });
+
+  it("owns one direct-root Strict Mode link-access change after replay", async () => {
+    const pending = deferred<{ document: DocumentDto }>();
+    patchDocument.mockReturnValueOnce(pending.promise);
+    const onDocChange = vi.fn();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const linkAccess = captureChange(screen.getByTestId("link-access") as HTMLSelectElement);
+    linkAccess.element.value = "comment";
+
+    directInvoke(linkAccess);
+    directInvoke(linkAccess);
+
+    expect(patchDocument).toHaveBeenCalledExactlyOnceWith(DOC_ID, { linkAccess: "comment" });
+    await act(async () => {
+      pending.resolve({ document: { ...doc, linkAccess: "comment" } });
+      await pending.promise;
+    });
+    expect(onDocChange).toHaveBeenCalledOnce();
+  });
+
+  it("accepts one genuine direct-root Strict Mode Escape close after replay", async () => {
+    const onClose = vi.fn();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const input = screen.getByTestId("share-login");
+    input.focus();
+
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+    fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("accepts one genuine direct-root Strict Mode outside close after replay", async () => {
+    const onClose = vi.fn();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("retires restored direct-root Strict Mode detach history without poisoning its successor", async () => {
+    const onClose = vi.fn();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onClose} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const staleDone = captureClick(screen.getByRole("button", { name: "Done" }));
+    const footer = staleDone.element.parentElement!;
+    staleDone.element.remove();
+    footer.append(staleDone.element);
+
+    directInvoke(staleDone);
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "successor" } });
+    const currentDone = captureClick(screen.getByRole("button", { name: "Done" }));
+    directInvoke(staleDone, currentDone.element);
+    directInvoke(currentDone);
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
   it("accepts one native keyboard SubmitEvent and rejects fabricated or wrong-submitter events without event work", async () => {
     const pending = deferred<unknown>();
     addCollaborator.mockReturnValueOnce(pending.promise);
@@ -287,12 +495,15 @@ describe("ShareDialog exact control publications", () => {
     const form = addButton.form!;
     const submit = captureSubmit(form);
     const wrongSubmitter = document.createElement("button");
-    form.append(wrongSubmitter);
+    const consumedNative = nativeSubmit(form);
+    consumedNative.preventDefault();
 
     const rejected = [
       directInvoke(submit, form, { nativeEvent: { type: "submit", target: form, submitter: null } }),
       directInvoke(submit, form, { type: "click" }),
       directInvoke(submit, form, { nativeEvent: nativeSubmit(form, wrongSubmitter) }),
+      directInvoke(submit, form, { nativeEvent: consumedNative }),
+      directInvoke(submit, form, { defaultPrevented: true }),
     ];
     for (const event of rejected) {
       expect(event.preventDefault).not.toHaveBeenCalled();
@@ -300,7 +511,6 @@ describe("ShareDialog exact control publications", () => {
     }
     expect(addCollaborator).not.toHaveBeenCalled();
 
-    wrongSubmitter.remove();
     const accepted = directInvoke(submit, form, { nativeEvent: nativeSubmit(form) });
     const repeated = directInvoke(submit, form, { nativeEvent: nativeSubmit(form) });
     expect(accepted.preventDefault).toHaveBeenCalledOnce();
