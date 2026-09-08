@@ -280,6 +280,7 @@ function layoutMatches(visit: ContentVisit): boolean {
     visit.ownerWindow.ResizeObserver !== visit.resizeObserverConstructor ||
     visit.ownerWindow.MutationObserver !== visit.mutationObserverConstructor ||
     visit.ownerDocument.fonts !== visit.fonts ||
+    visit.fonts.ready !== visit.fontsReady ||
     visit.ownerWindow.getComputedStyle !== visit.getComputedStyle ||
     visit.marker.previousSibling !== visit.root ||
     visit.root.nextSibling !== visit.marker ||
@@ -318,6 +319,11 @@ function structuralMutationIsRelevant(visit: ContentVisit, record: MutationRecor
     );
   }
   if (
+    record.target === visit.marker ||
+    (
+      record.target instanceof visit.ownerWindow.Node &&
+      visit.marker.contains(record.target)
+    ) ||
     record.target === visit.root ||
     (
       record.target instanceof visit.ownerWindow.Node &&
@@ -742,7 +748,8 @@ function establishVisit(
     if (visit.retired || coordinator.active !== visit) return;
     if (
       source !== visit.fonts ||
-      visit.ownerDocument.fonts !== visit.fonts
+      visit.ownerDocument.fonts !== visit.fonts ||
+      visit.fonts.ready !== visit.fontsReady
     ) {
       retireVisit(visit, coordinator, "authority");
       return;

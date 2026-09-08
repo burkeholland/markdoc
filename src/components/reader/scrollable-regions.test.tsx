@@ -66,12 +66,20 @@ class InstrumentedResizeObserver implements ResizeObserver {
 
 class InstrumentedFonts {
   readonly callbacks: Array<() => void> = [];
-  readonly ready = {
-    then: (continuation: (fonts: FontFaceSet) => unknown) => {
-      this.callbacks.push(() => continuation(document.fonts));
-      return Promise.resolve(document.fonts);
-    },
-  } as Promise<FontFaceSet>;
+  ready = this.createReady();
+
+  private createReady() {
+    return {
+      then: (continuation: (fonts: FontFaceSet) => unknown) => {
+        this.callbacks.push(() => continuation(document.fonts));
+        return Promise.resolve(document.fonts);
+      },
+    } as Promise<FontFaceSet>;
+  }
+
+  replaceReady() {
+    this.ready = this.createReady();
+  }
 
   publish(index: number) {
     const callback = this.callbacks[index];
@@ -807,6 +815,42 @@ describe("ReaderScrollableRegions exact content visits", () => {
     outer.remove();
   });
 
+  it.each(["text", "comment", "element"] as const)(
+    "permanently retires after restored marker %s subtree mutation",
+    (kind) => {
+      const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+      const view = render(<ReaderFixture html={html} />);
+      const root = readerRoot(view.container);
+      const target = region(root, "target");
+      const marker = view.container.querySelector<HTMLElement>("[data-reader-overflow-marker]")!;
+      const observer = InstrumentedResizeObserver.instances[0];
+      const lateResize = observer.capture();
+      const lateFonts = fonts.callbacks[0];
+      const child = kind === "text"
+        ? document.createTextNode("temporary")
+        : kind === "comment"
+          ? document.createComment("temporary")
+          : document.createElement("i");
+
+      marker.append(child);
+      if (kind === "text") child.nodeValue = "changed";
+      child.remove();
+      tabIndexReads.length = 0;
+      tabIndexWrites.length = 0;
+      geometryReads.length = 0;
+      lateResize();
+      lateFonts();
+
+      expect(marker).toHaveTextContent("");
+      expect(marker.childNodes).toHaveLength(0);
+      expect(tabIndexReads).toHaveLength(0);
+      expect(tabIndexWrites).toHaveLength(0);
+      expect(geometryReads).toHaveLength(0);
+      expect(observer.disconnect).toHaveBeenCalledTimes(1);
+      expect(target).toHaveAttribute("tabindex", "0");
+    },
+  );
+
   it("transfers only the externally replaced region and restores the independently owned peer", () => {
     const html = bodyHtml(
       { id: "external", clientWidth: 100, scrollWidth: 102 },
@@ -961,5 +1005,39 @@ describe("ReaderScrollableRegions exact content visits", () => {
     expect(target).toHaveAttribute("tabindex", "0");
 
     view.unmount();
+  });
+
+  it("retires when the same FontFaceSet replaces ready and recovers on its fresh promise", () => {
+    const html = bodyHtml({ id: "target", clientWidth: 100, scrollWidth: 102 });
+    const directRegions = [{ id: "target", clientWidth: 100, scrollWidth: 102 }];
+    const view = render(<ReaderFixture html={html} directRegions={directRegions} />);
+    const root = readerRoot(view.container);
+    const target = region(root, "target");
+    const oldObserver = InstrumentedResizeObserver.instances[0];
+    const oldReady = fonts.callbacks[0];
+    fonts.replaceReady();
+    tabIndexReads.length = 0;
+    tabIndexWrites.length = 0;
+    geometryReads.length = 0;
+
+    oldReady();
+    expect(tabIndexReads).toHaveLength(0);
+    expect(tabIndexWrites).toHaveLength(0);
+    expect(geometryReads).toHaveLength(0);
+    expect(oldObserver.disconnect).toHaveBeenCalledTimes(1);
+    expect(target).toHaveAttribute("tabindex", "0");
+
+    view.rerender(
+      <ReaderFixture html={html} directRegions={directRegions} commit={1} />,
+    );
+    const currentObserver = InstrumentedResizeObserver.instances[1];
+    expect(region(root, "target")).toBe(target);
+    expect(fonts.callbacks).toHaveLength(2);
+    expect(currentObserver.disconnect).not.toHaveBeenCalled();
+
+    setGeometry(target, 100, 101);
+    currentObserver.publish();
+    expect(target).not.toHaveAttribute("tabindex");
+    expect(writesFor(target)).toEqual([null]);
   });
 });
