@@ -76,6 +76,7 @@ interface StatusBarIssuePublication {
 
 interface StatusBarAuthority {
   mount: symbol;
+  publicationRevision: number;
   session: CollabSession;
   source: string;
   tree: unknown;
@@ -283,6 +284,8 @@ interface StatusBarPublicationManager {
   active: StatusBarGeneration | null;
   statsBoundary: StatusBarStatsBoundaryPublication | null;
   portalBoundaries: Map<StatusBarPortalSlot, StatusBarPortalBoundaryPublication>;
+  successorRequested: boolean;
+  requestSuccessor: () => void;
 }
 
 interface StatusBarValueIntent<T> {
@@ -331,7 +334,9 @@ const StatusBarStatsPopover = memo(
   ),
 );
 
-function createPublicationManager(): StatusBarPublicationManager {
+function createPublicationManager(
+  requestSuccessor: () => void,
+): StatusBarPublicationManager {
   return {
     mount: Symbol("status-bar"),
     epoch: 0,
@@ -339,6 +344,8 @@ function createPublicationManager(): StatusBarPublicationManager {
     active: null,
     statsBoundary: null,
     portalBoundaries: new Map(),
+    successorRequested: false,
+    requestSuccessor,
   };
 }
 
@@ -1572,7 +1579,10 @@ function refreshRelationSeals(generation: StatusBarGeneration) {
   }
 }
 
-function retireGeneration(generation: StatusBarGeneration) {
+function retireGeneration(
+  generation: StatusBarGeneration,
+  requestSuccessor = true,
+) {
   if (generation.retired) return;
   generation.retired = true;
   generation.pendingIntents.forEach((intent) => {
@@ -1589,6 +1599,15 @@ function retireGeneration(generation: StatusBarGeneration) {
     observer.disconnect();
   });
   generation.observers.length = 0;
+  const { manager } = generation;
+  if (
+    requestSuccessor
+    && manager.active === generation
+    && !manager.successorRequested
+  ) {
+    manager.successorRequested = true;
+    manager.requestSuccessor();
+  }
 }
 
 function retireManagerGeneration(
@@ -1602,7 +1621,7 @@ function retireManagerGeneration(
     && manager.candidates.size > 0
   )
     return;
-  if (manager.active) retireGeneration(manager.active);
+  if (manager.active) retireGeneration(manager.active, false);
   manager.active = null;
   manager.candidates.clear();
   manager.epoch += 1;
@@ -2207,6 +2226,7 @@ function activateGeneration(
     );
   }
   manager.active = generation;
+  manager.successorRequested = false;
   STATUS_BAR_NATIVE_EVENTS.forEach((type) => {
     const listener = (event: Event) => recordNativeEvent(generation, event);
     ownerDocument.addEventListener(type, listener, true);
@@ -3171,7 +3191,12 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const errors = issues.filter((i) => i.severity === "error").length;
 
   const [themePreference, setThemePreference] = useTheme();
-  const [manager] = useState(createPublicationManager);
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const [manager] = useState(() =>
+    createPublicationManager(() =>
+      setPublicationRevision((revision) => revision + 1),
+    ),
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const documentValue = doc;
@@ -3215,6 +3240,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     })));
     return Object.freeze({
       mount: manager.mount,
+      publicationRevision,
       session,
       source,
       tree,
@@ -3264,6 +3290,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     onShortcuts,
     onStorage,
     onSyncScroll,
+    publicationRevision,
     session,
     setThemePreference,
     selection,

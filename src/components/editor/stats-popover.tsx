@@ -387,6 +387,10 @@ interface StatsPointerProvenance extends StatsNativeProvenance {
   readonly button: number;
   pointerUp: Event | null;
   click: MouseEvent | null;
+  clickTarget: EventTarget | null;
+  clickPath: readonly EventTarget[] | null;
+  clickPhase: number;
+  callbackExpiresAt: number | null;
 }
 
 interface StatsNativeCapture {
@@ -430,6 +434,7 @@ const STATS_RESPONSIVE_CONTENT_ATTRIBUTES = new Set([
   "data-side",
   "style",
 ]);
+const STATS_POINTER_CALLBACK_LEASE_MS = 1_000;
 
 function statsSnapshot(stats: DocStats): StatsSnapshot {
   return Object.freeze({ stats, ...stats });
@@ -1326,10 +1331,15 @@ class StatsDisclosureCoordinator {
           this.forgetProvenance(capturedPointer.event);
         } else {
           capturedPointer.click = event;
+          capturedPointer.clickTarget = event.target;
+          capturedPointer.clickPath = Object.freeze([...event.composedPath()]);
+          capturedPointer.clickPhase = event.eventPhase;
+          capturedPointer.callbackExpiresAt =
+            ownerWindow.performance.now() + STATS_POINTER_CALLBACK_LEASE_MS;
           capturedPointer.ownerWindow.clearTimeout(capturedPointer.timeoutId);
           capturedPointer.timeoutId = ownerWindow.setTimeout(
             () => this.forgetProvenance(capturedPointer.event),
-            0,
+            STATS_POINTER_CALLBACK_LEASE_MS,
           );
         }
       } else if (
@@ -1394,6 +1404,10 @@ class StatsDisclosureCoordinator {
           button: typeof button === "number" ? button : 0,
           pointerUp: null,
           click: null,
+          clickTarget: null,
+          clickPath: null,
+          clickPhase: ownerWindow.Event.NONE,
+          callbackExpiresAt: null,
         };
         this.#pointerProvenance = pointerProvenance;
         this.#nativeProvenance.set(event, pointerProvenance);
@@ -2479,13 +2493,14 @@ class StatsDisclosureCoordinator {
       (source === "pointer" &&
         (!pointerProvenance?.pointerUp ||
           !pointerProvenance.click ||
+          !pointerProvenance.clickPath ||
+          pointerProvenance.callbackExpiresAt === null ||
+          ownerWindow.performance.now() >=
+            pointerProvenance.callbackExpiresAt ||
           pointerProvenance.target !== target ||
-          pointerProvenance.click.eventPhase ===
-            ownerWindow.Event.NONE ||
-          pointerProvenance.click.target !== target ||
-          !pointerProvenance.click
-            .composedPath()
-            .includes(document)))
+          pointerProvenance.clickPhase === ownerWindow.Event.NONE ||
+          pointerProvenance.clickTarget !== target ||
+          !pointerProvenance.clickPath.includes(document)))
     ) {
       return;
     }

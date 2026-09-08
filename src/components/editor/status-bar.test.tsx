@@ -13,6 +13,11 @@ import type { CollabSession } from "@/editor/collab/session";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { DocumentDto } from "@/server/dto";
 import type { Layout } from "@/lib/viewport";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/primitives";
 
 const controlled = vi.hoisted(() => ({
   hydrated: true,
@@ -514,6 +519,21 @@ function LayoutReplayProbe({ inspect }: { inspect: () => void }) {
   return null;
 }
 
+function UnrelatedPresencePopover() {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" data-testid="presence-trigger">
+          Presence
+        </button>
+      </PopoverTrigger>
+      <PopoverContent data-testid="presence-content">
+        Current collaborators
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 beforeEach(() => {
   Object.defineProperty(window, "PointerEvent", {
     configurable: true,
@@ -930,6 +950,34 @@ describe("status bar nested StatsPopover reconciliation", () => {
     expect(current.storage).toHaveBeenCalledOnce();
   });
 
+  it("publishes an internal successor after an unrelated body portal opens and closes", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    await renderDirect(
+      <StrictMode>
+        <UnrelatedPresencePopover />
+        <StatusBar {...props} />
+      </StrictMode>,
+    );
+    const root = screen.getByTestId("status-bar");
+    const presence = screen.getByTestId("presence-trigger");
+
+    fireEvent.click(presence);
+    expect(screen.getByTestId("presence-content")).toBeVisible();
+    await nextTask();
+    expect(screen.getByTestId("status-bar")).toBe(root);
+
+    fireEvent.click(presence);
+    expect(screen.queryByTestId("presence-content")).toBeNull();
+    await nextTask();
+    expect(screen.getByTestId("status-bar")).toBe(root);
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    fireEvent.click(desktopShortcuts());
+    expect(current.storage).toHaveBeenCalledOnce();
+    expect(current.shortcuts).toHaveBeenCalledOnce();
+  });
+
   it("accepts an immediate secondary-pointer disclosure close once", async () => {
     const current = callbacks();
     const outside = document.createElement("button");
@@ -1108,11 +1156,12 @@ describe("status bar permanent retirement", () => {
     await rerenderStatus(view, props, "fresh-document");
     openIssues();
     const originalMessage = ISSUE_A.message;
+    const issueButton = elementWithText("button", originalMessage);
     ISSUE_A.message = "Mutated issue";
-    fireEvent.click(elementWithText("button", originalMessage));
+    fireEvent.click(issueButton);
     expect(current.issue).not.toHaveBeenCalled();
     ISSUE_A.message = originalMessage;
-    fireEvent.click(elementWithText("button", originalMessage));
+    fireEvent.click(issueButton);
     expect(current.issue).not.toHaveBeenCalled();
 
     await rerenderStatus(view, props, "fresh-issue");

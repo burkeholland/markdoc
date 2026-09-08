@@ -525,6 +525,7 @@ function dispatchStatsOutside(
   target: HTMLElement,
   callbacks: readonly StatsContentCallbacks[],
   openChanges: readonly PopoverOpenChange[],
+  pointerDelayMs = 0,
 ) {
   const pending: VoidFunction[] = [];
   const queued = vi
@@ -552,31 +553,38 @@ function dispatchStatsOutside(
         });
   const consume = (event: Event) => {
     if (source === "focus" && event !== original) return;
-    const custom = new CustomEvent(customType, {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      detail: { originalEvent: original },
-    });
-    for (const callbacksForPublication of callbacks) {
-      const callback = callbacksForPublication[callbackName];
-      if (!callback) continue;
-      target.addEventListener(
-        customType,
-        (value) =>
-          callback(
-            value as CustomEvent<{
-              originalEvent: PointerEvent & FocusEvent;
-            }>,
-          ),
-        { once: true },
-      );
+    const deliver = () => {
+      const custom = new CustomEvent(customType, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        detail: { originalEvent: original },
+      });
+      for (const callbacksForPublication of callbacks) {
+        const callback = callbacksForPublication[callbackName];
+        if (!callback) continue;
+        target.addEventListener(
+          customType,
+          (value) =>
+            callback(
+              value as CustomEvent<{
+                originalEvent: PointerEvent & FocusEvent;
+              }>,
+            ),
+          { once: true },
+        );
+      }
+      target.dispatchEvent(custom);
+      for (const openChange of openChanges) {
+        queueMicrotask(() => openChange(false));
+      }
+      while (pending.length) pending.shift()!();
+    };
+    if (source === "pointer") {
+      setTimeout(deliver, pointerDelayMs);
+    } else {
+      deliver();
     }
-    target.dispatchEvent(custom);
-    for (const openChange of openChanges) {
-      queueMicrotask(() => openChange(false));
-    }
-    while (pending.length) pending.shift()!();
     event.stopPropagation();
   };
   target.addEventListener(consumeType, consume);
@@ -1538,7 +1546,7 @@ describe("StatsPopover disclosure visit authority", () => {
     }
   });
 
-  it("accepts one genuine pointer-outside dismissal after direct-root Strict Mode replay", async () => {
+  it("retains one exact pointer-outside dismissal through the deferred Radix callback", async () => {
     vi.useFakeTimers();
     const outside = document.createElement("button");
     document.body.append(outside);
@@ -1582,6 +1590,37 @@ describe("StatsPopover disclosure visit authority", () => {
         screen.getByTestId("stats-button"),
       );
       expect(focusTrigger).not.toHaveBeenCalled();
+    } finally {
+      act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      mounted.host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects a deferred pointer-outside dismissal after its exact click lease expires", async () => {
+    vi.useFakeTimers();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const mounted = renderStrictStats(
+      makeSession("strict-pointer-outside-expired"),
+      () => {},
+    );
+    try {
+      openPopover();
+      dispatchStatsOutside(
+        "pointer",
+        outside,
+        [capturedStatsContentCallbacks.at(-1)!],
+        [capturedPopoverOpenChanges.at(-1)!],
+        1_001,
+      );
+      await act(() => vi.advanceTimersByTimeAsync(1_001));
+
+      expect(screen.getByTestId("stats-popover")).toBeVisible();
+      fireEvent.click(screen.getByTestId("stats-button"));
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
     } finally {
       act(() => mounted.root.unmount());
       vi.clearAllTimers();
