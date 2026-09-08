@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  type ChangeEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
 
@@ -190,6 +198,90 @@ function PickerSlot({ name, githubAvailable = true }: { name: string; githubAvai
 
 function pickerSlot(name: string) {
   return within(screen.getByTestId(`picker-slot-${name}`));
+}
+
+function reactProp<T>(element: HTMLElement, name: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const value = props?.[name];
+  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  return value as T;
+}
+
+type PickerClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type PickerChangeHandler<T extends HTMLInputElement | HTMLSelectElement> = (event: ChangeEvent<T>) => void;
+
+function nativePickerClick(control: HTMLButtonElement, target: EventTarget | null = control, type = "click") {
+  const MouseEventConstructor = control.ownerDocument.defaultView?.MouseEvent;
+  if (!MouseEventConstructor) throw new Error("The picker control has no owner-document MouseEvent");
+  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true, button: 0 });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function directPickerClick(
+  handler: PickerClickHandler,
+  control: HTMLButtonElement,
+  {
+    currentTarget = control,
+    target = control,
+    nativeEvent = nativePickerClick(control, target),
+  }: {
+    currentTarget?: HTMLButtonElement;
+    target?: EventTarget | null;
+    nativeEvent?: Event;
+  } = {},
+) {
+  handler({
+    type: "click",
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+  } as unknown as ReactMouseEvent<HTMLButtonElement>);
+}
+
+function nativePickerChange(control: HTMLInputElement | HTMLSelectElement, target: EventTarget | null = control, type = "change") {
+  const EventConstructor = control.ownerDocument.defaultView?.Event;
+  if (!EventConstructor) throw new Error("The picker control has no owner-document Event");
+  const event = new EventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function directPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
+  handler: PickerChangeHandler<T>,
+  control: T,
+  {
+    currentTarget = control,
+    target = control,
+    nativeEvent = nativePickerChange(control, target),
+  }: {
+    currentTarget?: T;
+    target?: EventTarget | null;
+    nativeEvent?: Event;
+  } = {},
+) {
+  handler({
+    type: "change",
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+  } as unknown as ChangeEvent<T>);
+}
+
+function dispatchPickerSubmit(form: HTMLFormElement, submitter: HTMLButtonElement) {
+  const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
+  if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
+  form.dispatchEvent(
+    new SubmitEventConstructor("submit", {
+      bubbles: true,
+      cancelable: true,
+      submitter,
+    }),
+  );
 }
 
 // The empty state of the GitHub picker for an account without a GitHub token (#162): it used to be a
@@ -821,6 +913,303 @@ describe("GitHubPicker list recovery", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("GitHubPicker exact control publication", () => {
+  it("uses one stable radio group per link picker and switches both destinations independently", async () => {
+    render(
+      <>
+        <section data-testid="link-picker-a">
+          <GitHubPicker mode="link" doc={documentDto("doc-a", "Document A")} githubAvailable githubConfigured />
+        </section>
+        <section data-testid="link-picker-b">
+          <GitHubPicker mode="link" doc={documentDto("doc-b", "Document B")} githubAvailable githubConfigured />
+        </section>
+      </>,
+    );
+    const pickerA = within(screen.getByTestId("link-picker-a"));
+    const pickerB = within(screen.getByTestId("link-picker-b"));
+    const createA = pickerA.getByRole("radio", { name: "Create a new gist" }) as HTMLInputElement;
+    const existingA = pickerA.getByRole("radio", { name: "Use an existing gist" }) as HTMLInputElement;
+    const createB = pickerB.getByRole("radio", { name: "Create a new gist" }) as HTMLInputElement;
+    const existingB = pickerB.getByRole("radio", { name: "Use an existing gist" }) as HTMLInputElement;
+
+    expect(createA.name).toBe(existingA.name);
+    expect(createB.name).toBe(existingB.name);
+    expect(createA.name).not.toBe(createB.name);
+
+    fireEvent.click(existingA);
+    expect(existingA).toBeChecked();
+    expect(createA).not.toBeChecked();
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(await pickerA.findByTestId("gist-list")).toBeInTheDocument();
+
+    fireEvent.click(createA);
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(pickerA.queryByTestId("gist-list")).toBeNull();
+
+    fireEvent.click(existingB);
+    expect(existingB).toBeChecked();
+    expect(createB).not.toBeChecked();
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+    expect(await pickerB.findByTestId("gist-list")).toBeInTheDocument();
+
+    fireEvent.click(createB);
+    expect(createB).toBeChecked();
+    expect(existingB).not.toBeChecked();
+    expect(createA).toBeChecked();
+    expect(existingA).not.toBeChecked();
+  });
+
+  it("accepts the exact repository submit in a secondary document after rejecting foreign forms", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const secondaryDocument = frame.contentDocument;
+    if (!secondaryDocument?.defaultView) throw new Error("The test iframe has no browsing context");
+    const pickerHost = secondaryDocument.createElement("div");
+    const foreignHost = secondaryDocument.createElement("div");
+    secondaryDocument.body.append(pickerHost, foreignHost);
+    const pickerView = render(
+      <GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured />,
+      { container: pickerHost },
+    );
+    const picker = within(pickerHost);
+
+    try {
+      fireEvent.click(picker.getByTestId("picker-tab-repo"));
+      fireEvent.click(await picker.findByTestId("repo-item"));
+      const path = (await picker.findByTestId("repo-path")) as HTMLInputElement;
+      const form = path.form;
+      const submit = picker.getByTestId("repo-link") as HTMLButtonElement;
+      if (!form) throw new Error("The repository path is not attached to its form");
+      fireEvent.change(path, { target: { value: "docs/secondary.md" } });
+      const submitHandler = reactProp<(event: FormEvent<HTMLFormElement>) => void>(form, "onSubmit");
+
+      const sameDocumentForeignView = render(
+        <form onSubmit={submitHandler}>
+          <button type="submit">Foreign submit</button>
+        </form>,
+        { container: foreignHost },
+      );
+      const crossDocumentForeignView = render(
+        <form onSubmit={submitHandler}>
+          <button type="submit">Cross-document submit</button>
+        </form>,
+      );
+      try {
+        const sameDocumentForeignForm = foreignHost.querySelector("form");
+        const sameDocumentForeignSubmit = foreignHost.querySelector("button");
+        const crossDocumentForeignForm = crossDocumentForeignView.container.querySelector("form");
+        const crossDocumentForeignSubmit = crossDocumentForeignView.getByRole("button");
+        if (
+          !sameDocumentForeignForm ||
+          !sameDocumentForeignSubmit ||
+          !crossDocumentForeignForm ||
+          !(crossDocumentForeignSubmit instanceof HTMLButtonElement)
+        ) {
+          throw new Error("A foreign submit fixture was not mounted");
+        }
+
+        act(() => dispatchPickerSubmit(sameDocumentForeignForm, sameDocumentForeignSubmit));
+        act(() => dispatchPickerSubmit(crossDocumentForeignForm, crossDocumentForeignSubmit));
+        expect(linkDocument).not.toHaveBeenCalled();
+        expect(path).toHaveValue("docs/secondary.md");
+
+        act(() => dispatchPickerSubmit(form, submit));
+        expect(linkDocument).toHaveBeenCalledExactlyOnceWith(documentDto().id, {
+          storage: "repo",
+          owner: currentRepo.owner,
+          repo: currentRepo.name,
+          branch: "main",
+          path: "docs/secondary.md",
+        });
+      } finally {
+        sameDocumentForeignView.unmount();
+        crossDocumentForeignView.unmount();
+      }
+    } finally {
+      pickerView.unmount();
+      frame.remove();
+    }
+  });
+
+  it("rejects in-place gist mutation and DOM reorder without poisoning the restored exact row", async () => {
+    const first = gist("gist-first", "first.md");
+    const second = gist("gist-second", "second.md");
+    const mutableGists = [first, second];
+    const onImported = vi.fn();
+    gists.mockResolvedValue({ gists: mutableGists });
+
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    const rows = await screen.findAllByTestId("gist-item");
+    const firstRow = rows[0] as HTMLButtonElement;
+    const list = firstRow.parentElement?.parentElement;
+    const firstItem = firstRow.parentElement;
+    const secondItem = rows[1]?.parentElement;
+    expect(list).toBeInstanceOf(HTMLUListElement);
+    expect(firstItem).toBeInstanceOf(HTMLLIElement);
+    expect(secondItem).toBeInstanceOf(HTMLLIElement);
+
+    first.id = "mutated";
+    fireEvent.click(firstRow);
+    expect(importDocument).not.toHaveBeenCalled();
+    first.id = "gist-first";
+
+    list!.append(firstItem!);
+    fireEvent.click(firstRow);
+    expect(importDocument).not.toHaveBeenCalled();
+    list!.insertBefore(firstItem!, secondItem!);
+
+    fireEvent.click(firstRow);
+    expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+      source: "gist",
+      gistId: "gist-first",
+      filename: "first.md",
+    });
+    await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
+  });
+
+  it("keeps a same-DOM callback replacement usable after late old refs and cross-generation handlers", async () => {
+    const oldCallback = vi.fn();
+    const currentCallback = vi.fn();
+    const view = render(
+      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={oldCallback} />,
+    );
+    const oldRow = (await screen.findByTestId("gist-item")) as HTMLButtonElement;
+    const oldHandler = reactProp<PickerClickHandler>(oldRow, "onClick");
+    const oldRef = reactProp<RefCallback<HTMLButtonElement>>(oldRow, "ref");
+
+    view.rerender(
+      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={currentCallback} />,
+    );
+    const currentRow = screen.getByTestId("gist-item") as HTMLButtonElement;
+    expect(currentRow).toBe(oldRow);
+
+    oldRef(currentRow);
+    oldRef(null);
+    directPickerClick(oldHandler, currentRow);
+    expect(importDocument).not.toHaveBeenCalled();
+    expect(oldCallback).not.toHaveBeenCalled();
+    expect(currentCallback).not.toHaveBeenCalled();
+
+    fireEvent.click(currentRow);
+    await waitFor(() => expect(currentCallback).toHaveBeenCalledExactlyOnceWith("imported"));
+    expect(oldCallback).not.toHaveBeenCalled();
+    expect(importDocument).toHaveBeenCalledOnce();
+  });
+
+  it("isolates sibling visit handlers in both orders and accepts each exact visit once", async () => {
+    const importedA = vi.fn();
+    const importedB = vi.fn();
+    render(
+      <>
+        <section data-testid="picker-visit-a">
+          <GitHubPicker mode="import" githubAvailable githubConfigured onImported={importedA} />
+        </section>
+        <section data-testid="picker-visit-b">
+          <GitHubPicker mode="import" githubAvailable githubConfigured onImported={importedB} />
+        </section>
+      </>,
+    );
+    const visitA = within(screen.getByTestId("picker-visit-a"));
+    const visitB = within(screen.getByTestId("picker-visit-b"));
+    const rowA = (await visitA.findByTestId("gist-item")) as HTMLButtonElement;
+    const rowB = (await visitB.findByTestId("gist-item")) as HTMLButtonElement;
+    const handlerA = reactProp<PickerClickHandler>(rowA, "onClick");
+    const handlerB = reactProp<PickerClickHandler>(rowB, "onClick");
+
+    directPickerClick(handlerA, rowB);
+    directPickerClick(handlerB, rowA);
+    expect(importDocument).not.toHaveBeenCalled();
+
+    fireEvent.click(rowB);
+    directPickerClick(handlerA, rowB);
+    directPickerClick(handlerB, rowA);
+    fireEvent.click(rowB);
+    fireEvent.click(rowA);
+
+    expect(importDocument).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(importedA).toHaveBeenCalledExactlyOnceWith("imported");
+      expect(importedB).toHaveBeenCalledExactlyOnceWith("imported");
+    });
+  });
+
+  it("retires a filtered repository row and ignores its late ref before selecting the exact visible row", async () => {
+    const alpha = repository("alpha");
+    const beta = repository("beta", "trunk");
+    repos.mockResolvedValue({ repos: [alpha, beta] });
+    renderPicker();
+
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    const repositoryButtons = (await screen.findAllByTestId("repo-item")) as HTMLButtonElement[];
+    const alphaButton = repositoryButtons.find((button) => button.textContent?.includes(alpha.fullName))!;
+    const oldHandler = reactProp<PickerClickHandler>(alphaButton, "onClick");
+    const oldRef = reactProp<RefCallback<HTMLButtonElement>>(alphaButton, "ref");
+    fireEvent.change(screen.getByPlaceholderText("Filter repositories"), { target: { value: "beta" } });
+
+    const betaButton = (await screen.findByTestId("repo-item")) as HTMLButtonElement;
+    expect(betaButton).toHaveTextContent(beta.fullName);
+    oldRef(betaButton);
+    oldRef(null);
+    directPickerClick(oldHandler, betaButton);
+    expect(branches).not.toHaveBeenCalled();
+
+    fireEvent.click(betaButton);
+    await waitFor(() => expect(branches).toHaveBeenCalledExactlyOnceWith(beta.owner, beta.name));
+    expect(screen.getByText(beta.fullName)).toBeInTheDocument();
+  });
+
+  it("rejects fabricated field changes and mutable branch options while each restored control stays usable", async () => {
+    const doc = documentDto();
+    const linkView = render(
+      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
+    );
+    const filename = screen.getByTestId("gist-filename") as HTMLInputElement;
+    const filenameHandler = reactProp<PickerChangeHandler<HTMLInputElement>>(filename, "onChange");
+    const foreign = document.createElement("input");
+    document.body.append(foreign);
+
+    try {
+      filename.value = "fabricated.md";
+      directPickerChange(filenameHandler, filename);
+      filename.value = "current-document.md";
+      directPickerChange(filenameHandler, filename, {
+        currentTarget: foreign,
+        target: foreign,
+        nativeEvent: nativePickerChange(foreign),
+      });
+      expect(filename).toHaveValue("current-document.md");
+
+      fireEvent.change(filename, { target: { value: "accepted.md" } });
+      expect(screen.getByTestId("gist-filename")).toHaveValue("accepted.md");
+    } finally {
+      foreign.remove();
+    }
+    linkView.unmount();
+
+    const mutableBranches = ["main", "next"];
+    branches.mockResolvedValue({ branches: mutableBranches });
+    renderPicker();
+    await selectRepository();
+    const branchSelect = (await screen.findByTestId("branch-select")) as HTMLSelectElement;
+    await waitFor(() => expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"));
+
+    mutableBranches[1] = "release";
+    fireEvent.change(branchSelect, { target: { value: "next" } });
+    expect(files).toHaveBeenCalledTimes(1);
+
+    mutableBranches[1] = "next";
+    branchSelect.value = "main";
+    fireEvent.change(branchSelect, { target: { value: "next" } });
+    await waitFor(() => expect(files).toHaveBeenCalledWith(currentRepo.owner, currentRepo.name, "next"));
+    expect(screen.getByTestId("branch-select")).toHaveValue("next");
   });
 });
 
