@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useEffect, useLayoutEffect } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CollabSession } from "@/editor/collab/session";
 import { HINTS_STORAGE_KEY, readHintsRecord } from "@/lib/hints";
@@ -61,6 +66,8 @@ function fakeSession(docId: string, options: { people?: number; agentHere?: bool
   const listeners = new Set<() => void>();
   return {
     docId,
+    role: "editor",
+    canEdit: true,
     synced: true,
     authError: null,
     trashed: false,
@@ -134,44 +141,207 @@ let visibility: DocumentVisibilityState;
 
 const directRoots: { root: Root; host: HTMLDivElement }[] = [];
 
-function reactHandler<T>(element: HTMLElement, name: string): T {
+function reactHandler<T>(element: Element, name: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
   const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
   const handler = props?.[name];
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
   return handler as T;
 }
 
-type HintMouseHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
+type HintMouseHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type HintRef = (element: Element | null) => void;
 
-function hintMouseEvent(
+interface CapturedHint {
+  readonly root: HTMLDivElement;
+  readonly icon: SVGSVGElement;
+  readonly text: HTMLSpanElement;
+  readonly actionElement: HTMLButtonElement;
+  readonly dismissElement: HTMLButtonElement;
+  readonly dismissIcon: SVGSVGElement;
+  readonly actionHandler: HintMouseHandler;
+  readonly dismissHandler: HintMouseHandler;
+  readonly refs: readonly HintRef[];
+}
+
+function captureHint(host: ParentNode = document): CapturedHint {
+  const root = host.querySelector<HTMLDivElement>("[data-testid='hint-bar']");
+  const actionElement = host.querySelector<HTMLButtonElement>("[data-testid='hint-action']");
+  const dismissElement = host.querySelector<HTMLButtonElement>("[data-testid='hint-dismiss']");
+  const icon = root?.firstElementChild;
+  const text = icon?.nextElementSibling;
+  const dismissIcon = dismissElement?.firstElementChild;
+  if (
+    !root ||
+    !actionElement ||
+    !dismissElement ||
+    !(icon instanceof SVGSVGElement) ||
+    !(text instanceof HTMLSpanElement) ||
+    !(dismissIcon instanceof SVGSVGElement)
+  ) {
+    throw new Error("The complete HintBar publication is not mounted");
+  }
+  const actionHandler = reactHandler<HintMouseHandler>(actionElement, "onClick");
+  const dismissHandler = reactHandler<HintMouseHandler>(dismissElement, "onClick");
+  return {
+    root,
+    icon,
+    text,
+    actionElement,
+    dismissElement,
+    dismissIcon,
+    actionHandler,
+    dismissHandler,
+    refs: [root, icon, text, actionElement, dismissElement, dismissIcon].map(
+      (element) => reactHandler<HintRef>(element, "ref"),
+    ),
+  };
+}
+
+function fabricatedClick(
   currentTarget: HTMLButtonElement,
-  preventDefault = vi.fn(),
-): React.MouseEvent<HTMLButtonElement> {
-  return { currentTarget, preventDefault } as unknown as React.MouseEvent<HTMLButtonElement>;
+  target: EventTarget = currentTarget,
+  nativeEvent = new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }),
+) {
+  return {
+    type: "click",
+    button: 0,
+    detail: nativeEvent.detail,
+    bubbles: true,
+    currentTarget,
+    target,
+    nativeEvent,
+    defaultPrevented: false,
+    preventDefault: vi.fn(),
+  } as unknown as ReactMouseEvent<HTMLButtonElement>;
+}
+
+function pointerActivate(target: Element) {
+  const down = fireEvent.mouseDown(target, {
+    bubbles: true,
+    button: 0,
+    buttons: 1,
+    detail: 1,
+  });
+  const up = fireEvent.mouseUp(target, {
+    bubbles: true,
+    button: 0,
+    buttons: 0,
+    detail: 1,
+  });
+  const click = fireEvent.click(target, {
+    bubbles: true,
+    button: 0,
+    buttons: 0,
+    detail: 1,
+  });
+  return { down, up, click };
+}
+
+function keyboardActivate(
+  button: HTMLButtonElement,
+  key: "Enter" | " ",
+) {
+  button.focus();
+  fireEvent.keyDown(button, { bubbles: true, key });
+  if (key === " ") fireEvent.keyUp(button, { bubbles: true, key });
+  fireEvent.click(button, {
+    bubbles: true,
+    button: 0,
+    buttons: 0,
+    detail: 0,
+  });
 }
 
 function captureHintCallbacks() {
-  const actionElement = screen.getByTestId("hint-action") as HTMLButtonElement;
-  const dismissElement = screen.getByTestId("hint-dismiss") as HTMLButtonElement;
-  const actionHandler = reactHandler<HintMouseHandler>(actionElement, "onClick");
-  const actionMouseDownHandler = reactHandler<HintMouseHandler>(actionElement, "onMouseDown");
-  const dismissHandler = reactHandler<HintMouseHandler>(dismissElement, "onClick");
+  const captured = captureHint();
+  let actionPressed = false;
+  const actionMouseDownHandler = reactHandler<HintMouseHandler>(
+    captured.actionElement,
+    "onMouseDown",
+  );
+  const invokeCurrent = (
+    element: HTMLButtonElement,
+    handler: HintMouseHandler,
+    currentTarget: HTMLButtonElement,
+  ) => {
+    if (
+      currentTarget === element &&
+      element.isConnected &&
+      reactHandler<HintMouseHandler>(element, "onClick") === handler
+    ) {
+      pointerActivate(element);
+      return;
+    }
+    handler(fabricatedClick(currentTarget));
+  };
   return {
-    actionElement,
-    dismissElement,
-    actionHandler,
+    ...captured,
     actionMouseDownHandler,
-    dismissHandler,
-    action: (currentTarget = actionElement) =>
-      actionHandler(hintMouseEvent(currentTarget)),
+    action: (currentTarget = captured.actionElement) => {
+      if (
+        actionPressed &&
+        currentTarget === captured.actionElement &&
+        currentTarget.isConnected &&
+        reactHandler<HintMouseHandler>(currentTarget, "onClick") ===
+          captured.actionHandler
+      ) {
+        actionPressed = false;
+        fireEvent.mouseUp(currentTarget, {
+          bubbles: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        fireEvent.click(currentTarget, {
+          bubbles: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        return;
+      }
+      actionPressed = false;
+      invokeCurrent(
+        captured.actionElement,
+        captured.actionHandler,
+        currentTarget,
+      );
+    },
     actionMouseDown: (
-      currentTarget = actionElement,
+      currentTarget = captured.actionElement,
       preventDefault = vi.fn(),
-    ) => actionMouseDownHandler(hintMouseEvent(currentTarget, preventDefault)),
-    dismiss: (currentTarget = dismissElement) =>
-      dismissHandler(hintMouseEvent(currentTarget)),
+    ) => {
+      if (
+        currentTarget === captured.actionElement &&
+        currentTarget.isConnected &&
+        reactHandler<HintMouseHandler>(currentTarget, "onMouseDown") ===
+          actionMouseDownHandler
+      ) {
+        if (
+          !fireEvent.mouseDown(currentTarget, {
+            bubbles: true,
+            button: 0,
+            buttons: 1,
+            detail: 1,
+          })
+        ) {
+          actionPressed = true;
+          preventDefault();
+        }
+        return;
+      }
+      actionMouseDownHandler(
+        fabricatedClick(currentTarget) as ReactMouseEvent<HTMLButtonElement>,
+      );
+    },
+    dismiss: (currentTarget = captured.dismissElement) =>
+      invokeCurrent(
+        captured.dismissElement,
+        captured.dismissHandler,
+        currentTarget,
+      ),
   };
 }
 
@@ -336,7 +506,7 @@ describe("HintBar collaborator discovery", () => {
     await flushPromises();
     expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
 
-    fireEvent.click(screen.getByTestId("hint-dismiss"));
+    pointerActivate(screen.getByTestId("hint-dismiss"));
     expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
     expect(readHintsRecord(window.localStorage).dismissed).toEqual(["collab-agent", "mention-copilot"]);
 
@@ -1030,5 +1200,490 @@ describe("HintBar collaborator discovery", () => {
     expect(collaborators).toHaveBeenCalledTimes(2);
     expect(tokens).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ["collab-agent", "pointer"],
+    ["collab-agent", "Enter"],
+    ["mention-copilot", "pointer"],
+    ["mention-copilot", " "],
+  ] as const)(
+    "admits one distinct Strict Mode %s Action successor by %s provenance",
+    async (id, activation) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed:
+            id === "collab-agent"
+              ? ["mention-copilot"]
+              : ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const session = fakeSession(
+        `strict-${id}-${activation}`,
+        id === "mention-copilot" ? { threads: 1 } : {},
+      );
+      let current: CapturedHint | null = null;
+      const destination = vi.fn(() => {
+        if (current) pointerActivate(current.actionElement);
+      });
+      const root = createHintRoot();
+
+      await renderHintRoot(
+        root,
+        <StrictMode>
+          <HintBar
+            session={session}
+            actions={actions}
+            onShare={id === "collab-agent" ? destination : onShare}
+            onComment={id === "mention-copilot" ? destination : onComment}
+          />
+        </StrictMode>,
+      );
+      current = captureHint();
+      expect(current.root).toHaveAttribute("data-hint", id);
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+
+      fireEvent.click(current.actionElement, {
+        bubbles: true,
+        button: 0,
+        detail: 1,
+      });
+      current.actionHandler(fabricatedClick(current.actionElement));
+      expect(destination).not.toHaveBeenCalled();
+      expect(storageWrites).not.toHaveBeenCalled();
+
+      if (activation === "pointer") {
+        expect(pointerActivate(current.actionElement).down).toBe(false);
+      } else {
+        keyboardActivate(current.actionElement, activation);
+      }
+
+      expect(destination).toHaveBeenCalledOnce();
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(readHintsRecord(window.localStorage).dismissed).toEqual([
+        "collab-agent",
+        "mention-copilot",
+      ]);
+      current.actionHandler(fabricatedClick(current.actionElement));
+      pointerActivate(current.actionElement);
+      expect(destination).toHaveBeenCalledOnce();
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(actions.focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["pointer", false],
+    [" ", true],
+  ] as const)(
+    "admits one distinct Strict Mode Dismiss successor by %s provenance",
+    async (activation, focusInside) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed: ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      let current: CapturedHint | null = null;
+      const editorActions = {
+        focus: vi.fn(() => {
+          if (current) pointerActivate(current.dismissElement);
+        }),
+      } as unknown as EditorActions;
+      const root = createHintRoot();
+
+      try {
+        await renderHintRoot(
+          root,
+          <StrictMode>
+            <HintBar
+              session={fakeSession(`strict-dismiss-${activation}`, {
+                threads: 1,
+              })}
+              actions={editorActions}
+              onShare={onShare}
+              onComment={onComment}
+            />
+          </StrictMode>,
+        );
+        current = captureHint();
+        const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+        if (focusInside) current.dismissElement.focus();
+        else outside.focus();
+
+        current.dismissHandler(
+          fabricatedClick(current.dismissElement, current.dismissIcon),
+        );
+        expect(storageWrites).not.toHaveBeenCalled();
+        if (activation === "pointer") {
+          expect(pointerActivate(current.dismissIcon).down).toBe(true);
+        } else {
+          keyboardActivate(current.dismissElement, activation);
+        }
+
+        expect(storageWrites).toHaveBeenCalledOnce();
+        expect(editorActions.focus).toHaveBeenCalledTimes(
+          focusInside ? 1 : 0,
+        );
+        expect(onShare).not.toHaveBeenCalled();
+        expect(onComment).not.toHaveBeenCalled();
+        pointerActivate(current.dismissElement);
+        expect(storageWrites).toHaveBeenCalledOnce();
+      } finally {
+        outside.remove();
+      }
+    },
+  );
+
+  it("rejects crossed and fabricated events without poisoning the Strict Mode successor", async () => {
+    window.localStorage.setItem(
+      HINTS_STORAGE_KEY,
+      JSON.stringify({
+        dismissed: ["collab-agent"],
+        agentSeen: false,
+      }),
+    );
+    const root = createHintRoot();
+    await renderHintRoot(
+      root,
+      <StrictMode>
+        <HintBar
+          session={fakeSession("strict-event-provenance", { threads: 1 })}
+          actions={actions}
+          onShare={onShare}
+          onComment={onComment}
+        />
+      </StrictMode>,
+    );
+    const current = captureHint();
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+
+    current.actionHandler(
+      fabricatedClick(current.dismissElement, current.dismissIcon),
+    );
+    current.dismissHandler(
+      fabricatedClick(current.actionElement, current.actionElement),
+    );
+    fireEvent.mouseDown(current.dismissElement, {
+      bubbles: true,
+      button: 0,
+      buttons: 1,
+      detail: 1,
+    });
+    fireEvent.click(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      detail: 1,
+    });
+    fireEvent.keyDown(current.actionElement, {
+      bubbles: true,
+      ctrlKey: true,
+      key: "Enter",
+    });
+    fireEvent.click(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      detail: 0,
+    });
+    fireEvent.mouseDown(current.actionElement, {
+      bubbles: true,
+      button: 2,
+      buttons: 2,
+      detail: 1,
+    });
+    fireEvent.click(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      detail: 1,
+    });
+    current.actionElement.focus();
+    const preventKey = (event: KeyboardEvent) => event.preventDefault();
+    current.actionElement.addEventListener("keydown", preventKey, {
+      once: true,
+    });
+    fireEvent.keyDown(current.actionElement, {
+      bubbles: true,
+      key: "Enter",
+    });
+    fireEvent.click(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      detail: 0,
+    });
+    fireEvent.keyDown(current.actionElement, {
+      bubbles: true,
+      key: "Enter",
+    });
+    current.dismissElement.focus();
+    fireEvent.click(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      detail: 0,
+    });
+    const lookalikeView: {
+      document: Document;
+      window: unknown;
+    } = {
+      document,
+      window: null,
+    };
+    lookalikeView.window = lookalikeView;
+    const forgedPath: EventTarget[] = [];
+    let node: Node | null = current.actionElement;
+    while (node) {
+      forgedPath.push(node);
+      node = node.parentNode;
+    }
+    forgedPath.push(lookalikeView as unknown as EventTarget);
+    for (const type of ["mousedown", "mouseup", "click"] as const) {
+      const event = new MouseEvent(type, {
+        bubbles: true,
+        button: 0,
+        buttons: type === "mousedown" ? 1 : 0,
+        detail: 1,
+      });
+      Object.defineProperty(event, "composedPath", {
+        configurable: true,
+        value: () => [...forgedPath],
+      });
+      current.actionElement.dispatchEvent(event);
+    }
+    fireEvent.mouseDown(current.actionElement, {
+      bubbles: true,
+      button: 0,
+      buttons: 1,
+      detail: 1,
+    });
+    fireEvent.mouseUp(current.dismissElement, {
+      bubbles: true,
+      button: 0,
+      buttons: 0,
+      detail: 1,
+    });
+    let stoppedClick: MouseEvent | null = null;
+    current.actionElement.addEventListener(
+      "click",
+      (event) => {
+        stoppedClick = event;
+        event.stopPropagation();
+      },
+      { once: true },
+    );
+    pointerActivate(current.actionElement);
+    if (!stoppedClick) throw new Error("The stopped native click was not captured");
+    current.actionHandler(
+      fabricatedClick(
+        current.actionElement,
+        current.actionElement,
+        stoppedClick,
+      ),
+    );
+
+    expect(storageWrites).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
+    pointerActivate(current.actionElement);
+    expect(storageWrites).toHaveBeenCalledOnce();
+    expect(onComment).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "root mutation and restoration",
+    "text replacement and restoration",
+    "control reorder and restoration",
+    "disabled control and restoration",
+    "root detach and reinsert",
+    "ancestor detach and reinsert",
+  ] as const)(
+    "permanently retires a Strict Mode publication after %s",
+    async (scenario) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed: ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const comment = vi.fn();
+      const session = fakeSession(`strict-history-${scenario}`, {
+        threads: 1,
+      });
+      const root = createHintRoot();
+      const tree = (key: string) => (
+        <StrictMode>
+          <section key={key} data-testid="hint-ancestor">
+            <HintBar
+              session={session}
+              actions={actions}
+              onShare={onShare}
+              onComment={comment}
+            />
+          </section>
+        </StrictMode>
+      );
+      await renderHintRoot(root, tree("retired"));
+      const stale = captureHint();
+      const ancestor = stale.root.parentElement;
+      if (!ancestor?.parentNode) throw new Error("HintBar has no ancestor");
+
+      if (scenario === "root mutation and restoration") {
+        stale.root.setAttribute("data-transient", "changed");
+        stale.root.removeAttribute("data-transient");
+      } else if (scenario === "text replacement and restoration") {
+        const replacement = stale.text.cloneNode(true);
+        stale.root.replaceChild(replacement, stale.text);
+        stale.root.replaceChild(stale.text, replacement);
+      } else if (scenario === "control reorder and restoration") {
+        stale.root.insertBefore(stale.dismissElement, stale.actionElement);
+        stale.root.append(stale.dismissElement);
+      } else if (scenario === "disabled control and restoration") {
+        stale.actionElement.disabled = true;
+        stale.actionElement.disabled = false;
+      } else if (scenario === "root detach and reinsert") {
+        const parent = stale.root.parentNode;
+        const next = stale.root.nextSibling;
+        if (!parent) throw new Error("HintBar has no parent");
+        parent.removeChild(stale.root);
+        parent.insertBefore(stale.root, next);
+      } else {
+        const parent = ancestor.parentNode;
+        const next = ancestor.nextSibling;
+        parent.removeChild(ancestor);
+        parent.insertBefore(ancestor, next);
+      }
+
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+      pointerActivate(stale.actionElement);
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(comment).not.toHaveBeenCalled();
+
+      await renderHintRoot(root, tree("fresh"));
+      const current = captureHint();
+      expect(current.root).not.toBe(stale.root);
+      const currentElements = [
+        current.root,
+        current.icon,
+        current.text,
+        current.actionElement,
+        current.dismissElement,
+        current.dismissIcon,
+      ];
+      act(() => {
+        stale.actionHandler(fabricatedClick(current.actionElement));
+        stale.dismissHandler(fabricatedClick(current.dismissElement));
+        stale.refs.forEach((ref, index) => ref(currentElements[index]!));
+        [...stale.refs].reverse().forEach((ref) => ref(null));
+      });
+      expect(storageWrites).not.toHaveBeenCalled();
+
+      pointerActivate(current.actionElement);
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(comment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([0, 1, 2, 3, 4, 5] as const)(
+    "rejects partial and repeated Strict Mode replay for visible ref %s",
+    async (refIndex) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({
+          dismissed: ["collab-agent"],
+          agentSeen: false,
+        }),
+      );
+      const comment = vi.fn();
+      const session = fakeSession(`strict-partial-ref-${refIndex}`, {
+        threads: 1,
+      });
+      const root = createHintRoot();
+      const tree = (key: string) => (
+        <StrictMode>
+          <HintBar
+            key={key}
+            session={session}
+            actions={actions}
+            onShare={onShare}
+            onComment={comment}
+          />
+        </StrictMode>
+      );
+      await renderHintRoot(root, tree("partial"));
+      const stale = captureHint();
+      const elements = [
+        stale.root,
+        stale.icon,
+        stale.text,
+        stale.actionElement,
+        stale.dismissElement,
+        stale.dismissIcon,
+      ];
+      const ref = stale.refs[refIndex]!;
+
+      act(() => {
+        ref(null);
+        ref(elements[refIndex]!);
+        ref(null);
+        ref(elements[refIndex]!);
+      });
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+      pointerActivate(stale.actionElement);
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(comment).not.toHaveBeenCalled();
+
+      await renderHintRoot(root, tree("fresh"));
+      const current = captureHint();
+      pointerActivate(current.actionElement);
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(comment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("keeps callback-drift A stale while the exact B publication remains usable", async () => {
+    window.localStorage.setItem(
+      HINTS_STORAGE_KEY,
+      JSON.stringify({
+        dismissed: ["collab-agent"],
+        agentSeen: false,
+      }),
+    );
+    const session = fakeSession("strict-callback-drift", { threads: 1 });
+    const commentA = vi.fn();
+    const commentB = vi.fn();
+    const root = createHintRoot();
+    const tree = (comment: () => void) => (
+      <StrictMode>
+        <HintBar
+          session={session}
+          actions={actions}
+          onShare={onShare}
+          onComment={comment}
+        />
+      </StrictMode>
+    );
+    await renderHintRoot(root, tree(commentA));
+    const stale = captureHint();
+    await renderHintRoot(root, tree(commentB));
+    const current = captureHint();
+    expect(current.root).toBe(stale.root);
+    expect(current.actionHandler).not.toBe(stale.actionHandler);
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+
+    act(() => {
+      stale.actionHandler(fabricatedClick(current.actionElement));
+      stale.dismissHandler(fabricatedClick(current.dismissElement));
+    });
+    expect(storageWrites).not.toHaveBeenCalled();
+    expect(commentA).not.toHaveBeenCalled();
+    expect(commentB).not.toHaveBeenCalled();
+
+    pointerActivate(current.actionElement);
+    expect(storageWrites).toHaveBeenCalledOnce();
+    expect(commentA).not.toHaveBeenCalled();
+    expect(commentB).toHaveBeenCalledOnce();
   });
 });
