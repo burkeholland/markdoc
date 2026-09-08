@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useLayoutEffect } from "react";
+import {
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+  type RefCallback,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UpdatePill } from "./update-pill";
@@ -31,22 +35,24 @@ function deferred<T>() {
 function ReaderBoundary({
   docId = DOC_ID,
   initialHash = INITIAL_HASH,
+  pollMs = POLL_MS,
   show = true,
   visit = "initial",
   onLayout,
 }: {
   docId?: string;
   initialHash?: string;
+  pollMs?: number;
   show?: boolean;
   visit?: "initial" | "replacement";
   onLayout?: () => void;
 }) {
   useLayoutEffect(() => {
     onLayout?.();
-  }, [docId, initialHash, show, visit, onLayout]);
+  }, [docId, initialHash, pollMs, show, visit, onLayout]);
 
   if (!show) return null;
-  const props = { docId, initialHash, pollMs: POLL_MS };
+  const props = { docId, initialHash, pollMs };
   return visit === "initial" ? <InitialReaderVisit {...props} /> : <ReplacementReaderVisit {...props} />;
 }
 
@@ -58,12 +64,34 @@ function ReplacementReaderVisit(props: { docId: string; initialHash: string; pol
   return <UpdatePill {...props} />;
 }
 
-function captureClick(element: HTMLElement) {
+type RefreshClick = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+
+function reactHandler<T>(element: Element, name: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error("React props were not attached to the Refresh button");
-  const props = (element as unknown as Record<string, { onClick?: () => void } | undefined>)[propsKey];
-  if (!props?.onClick) throw new Error("The Refresh button did not have an onClick handler");
-  return props.onClick;
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const handler = props?.[name];
+  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  return handler as T;
+}
+
+function captureClick(element: HTMLButtonElement) {
+  return reactHandler<RefreshClick>(element, "onClick");
+}
+
+function clickEvent(currentTarget: HTMLButtonElement) {
+  return {
+    currentTarget,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  } as unknown as ReactMouseEvent<HTMLButtonElement>;
+}
+
+function controls(host: ParentNode = document) {
+  const pill = host.querySelector<HTMLDivElement>('[data-testid="reader-updated"]');
+  const button = pill?.querySelector<HTMLButtonElement>("button");
+  if (!pill || !button) throw new Error("The complete reader update control was not rendered");
+  return { pill, button };
 }
 
 function trackVisibilityListeners() {
@@ -89,11 +117,16 @@ function createNavigationSpies() {
   };
 }
 
-function invokeRefreshes(navigation: ReturnType<typeof createNavigationSpies>, ...callbacks: Array<() => void>) {
+async function withNavigation<T>(
+  navigation: ReturnType<typeof createNavigationSpies>,
+  callback: () => T | Promise<T>,
+): Promise<T> {
   const browserWindow = window;
-  vi.stubGlobal("window", { location: navigation });
+  const controlledWindow = Object.create(browserWindow) as Window;
+  Object.defineProperty(controlledWindow, "location", { configurable: true, value: navigation });
+  vi.stubGlobal("window", controlledWindow);
   try {
-    for (const callback of callbacks) callback();
+    return await callback();
   } finally {
     vi.stubGlobal("window", browserWindow);
   }
@@ -400,27 +433,166 @@ describe("UpdatePill polling", () => {
     document.body.append(focusOwner);
     focusOwner.focus();
     fetchMock.mockResolvedValue(response("hash-after"));
+    const frozenNavigation = createNavigationSpies();
 
     try {
-      mount();
-      await advance(0);
-      const pill = screen.getByTestId("reader-updated");
-      const refresh = captureClick(screen.getByRole("button", { name: /Updated.*Refresh/ }));
+      await withNavigation(frozenNavigation, async () => {
+        mount();
+        await advance(0);
+      });
+      const { pill, button } = controls();
+      const refresh = captureClick(button);
+      const event = clickEvent(button);
       const markup = pill.outerHTML;
       const timers = vi.getTimerCount();
 
-      const navigation = createNavigationSpies();
-      invokeRefreshes(navigation, refresh, refresh);
+      const replacementNavigation = createNavigationSpies();
+      await withNavigation(replacementNavigation, () => {
+        refresh(event);
+        refresh(event);
+      });
 
-      expect(navigation.reload).toHaveBeenCalledOnce();
-      expect(navigation.assign).not.toHaveBeenCalled();
-      expect(navigation.replace).not.toHaveBeenCalled();
+      expect(frozenNavigation.reload).toHaveBeenCalledOnce();
+      expect(frozenNavigation.assign).not.toHaveBeenCalled();
+      expect(frozenNavigation.replace).not.toHaveBeenCalled();
+      expect(replacementNavigation.reload).not.toHaveBeenCalled();
+      expect(replacementNavigation.assign).not.toHaveBeenCalled();
+      expect(replacementNavigation.replace).not.toHaveBeenCalled();
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(timers);
       expect(activeListeners.size).toBe(0);
       expect(pill.outerHTML).toBe(markup);
       expect(focusOwner).toHaveFocus();
     } finally {
+      focusOwner.remove();
+    }
+  });
+
+  it.each(
+    (
+      [
+        "sibling button",
+        "foreign connected button",
+        "detached exact button",
+        "replacement button",
+        "replacement pill",
+        "disabled exact button",
+        "fact-mutated exact button",
+        "fact-mutated exact pill",
+      ] as const
+    ).flatMap((source) =>
+      (["wrong-before-current", "current-before-wrong"] as const).map((order) => ({ source, order })),
+    ),
+  )("rejects a $source with zero work in $order order", async ({ source, order }) => {
+    const activeListeners = trackVisibilityListeners();
+    const focusOwner = document.createElement("button");
+    const host = document.createElement("div");
+    document.body.append(focusOwner, host);
+    focusOwner.focus();
+    const root = createRoot(host);
+    const navigation = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+    let restore = () => {};
+
+    try {
+      await withNavigation(navigation, async () => {
+        await act(async () => root.render(<UpdatePill docId={DOC_ID} initialHash={INITIAL_HASH} pollMs={POLL_MS} />));
+        await advance(0);
+      });
+      const { pill, button } = controls(host);
+      const refresh = captureClick(button);
+      const prepareWrongSource = () => {
+        if (source === "sibling button") {
+          const sibling = document.createElement("button");
+          pill.append(sibling);
+          restore = () => sibling.remove();
+          return sibling;
+        }
+        if (source === "foreign connected button") {
+          const foreign = document.createElement("button");
+          document.body.append(foreign);
+          restore = () => foreign.remove();
+          return foreign;
+        }
+        if (source === "detached exact button") {
+          button.remove();
+          restore = () => pill.append(button);
+          return button;
+        }
+        if (source === "replacement button") {
+          const replacement = button.cloneNode(true) as HTMLButtonElement;
+          pill.replaceChildren(replacement);
+          restore = () => pill.replaceChildren(button);
+          return replacement;
+        }
+        if (source === "replacement pill") {
+          const replacement = pill.cloneNode(true) as HTMLDivElement;
+          const replacementButton = replacement.querySelector("button");
+          if (!(replacementButton instanceof HTMLButtonElement)) throw new Error("Replacement pill has no button");
+          host.replaceChild(replacement, pill);
+          restore = () => host.replaceChild(pill, replacement);
+          return replacementButton;
+        }
+        if (source === "disabled exact button") {
+          button.disabled = true;
+          restore = () => {
+            button.disabled = false;
+          };
+          return button;
+        }
+        if (source === "fact-mutated exact button") {
+          button.setAttribute("data-mutated", "true");
+          restore = () => button.removeAttribute("data-mutated");
+          return button;
+        }
+        pill.setAttribute("role", "alert");
+        restore = () => pill.setAttribute("role", "status");
+        return button;
+      };
+      const invokeWrong = () => {
+        const wrongSource = prepareWrongSource();
+        const before = host.innerHTML;
+        const fetches = fetchMock.mock.calls.length;
+        const timers = vi.getTimerCount();
+        const listeners = activeListeners.size;
+        const activeElement = document.activeElement;
+        const event = clickEvent(wrongSource);
+
+        refresh(event);
+
+        expect(navigation.reload).toHaveBeenCalledTimes(order === "current-before-wrong" ? 1 : 0);
+        expect(navigation.assign).not.toHaveBeenCalled();
+        expect(navigation.replace).not.toHaveBeenCalled();
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(event.stopPropagation).not.toHaveBeenCalled();
+        expect(fetchMock).toHaveBeenCalledTimes(fetches);
+        expect(vi.getTimerCount()).toBe(timers);
+        expect(activeListeners.size).toBe(listeners);
+        expect(document.activeElement).toBe(activeElement);
+        expect(host.innerHTML).toBe(before);
+        restore();
+        restore = () => {};
+      };
+      const invokeCurrent = () => refresh(clickEvent(button));
+
+      if (order === "wrong-before-current") {
+        invokeWrong();
+        invokeCurrent();
+      } else {
+        invokeCurrent();
+        invokeWrong();
+      }
+
+      expect(navigation.reload).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(activeListeners.size).toBe(0);
+      expect(focusOwner).toHaveFocus();
+    } finally {
+      restore();
+      await act(async () => root.unmount());
+      host.remove();
       focusOwner.remove();
     }
   });
@@ -434,11 +606,15 @@ describe("UpdatePill polling", () => {
     const root = createRoot(host);
     focusOwner.focus();
     fetchMock.mockResolvedValue(response("hash-after"));
+    const frozenNavigation = createNavigationSpies();
 
     try {
-      await act(async () => root.render(<ReaderBoundary />));
-      await advance(0);
-      const staleRefresh = captureClick(screen.getByRole("button", { name: /Updated.*Refresh/ }));
+      await withNavigation(frozenNavigation, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const staleControl = controls(host);
+      const staleRefresh = captureClick(staleControl.button);
       const fetches = fetchMock.mock.calls.length;
       const timers = vi.getTimerCount();
       const listeners = activeListeners.size;
@@ -448,27 +624,24 @@ describe("UpdatePill polling", () => {
       let boundaryListeners = -1;
       let boundaryFocused = false;
       const boundaryNavigation = createNavigationSpies();
-      let reachBoundary!: () => void;
-      const atBoundary = new Promise<void>((resolve) => {
-        reachBoundary = resolve;
-      });
 
-      root.render(
-        <ReaderBoundary
-          show={false}
-          onLayout={() => {
-            boundaryMarkup = host.innerHTML;
-            boundaryFetches = fetchMock.mock.calls.length;
-            boundaryTimers = vi.getTimerCount();
-            boundaryListeners = activeListeners.size;
-            boundaryFocused = document.activeElement === focusOwner;
-            invokeRefreshes(boundaryNavigation, staleRefresh);
-            reachBoundary();
-          }}
-        />,
+      await withNavigation(boundaryNavigation, () =>
+        act(async () =>
+          root.render(
+            <ReaderBoundary
+              show={false}
+              onLayout={() => {
+                boundaryMarkup = host.innerHTML;
+                boundaryFetches = fetchMock.mock.calls.length;
+                boundaryTimers = vi.getTimerCount();
+                boundaryListeners = activeListeners.size;
+                boundaryFocused = document.activeElement === focusOwner;
+                staleRefresh(clickEvent(staleControl.button));
+              }}
+            />,
+          ),
+        ),
       );
-      await atBoundary;
-      await act(async () => {});
 
       expect(boundaryMarkup).toBe("");
       expect(boundaryFetches).toBe(fetches);
@@ -480,7 +653,8 @@ describe("UpdatePill polling", () => {
       expect(boundaryNavigation.replace).not.toHaveBeenCalled();
 
       const afterBoundaryNavigation = createNavigationSpies();
-      invokeRefreshes(afterBoundaryNavigation, staleRefresh);
+      await withNavigation(afterBoundaryNavigation, () => staleRefresh(clickEvent(staleControl.button)));
+      expect(frozenNavigation.reload).not.toHaveBeenCalled();
       expect(afterBoundaryNavigation.reload).not.toHaveBeenCalled();
       expect(afterBoundaryNavigation.assign).not.toHaveBeenCalled();
       expect(afterBoundaryNavigation.replace).not.toHaveBeenCalled();
@@ -496,10 +670,102 @@ describe("UpdatePill polling", () => {
     }
   });
 
+  it.each(
+    (["reload method replacement", "poll cadence replacement"] as const).flatMap((change) =>
+      (["retired-before-current", "current-before-retired"] as const).map((order) => ({ change, order })),
+    ),
+  )("keeps reused DOM owned by B after $change in $order order", async ({ change, order }) => {
+    const activeListeners = trackVisibilityListeners();
+    const focusOwner = document.createElement("button");
+    const host = document.createElement("div");
+    document.body.append(focusOwner, host);
+    const root = createRoot(host);
+    const navigationA = createNavigationSpies();
+    const navigationB = createNavigationSpies();
+    fetchMock.mockResolvedValue(response("hash-after"));
+
+    try {
+      await withNavigation(navigationA, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const a = controls(host);
+      const staleRefresh = captureClick(a.button);
+      const stalePillRef = reactHandler<RefCallback<HTMLDivElement>>(a.pill, "ref");
+      const staleButtonRef = reactHandler<RefCallback<HTMLButtonElement>>(a.button, "ref");
+      let boundaryRan = false;
+
+      await withNavigation(navigationB, () =>
+        act(async () =>
+          root.render(
+            <ReaderBoundary
+              pollMs={change === "poll cadence replacement" ? POLL_MS + 17 : POLL_MS}
+              onLayout={() => {
+                boundaryRan = true;
+                const current = controls(host);
+                expect(current.pill).toBe(a.pill);
+                expect(current.button).toBe(a.button);
+                staleRefresh(clickEvent(current.button));
+              }}
+            />,
+          ),
+        ),
+      );
+
+      expect(boundaryRan).toBe(true);
+      expect(navigationA.reload).not.toHaveBeenCalled();
+      expect(navigationB.reload).not.toHaveBeenCalled();
+      const b = controls(host);
+      expect(b.pill).toBe(a.pill);
+      expect(b.button).toBe(a.button);
+      const currentRefresh = captureClick(b.button);
+      focusOwner.focus();
+
+      act(() => {
+        stalePillRef(a.pill);
+        staleButtonRef(a.button);
+        staleButtonRef(null);
+        stalePillRef(null);
+      });
+      const fetches = fetchMock.mock.calls.length;
+      const timers = vi.getTimerCount();
+      const listeners = activeListeners.size;
+      const markup = host.innerHTML;
+      expect(host.innerHTML).toBe(markup);
+
+      if (order === "retired-before-current") {
+        staleRefresh(clickEvent(b.button));
+        currentRefresh(clickEvent(b.button));
+      } else {
+        currentRefresh(clickEvent(b.button));
+        staleRefresh(clickEvent(b.button));
+      }
+
+      expect(navigationA.reload).not.toHaveBeenCalled();
+      expect(navigationB.reload).toHaveBeenCalledOnce();
+      expect(fetchMock).toHaveBeenCalledTimes(fetches);
+      expect(vi.getTimerCount()).toBe(timers);
+      expect(activeListeners.size).toBe(listeners);
+      expect(host.innerHTML).toBe(markup);
+      expect(focusOwner).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      focusOwner.remove();
+    }
+  });
+
   it.each([
     {
       name: "different document values with stale before current",
       docId: REPLACEMENT_DOC_ID,
+      initialHash: INITIAL_HASH,
+      visit: "initial" as const,
+      staleFirst: true,
+    },
+    {
+      name: "a replacement hash on the same document",
+      docId: DOC_ID,
       initialHash: REPLACEMENT_HASH,
       visit: "initial" as const,
       staleFirst: true,
@@ -520,11 +786,16 @@ describe("UpdatePill polling", () => {
     const root = createRoot(host);
     focusOwner.focus();
     fetchMock.mockResolvedValueOnce(response("changed-a")).mockResolvedValueOnce(response("changed-b"));
+    const navigationA = createNavigationSpies();
+    const navigationB = createNavigationSpies();
 
     try {
-      await act(async () => root.render(<ReaderBoundary />));
-      await advance(0);
-      const staleRefresh = captureClick(screen.getByRole("button", { name: /Updated.*Refresh/ }));
+      await withNavigation(navigationA, async () => {
+        await act(async () => root.render(<ReaderBoundary />));
+        await advance(0);
+      });
+      const staleControl = controls(host);
+      const staleRefresh = captureClick(staleControl.button);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(activeListeners.size).toBe(0);
 
@@ -533,42 +804,37 @@ describe("UpdatePill polling", () => {
       let boundaryTimers = -1;
       let boundaryListeners = -1;
       let boundaryFocused = false;
-      const boundaryNavigation = createNavigationSpies();
       let layoutCalls = 0;
-      let reachBoundary!: () => void;
-      const atBoundary = new Promise<void>((resolve) => {
-        reachBoundary = resolve;
-      });
 
-      root.render(
-        <ReaderBoundary
-          docId={docId}
-          initialHash={initialHash}
-          visit={visit}
-          onLayout={() => {
-            layoutCalls++;
-            boundaryMarkup = host.innerHTML;
-            boundaryFetches = fetchMock.mock.calls.length;
-            boundaryTimers = vi.getTimerCount();
-            boundaryListeners = activeListeners.size;
-            boundaryFocused = document.activeElement === focusOwner;
-            invokeRefreshes(boundaryNavigation, staleRefresh);
-            reachBoundary();
-          }}
-        />,
-      );
-      await atBoundary;
-      await act(async () => {});
-      await advance(0);
+      await withNavigation(navigationB, async () => {
+        await act(async () =>
+          root.render(
+            <ReaderBoundary
+              docId={docId}
+              initialHash={initialHash}
+              visit={visit}
+              onLayout={() => {
+                layoutCalls++;
+                boundaryMarkup = host.innerHTML;
+                boundaryFetches = fetchMock.mock.calls.length;
+                boundaryTimers = vi.getTimerCount();
+                boundaryListeners = activeListeners.size;
+                boundaryFocused = document.activeElement === focusOwner;
+                staleRefresh(clickEvent(staleControl.button));
+              }}
+            />,
+          ),
+        );
+        await advance(0);
+      });
 
       expect(boundaryMarkup).toBe("");
       expect(boundaryFetches).toBe(1);
       expect(boundaryTimers).toBe(0);
       expect(boundaryListeners).toBe(0);
       expect(boundaryFocused).toBe(true);
-      expect(boundaryNavigation.reload).not.toHaveBeenCalled();
-      expect(boundaryNavigation.assign).not.toHaveBeenCalled();
-      expect(boundaryNavigation.replace).not.toHaveBeenCalled();
+      expect(navigationA.reload).not.toHaveBeenCalled();
+      expect(navigationB.reload).not.toHaveBeenCalled();
       expect(layoutCalls).toBe(1);
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -578,29 +844,45 @@ describe("UpdatePill polling", () => {
       ]);
       expect(requestSignal(1)).not.toBe(requestSignal(0));
       expect(requestSignal(1).aborted).toBe(false);
-      const currentPill = screen.getByTestId("reader-updated");
-      const currentRefresh = captureClick(screen.getByRole("button", { name: /Updated.*Refresh/ }));
-      const currentMarkup = currentPill.outerHTML;
+      const currentControl = controls(host);
+      const currentRefresh = captureClick(currentControl.button);
+      if (visit === "replacement" || docId !== DOC_ID || initialHash !== INITIAL_HASH) {
+        expect(currentControl.pill).not.toBe(staleControl.pill);
+        expect(currentControl.button).not.toBe(staleControl.button);
+      }
+      staleRefresh(clickEvent(currentControl.button));
+      currentRefresh(clickEvent(staleControl.button));
+      expect(navigationA.reload).not.toHaveBeenCalled();
+      expect(navigationB.reload).not.toHaveBeenCalled();
+      const currentMarkup = currentControl.pill.outerHTML;
       const fetches = fetchMock.mock.calls.length;
       const timers = vi.getTimerCount();
       const listeners = activeListeners.size;
 
-      const callbacks = staleFirst ? [staleRefresh, currentRefresh] : [currentRefresh, staleRefresh];
-      const navigation = createNavigationSpies();
-      invokeRefreshes(navigation, ...callbacks);
-      expect(navigation.reload).toHaveBeenCalledOnce();
-      expect(navigation.assign).not.toHaveBeenCalled();
-      expect(navigation.replace).not.toHaveBeenCalled();
+      if (staleFirst) {
+        staleRefresh(clickEvent(staleControl.button));
+        currentRefresh(clickEvent(currentControl.button));
+      } else {
+        currentRefresh(clickEvent(currentControl.button));
+        staleRefresh(clickEvent(staleControl.button));
+      }
+      expect(navigationA.reload).not.toHaveBeenCalled();
+      expect(navigationB.reload).toHaveBeenCalledOnce();
+      expect(navigationB.assign).not.toHaveBeenCalled();
+      expect(navigationB.replace).not.toHaveBeenCalled();
 
       const repeatedNavigation = createNavigationSpies();
-      invokeRefreshes(repeatedNavigation, staleRefresh, currentRefresh);
+      await withNavigation(repeatedNavigation, () => {
+        staleRefresh(clickEvent(staleControl.button));
+        currentRefresh(clickEvent(currentControl.button));
+      });
       expect(repeatedNavigation.reload).not.toHaveBeenCalled();
       expect(repeatedNavigation.assign).not.toHaveBeenCalled();
       expect(repeatedNavigation.replace).not.toHaveBeenCalled();
       expect(fetchMock).toHaveBeenCalledTimes(fetches);
       expect(vi.getTimerCount()).toBe(timers);
       expect(activeListeners.size).toBe(listeners);
-      expect(currentPill.outerHTML).toBe(currentMarkup);
+      expect(currentControl.pill.outerHTML).toBe(currentMarkup);
       expect(focusOwner).toHaveFocus();
       expect(layoutCalls).toBe(1);
     } finally {
