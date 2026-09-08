@@ -114,6 +114,71 @@ const TEMPLATE_ICON_CONTAINER_CLASS =
 const TEMPLATE_NAME_CLASS = "block text-sm font-semibold text-ink";
 const TEMPLATE_DESCRIPTION_CLASS = "block text-xs leading-4 text-ink-3";
 
+type TemplateGridExpectedAttributes = readonly (readonly [string, string])[];
+type TemplateGridExpectedIconNode = readonly [
+  localName: string,
+  attributes: TemplateGridExpectedAttributes,
+];
+
+const TEMPLATE_ICON_CHILDREN = {
+  File: [
+    ["path", [["d", "M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"]]],
+    ["path", [["d", "M14 2v5a1 1 0 0 0 1 1h5"]]],
+  ],
+  Users: [
+    ["path", [["d", "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"]]],
+    ["path", [["d", "M16 3.128a4 4 0 0 1 0 7.744"]]],
+    ["path", [["d", "M22 21v-2a4 4 0 0 0-3-3.87"]]],
+    ["circle", [["cx", "9"], ["cy", "7"], ["r", "4"]]],
+  ],
+  BookOpen: [
+    ["path", [["d", "M12 5v16"]]],
+    ["path", [["d", "M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"]]],
+  ],
+  DraftingCompass: [
+    ["path", [["d", "m12.99 6.74 1.93 3.44"]]],
+    ["path", [["d", "M19.136 12a10 10 0 0 1-14.271 0"]]],
+    ["path", [["d", "m21 21-2.16-3.84"]]],
+    ["path", [["d", "m3 21 8.02-14.26"]]],
+    ["circle", [["cx", "12"], ["cy", "5"], ["r", "2"]]],
+  ],
+  CalendarCheck: [
+    ["path", [["d", "M8 2v3"]]],
+    ["path", [["d", "M16 2v3"]]],
+    ["rect", [["x", "3"], ["y", "3"], ["width", "18"], ["height", "18"], ["rx", "2"]]],
+    ["path", [["d", "M3 9h18"]]],
+    ["path", [["d", "m9 15 2 2 4-4"]]],
+  ],
+  PenLine: [
+    ["path", [["d", "M13 21h8"]]],
+    ["path", [["d", "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"]]],
+  ],
+  Scale: [
+    ["path", [["d", "M12 3v18"]]],
+    ["path", [["d", "m19 8 3 8a5 5 0 0 1-6 0zV7"]]],
+    ["path", [["d", "M3 7h1a17 17 0 0 0 8-2 17 17 0 0 0 8 2h1"]]],
+    ["path", [["d", "m5 8 3 8a5 5 0 0 1-6 0zV7"]]],
+    ["path", [["d", "M7 21h10"]]],
+  ],
+  ListChecks: [
+    ["path", [["d", "M13 5h8"]]],
+    ["path", [["d", "M13 12h8"]]],
+    ["path", [["d", "M13 19h8"]]],
+    ["path", [["d", "m3 17 2 2 4-4"]]],
+    ["path", [["d", "m3 7 2 2 4-4"]]],
+  ],
+  Sparkles: [
+    ["path", [["d", "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"]]],
+    ["path", [["d", "M20 2v4"]]],
+    ["path", [["d", "M22 4h-4"]]],
+    ["circle", [["cx", "4"], ["cy", "20"], ["r", "2"]]],
+  ],
+} as const satisfies Record<TemplateIcon, readonly TemplateGridExpectedIconNode[]>;
+
+const TEMPLATE_BUSY_ICON_CHILDREN = [
+  ["path", [["d", "M21 12a9 9 0 1 1-6.219-8.56"]]],
+] as const satisfies readonly TemplateGridExpectedIconNode[];
+
 interface TemplateGridEntryPublication {
   readonly identity: symbol;
   readonly index: number;
@@ -222,6 +287,7 @@ interface TemplateGridPublicationCells {
   readonly active: { current: TemplateGridPublication | null };
   readonly successorOf: { current: TemplateGridPublication | null };
   readonly replay: { current: TemplateGridReplay | null };
+  readonly delivery: { current: symbol | null };
   readonly claimedPublications: WeakSet<TemplateGridPublication>;
   readonly claimedEntries: WeakSet<TemplateGridDomPublication>;
   readonly claimedActions: WeakSet<TemplateGridActionPublication>;
@@ -242,6 +308,11 @@ interface TemplateGridReactClickProof {
   readonly native: TemplateGridNativeClickProof;
 }
 
+interface TemplateGridReactEntryClickProof extends TemplateGridReactClickProof {
+  readonly entry: TemplateGridDomPublication;
+  readonly action: TemplateGridActionPublication;
+}
+
 interface TemplateGridPublicationRuntime {
   readonly publication: TemplateGridPublication;
   readonly publish: () => boolean;
@@ -257,10 +328,14 @@ interface TemplateGridPublicationRuntime {
   readonly captureReactClick: (
     event: ReactMouseEvent<HTMLUListElement>,
   ) => void;
+  readonly captureReactCardClick: (
+    entry: TemplateGridEntryPublication,
+    event: ReactMouseEvent<HTMLLIElement>,
+  ) => void;
   readonly activate: (
     entry: TemplateGridEntryPublication,
     event: ReactMouseEvent<HTMLButtonElement>,
-  ) => TemplateGridDomPublication | null;
+  ) => boolean;
 }
 
 interface TemplateGridEntryOwnerSet {
@@ -297,9 +372,12 @@ interface TemplateGridPublicationSet {
     readonly captureDescription: (
       element: HTMLSpanElement | null,
     ) => void | (() => void);
+    readonly captureClick: (
+      event: ReactMouseEvent<HTMLLIElement>,
+    ) => void;
     readonly activate: (
       event: ReactMouseEvent<HTMLButtonElement>,
-    ) => TemplateGridDomPublication | null;
+    ) => boolean;
   }[];
 }
 
@@ -654,6 +732,72 @@ function templateGridIsEffectivelyEnabled(
   return reachedGrid;
 }
 
+function templateGridHasExactAttributes(
+  element: Element,
+  expected: TemplateGridExpectedAttributes,
+) {
+  return (
+    element.attributes.length === expected.length &&
+    expected.every(([name, value]) => element.getAttribute(name) === value)
+  );
+}
+
+function templateGridIconIsExact(
+  entry: TemplateGridEntryPublication,
+  icon: SVGSVGElement,
+) {
+  const iconName = entry.isBusy
+    ? "loader-circle"
+    : entry.icon.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+  const expectedChildren = entry.isBusy
+    ? TEMPLATE_BUSY_ICON_CHILDREN
+    : TEMPLATE_ICON_CHILDREN[entry.icon];
+  const expectedAttributes = [
+    ["xmlns", "http://www.w3.org/2000/svg"],
+    ["width", "18"],
+    ["height", "18"],
+    ["viewBox", "0 0 24 24"],
+    ["fill", "none"],
+    ["stroke", "currentColor"],
+    ["stroke-width", "2"],
+    ["stroke-linecap", "round"],
+    ["stroke-linejoin", "round"],
+    [
+      "class",
+      `lucide lucide-${iconName}${entry.isBusy ? " animate-spin" : ""}`,
+    ],
+    ["aria-hidden", "true"],
+  ] as const satisfies TemplateGridExpectedAttributes;
+  return (
+    icon.localName === "svg" &&
+    icon.namespaceURI === "http://www.w3.org/2000/svg" &&
+    templateGridHasExactAttributes(icon, expectedAttributes) &&
+    icon.childNodes.length === expectedChildren.length &&
+    icon.children.length === expectedChildren.length &&
+    expectedChildren.every(([localName, attributes], index) => {
+      const child = icon.children.item(index);
+      return (
+        child?.localName === localName &&
+        child.namespaceURI === "http://www.w3.org/2000/svg" &&
+        child.parentNode === icon &&
+        child.childNodes.length === 0 &&
+        templateGridHasExactAttributes(child, attributes)
+      );
+    })
+  );
+}
+
+function templateGridTextIsExact(element: HTMLSpanElement, value: string) {
+  const text = element.firstChild;
+  return (
+    element.childNodes.length === 1 &&
+    element.children.length === 0 &&
+    text !== null &&
+    text.nodeType === element.ownerDocument.defaultView?.Node.TEXT_NODE &&
+    text.nodeValue === value
+  );
+}
+
 function templateGridElementsAreCurrent(
   render: TemplateGridRenderPublication,
   gridOwner: TemplateGridElementOwnerView,
@@ -668,6 +812,10 @@ function templateGridElementsAreCurrent(
     grid.tagName !== "UL" ||
     grid.className !== render.gridClassName ||
     grid.dataset.testid !== "template-grid" ||
+    !templateGridHasExactAttributes(grid, [
+      ["class", render.gridClassName],
+      ["data-testid", "template-grid"],
+    ]) ||
     grid.childNodes.length !== render.entries.length ||
     grid.children.length !== render.entries.length ||
     entryOwners.length !== render.entries.length
@@ -702,6 +850,7 @@ function templateGridElementsAreCurrent(
       card.parentElement !== grid ||
       card.tagName !== "LI" ||
       card.className !== TEMPLATE_CARD_CLASS ||
+      !templateGridHasExactAttributes(card, [["class", TEMPLATE_CARD_CLASS]]) ||
       card.childNodes.length !== 1 ||
       card.children.length !== 1 ||
       card.firstElementChild !== button ||
@@ -715,6 +864,17 @@ function templateGridElementsAreCurrent(
         (entry.isBusy ? "true" : null) ||
       button.className !== TEMPLATE_BUTTON_CLASS ||
       button.dataset.testid !== `template-${entry.id}` ||
+      !templateGridHasExactAttributes(button, [
+        ["type", "button"],
+        ...(render.busy !== null
+          ? ([["disabled", ""]] as const)
+          : []),
+        ...(entry.isBusy
+          ? ([["aria-busy", "true"]] as const)
+          : []),
+        ["class", TEMPLATE_BUTTON_CLASS],
+        ["data-testid", `template-${entry.id}`],
+      ]) ||
       button.childNodes.length !== 3 ||
       button.children.length !== 3
     ) {
@@ -726,24 +886,26 @@ function templateGridElementsAreCurrent(
       !(iconContainer instanceof ownerWindow.HTMLSpanElement) ||
       iconContainer.parentElement !== button ||
       iconContainer.className !== TEMPLATE_ICON_CONTAINER_CLASS ||
+      !templateGridHasExactAttributes(iconContainer, [
+        ["class", TEMPLATE_ICON_CONTAINER_CLASS],
+      ]) ||
       iconContainer.childNodes.length !== 1 ||
       iconContainer.children.length !== 1 ||
       iconContainer.firstElementChild !== icon ||
       icon.parentElement !== iconContainer ||
-      icon.getAttribute("width") !== "18" ||
-      icon.getAttribute("height") !== "18" ||
-      icon.getAttribute("aria-hidden") !== "true" ||
-      icon.classList.contains("animate-spin") !== entry.isBusy ||
+      !templateGridIconIsExact(entry, icon) ||
       button.children.item(1) !== name ||
       name.parentElement !== button ||
       name.className !== TEMPLATE_NAME_CLASS ||
-      name.children.length !== 0 ||
-      name.textContent !== entry.name ||
+      !templateGridHasExactAttributes(name, [["class", TEMPLATE_NAME_CLASS]]) ||
+      !templateGridTextIsExact(name, entry.name) ||
       button.children.item(2) !== description ||
       description.parentElement !== button ||
       description.className !== TEMPLATE_DESCRIPTION_CLASS ||
-      description.children.length !== 0 ||
-      description.textContent !== entry.description
+      !templateGridHasExactAttributes(description, [
+        ["class", TEMPLATE_DESCRIPTION_CLASS],
+      ]) ||
+      !templateGridTextIsExact(description, entry.description)
     ) {
       return false;
     }
@@ -853,7 +1015,8 @@ function createTemplateGridPublication(
     if (
       !ownerWindow ||
       !(grid instanceof ownerWindow.HTMLUListElement) ||
-      !placement
+      !placement ||
+      !templateGridElementsAreCurrent(render, gridOwner, entryOwners)
     ) {
       return null;
     }
@@ -907,6 +1070,9 @@ function createTemplateGridPublication(
         targets: templateGridNodes(button),
       });
     });
+    if (!templateGridElementsAreCurrent(render, gridOwner, entryOwners)) {
+      return null;
+    }
     const dom = snapshotTemplateGridDom(grid);
     let retired = false;
     let retirement: Retirement | null = null;
@@ -917,7 +1083,8 @@ function createTemplateGridPublication(
       new Set<TemplateGridElementOwnerView>();
     let guard: TemplateGridDomGuard | null = null;
     let nativeClick: TemplateGridNativeClickProof | null = null;
-    let reactClick: TemplateGridReactClickProof | null = null;
+    let reactGridClick: TemplateGridReactClickProof | null = null;
+    let reactCardClick: TemplateGridReactEntryClickProof | null = null;
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -996,13 +1163,15 @@ function createTemplateGridPublication(
     };
     const onNativeClickCapture = (event: MouseEvent) => {
       nativeClick = null;
-      reactClick = null;
+      reactGridClick = null;
+      reactCardClick = null;
       nativeClick = exactNativeClick(event);
     };
     const onNativeClickBubble = (event: MouseEvent) => {
       if (nativeClick?.event === event) {
         nativeClick = null;
-        reactClick = null;
+        reactGridClick = null;
+        reactCardClick = null;
       }
     };
     const addNativeListeners = () => {
@@ -1025,7 +1194,8 @@ function createTemplateGridPublication(
       );
     const release = () => {
       nativeClick = null;
-      reactClick = null;
+      reactGridClick = null;
+      reactCardClick = null;
       guard?.release();
       guard = null;
       releaseNativeListeners();
@@ -1036,7 +1206,8 @@ function createTemplateGridPublication(
       retired = true;
       retirement = reason;
       nativeClick = null;
-      reactClick = null;
+      reactGridClick = null;
+      reactCardClick = null;
       releaseNativeListeners();
       if (cells.active.current === publication) {
         cells.active.current = null;
@@ -1067,11 +1238,13 @@ function createTemplateGridPublication(
       entry: TemplateGridDomPublication,
     ) =>
       Boolean(
-        reactClick &&
+          reactCardClick &&
           nativeClick &&
-          reactClick.native === nativeClick &&
-          reactClick.event === event &&
-          event.nativeEvent === nativeClick.event &&
+            reactCardClick.native === nativeClick &&
+            reactCardClick.event === event &&
+            reactCardClick.entry === entry &&
+            reactCardClick.action === entry.action &&
+            event.nativeEvent === nativeClick.event &&
           nativeReactDispatchIsCurrent(
             nativeClick.event,
             ownerWindow.Event.CAPTURING_PHASE,
@@ -1111,7 +1284,13 @@ function createTemplateGridPublication(
             : [],
         );
         guard = createTemplateGridDomGuard(grid, placement);
-        if (!guard || cells.active.current) {
+        if (
+          !guard ||
+          cells.active.current ||
+          !templateGridElementsAreCurrent(render, gridOwner, entryOwners) ||
+          !templateGridPlacementMatches(ownerDocument, placement) ||
+          !templateGridDomMatches(dom)
+        ) {
           release();
           return false;
         }
@@ -1181,6 +1360,8 @@ function createTemplateGridPublication(
             })
           : null,
       captureReactClick: (event: ReactMouseEvent<HTMLUListElement>) => {
+        reactGridClick = null;
+        reactCardClick = null;
         const capturedNative =
           nativeClick ??
           (event.nativeEvent instanceof ownerWindow.MouseEvent
@@ -1204,15 +1385,56 @@ function createTemplateGridPublication(
           !event.bubbles ||
           event.defaultPrevented
         ) {
-          reactClick = null;
           return;
         }
-        reactClick = Object.freeze({ event, native: capturedNative });
+        reactGridClick = Object.freeze({ event, native: capturedNative });
+      },
+      captureReactCardClick: (
+        entryAuthority: TemplateGridEntryPublication,
+        event: ReactMouseEvent<HTMLLIElement>,
+      ) => {
+        reactCardClick = null;
+        const entry = publication.entries[entryAuthority.index];
+        const gridProof = reactGridClick;
+        if (
+          !entry ||
+          !gridProof ||
+          !publicationOwnsCurrentDom() ||
+          publication.render !== render ||
+          render.entries[entryAuthority.index] !== entryAuthority ||
+          entry.entry !== entryAuthority ||
+          gridProof.event !== event ||
+          gridProof.native !== nativeClick ||
+          event.nativeEvent !== gridProof.native.event ||
+          !nativeReactDispatchIsCurrent(
+            gridProof.native.event,
+            ownerWindow.Event.CAPTURING_PHASE,
+          ) ||
+          event.type !== "click" ||
+          event.button !== 0 ||
+          event.buttons !== 0 ||
+          event.detail !== gridProof.native.event.detail ||
+          event.currentTarget !== entry.card ||
+          event.target !== gridProof.native.target ||
+          gridProof.native.entry !== entry ||
+          gridProof.native.action !== entry.action ||
+          !event.bubbles ||
+          event.defaultPrevented
+        ) {
+          return;
+        }
+        reactCardClick = Object.freeze({
+          event,
+          native: gridProof.native,
+          entry,
+          action: entry.action,
+        });
       },
       activate: (
         entryAuthority: TemplateGridEntryPublication,
         event: ReactMouseEvent<HTMLButtonElement>,
       ) => {
+        if (cells.delivery.current !== null) return false;
         const entry = publication.entries[entryAuthority.index];
         const action = entry?.action;
         if (
@@ -1235,16 +1457,24 @@ function createTemplateGridPublication(
           !nativeClick ||
           cells.claimedNativeEvents.has(nativeClick.event)
         ) {
-          return null;
+          return false;
         }
         cells.claimedPublications.add(publication);
         cells.claimedEntries.add(entry);
         cells.claimedActions.add(action);
         cells.claimedReactEvents.add(event);
         cells.claimedNativeEvents.add(nativeClick.event);
+        cells.delivery.current = publication.identity;
         publication.retire();
         release();
-        return entry;
+        try {
+          render.onPick(entry.entry.template);
+        } finally {
+          if (cells.delivery.current === publication.identity) {
+            cells.delivery.current = null;
+          }
+        }
+        return true;
       },
     });
     return runtime;
@@ -1335,8 +1565,11 @@ function createTemplateGridPublication(
           captureIcon: owned.icon.capture,
           captureName: owned.name.capture,
           captureDescription: owned.description.capture,
+          captureClick: (event: ReactMouseEvent<HTMLLIElement>) => {
+            currentRuntime?.captureReactCardClick(owned.entry, event);
+          },
           activate: (event: ReactMouseEvent<HTMLButtonElement>) =>
-            currentRuntime?.activate(owned.entry, event) ?? null,
+            currentRuntime?.activate(owned.entry, event) ?? false,
         }),
       ),
     ),
@@ -1350,6 +1583,7 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
     active: { current: null },
     successorOf: { current: null },
     replay: { current: null },
+    delivery: { current: null },
     claimedPublications: new WeakSet(),
     claimedEntries: new WeakSet(),
     claimedActions: new WeakSet(),
@@ -1418,14 +1652,13 @@ export function TemplateGrid({ onPick, busy, compact }: { onPick: (t: Template) 
             key={entry.id}
             ref={owned.captureCard}
             className={TEMPLATE_CARD_CLASS}
+            onClickCapture={owned.captureClick}
           >
             <button
               ref={owned.captureButton}
               type="button"
               onClickCapture={(event: ReactMouseEvent<HTMLButtonElement>) => {
-                const current = owned.activate(event);
-                if (!current) return;
-                render.onPick(current.entry.template);
+                owned.activate(event);
               }}
               disabled={render.busy !== null}
               aria-busy={entry.isBusy || undefined}
