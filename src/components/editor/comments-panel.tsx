@@ -1,6 +1,7 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type MouseEvent } from "react";
+import { flushSync } from "react-dom";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -11,7 +12,7 @@ import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comm
 import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
+import { api, apiErrorText } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY, AGENT_DOCS_URL } from "@/lib/mcp";
 import { rovingIndex } from "@/lib/a11y";
 import { cn, isMac, relativeTime } from "@/lib/utils";
@@ -169,40 +170,1530 @@ function commentSuggestionTargets(threads: CommentThread[], text: string): Comme
   });
 }
 
-function SuggestionActions({
+const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
+const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
+const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
+const seenSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
+const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
+const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "currentTarget",
+)?.get;
+const suggestionEventTargetGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "target",
+)?.get;
+const suggestionEventDefaultPreventedGetter = Object.getOwnPropertyDescriptor(
+  globalThis.Event.prototype,
+  "defaultPrevented",
+)?.get;
+const suggestionEventComposedPath = globalThis.Event.prototype.composedPath;
+const suggestionAddEventListener = globalThis.EventTarget.prototype.addEventListener;
+const suggestionRemoveEventListener = globalThis.EventTarget.prototype.removeEventListener;
+const suggestionWindowAddEventListener =
+  typeof globalThis.addEventListener === "function" ? globalThis.addEventListener : null;
+const suggestionWindowRemoveEventListener =
+  typeof globalThis.removeEventListener === "function" ? globalThis.removeEventListener : null;
+const suggestionGlobalWindow = typeof window === "undefined" ? null : window;
+const suggestionReflectApply = Reflect.apply;
+
+function suggestionNativeCurrentTarget(event: Event): EventTarget | null {
+  return suggestionEventCurrentTargetGetter
+    ? (suggestionReflectApply(suggestionEventCurrentTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
+
+function suggestionNativeTarget(event: Event): EventTarget | null {
+  return suggestionEventTargetGetter
+    ? (suggestionReflectApply(suggestionEventTargetGetter, event, []) as EventTarget | null)
+    : null;
+}
+
+function suggestionNativeComposedPath(event: Event): EventTarget[] {
+  return suggestionReflectApply(suggestionEventComposedPath, event, []) as EventTarget[];
+}
+
+function suggestionNativeDefaultPrevented(event: Event): boolean {
+  return !suggestionEventDefaultPreventedGetter ||
+    suggestionReflectApply(suggestionEventDefaultPreventedGetter, event, []) === true;
+}
+
+function addSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionAddEventListener, target, ["click", listener, options]);
+}
+
+function removeSuggestionClickListener(target: EventTarget, listener: EventListener, options?: boolean) {
+  suggestionReflectApply(suggestionRemoveEventListener, target, ["click", listener, options]);
+}
+
+function addSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean): boolean {
+  const intrinsic = target === suggestionGlobalWindow ? suggestionWindowAddEventListener : suggestionAddEventListener;
+  if (!intrinsic) return false;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
+  return true;
+}
+
+function removeSuggestionWindowClickListener(target: Window, listener: EventListener, options?: boolean) {
+  const intrinsic =
+    target === suggestionGlobalWindow ? suggestionWindowRemoveEventListener : suggestionRemoveEventListener;
+  if (!intrinsic) return;
+  suggestionReflectApply(intrinsic, target, ["click", listener, options]);
+}
+
+type SuggestionActionKind = "accept" | "reject";
+
+interface SuggestionActionAuthority {
+  readonly mount: symbol;
+  readonly state: CommentSuggestionState;
+  readonly canAccept: boolean;
+  readonly canReject: boolean;
+  readonly disabled: boolean;
+  readonly onAccept: () => void | Promise<void> | boolean;
+  readonly onReject: () => void | Promise<unknown> | boolean;
+  readonly order: readonly SuggestionActionKind[];
+  readonly presentation: SuggestionActionPresentation;
+  readonly batch: SuggestionBatchAuthority | null;
+}
+
+interface SuggestionActionButtonPresentation {
+  readonly className: string;
+  readonly testId: string;
+  readonly label: string;
+  readonly disabled: boolean;
+  readonly busy: boolean;
+  readonly title: string | null;
+  readonly ariaLabel: string | null;
+}
+
+interface SuggestionActionPresentation {
+  readonly rootClassName: string;
+  readonly rootTestId: string;
+  readonly accept: SuggestionActionButtonPresentation | null;
+  readonly reject: SuggestionActionButtonPresentation | null;
+}
+
+interface SuggestionActionElements {
+  readonly root: HTMLDivElement;
+  readonly accept: HTMLButtonElement | null;
+  readonly reject: HTMLButtonElement | null;
+  readonly buttons: readonly HTMLButtonElement[];
+}
+
+interface SuggestionActionDefinition {
+  readonly identity: symbol;
+  readonly renderIdentity: symbol;
+  readonly kind: SuggestionActionKind;
+  readonly enabled: boolean;
+  readonly callback: () => void | Promise<unknown> | boolean;
+  readonly capture: (element: HTMLButtonElement | null) => void;
+  readonly onClickCapture: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+interface SuggestionActionRender {
+  readonly identity: symbol;
+  readonly authority: SuggestionActionAuthority;
+  readonly accept: SuggestionActionDefinition | null;
+  readonly reject: SuggestionActionDefinition | null;
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly onRootClickCapture: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly onRootClick: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onAcceptCapture: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureReject: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onRejectCapture: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly onReject: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly establish: () => void | (() => void);
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface SuggestionActionDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly SuggestionActionDomSnapshot[];
+}
+
+interface SuggestionActionNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface SuggestionActionPlacement {
+  readonly document: Document;
+  readonly chain: readonly SuggestionActionNodePlacement[];
+}
+
+interface SuggestionActionPublication {
+  readonly identity: symbol;
+  readonly render: SuggestionActionRender;
+  readonly authority: SuggestionActionAuthority;
+  readonly elements: SuggestionActionElements;
+  readonly ownerDocument: Document;
+  readonly dom: SuggestionActionDomSnapshot;
+  readonly placement: SuggestionActionPlacement;
+}
+
+interface SuggestionActionCells {
+  readonly active: { current: SuggestionActionPublication | null };
+  readonly successorOf: { current: SuggestionActionPublication | null };
+  readonly replay: { current: SuggestionActionReplay | null };
+  readonly retired: WeakSet<SuggestionActionPublication>;
+  readonly claimedPublications: WeakSet<SuggestionActionPublication>;
+  readonly claimedActions: WeakSet<SuggestionActionDefinition>;
+  readonly claimedReactEvents: WeakSet<object>;
+}
+
+interface SuggestionActionElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface SuggestionActionRefReplay {
+  readonly owner: SuggestionActionElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface SuggestionActionReplay {
+  readonly source: SuggestionActionPublication;
+  readonly dom: SuggestionActionDomSnapshot;
+  readonly placement: SuggestionActionPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface SuggestionActionDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface SuggestionNativeSnapshot {
+  readonly event: globalThis.MouseEvent;
+  readonly publication: SuggestionActionPublication;
+  readonly action: SuggestionActionDefinition | null;
+  readonly button: HTMLButtonElement | null;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly buttonValue: number;
+  readonly buttons: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly detail: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly screenX: number;
+  readonly screenY: number;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly relatedTarget: EventTarget | null;
+  readonly view: Window | null;
+  readonly timeStamp: number;
+}
+
+interface SuggestionNativeDelivery {
+  readonly snapshot: SuggestionNativeSnapshot;
+  delegationTarget: EventTarget | null;
+  crossedRoot: boolean;
+  captureInvalid: boolean;
+  captureEvent: object | null;
+  captureAction: SuggestionActionDefinition | null;
+  captureRootCount: number;
+  captureActionCount: number;
+  bubbleInvalid: boolean;
+  bubbleEvent: object | null;
+  bubbleAction: SuggestionActionDefinition | null;
+  bubbleActionCount: number;
+  bubbleRootCount: number;
+  bubbleDelivery: SuggestionReactDelivery | null;
+}
+
+interface SuggestionReactDelivery {
+  readonly publication: SuggestionActionPublication;
+  readonly action: SuggestionActionDefinition;
+  readonly event: object;
+  readonly native: SuggestionNativeDelivery;
+  readonly target: EventTarget;
+  readonly type: string;
+  readonly button: number;
+  readonly buttons: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+}
+
+interface SuggestionActionPublicationRuntime {
+  readonly publication: SuggestionActionPublication;
+  readonly publish: (owners: readonly SuggestionActionElementOwnerView[]) => boolean;
+  readonly stageCaptureRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly stageCaptureAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
+  readonly stageBubbleAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
+  readonly stageBubbleRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly noteRef: (owner: SuggestionActionElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+class SuggestionActionElementOwner<T extends HTMLElement> implements SuggestionActionElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: SuggestionActionElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+function suggestionActionSnapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotSuggestionActionDom(node: Node): SuggestionActionDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: suggestionActionSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotSuggestionActionDom)),
+  });
+}
+
+function suggestionActionDomMatches(snapshot: SuggestionActionDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = suggestionActionSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) => node.childNodes.item(index) === child.node && suggestionActionDomMatches(child))
+  );
+}
+
+function suggestionActionDomContains(snapshot: SuggestionActionDomSnapshot, target: Node): boolean {
+  return snapshot.node === target || snapshot.children.some((child) => suggestionActionDomContains(child, target));
+}
+
+function captureSuggestionActionPlacement(root: HTMLDivElement): SuggestionActionPlacement | null {
+  const document = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const chain: SuggestionActionNodePlacement[] = [];
+  let node: Node = root;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    chain.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+      }),
+    );
+    node = parent;
+  }
+  return Object.freeze({ document, chain: Object.freeze(chain) });
+}
+
+function suggestionActionPlacementMatches(root: HTMLDivElement, placement: SuggestionActionPlacement): boolean {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.chain.length > 0 &&
+    placement.chain[0]?.node === root &&
+    placement.chain.every(
+      ({ node, parent, previousSibling, nextSibling }) =>
+        node.parentNode === parent &&
+        node.previousSibling === previousSibling &&
+        node.nextSibling === nextSibling,
+    )
+  );
+}
+
+function suggestionActionPlacementMutationIsRelevant(record: MutationRecord, placement: SuggestionActionPlacement): boolean {
+  if (record.type !== "childList") {
+    return placement.chain.some(({ node }) => record.target === node);
+  }
+  return placement.chain.some(({ node, parent }) => {
+    if (record.target !== parent) return false;
+    return (
+      record.previousSibling === node ||
+      record.nextSibling === node ||
+      [...record.addedNodes].some((changed) => changed === node) ||
+      [...record.removedNodes].some((changed) => changed === node)
+    );
+  });
+}
+
+function createSuggestionActionDomGuard(
+  root: HTMLDivElement,
+  dom: SuggestionActionDomSnapshot,
+  placement: SuggestionActionPlacement,
+  onChange: () => void,
+): SuggestionActionDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    const nextChanged = records.some(
+      (record) =>
+        suggestionActionDomContains(dom, record.target) ||
+        suggestionActionPlacementMutationIsRelevant(record, placement),
+    );
+    if (nextChanged) {
+      changed = true;
+      onChange();
+    }
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(placement.document, {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    characterDataOldValue: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function suggestionActionControlIsEnabled(control: HTMLButtonElement): boolean {
+  if (control.disabled || control.matches(":disabled") || control.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (element.hasAttribute("inert") || element.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  }
+  return true;
+}
+
+function suggestionActionButtonPresentationsMatch(
+  previous: SuggestionActionButtonPresentation | null,
+  current: SuggestionActionButtonPresentation | null,
+): boolean {
+  return (
+    previous === current ||
+    (!!previous &&
+      !!current &&
+      previous.className === current.className &&
+      previous.testId === current.testId &&
+      previous.label === current.label &&
+      previous.disabled === current.disabled &&
+      previous.busy === current.busy &&
+      previous.title === current.title &&
+      previous.ariaLabel === current.ariaLabel)
+  );
+}
+
+function suggestionActionPresentationsMatch(
+  previous: SuggestionActionPresentation,
+  current: SuggestionActionPresentation,
+): boolean {
+  return (
+    previous === current ||
+    (previous.rootClassName === current.rootClassName &&
+      previous.rootTestId === current.rootTestId &&
+      suggestionActionButtonPresentationsMatch(previous.accept, current.accept) &&
+      suggestionActionButtonPresentationsMatch(previous.reject, current.reject))
+  );
+}
+
+function suggestionActionAuthoritiesMatch(previous: SuggestionActionAuthority, current: SuggestionActionAuthority): boolean {
+  return (
+    previous.mount === current.mount &&
+    previous.state === current.state &&
+    previous.canAccept === current.canAccept &&
+    previous.canReject === current.canReject &&
+    previous.disabled === current.disabled &&
+    previous.onAccept === current.onAccept &&
+    previous.onReject === current.onReject &&
+    previous.order.length === current.order.length &&
+    previous.order.every((kind, index) => kind === current.order[index]) &&
+    suggestionActionPresentationsMatch(previous.presentation, current.presentation) &&
+    suggestionBatchAuthoritiesMatch(previous.batch, current.batch)
+  );
+}
+
+function exactSuggestionActionDomIsCurrent(publication: SuggestionActionPublication): boolean {
+  const { authority, elements, ownerDocument } = publication;
+  const { root, accept, reject, buttons } = elements;
+  const { presentation } = authority;
+  if (
+    !root.isConnected ||
+    root.ownerDocument !== ownerDocument ||
+    root.tagName !== "DIV" ||
+    root.className !== presentation.rootClassName ||
+    root.dataset.testid !== presentation.rootTestId ||
+    root.children.length !== authority.order.length ||
+    buttons.length !== authority.order.length ||
+    (!!presentation.accept !== !!accept) ||
+    (!!presentation.reject !== !!reject)
+  ) {
+    return false;
+  }
+  return authority.order.every((kind, index) => {
+    const button = buttons[index];
+    const expected = kind === "accept" ? accept : reject;
+    const expectedPresentation = kind === "accept" ? presentation.accept : presentation.reject;
+    return (
+      !!button &&
+      !!expectedPresentation &&
+      button === expected &&
+      root.children.item(index) === button &&
+      button.isConnected &&
+      button.ownerDocument === ownerDocument &&
+      button.parentElement === root &&
+      button.tagName === "BUTTON" &&
+      button.type === "button" &&
+      button.disabled === expectedPresentation.disabled &&
+      button.className === expectedPresentation.className &&
+      button.dataset.testid === expectedPresentation.testId &&
+      button.textContent?.trim() === expectedPresentation.label &&
+      button.title === (expectedPresentation.title ?? "") &&
+      button.getAttribute("aria-label") === expectedPresentation.ariaLabel &&
+      button.getAttribute("aria-busy") === (expectedPresentation.busy ? "true" : null) &&
+      (expectedPresentation.disabled || suggestionActionControlIsEnabled(button))
+    );
+  });
+}
+
+function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery): boolean {
+  const { snapshot } = delivery;
+  const { event, publication, target } = snapshot;
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(event instanceof ownerWindow.MouseEvent) ||
+    event.type !== snapshot.type ||
+    event.button !== snapshot.buttonValue ||
+    event.buttons !== snapshot.buttons ||
+    event.bubbles !== snapshot.bubbles ||
+    event.cancelable !== snapshot.cancelable ||
+    event.composed !== snapshot.composed ||
+    event.detail !== snapshot.detail ||
+    event.clientX !== snapshot.clientX ||
+    event.clientY !== snapshot.clientY ||
+    event.screenX !== snapshot.screenX ||
+    event.screenY !== snapshot.screenY ||
+    event.ctrlKey !== snapshot.ctrlKey ||
+    event.shiftKey !== snapshot.shiftKey ||
+    event.altKey !== snapshot.altKey ||
+    event.metaKey !== snapshot.metaKey ||
+    event.relatedTarget !== snapshot.relatedTarget ||
+    event.view !== snapshot.view ||
+    event.timeStamp !== snapshot.timeStamp ||
+    suggestionNativeTarget(event) !== target ||
+    suggestionNativeDefaultPrevented(event)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function suggestionNativeSnapshotMatches(delivery: SuggestionNativeDelivery): boolean {
+  const { event, publication, path } = delivery.snapshot;
+  const ownerWindow = publication.ownerDocument.defaultView;
+  if (!ownerWindow || event.eventPhase === ownerWindow.Event.NONE || !suggestionNativeSnapshotFieldsMatch(delivery)) {
+    return false;
+  }
+  const currentPath = suggestionNativeComposedPath(event);
+  return currentPath.length === path.length && path.every((entry, index) => currentPath[index] === entry);
+}
+
+function createSuggestionActionRender(
+  authority: SuggestionActionAuthority,
+  cells: SuggestionActionCells,
+  requestSuccessor: () => void,
+): SuggestionActionRender {
+  const render = {} as SuggestionActionRender;
+  const identity = Symbol("suggestion-action-render");
+  let currentRuntime: SuggestionActionPublicationRuntime | null = null;
+  let lastRuntime: SuggestionActionPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+  const buttonOwners: SuggestionActionElementOwner<HTMLButtonElement>[] = [];
+
+  const acceptsSuccessorOf = (publication: SuggestionActionPublication) =>
+    cells.active.current === null &&
+    cells.successorOf.current === publication &&
+    cells.retired.has(publication) &&
+    publication.render.isRetired() &&
+    !cells.claimedPublications.has(publication);
+
+  const requestReplaySuccessor = (runtime: SuggestionActionPublicationRuntime) => {
+    const { publication } = runtime;
+    if (
+      successorRequested ||
+      cells.replay.current !== null ||
+      !acceptsSuccessorOf(publication) ||
+      !suggestionActionAuthoritiesMatch(publication.authority, authority) ||
+      !suggestionActionAuthorityFactsAreCurrent(authority) ||
+      !exactSuggestionActionDomIsCurrent(publication) ||
+      !runtime.publishedDomMatches() ||
+      !runtime.stageSuccessorHandoff()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: publication,
+      dom: publication.dom,
+      placement: publication.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: SuggestionActionElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.publication)) requestReplaySuccessor(runtime);
+  };
+
+  const rootOwner = new SuggestionActionElementOwner<HTMLDivElement>(onElementChange);
+
+  const committedElements = (): SuggestionActionElements | null => {
+    const root = rootOwner.element();
+    const buttons = buttonOwners.map((owner) => owner.element());
+    if (!root || buttons.some((button) => button === null)) return null;
+    const committed = buttons as HTMLButtonElement[];
+    const acceptIndex = authority.order.indexOf("accept");
+    const rejectIndex = authority.order.indexOf("reject");
+    return Object.freeze({
+      root,
+      accept: acceptIndex === -1 ? null : committed[acceptIndex]!,
+      reject: rejectIndex === -1 ? null : committed[rejectIndex]!,
+      buttons: Object.freeze(committed),
+    });
+  };
+
+  const expectedOwners = (): readonly SuggestionActionElementOwnerView[] => [rootOwner, ...buttonOwners];
+
+  const createRuntime = (
+    publication: SuggestionActionPublication,
+    replayOwners: ReadonlySet<SuggestionActionElementOwnerView>,
+  ): SuggestionActionPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let released = false;
+    let replayRefs: SuggestionActionRefReplay[] = [];
+    let domGuard: SuggestionActionDomGuard | null = null;
+    const nativeDeliveries = new WeakMap<globalThis.MouseEvent, SuggestionNativeDelivery>();
+    const nativeBubbleTargets = new Set<EventTarget>();
+
+    const removeListeners = () => {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (ownerWindow) removeSuggestionWindowClickListener(ownerWindow, captureNative, true);
+      removeSuggestionClickListener(publication.elements.root, crossNativeRoot);
+      for (const target of nativeBubbleTargets) removeSuggestionClickListener(target, finalizeNative);
+      nativeBubbleTargets.clear();
+    };
+    const release = () => {
+      if (released) return;
+      released = true;
+      removeListeners();
+      domGuard?.release();
+    };
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(publication);
+      removeListeners();
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every((entry) => !entry.detached && !entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every((entry) => entry.detached && entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached && entry.reattached && entry.owner.element() === entry.element
+          : !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+        domGuard.isClean() &&
+        publication.elements.root === publication.dom.node &&
+        suggestionActionPlacementMatches(publication.elements.root, publication.placement) &&
+        suggestionActionDomMatches(publication.dom),
+      );
+    const retireAndRequestSuccessor = () => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.claimedPublications.has(publication)
+      ) {
+        return;
+      }
+      retire("action");
+      if (successorRequested) return;
+      successorRequested = true;
+      flushSync(requestSuccessor);
+    };
+    const publicationIsCurrent = () => {
+      if (
+        renderRetired ||
+        cells.active.current !== publication ||
+        cells.retired.has(publication) ||
+        publication.render !== render ||
+        publication.authority !== authority
+      ) {
+        return false;
+      }
+      if (!suggestionActionAuthorityFactsAreCurrent(authority)) {
+        retireAndRequestSuccessor();
+        return false;
+      }
+      return exactSuggestionActionDomIsCurrent(publication) && publishedDomMatches();
+    };
+    const retireForMutation = () => {
+      retireAndRequestSuccessor();
+    };
+
+    function captureNative(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (
+        !ownerWindow ||
+        !(event instanceof ownerWindow.MouseEvent) ||
+        event.type !== "click" ||
+        event.button !== 0 ||
+        !event.bubbles ||
+        suggestionNativeDefaultPrevented(event) ||
+        event.eventPhase === ownerWindow.Event.NONE
+      ) {
+        return;
+      }
+      const target = suggestionNativeTarget(event);
+      const NodeConstructor = ownerWindow.Node;
+      if (!(target instanceof NodeConstructor) || target.ownerDocument !== publication.ownerDocument) return;
+      const path = suggestionNativeComposedPath(event);
+      if (!path.includes(publication.elements.root)) return;
+      if (authority.batch) {
+        if (seenSuggestionNativeEvents.has(event)) return;
+        seenSuggestionNativeEvents.add(event);
+      }
+      if (!publicationIsCurrent()) return;
+      const action =
+        publication.elements.buttons
+          .map((button, index) => ({ button, action: authority.order[index] === "accept" ? render.accept : render.reject }))
+          .find(({ button }) => button.contains(target) && path.includes(button)) ?? null;
+      const snapshot: SuggestionNativeSnapshot = Object.freeze({
+        event,
+        publication,
+        action: action?.action ?? null,
+        button: action?.button ?? null,
+        target,
+        path: Object.freeze([...path]),
+        type: event.type,
+        buttonValue: event.button,
+        buttons: event.buttons,
+        bubbles: event.bubbles,
+        cancelable: event.cancelable,
+        composed: event.composed,
+        detail: event.detail,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        relatedTarget: event.relatedTarget,
+        view: event.view,
+        timeStamp: event.timeStamp,
+      });
+      const delivery: SuggestionNativeDelivery = {
+        snapshot,
+        delegationTarget: null,
+        crossedRoot: false,
+        captureInvalid: false,
+        captureEvent: null,
+        captureAction: null,
+        captureRootCount: 0,
+        captureActionCount: 0,
+        bubbleInvalid: false,
+        bubbleEvent: null,
+        bubbleAction: null,
+        bubbleActionCount: 0,
+        bubbleRootCount: 0,
+        bubbleDelivery: null,
+      };
+      nativeDeliveries.set(event, delivery);
+      queueMicrotask(() => {
+        queueMicrotask(() => {
+          if (nativeDeliveries.get(event) === delivery) nativeDeliveries.delete(event);
+        });
+      });
+    }
+
+    function crossNativeRoot(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow || !(event instanceof ownerWindow.MouseEvent)) return;
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        suggestionNativeCurrentTarget(event) !== publication.elements.root ||
+        !suggestionNativeSnapshotMatches(delivery)
+      ) {
+        return;
+      }
+      delivery.crossedRoot = true;
+      if (
+        delivery.captureInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        !delivery.captureEvent ||
+        !delivery.captureAction ||
+        delivery.snapshot.action !== delivery.captureAction ||
+        delivery.snapshot.button !==
+          (delivery.captureAction.kind === "accept"
+            ? publication.elements.accept
+            : publication.elements.reject)
+      ) {
+        delivery.captureInvalid = true;
+      }
+    }
+
+    const nativeDelivery = (
+      event: MouseEvent<HTMLElement>,
+      currentTarget: HTMLElement,
+      requireRootCrossing: boolean,
+    ): SuggestionNativeDelivery | null => {
+      if (!event || typeof event !== "object") return null;
+      const ownerWindow = publication.ownerDocument.defaultView;
+      const nativeEvent = event.nativeEvent;
+      if (!ownerWindow || !(nativeEvent instanceof ownerWindow.MouseEvent)) return null;
+      const delivery = nativeDeliveries.get(nativeEvent);
+      if (
+        !delivery ||
+        (requireRootCrossing && !delivery.crossedRoot) ||
+        delivery.snapshot.publication !== publication ||
+        event.nativeEvent !== delivery.snapshot.event ||
+        event.type !== "click" ||
+        event.button !== 0 ||
+        !event.bubbles ||
+        event.defaultPrevented ||
+        event.currentTarget !== currentTarget ||
+        event.target !== delivery.snapshot.target ||
+        suggestionNativeTarget(nativeEvent) !== event.target ||
+        !suggestionNativeSnapshotMatches(delivery)
+      ) {
+        return null;
+      }
+      return delivery;
+    };
+
+    const stageCaptureRoot = (event: MouseEvent<HTMLDivElement>) => {
+      const delivery = nativeDelivery(event, publication.elements.root, false);
+      if (
+        !delivery ||
+        delivery.crossedRoot ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureRootCount += 1;
+      if (delivery.captureRootCount !== 1 || (delivery.captureEvent && delivery.captureEvent !== event)) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureEvent = event;
+      const delegationTarget = suggestionNativeCurrentTarget(delivery.snapshot.event);
+      if (!delegationTarget || !delivery.snapshot.path.includes(delegationTarget)) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.delegationTarget = delegationTarget;
+      if (!nativeBubbleTargets.has(delegationTarget)) {
+        addSuggestionClickListener(delegationTarget, finalizeNative);
+        nativeBubbleTargets.add(delegationTarget);
+      }
+    };
+
+    const stageCaptureAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      const delivery = button ? nativeDelivery(event, button, false) : null;
+      if (
+        !delivery ||
+        delivery.crossedRoot ||
+        !button ||
+        action.renderIdentity !== identity ||
+        (action.kind === "accept" ? render.accept : render.reject) !== action ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.captureActionCount += 1;
+      if (
+        delivery.captureActionCount !== 1 ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureEvent !== event ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
+        (delivery.captureAction && delivery.captureAction !== action) ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button.contains(delivery.snapshot.target)
+      ) {
+        delivery.captureInvalid = true;
+        return;
+      }
+      delivery.captureAction = action;
+    };
+
+    const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      const delivery = button ? nativeDelivery(event, button, true) : null;
+      if (delivery && delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event)) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      if (
+        !delivery ||
+        delivery.captureInvalid ||
+        !button ||
+        action.renderIdentity !== identity ||
+        (action.kind === "accept" ? render.accept : render.reject) !== action ||
+        delivery.captureAction !== action ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button.contains(delivery.snapshot.target) ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(event) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      delivery.bubbleActionCount += 1;
+      if (
+        delivery.bubbleActionCount !== 1 ||
+        (delivery.bubbleEvent && delivery.bubbleEvent !== event) ||
+        (delivery.bubbleAction && delivery.bubbleAction !== action)
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleEvent = event;
+      delivery.bubbleAction = action;
+      delivery.bubbleDelivery = Object.freeze({
+        publication,
+        action,
+        event,
+        native: delivery,
+        target: event.target,
+        type: event.type,
+        button: event.button,
+        buttons: event.buttons,
+        bubbles: event.bubbles,
+        cancelable: event.cancelable,
+      });
+    };
+
+    const stageBubbleRoot = (event: MouseEvent<HTMLDivElement>) => {
+      const delivery = nativeDelivery(event, publication.elements.root, true);
+      if (!delivery || !publicationIsCurrent()) return;
+      delivery.bubbleRootCount += 1;
+      if (
+        delivery.bubbleRootCount !== 1 ||
+        delivery.bubbleInvalid ||
+        delivery.delegationTarget !== suggestionNativeCurrentTarget(delivery.snapshot.event) ||
+        delivery.bubbleEvent !== event ||
+        delivery.captureEvent === event ||
+        !delivery.bubbleAction ||
+        !delivery.bubbleDelivery
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+    };
+
+    function finalizeNative(event: Event) {
+      const ownerWindow = publication.ownerDocument.defaultView;
+      if (!ownerWindow || !(event instanceof ownerWindow.MouseEvent)) {
+        return;
+      }
+      const delivery = nativeDeliveries.get(event);
+      if (
+        !delivery ||
+        delivery.snapshot.publication !== publication ||
+        suggestionNativeCurrentTarget(event) !== delivery.delegationTarget
+      ) {
+        return;
+      }
+      const pending = delivery.bubbleDelivery;
+      if (!pending) return;
+      const { action } = pending;
+      const button = action.kind === "accept" ? publication.elements.accept : publication.elements.reject;
+      if (
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureRootCount !== 1 ||
+        delivery.captureActionCount !== 1 ||
+        delivery.bubbleActionCount !== 1 ||
+        delivery.bubbleRootCount !== 1 ||
+        delivery.captureAction !== action ||
+        delivery.bubbleAction !== action ||
+        pending.publication !== publication ||
+        pending.event !== delivery.bubbleEvent ||
+        pending.native !== delivery ||
+        pending.target !== delivery.snapshot.target ||
+        pending.type !== delivery.snapshot.type ||
+        pending.button !== delivery.snapshot.buttonValue ||
+        pending.buttons !== delivery.snapshot.buttons ||
+        pending.bubbles !== delivery.snapshot.bubbles ||
+        pending.cancelable !== delivery.snapshot.cancelable ||
+        !suggestionNativeSnapshotMatches(delivery) ||
+        delivery.snapshot.action !== action ||
+        delivery.snapshot.button !== button ||
+        !button ||
+        !button.contains(delivery.snapshot.target) ||
+        !action.enabled ||
+        !suggestionActionControlIsEnabled(button) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        !delivery.captureEvent ||
+        cells.claimedReactEvents.has(delivery.captureEvent) ||
+        !delivery.bubbleEvent ||
+        cells.claimedReactEvents.has(delivery.bubbleEvent) ||
+        claimedSuggestionNativeEvents.has(delivery.snapshot.event) ||
+        !publicationIsCurrent()
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(action);
+      cells.claimedReactEvents.add(delivery.captureEvent);
+      cells.claimedReactEvents.add(delivery.bubbleEvent);
+      claimedSuggestionNativeEvents.add(delivery.snapshot.event);
+      nativeDeliveries.delete(delivery.snapshot.event);
+      event.stopPropagation();
+      const accepted = action.callback();
+      if (accepted === false) {
+        cells.claimedPublications.delete(publication);
+        cells.claimedActions.delete(action);
+        cells.claimedReactEvents.delete(delivery.captureEvent);
+        cells.claimedReactEvents.delete(delivery.bubbleEvent);
+        claimedSuggestionNativeEvents.delete(delivery.snapshot.event);
+        return;
+      }
+      void accepted;
+    }
+
+    const runtime: SuggestionActionPublicationRuntime = Object.freeze({
+      publication,
+      publish: (owners: readonly SuggestionActionElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        domGuard = createSuggestionActionDomGuard(
+          publication.elements.root,
+          publication.dom,
+          publication.placement,
+          retireForMutation,
+        );
+        if (!domGuard) return false;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) throw new Error("Cannot publish suggestion actions without every committed ref");
+          return { owner, element, detached: false, reattached: false, handoffDetached: false };
+        });
+        const ownerWindow = publication.ownerDocument.defaultView;
+        if (!ownerWindow || !addSuggestionWindowClickListener(ownerWindow, captureNative, true)) return false;
+        addSuggestionClickListener(publication.elements.root, crossNativeRoot);
+        established = true;
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      stageCaptureRoot,
+      stageCaptureAction,
+      stageBubbleAction,
+      stageBubbleRoot,
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      noteRef: (owner: SuggestionActionElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (element === null && previous === proof.element && !proof.handoffDetached) proof.handoffDetached = true;
+          else if (element !== previous) invalidReplay = true;
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (element === proof.element && previous === null && proof.detached) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) || (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every((entry) => entry.handoffDetached && entry.owner.element() === null),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release,
+    });
+    return runtime;
+  };
+
+  const stageCaptureAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureAction(action, event);
+  };
+
+  const stageBubbleAction = (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleAction(action, event);
+  };
+
+  const action = (
+    kind: SuggestionActionKind,
+    enabled: boolean,
+    callback: () => void | Promise<unknown> | boolean,
+  ): SuggestionActionDefinition => {
+    const owner = new SuggestionActionElementOwner<HTMLButtonElement>(onElementChange);
+    buttonOwners.push(owner);
+    const definition = {} as SuggestionActionDefinition;
+    Object.assign(definition, {
+      identity: Symbol(`suggestion-${kind}`),
+      renderIdentity: identity,
+      kind,
+      enabled,
+      callback,
+      capture: owner.capture,
+      onClickCapture: (event: MouseEvent<HTMLButtonElement>) => stageCaptureAction(definition, event),
+      onClick: (event: MouseEvent<HTMLButtonElement>) => stageBubbleAction(definition, event),
+    });
+    return Object.freeze(definition);
+  };
+
+  const accept = authority.canAccept
+    ? action("accept", !authority.presentation.accept!.disabled, authority.onAccept)
+    : null;
+  const reject = authority.canReject
+    ? action("reject", !authority.presentation.reject!.disabled, authority.onReject)
+    : null;
+
+  const establish = () => {
+    if (lastRuntime) {
+      const exactReplay = lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay();
+      if (exactReplay && acceptsSuccessorOf(lastRuntime.publication)) {
+        requestReplaySuccessor(lastRuntime);
+      } else if (
+        lastRuntime.isRetired() &&
+        !lastRuntime.mutationHistoryIsClean() &&
+        !successorRequested
+      ) {
+        successorRequested = true;
+        const replay = cells.replay.current;
+        if (replay?.source === lastRuntime.publication) {
+          cells.replay.current = null;
+          replay.release();
+        } else {
+          lastRuntime.release();
+        }
+        requestSuccessor();
+      }
+      return undefined;
+    }
+    if (renderRetired || invalidBeforeEstablish || !suggestionActionAuthorityFactsAreCurrent(authority)) return undefined;
+    const elements = committedElements();
+    const placement = elements ? captureSuggestionActionPlacement(elements.root) : null;
+    if (!elements || !placement) return undefined;
+    const publication: SuggestionActionPublication = Object.freeze({
+      identity: Symbol("suggestion-action-publication"),
+      render,
+      authority,
+      elements,
+      ownerDocument: elements.root.ownerDocument,
+      dom: snapshotSuggestionActionDom(elements.root),
+      placement,
+    });
+    if (!exactSuggestionActionDomIsCurrent(publication)) return undefined;
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = suggestionActionAuthoritiesMatch(replay.source.authority, authority);
+      const exactReplay =
+        sameAuthority &&
+        replay.source.render.isRetired() &&
+        cells.retired.has(replay.source) &&
+        cells.successorOf.current === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.root === replay.dom.node &&
+        suggestionActionPlacementMatches(elements.root, replay.placement) &&
+        suggestionActionDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+      if (sameAuthority && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(publication);
+        if (!successorRequested) {
+          successorRequested = true;
+          requestSuccessor();
+        }
+        return undefined;
+      }
+    }
+
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.render.retire();
+    const transitionSource = cells.successorOf.current;
+    const owners = expectedOwners();
+    const replayOwners = new Set<SuggestionActionElementOwnerView>();
+    if (transitionSource?.authority.mount === authority.mount) {
+      for (const owner of owners) {
+        const element = owner.element();
+        if (element && !suggestionActionDomContains(transitionSource.dom, element)) replayOwners.add(owner);
+      }
+    }
+    const runtime = createRuntime(publication, replayOwners);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish(owners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const retire = () => {
+    if (renderRetired) return false;
+    if (currentRuntime) {
+      currentRuntime.retireForAction();
+      return true;
+    }
+    renderRetired = true;
+    return true;
+  };
+
+  const onRootClickCapture = (event: MouseEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureRoot(event);
+  };
+
+  const onRootClick = (event: MouseEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleRoot(event);
+  };
+
+  Object.assign(render, {
+    identity,
+    authority,
+    accept,
+    reject,
+    captureRoot: rootOwner.capture,
+    onRootClickCapture,
+    onRootClick,
+    captureAccept: accept?.capture ?? null,
+    onAcceptCapture: accept?.onClickCapture ?? null,
+    onAccept: accept?.onClick ?? null,
+    captureReject: reject?.capture ?? null,
+    onRejectCapture: reject?.onClickCapture ?? null,
+    onReject: reject?.onClick ?? null,
+    establish,
+    retire,
+    isRetired: () => renderRetired,
+  });
+  return Object.freeze(render);
+}
+
+function PublishedSuggestionActions({
   state,
   canAccept,
   canReject,
+  disabled = false,
   onAccept,
   onReject,
+  presentation: suppliedPresentation,
+  batch = null,
 }: {
   state: CommentSuggestionState;
   canAccept: boolean;
   canReject: boolean;
-  onAccept: () => void | Promise<void>;
-  onReject: () => void | Promise<unknown>;
+  disabled?: boolean;
+  onAccept: () => void | Promise<void> | boolean;
+  onReject: () => void | Promise<unknown> | boolean;
+  presentation?: SuggestionActionPresentation;
+  batch?: SuggestionBatchAuthority | null;
 }) {
-  if ((state !== "pending" && state !== "outdated") || (!canAccept && !canReject)) return null;
+  const [mount] = useState(() => Symbol("suggestion-actions"));
+  const [cells] = useState<SuggestionActionCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet<SuggestionActionPublication>(),
+    claimedPublications: new WeakSet<SuggestionActionPublication>(),
+    claimedActions: new WeakSet<SuggestionActionDefinition>(),
+    claimedReactEvents: new WeakSet<object>(),
+  }));
+  const replayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    replayCleanup.current += 1;
+    return () => {
+      replayCleanup.current += 1;
+      const cleanup = replayCleanup.current;
+      queueMicrotask(() => {
+        if (replayCleanup.current !== cleanup) return;
+        const replay = cells.replay.current;
+        if (!replay) return;
+        cells.replay.current = null;
+        if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+        replay.release();
+      });
+    };
+  }, [cells]);
+  const [, setPublicationRevision] = useState(0);
+  const requestSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const presentation =
+    suppliedPresentation ??
+    Object.freeze({
+      rootClassName: SUGGESTION_ACTIONS_CLASS,
+      rootTestId: "suggestion-actions",
+      accept: canAccept
+        ? Object.freeze({
+            className: SUGGESTION_ACCEPT_CLASS,
+            testId: "suggestion-accept-comment",
+            label: "Accept suggestion",
+            disabled: disabled || state === "outdated",
+            busy: false,
+            title: null,
+            ariaLabel: null,
+          })
+        : null,
+      reject: canReject
+        ? Object.freeze({
+            className: SUGGESTION_REJECT_CLASS,
+            testId: "suggestion-reject-comment",
+            label: "Reject",
+            disabled,
+            busy: false,
+            title: null,
+            ariaLabel: null,
+          })
+        : null,
+    });
+  const authority: SuggestionActionAuthority = Object.freeze({
+    mount,
+    state,
+    canAccept,
+    canReject,
+    disabled,
+    onAccept,
+    onReject,
+    order: Object.freeze([
+      ...(canAccept ? (["accept"] as const) : []),
+      ...(canReject ? (["reject"] as const) : []),
+    ]),
+    presentation,
+    batch,
+  });
+  const publication = createSuggestionActionRender(authority, cells, requestSuccessor);
+  useLayoutEffect(() => publication.establish(), [publication]);
+  const {
+    captureRoot,
+    onRootClickCapture,
+    onRootClick,
+    captureAccept,
+    onAcceptCapture,
+    onAccept: onAcceptClick,
+    captureReject,
+    onRejectCapture,
+    onReject: onRejectClick,
+  } = publication;
+  const acceptPresentation = presentation.accept;
+  const rejectPresentation = presentation.reject;
+
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2" onClick={(event) => event.stopPropagation()} data-testid="suggestion-actions">
+    <div ref={captureRoot} className={presentation.rootClassName} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid={presentation.rootTestId}>
       {canAccept && (
         <button
+          ref={captureAccept}
           type="button"
-          className="btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap"
-          disabled={state === "outdated"}
-          onClick={() => void onAccept()}
-          data-testid="suggestion-accept-comment"
+          className={acceptPresentation!.className}
+          disabled={acceptPresentation!.disabled}
+          aria-busy={acceptPresentation!.busy || undefined}
+          aria-label={acceptPresentation!.ariaLabel ?? undefined}
+          title={acceptPresentation!.title ?? undefined}
+          onClickCapture={onAcceptCapture!}
+          onClick={onAcceptClick!}
+          data-testid={acceptPresentation!.testId}
         >
-          <Check size={13} /> Accept suggestion
+          {batch ? acceptPresentation!.label : <><Check size={13} /> {acceptPresentation!.label}</>}
         </button>
       )}
       {canReject && (
-        <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap" onClick={() => void onReject()} data-testid="suggestion-reject-comment">
-          <X size={13} /> Reject
+        <button
+          ref={captureReject}
+          type="button"
+          className={rejectPresentation!.className}
+          disabled={rejectPresentation!.disabled}
+          aria-busy={rejectPresentation!.busy || undefined}
+          aria-label={rejectPresentation!.ariaLabel ?? undefined}
+          title={rejectPresentation!.title ?? undefined}
+          onClickCapture={onRejectCapture!}
+          onClick={onRejectClick!}
+          data-testid={rejectPresentation!.testId}
+        >
+          {batch ? rejectPresentation!.label : <><X size={13} /> {rejectPresentation!.label}</>}
         </button>
       )}
     </div>
   );
+}
+
+function SuggestionActions(props: {
+  state: CommentSuggestionState;
+  canAccept: boolean;
+  canReject: boolean;
+  disabled?: boolean;
+  onAccept: () => void | Promise<void>;
+  onReject: () => void | Promise<unknown>;
+}) {
+  if ((props.state !== "pending" && props.state !== "outdated") || (!props.canAccept && !props.canReject)) return null;
+  return <PublishedSuggestionActions {...props} />;
 }
 
 /** Review card author label: token name for agents, display name for humans. */
@@ -270,19 +1761,21 @@ function ReactionRow({
   names,
   me,
   canReact,
+  disabled = false,
   onToggle,
 }: {
   reactions: Reactions;
   names: Record<string, string>;
   me: string;
   canReact: boolean;
+  disabled?: boolean;
   onToggle: (emoji: string) => void;
 }) {
   const { armed, open, setOpen, plainProps } = useLazyTrigger();
   const entries = Object.entries(reactions).filter(([, ids]) => ids.length > 0);
   if (entries.length === 0 && !canReact) return null;
   const addButton = (
-    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" data-testid="reaction-add">
+    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" disabled={disabled} data-testid="reaction-add">
       <SmilePlus size={14} />
     </button>
   );
@@ -300,7 +1793,7 @@ function ReactionRow({
             title={ids.map((id) => names[id] ?? id).join(", ")}
             aria-pressed={mine}
             aria-label={`${emoji} ${ids.length}`}
-            disabled={!canReact}
+            disabled={!canReact || disabled}
             onClick={() => onToggle(emoji)}
             data-testid="reaction-chip"
           >
@@ -322,6 +1815,7 @@ function ReactionRow({
                     type="button"
                     data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
                     aria-label={`React with ${emoji}`}
+                    disabled={disabled}
                     onClick={() => {
                       onToggle(emoji);
                       setOpen(false);
@@ -348,45 +1842,65 @@ function ReactionRow({
  * until it has, or when it failed — so the picker can offer "Connect an agent" to a user who has none (#1025).
  */
 function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): { candidates: MentionCandidate[]; tokenCount: number | null } {
-  const [collaborators, setCollaborators] = useState<MentionCandidate[]>([]);
-  const [knownAgents, setKnownAgents] = useState<MentionCandidate[]>([]);
-  const [ownTokens, setOwnTokens] = useState<MentionCandidate[] | null>(null);
   const ownerLogin = session.user.login ?? null;
-  const me = ownerLogin?.toLowerCase();
+  const me = ownerLogin?.toLowerCase() ?? null;
+  const [collaborationResult, setCollaborationResult] = useState<{
+    session: CollabSession;
+    documentId: string;
+    viewerLogin: string | null;
+    collaborators: MentionCandidate[];
+    knownAgents: MentionCandidate[];
+  } | null>(null);
+  const [tokenResult, setTokenResult] = useState<{
+    session: CollabSession;
+    viewerLogin: string;
+    viewerName: string;
+    candidates: MentionCandidate[];
+  } | null>(null);
   useEffect(() => {
     let cancelled = false;
+    const documentId = session.docId;
+    const viewerLogin = me;
     api.documents
-      .collaborators(session.docId)
+      .collaborators(documentId)
       .then((res) => {
         if (cancelled) return;
         const list: MentionCandidate[] = [];
         if (res.owner?.login) list.push({ login: res.owner.login, name: res.owner.name ?? res.owner.login, image: res.owner.image });
         for (const c of res.collaborators) list.push({ login: c.login, name: c.name ?? c.login, image: c.image });
-        setCollaborators(list);
-        setKnownAgents(
-          (res.agents ?? []).map((a) => ({
+        setCollaborationResult({
+          session,
+          documentId,
+          viewerLogin,
+          collaborators: list,
+          knownAgents: (res.agents ?? []).map((a) => ({
             login: a.login,
             name: a.name,
             image: null,
-            agent: { ownerLogin: a.ownerLogin, ownerName: a.ownerName ?? null, canAsk: a.ownerLogin.toLowerCase() === me || a.collaboratorsMayAsk === true },
+            agent: { ownerLogin: a.ownerLogin, ownerName: a.ownerName ?? null, canAsk: a.ownerLogin.toLowerCase() === viewerLogin || a.collaboratorsMayAsk === true },
           })),
-        );
+        });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [session.docId, me]);
+  }, [session, session.docId, me]);
   useEffect(() => {
     if (!withOwnTokens || !ownerLogin) return;
     let cancelled = false;
+    const viewerLogin = ownerLogin.toLowerCase();
+    const viewerName = session.user.name;
     api.tokens
       .list()
       .then((res) => {
         if (cancelled) return;
-        setOwnTokens(
-          res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin, ownerName: session.user.name, canAsk: true }, own: true })),
-        );
+        setTokenResult({
+          session,
+          viewerLogin,
+          viewerName,
+          candidates: res.tokens.map((t) => ({ login: agentMentionLogin(ownerLogin, t.name), name: t.name, image: null, agent: { ownerLogin, ownerName: viewerName, canAsk: true }, own: true })),
+        });
       })
       .catch((err: unknown) => {
         // Agents' sessions cannot list tokens (403); the picker simply offers what the document knows.
@@ -395,7 +1909,7 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
     return () => {
       cancelled = true;
     };
-  }, [withOwnTokens, ownerLogin, session.user.name]);
+  }, [withOwnTokens, session, ownerLogin, session.user.name]);
   const present = useSessionValue(
     session,
     (s) =>
@@ -410,7 +1924,13 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
         ),
     jsonEqual,
   );
+  const currentCollaboration =
+    collaborationResult?.session === session && collaborationResult.documentId === session.docId && collaborationResult.viewerLogin === me ? collaborationResult : null;
+  const ownTokens =
+    me !== null && tokenResult?.session === session && tokenResult.viewerLogin === me && tokenResult.viewerName === session.user.name ? tokenResult.candidates : null;
   return useMemo(() => {
+    const collaborators = currentCollaboration?.collaborators ?? [];
+    const knownAgents = currentCollaboration?.knownAgents ?? [];
     const seen = new Set<string>();
     const out: MentionCandidate[] = [];
     const known = new Map(knownAgents.map((a) => [a.login.toLowerCase(), a] as const));
@@ -424,7 +1944,7 @@ function useMentionCandidates(session: CollabSession, withOwnTokens: boolean): {
       out.push(listed && c.agent ? { ...c, agent: { ...c.agent, ownerName: c.agent.ownerName ?? listed.ownerName, canAsk: c.agent.canAsk || listed.canAsk } } : c);
     }
     return { candidates: out, tokenCount: ownTokens ? ownTokens.length : null };
-  }, [present, collaborators, knownAgents, ownTokens, me]);
+  }, [present, currentCollaboration, ownTokens, me]);
 }
 
 const MAX_SUGGESTIONS = 6;
@@ -579,6 +2099,499 @@ function useCommentOps(session: CollabSession) {
   );
 }
 
+interface CommentPanelVisit {
+  readonly marker: "comment-panel-visit";
+}
+
+type CommentRowAction =
+  | { type: "resolve"; resolved: boolean }
+  | { type: "delete" }
+  | { type: "react"; emoji: string; reacted: boolean };
+
+type CommentBatchAction = "review-accept" | "review-reject" | "review-resolve" | "suggestions-accept" | "suggestions-reject";
+
+interface CommentTargetIdentity {
+  readonly thread: object;
+  readonly reply: object | null;
+}
+
+interface CommentSuggestionBatchTarget {
+  readonly kind: "comment-suggestion";
+  readonly key: string;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly identity: CommentTargetIdentity;
+  readonly body: string;
+  readonly proposed: string;
+  readonly initiallyOutdated: boolean;
+}
+
+interface CommentResolveBatchTarget {
+  readonly kind: "comment-resolve";
+  readonly key: string;
+  readonly threadId: string;
+  readonly replyId: null;
+  readonly identity: CommentTargetIdentity;
+}
+
+interface LocalSuggestionBatchTarget {
+  readonly kind: "local-suggestion";
+  readonly key: string;
+  readonly suggestionId: string;
+  readonly memberIds: readonly string[];
+  readonly memberIdentities: readonly object[];
+  readonly before: string;
+  readonly after: string;
+}
+
+type CommentBatchTarget = CommentSuggestionBatchTarget | CommentResolveBatchTarget | LocalSuggestionBatchTarget;
+
+interface CommentBatchOwner {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly scope: string;
+  readonly reviewId: string | null;
+  readonly reviewSignature: string | null;
+  readonly authorName: string | null;
+  readonly action: CommentBatchAction;
+  readonly operation: number;
+  readonly targets: readonly CommentBatchTarget[];
+}
+
+function reviewIdentitySignature(review: ReviewDto): string {
+  return JSON.stringify([review.id, review.documentId, review.authorId, review.authorName, review.collabAuthorId, review.agent, review.verdict, review.summary, review.threadIds, review.createdAt]);
+}
+
+interface CommentRowActionOwner {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly action: Readonly<CommentRowAction>;
+}
+
+interface CommentRowActionCoordinator {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  mounted: boolean;
+  operation: number;
+  targets: Set<string>;
+  readonly owners: Map<string, CommentRowActionOwner>;
+  readonly errors: Map<string, string>;
+  readonly batchOwners: Map<string, CommentBatchOwner>;
+  readonly batchTargets: Map<string, CommentBatchOwner>;
+  reviewSignatures: Map<string, string>;
+  readonly versions: Map<string, number>;
+  readonly listeners: Map<string, Set<() => void>>;
+  readonly batchVersions: Map<string, number>;
+  readonly batchListeners: Map<string, Set<() => void>>;
+}
+
+interface CommentRowActionState {
+  pending: CommentRowActionOwner | null;
+  batch: CommentBatchOwner | null;
+  error: string | null;
+}
+
+const ROOT_COMMENT_TARGET = "";
+const SUGGESTION_TARGET_PREFIX = "suggestion\0";
+const REVIEW_SCOPE_PREFIX = "review\0";
+const SUGGESTIONS_SCOPE = "suggestions";
+
+function commentTargetKey(threadId: string, replyId: string | null): string {
+  return `${threadId}\0${replyId ?? ROOT_COMMENT_TARGET}`;
+}
+
+function localSuggestionTargetKey(suggestionId: string): string {
+  return `${SUGGESTION_TARGET_PREFIX}${suggestionId}`;
+}
+
+function reviewBatchScope(reviewId: string): string {
+  return `${REVIEW_SCOPE_PREFIX}${reviewId}`;
+}
+
+function storedCommentTargetIdentity(session: CollabSession, threadId: string, replyId: string | null): CommentTargetIdentity | null {
+  const thread = session.comments.ymap.get(threadId);
+  if (!thread) return null;
+  if (replyId === null) return Object.freeze({ thread, reply: null });
+  const replies = thread.get("replies");
+  if (!replies || typeof replies !== "object" || !("toArray" in replies) || typeof replies.toArray !== "function") return null;
+  const reply = (replies.toArray() as object[]).find((value) => "id" in value && value.id === replyId);
+  return reply ? Object.freeze({ thread, reply }) : null;
+}
+
+function sameCommentTargetIdentity(session: CollabSession, target: CommentSuggestionBatchTarget | CommentResolveBatchTarget): boolean {
+  const current = storedCommentTargetIdentity(session, target.threadId, target.replyId);
+  return current?.thread === target.identity.thread && current.reply === target.identity.reply;
+}
+
+function commentBatchLabel(owner: CommentBatchOwner): string {
+  if (owner.action === "review-resolve") return "Resolving comment…";
+  if (owner.action === "review-accept" || owner.action === "suggestions-accept") return "Accepting suggestion…";
+  return "Rejecting suggestion…";
+}
+
+function pendingCommentActionLabel(owner: CommentRowActionOwner): string {
+  if (owner.action.type === "resolve") return owner.action.resolved ? "Resolving comment…" : "Re-opening comment…";
+  if (owner.action.type === "delete") return owner.replyId ? "Deleting reply…" : "Deleting comment…";
+  return `${owner.action.reacted ? "Adding" : "Removing"} ${owner.action.emoji} reaction…`;
+}
+
+function failedCommentActionText(error: unknown, owner: CommentRowActionOwner): string {
+  const { action } = owner;
+  const fallback =
+    action.type === "resolve"
+      ? `Couldn’t ${action.resolved ? "resolve" : "re-open"} the comment.`
+      : action.type === "delete"
+        ? `Couldn’t delete the ${owner.replyId ? "reply" : "comment"}.`
+        : "Couldn’t update the reaction.";
+  const reason = apiErrorText(error, fallback).trim() || fallback;
+  return `${reason.replace(/[.\s]+$/, "")}. Try again.`;
+}
+
+function CommentActionFeedback({ state }: { state: CommentRowActionState }) {
+  if (state.pending) {
+    return (
+      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-3" role="status" aria-live="polite" data-testid="comment-action-pending" data-action={state.pending.action.type}>
+        <Loader2 size={12} className="animate-spin" aria-hidden />
+        {pendingCommentActionLabel(state.pending)}
+      </div>
+    );
+  }
+  if (state.batch) {
+    return (
+      <div className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-3" role="status" aria-live="polite" data-testid="comment-batch-pending" data-action={state.batch.action}>
+        <Loader2 size={12} className="animate-spin" aria-hidden />
+        {commentBatchLabel(state.batch)}
+      </div>
+    );
+  }
+  if (!state.error) return null;
+  return (
+    <div className="mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="comment-action-error">
+      {state.error}
+    </div>
+  );
+}
+
+function retireCommentRowActions(coordinator: CommentRowActionCoordinator) {
+  coordinator.mounted = false;
+  coordinator.owners.clear();
+  coordinator.errors.clear();
+  coordinator.batchOwners.clear();
+  coordinator.batchTargets.clear();
+  coordinator.reviewSignatures.clear();
+  coordinator.listeners.clear();
+  coordinator.batchListeners.clear();
+}
+
+function mountCommentRowActions(coordinator: CommentRowActionCoordinator) {
+  coordinator.mounted = true;
+  return () => retireCommentRowActions(coordinator);
+}
+
+function syncCommentRowActionTargets(coordinator: CommentRowActionCoordinator, threads: CommentThread[]) {
+  const targets = new Set(threads.flatMap((thread) => [commentTargetKey(thread.id, null), ...thread.replies.map((reply) => commentTargetKey(thread.id, reply.id))]));
+  coordinator.targets = targets;
+  for (const key of coordinator.owners.keys()) if (!targets.has(key)) coordinator.owners.delete(key);
+  for (const key of coordinator.errors.keys()) if (!targets.has(key)) coordinator.errors.delete(key);
+}
+
+function publishCommentRowAction(coordinator: CommentRowActionCoordinator, threadId: string) {
+  coordinator.versions.set(threadId, (coordinator.versions.get(threadId) ?? 0) + 1);
+  for (const listener of coordinator.listeners.get(threadId) ?? []) listener();
+}
+
+function ownsCommentRowAction(coordinator: CommentRowActionCoordinator, owner: CommentRowActionOwner): boolean {
+  const key = commentTargetKey(owner.threadId, owner.replyId);
+  return (
+    coordinator.mounted &&
+    coordinator.session === owner.session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    coordinator.targets.has(key) &&
+    coordinator.owners.get(key) === owner
+  );
+}
+
+function createCommentRowActionCoordinator(session: CollabSession, visit: CommentPanelVisit): CommentRowActionCoordinator {
+  return {
+    session,
+    documentId: session.docId,
+    visit,
+    mounted: true,
+    operation: 0,
+    targets: new Set(),
+    owners: new Map(),
+    errors: new Map(),
+    batchOwners: new Map(),
+    batchTargets: new Map(),
+    reviewSignatures: new Map(),
+    versions: new Map(),
+    listeners: new Map(),
+    batchVersions: new Map(),
+    batchListeners: new Map(),
+  };
+}
+
+function publishCommentBatchScope(coordinator: CommentRowActionCoordinator, scope: string) {
+  coordinator.batchVersions.set(scope, (coordinator.batchVersions.get(scope) ?? 0) + 1);
+  for (const listener of coordinator.batchListeners.get(scope) ?? []) listener();
+}
+
+function commentBatchThreadIds(owner: CommentBatchOwner): string[] {
+  return [...new Set(owner.targets.flatMap((target) => (target.kind === "local-suggestion" ? [] : [target.threadId])))];
+}
+
+function publishCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner) {
+  publishCommentBatchScope(coordinator, owner.scope);
+  for (const threadId of commentBatchThreadIds(owner)) publishCommentRowAction(coordinator, threadId);
+}
+
+function ownsCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner): boolean {
+  return (
+    coordinator.mounted &&
+    coordinator.session === owner.session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    coordinator.batchOwners.get(owner.scope) === owner &&
+    owner.targets.every((target) => coordinator.batchTargets.get(target.key) === owner)
+  );
+}
+
+function currentCommentBatchContext(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner): boolean {
+  return ownsCommentBatch(coordinator, owner) && (owner.reviewId === null || coordinator.reviewSignatures.get(owner.reviewId) === owner.reviewSignature);
+}
+
+function releaseCommentBatch(coordinator: CommentRowActionCoordinator, owner: CommentBatchOwner) {
+  if (!ownsCommentBatch(coordinator, owner)) return;
+  coordinator.batchOwners.delete(owner.scope);
+  for (const target of owner.targets) if (coordinator.batchTargets.get(target.key) === owner) coordinator.batchTargets.delete(target.key);
+  publishCommentBatch(coordinator, owner);
+}
+
+function commentTargetHasRowConflict(coordinator: CommentRowActionCoordinator, target: CommentBatchTarget): boolean {
+  if (target.kind === "local-suggestion") return false;
+  if (coordinator.owners.has(target.key)) return true;
+  if (target.replyId !== null) return coordinator.owners.get(commentTargetKey(target.threadId, null))?.action.type === "delete";
+  return false;
+}
+
+function commentTargetHasBatchConflict(coordinator: CommentRowActionCoordinator, target: CommentBatchTarget): boolean {
+  if (coordinator.batchTargets.has(target.key)) return true;
+  if (target.kind !== "comment-suggestion") return false;
+  return [...coordinator.batchOwners.values()].some((owner) =>
+    owner.targets.some((claimed) => claimed.kind === "comment-suggestion" && claimed.threadId === target.threadId),
+  );
+}
+
+function isCommentBatchBlocked(coordinator: CommentRowActionCoordinator, targets: readonly CommentBatchTarget[]): boolean {
+  return targets.some((target) => commentTargetHasRowConflict(coordinator, target) || commentTargetHasBatchConflict(coordinator, target));
+}
+
+function claimCommentBatch(
+  coordinator: CommentRowActionCoordinator,
+  input: {
+    scope: string;
+    review: ReviewDto | null;
+    authorName: string | null;
+    action: CommentBatchAction;
+    targets: readonly CommentBatchTarget[];
+  },
+): CommentBatchOwner | null {
+  if (!coordinator.mounted || coordinator.batchOwners.has(input.scope) || input.targets.length === 0 || isCommentBatchBlocked(coordinator, input.targets)) return null;
+  const reviewSignature = input.review ? reviewIdentitySignature(input.review) : null;
+  if (input.review && coordinator.reviewSignatures.get(input.review.id) !== reviewSignature) return null;
+
+  const owner = Object.freeze({
+    session: coordinator.session,
+    documentId: coordinator.documentId,
+    visit: coordinator.visit,
+    scope: input.scope,
+    reviewId: input.review?.id ?? null,
+    reviewSignature,
+    authorName: input.authorName,
+    action: input.action,
+    operation: ++coordinator.operation,
+    targets: Object.freeze([...input.targets]),
+  }) satisfies CommentBatchOwner;
+  coordinator.batchOwners.set(owner.scope, owner);
+  for (const target of owner.targets) {
+    coordinator.batchTargets.set(target.key, owner);
+    coordinator.errors.delete(target.key);
+  }
+  if (!ownsCommentBatch(coordinator, owner)) {
+    coordinator.batchOwners.delete(owner.scope);
+    for (const target of owner.targets) if (coordinator.batchTargets.get(target.key) === owner) coordinator.batchTargets.delete(target.key);
+    return null;
+  }
+  publishCommentBatch(coordinator, owner);
+  return owner;
+}
+
+function syncCommentBatchReviews(coordinator: CommentRowActionCoordinator, reviews: ReviewDto[]) {
+  coordinator.reviewSignatures = new Map(reviews.map((review) => [review.id, reviewIdentitySignature(review)]));
+  for (const owner of [...coordinator.batchOwners.values()]) {
+    if (owner.reviewId !== null && coordinator.reviewSignatures.get(owner.reviewId) !== owner.reviewSignature) releaseCommentBatch(coordinator, owner);
+  }
+}
+
+function useCommentBatchState(
+  coordinator: CommentRowActionCoordinator,
+  scope: string,
+  targets: readonly CommentBatchTarget[],
+): { owner: CommentBatchOwner | null; blocked: boolean } {
+  const threadIdsKey = [...new Set(targets.flatMap((target) => (target.kind === "local-suggestion" ? [] : [target.threadId])))].sort().join("\0");
+  const targetKeys = targets.map((target) => target.key).join("\u001f");
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let scopeListeners = coordinator.batchListeners.get(scope);
+      if (!scopeListeners) {
+        scopeListeners = new Set();
+        coordinator.batchListeners.set(scope, scopeListeners);
+      }
+      scopeListeners.add(listener);
+      const threadIds = threadIdsKey ? threadIdsKey.split("\0") : [];
+      for (const threadId of threadIds) {
+        let listeners = coordinator.listeners.get(threadId);
+        if (!listeners) {
+          listeners = new Set();
+          coordinator.listeners.set(threadId, listeners);
+        }
+        listeners.add(listener);
+      }
+      return () => {
+        scopeListeners.delete(listener);
+        if (scopeListeners.size === 0) coordinator.batchListeners.delete(scope);
+        for (const threadId of threadIds) {
+          const listeners = coordinator.listeners.get(threadId);
+          listeners?.delete(listener);
+          if (listeners?.size === 0) coordinator.listeners.delete(threadId);
+        }
+      };
+    },
+    [coordinator, scope, threadIdsKey],
+  );
+  const getSnapshot = useCallback(() => {
+    const owner = coordinator.batchOwners.get(scope);
+    return `${owner?.operation ?? 0}:${isCommentBatchBlocked(coordinator, targets) ? 1 : 0}:${targetKeys}`;
+  }, [coordinator, scope, targets, targetKeys]);
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return { owner: coordinator.batchOwners.get(scope) ?? null, blocked: isCommentBatchBlocked(coordinator, targets) };
+}
+
+/**
+ * The panel visit owns in-flight work so changing tabs cannot unlock a target. Cards subscribe by thread,
+ * preserving memoisation while root/reply actions inside one card remain independently addressable.
+ */
+function useCommentRowActionCoordinator(session: CollabSession, visit: CommentPanelVisit, threads: CommentThread[]) {
+  const coordinator = useMemo(() => createCommentRowActionCoordinator(session, visit), [session, visit]);
+
+  useLayoutEffect(() => mountCommentRowActions(coordinator), [coordinator]);
+  useLayoutEffect(() => syncCommentRowActionTargets(coordinator, threads), [coordinator, threads]);
+
+  return coordinator;
+}
+
+function useCommentRowActions(coordinator: CommentRowActionCoordinator, thread: CommentThread) {
+  const threadId = thread.id;
+  const subscribe = useCallback(
+    (listener: () => void) => {
+      let listeners = coordinator.listeners.get(threadId);
+      if (!listeners) {
+        listeners = new Set();
+        coordinator.listeners.set(threadId, listeners);
+      }
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) coordinator.listeners.delete(threadId);
+      };
+    },
+    [coordinator, threadId],
+  );
+  const getSnapshot = useCallback(() => coordinator.versions.get(threadId) ?? 0, [coordinator, threadId]);
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+  const run = useCallback(
+    (replyId: string | null, nextAction: CommentRowAction) => {
+      const key = commentTargetKey(threadId, replyId);
+      if (!coordinator.session.commentsViaApi || !coordinator.mounted || !coordinator.targets.has(key) || coordinator.owners.has(key) || coordinator.batchTargets.has(key)) return;
+
+      const rootKey = commentTargetKey(threadId, null);
+      const rootOwner = coordinator.owners.get(rootKey);
+      const threadHasOwner =
+        [...coordinator.owners.values()].some((owner) => owner.threadId === threadId) ||
+        [...coordinator.batchOwners.values()].some((owner) => owner.targets.some((target) => target.kind !== "local-suggestion" && target.threadId === threadId));
+      if ((replyId !== null && rootOwner?.action.type === "delete") || (replyId === null && nextAction.type === "delete" && threadHasOwner)) return;
+
+      const action: Readonly<CommentRowAction> = Object.freeze({ ...nextAction });
+      const owner = Object.freeze({
+        session: coordinator.session,
+        documentId: coordinator.documentId,
+        visit: coordinator.visit,
+        threadId,
+        replyId,
+        action,
+      }) satisfies CommentRowActionOwner;
+      coordinator.errors.delete(key);
+      coordinator.owners.set(key, owner);
+      if (!ownsCommentRowAction(coordinator, owner)) return;
+      publishCommentRowAction(coordinator, threadId);
+
+      const settle = (result: { ok: true } | { ok: false; error: unknown }) => {
+        if (!ownsCommentRowAction(coordinator, owner)) return;
+        if (result.ok) coordinator.errors.delete(key);
+        else coordinator.errors.set(key, failedCommentActionText(result.error, owner));
+        coordinator.owners.delete(key);
+        publishCommentRowAction(coordinator, threadId);
+      };
+
+      let request: Promise<unknown>;
+      try {
+        if (action.type === "resolve") {
+          const payload = Object.freeze({ action: "resolve" as const, threadId: owner.threadId, resolved: action.resolved });
+          request = api.documents.comment(owner.documentId, payload);
+        } else if (action.type === "delete") {
+          const payload = Object.freeze({ action: "delete" as const, threadId: owner.threadId, replyId: owner.replyId ?? undefined });
+          request = api.documents.comment(owner.documentId, payload);
+        } else {
+          const payload = Object.freeze({ action: "react" as const, threadId: owner.threadId, replyId: owner.replyId ?? undefined, emoji: action.emoji });
+          request = api.documents.comment(owner.documentId, payload);
+        }
+      } catch (error) {
+        settle({ ok: false, error });
+        return;
+      }
+      void request.then(
+        () => settle({ ok: true }),
+        (error: unknown) => settle({ ok: false, error }),
+      );
+    },
+    [coordinator, threadId],
+  );
+
+  const state = (replyId: string | null): CommentRowActionState => {
+    const key = commentTargetKey(threadId, replyId);
+    return { pending: coordinator.owners.get(key) ?? null, batch: coordinator.batchTargets.get(key) ?? null, error: coordinator.errors.get(key) ?? null };
+  };
+  const rootOwner = coordinator.owners.get(commentTargetKey(threadId, null));
+  const hasBatchReply = [...coordinator.batchOwners.values()].some((owner) =>
+    owner.targets.some((target) => target.kind !== "local-suggestion" && target.threadId === threadId && target.replyId !== null),
+  );
+
+  return {
+    run,
+    state,
+    blocked: (replyId: string | null) => coordinator.batchTargets.has(commentTargetKey(threadId, replyId)),
+    hasPendingReply: [...coordinator.owners.values()].some((owner) => owner.threadId === threadId && owner.replyId !== null) || hasBatchReply,
+    rootDeleting: rootOwner?.action.type === "delete",
+  };
+}
+
 /** Tallest the composer grows before it scrolls inside: about 16 lines, or 40 % of a short viewport. */
 const COMPOSER_MAX_HEIGHT = 320;
 
@@ -612,10 +2625,64 @@ export interface ComposerRequest {
   agents: MentionCandidate[];
 }
 
-function Composer({
+interface ComposerVisit {
+  readonly marker: "composer-visit";
+  retired: boolean;
+  focusOperation: ComposerFocusOperation | null;
+  blurOperation: ComposerBlurOperation | null;
+}
+
+interface ComposerFocusOperation {
+  readonly visit: ComposerVisit;
+  readonly element: HTMLTextAreaElement;
+  readonly operation: number;
+  readonly selection: readonly [start: number, end: number] | null;
+  readonly syncMention: boolean;
+  readonly caretAction: number;
+  frame: number | null;
+}
+
+interface ComposerBlurOperation {
+  readonly visit: ComposerVisit;
+  readonly element: HTMLTextAreaElement;
+  readonly operation: number;
+  readonly closeMention: true;
+  readonly caretAction: number;
+  timer: number | null;
+}
+
+interface ComposerSubmissionOwner {
+  readonly visit: ComposerVisit;
+  readonly operation: number;
+  readonly body: string;
+  readonly request: ComposerRequest | null;
+  readonly agentIdentities: readonly string[];
+}
+
+function cancelComposerFocusOperation(owner: ComposerFocusOperation) {
+  const frame = owner.frame;
+  owner.frame = null;
+  if (owner.visit.focusOperation === owner) owner.visit.focusOperation = null;
+  if (frame !== null) cancelAnimationFrame(frame);
+}
+
+function cancelComposerBlurOperation(owner: ComposerBlurOperation) {
+  const timer = owner.timer;
+  owner.timer = null;
+  if (owner.visit.blurOperation === owner) owner.visit.blurOperation = null;
+  if (timer !== null) window.clearTimeout(timer);
+}
+
+function cancelComposerDeferredWork(visit: ComposerVisit) {
+  if (visit.focusOperation) cancelComposerFocusOperation(visit.focusOperation);
+  if (visit.blurOperation) cancelComposerBlurOperation(visit.blurOperation);
+}
+
+function Composer<Result>({
   placeholder,
   autoFocus,
   onSubmit,
+  onSuccess,
   onCancel,
   submitLabel = "Comment",
   initial = "",
@@ -626,7 +2693,9 @@ function Composer({
   placeholder: string;
   autoFocus?: boolean;
   /** `request` is set when the body mentions an agent the picker knows and this composer offers the mode row. */
-  onSubmit: (body: string, request: ComposerRequest | null) => void | Promise<unknown>;
+  onSubmit: (body: string, request: ComposerRequest | null) => Result | Promise<Result>;
+  /** Runs only while this exact composer and submission still own the successful result. */
+  onSuccess?: (result: Result, body: string, request: ComposerRequest | null) => void;
   onCancel?: () => void;
   submitLabel?: string;
   initial?: string;
@@ -644,8 +2713,34 @@ function Composer({
   const [highlight, setHighlight] = useState(0);
   const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
   const ref = useRef<HTMLTextAreaElement>(null);
+  const activeVisit = useRef<ComposerVisit | null>(null);
+  const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
+  const operationSequence = useRef(0);
+  const deferredOperationSequence = useRef(0);
+  const caretActionSequence = useRef(0);
+  const lastCaretEvent = useRef<Event | null>(null);
+  useLayoutEffect(() => {
+    const visit: ComposerVisit = {
+      marker: "composer-visit",
+      retired: false,
+      focusOperation: null,
+      blurOperation: null,
+    };
+    activeVisit.current = visit;
+    activeSubmission.current = null;
+    return () => {
+      visit.retired = true;
+      cancelComposerDeferredWork(visit);
+      if (activeVisit.current === visit) {
+        activeVisit.current = null;
+        activeSubmission.current = null;
+      }
+    };
+  }, []);
+  const ownsSubmission = (owner: ComposerSubmissionOwner) => activeVisit.current === owner.visit && activeSubmission.current === owner;
   /** Re-evaluate whether the caret is in an `@` token. */
   const syncTrigger = useCallback((el: HTMLTextAreaElement) => {
+    if (activeSubmission.current) return;
     setHighlight(0);
     if (el.selectionStart !== el.selectionEnd) {
       setTrigger(null);
@@ -653,24 +2748,100 @@ function Composer({
     }
     setTrigger(mentionTriggerAt(el.value, el.selectionStart));
   }, []);
-  useEffect(() => {
-    if (!autoFocus) return;
-    // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
-    const raf = requestAnimationFrame(() => {
-      const el = ref.current;
-      if (!el) return;
-      el.focus();
-      // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
-      // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
-      if (initial && !editing) {
-        el.setSelectionRange(initial.length, initial.length);
-        syncTrigger(el);
+
+  const scheduleFocusSelection = useCallback(
+    (element: HTMLTextAreaElement, selection: readonly [start: number, end: number] | null, syncMention = false) => {
+      const visit = activeVisit.current;
+      if (!visit || visit.retired || ref.current !== element || activeSubmission.current) return null;
+      cancelComposerDeferredWork(visit);
+      const owner: ComposerFocusOperation = {
+        visit,
+        element,
+        operation: ++deferredOperationSequence.current,
+        selection,
+        syncMention,
+        caretAction: caretActionSequence.current,
+        frame: null,
+      };
+      visit.focusOperation = owner;
+      owner.frame = requestAnimationFrame(() => {
+        if (owner.frame === null) return;
+        owner.frame = null;
+        if (owner.visit.focusOperation === owner) owner.visit.focusOperation = null;
+        if (
+          activeVisit.current !== owner.visit ||
+          owner.visit.retired ||
+          ref.current !== owner.element ||
+          !owner.element.isConnected ||
+          activeSubmission.current ||
+          caretActionSequence.current !== owner.caretAction
+        ) {
+          return;
+        }
+        owner.element.focus();
+        if (owner.selection) owner.element.setSelectionRange(owner.selection[0], owner.selection[1]);
+        if (owner.syncMention) syncTrigger(owner.element);
+      });
+      return owner;
+    },
+    [syncTrigger],
+  );
+
+  const recordCaretAction = (element: HTMLTextAreaElement, event: Event) => {
+    const visit = activeVisit.current;
+    if (!visit || visit.retired || ref.current !== element) return;
+    if (lastCaretEvent.current === event) return;
+    lastCaretEvent.current = event;
+    caretActionSequence.current += 1;
+    cancelComposerDeferredWork(visit);
+  };
+
+  const scheduleBlurDismissal = (element: HTMLTextAreaElement) => {
+    const visit = activeVisit.current;
+    if (!visit || visit.retired || ref.current !== element || activeSubmission.current) return;
+    if (visit.blurOperation) cancelComposerBlurOperation(visit.blurOperation);
+    const owner: ComposerBlurOperation = {
+      visit,
+      element,
+      operation: ++deferredOperationSequence.current,
+      closeMention: true,
+      caretAction: caretActionSequence.current,
+      timer: null,
+    };
+    visit.blurOperation = owner;
+    owner.timer = window.setTimeout(() => {
+      if (owner.timer === null) return;
+      owner.timer = null;
+      if (owner.visit.blurOperation === owner) owner.visit.blurOperation = null;
+      if (
+        activeVisit.current !== owner.visit ||
+        owner.visit.retired ||
+        ref.current !== owner.element ||
+        !owner.element.isConnected ||
+        activeSubmission.current ||
+        caretActionSequence.current !== owner.caretAction
+      ) {
+        return;
       }
-    });
-    return () => cancelAnimationFrame(raf);
+      setTrigger(null);
+    }, 120);
+  };
+
+  useLayoutEffect(() => {
+    if (!autoFocus) return;
+    const element = ref.current;
+    if (!element) return;
+    // A frame later: a closing menu (Edit…) hands focus back to its trigger first.
+    // A seeded new comment ("@" from the empty state or the hint bar, #1025) starts with the caret after the seed, so
+    // the `@` picker is open before the user types; an edit keeps the browser's caret placement.
+    const selection = initial && !editing ? ([initial.length, initial.length] as const) : null;
+    const owner = scheduleFocusSelection(element, selection, selection !== null);
+    return () => {
+      if (owner) cancelComposerFocusOperation(owner);
+    };
     // `initial` is read once, on mount, like useState(initial) above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoFocus]);
+  }, [autoFocus, scheduleFocusSelection]);
   // The user's own tokens join the picker the first time an `@` is typed in any composer (not on panel mount);
   // a pasted `@login/agent` counts too, so the row can appear for an agent the document has not seen yet.
   const namesAgent = request !== undefined && parseAgentMentions(value).length > 0;
@@ -713,20 +2884,19 @@ function Composer({
 
   /** Insert a suggestion block for the quoted text and select its contents so typing replaces them. */
   const insertSuggestion = () => {
+    if (activeSubmission.current) return;
     const el = ref.current;
-    if (quote === undefined || parseSuggestionBlock(value)) return;
+    if (!el || quote === undefined || parseSuggestionBlock(value)) return;
     const next = suggestionBlockFor(quote, value);
     setValue(next);
     setTrigger(null);
     const start = next.lastIndexOf(quote);
-    requestAnimationFrame(() => {
-      el?.focus();
-      el?.setSelectionRange(start, start + quote.length);
-    });
+    scheduleFocusSelection(el, [start, start + quote.length]);
   };
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
   const applyFormat = (kind: "bold" | "italic" | "code" | "link") => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el) return;
     const { selectionStart, selectionEnd } = el;
@@ -736,10 +2906,7 @@ function Composer({
         : wrapSelection(el.value, selectionStart, selectionEnd, kind === "bold" ? "**" : kind === "italic" ? "*" : "`");
     setValue(r.value);
     setTrigger(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(r.selectionStart, r.selectionEnd);
-    });
+    scheduleFocusSelection(el, [r.selectionStart, r.selectionEnd]);
   };
 
   const matches = useMemo(() => (trigger ? filterMentionCandidates(candidates, trigger.query, MAX_SUGGESTIONS) : []), [trigger, candidates]);
@@ -769,6 +2936,7 @@ function Composer({
 
   /** A quick instruction goes right after the mention; once the body has text past it, at the caret instead. Focus stays in the box. */
   const insertInstruction = (text: string) => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el) return;
     const mentionEnd = lastAgentMentionEnd(value);
@@ -789,14 +2957,16 @@ function Composer({
     }
     setValue(next);
     setTrigger(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
+    scheduleFocusSelection(el, [pos, pos]);
   };
 
   /** Arrow keys move through the modes; a disabled mode takes focus (so its tooltip can say why) without being chosen. */
   const onModeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (activeSubmission.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const key = event.key === "ArrowUp" ? "ArrowLeft" : event.key === "ArrowDown" ? "ArrowRight" : event.key;
     const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
@@ -810,6 +2980,7 @@ function Composer({
   };
 
   const pick = (c: MentionCandidate) => {
+    if (activeSubmission.current) return;
     const el = ref.current;
     if (!el || !trigger) return;
     const caret = el.selectionStart;
@@ -818,40 +2989,77 @@ function Composer({
     setValue(next);
     setTrigger(null);
     const pos = trigger.start + insert.length;
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
+    scheduleFocusSelection(el, [pos, pos]);
   };
 
   const submit = async () => {
     const body = value.trim();
-    if (!body || locked) return;
+    const visit = activeVisit.current;
+    if (!visit || activeSubmission.current || !body || locked) return;
+    const submittedRequest = showRow ? { mode: effectiveMode, agents: [...agents] } : null;
+    const owner: ComposerSubmissionOwner = {
+      visit,
+      operation: ++operationSequence.current,
+      body,
+      request: submittedRequest,
+      agentIdentities: submittedRequest?.agents.map((agent) => agent.login) ?? [],
+    };
+    cancelComposerDeferredWork(visit);
+    activeSubmission.current = owner;
     setBusy(true);
     try {
-      await onSubmit(body, showRow ? { mode: effectiveMode, agents } : null);
-      setValue("");
-      setTrigger(null);
+      const result = await onSubmit(owner.body, owner.request);
+      if (ownsSubmission(owner)) {
+        setValue("");
+        setTrigger(null);
+        onSuccess?.(result, owner.body, owner.request);
+      }
+    } catch (reason) {
+      if (ownsSubmission(owner)) throw reason;
     } finally {
-      setBusy(false);
+      if (ownsSubmission(owner)) {
+        activeSubmission.current = null;
+        setBusy(false);
+      }
     }
   };
   return (
     <div className="@container flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
-      <Popover open={open} onOpenChange={(o) => !o && setTrigger(null)}>
+      <Popover open={open} onOpenChange={(o) => !o && !activeSubmission.current && setTrigger(null)}>
         <PopoverAnchor asChild>
           <textarea
             ref={ref}
             className="textarea min-h-[64px] resize-none text-[13px]"
             placeholder={placeholder}
             value={value}
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onPointerDown={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
+            onFocus={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
             onChange={(e) => {
+              if (activeSubmission.current) return;
+              recordCaretAction(e.currentTarget, e.nativeEvent);
               setValue(e.target.value);
               syncTrigger(e.target);
             }}
-            onSelect={(e) => syncTrigger(e.currentTarget)}
-            onBlur={() => setTimeout(() => setTrigger(null), 120)}
+            onSelect={(e) => {
+              if (!activeSubmission.current) {
+                recordCaretAction(e.currentTarget, e.nativeEvent);
+                syncTrigger(e.currentTarget);
+              }
+            }}
+            onBlur={(e) => {
+              if (activeSubmission.current) return;
+              recordCaretAction(e.currentTarget, e.nativeEvent);
+              scheduleBlurDismissal(e.currentTarget);
+            }}
             onKeyDown={(e) => {
+              if (activeSubmission.current) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
+              recordCaretAction(e.currentTarget, e.nativeEvent);
               const mod = e.metaKey || e.ctrlKey;
               if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "s" && quote !== undefined) {
                 e.preventDefault();
@@ -936,7 +3144,7 @@ function Composer({
                     key={c.login}
                     role="option"
                     aria-selected={i === highlight}
-                    aria-disabled={lockedRow || undefined}
+                    aria-disabled={busy || lockedRow || undefined}
                     className={cn("menu-item py-1.5", i === highlight && "bg-surface-3", lockedRow && "text-ink-3")}
                     title={reason}
                     onMouseDown={(e) => e.preventDefault()}
@@ -1006,13 +3214,14 @@ function Composer({
                   type="button"
                   role="radio"
                   aria-checked={checked}
-                  aria-disabled={disabled || undefined}
+                  aria-disabled={busy || disabled || undefined}
+                  disabled={busy}
                   tabIndex={checked ? 0 : -1}
                   className="composer-mode"
                   // Choosing a mode with the pointer must not pull focus out of the textarea (Enter still posts).
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    if (!disabled) setMode(m.id);
+                    if (!disabled && !activeSubmission.current) setMode(m.id);
                   }}
                   data-testid={`composer-mode-${m.id}`}
                 >
@@ -1030,7 +3239,7 @@ function Composer({
           </div>
           <div className="composer-chips" role="group" aria-label="Quick instructions">
             {QUICK_INSTRUCTIONS.map((q) => (
-              <button key={q} type="button" className="composer-chip" onMouseDown={(e) => e.preventDefault()} onClick={() => insertInstruction(q)} data-testid="composer-chip">
+              <button key={q} type="button" className="composer-chip" onMouseDown={(e) => e.preventDefault()} onClick={() => insertInstruction(q)} disabled={busy} data-testid="composer-chip">
                 {q}
               </button>
             ))}
@@ -1054,7 +3263,7 @@ function Composer({
             type="button"
             className="btn btn-ghost btn-sm mr-auto min-w-8 gap-1.5 whitespace-nowrap px-2 @min-[21rem]:px-3"
             onClick={insertSuggestion}
-            disabled={parseSuggestionBlock(value) !== null}
+            disabled={busy || parseSuggestionBlock(value) !== null}
             title="Suggest a change (Ctrl+Shift+S)"
             aria-label="Suggest a change"
             data-testid="comment-suggest-change"
@@ -1063,7 +3272,14 @@ function Composer({
           </button>
         )}
         {onCancel && (
-          <button type="button" className="btn btn-ghost btn-sm whitespace-nowrap" onClick={onCancel}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm whitespace-nowrap"
+            onClick={() => {
+              if (!activeSubmission.current) onCancel();
+            }}
+            disabled={busy}
+          >
             Cancel
           </button>
         )}
@@ -1074,7 +3290,7 @@ function Composer({
             type="button"
             className="btn btn-primary btn-sm whitespace-nowrap"
             disabled={!value.trim() || busy || locked}
-            onClick={() => void submit()}
+            onClick={submit}
             // Read after the button's name by screen readers, so keyboard users get the shortcuts without hovering.
             // (Not aria-label, which would replace "Save"; not title, which would add a second, native tooltip.)
             aria-description={shortcuts}
@@ -1163,6 +3379,7 @@ function RequestChip({ request, canCancel, onCancel }: { request: AgentRequestMi
 const ThreadCard = memo(function ThreadCard({
   thread,
   session,
+  actionCoordinator,
   outdated,
   active,
   onReveal,
@@ -1176,6 +3393,7 @@ const ThreadCard = memo(function ThreadCard({
 }: {
   thread: CommentThread;
   session: CollabSession;
+  actionCoordinator: CommentRowActionCoordinator;
   outdated: boolean;
   active: boolean;
   onReveal: (offset: number) => void;
@@ -1199,6 +3417,10 @@ const ThreadCard = memo(function ThreadCard({
   const canEdit = session.role === "owner" || session.role === "editor";
   // Same rule as the header's Requests section (#981): the requester or the document owner may cancel.
   const canCancelRequest = !!onCancelRequest && !!request && (request.userId === me || canModerate);
+  const rowActions = useCommentRowActions(actionCoordinator, thread);
+  const rootAction = rowActions.state(null);
+  const rootBusy = rootAction.pending !== null || rootAction.batch !== null;
+  const rootDeleteBlocked = rootBusy || rowActions.hasPendingReply;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (active) ref.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -1218,6 +3440,7 @@ const ThreadCard = memo(function ThreadCard({
   const canAcceptHere = canEdit && !isDocument;
 
   const accept = async (block: SuggestionBlock, reply: CommentReply | null = null) => {
+    if (rowActions.blocked(reply?.id ?? null)) return;
     const ok = await ops.acceptSuggestion(thread.id, block.text, reply?.id);
     if (!ok) {
       onToast?.("The quoted text changed — this suggestion is outdated.", "error");
@@ -1242,6 +3465,21 @@ const ThreadCard = memo(function ThreadCard({
     if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
     event.preventDefault();
     reveal();
+  };
+  const resolveThread = () => {
+    if (rowActions.blocked(null)) return;
+    if (session.commentsViaApi) rowActions.run(null, { type: "resolve", resolved: !thread.resolved });
+    else void ops.resolve(thread.id, !thread.resolved);
+  };
+  const deleteTarget = (replyId: string | null) => {
+    if (rowActions.blocked(replyId) || (replyId === null && rowActions.hasPendingReply)) return;
+    if (session.commentsViaApi) rowActions.run(replyId, { type: "delete" });
+    else void ops.remove(thread.id, replyId ?? undefined);
+  };
+  const reactTo = (replyId: string | null, reactions: Reactions, emoji: string) => {
+    if (rowActions.blocked(replyId)) return;
+    if (session.commentsViaApi) rowActions.run(replyId, { type: "react", emoji, reacted: !reactions[emoji]?.includes(me) });
+    else void ops.react(thread.id, replyId, emoji);
   };
 
   return (
@@ -1309,12 +3547,15 @@ const ThreadCard = memo(function ThreadCard({
                     state={suggestionState}
                     canAccept={canAcceptHere}
                     canReject={canComment}
+                    disabled={rootBusy}
                     onAccept={() => accept(suggestion)}
-                    onReject={() => ops.rejectSuggestion(thread.id)}
+                    onReject={() => {
+                      if (!rowActions.blocked(null)) return ops.rejectSuggestion(thread.id);
+                    }}
                   />
                 </div>
               )}
-              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, null, emoji)} />
+              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={rootBusy} onToggle={(emoji) => reactTo(null, thread.reactions, emoji)} />
             </>
           )}
         </div>
@@ -1325,7 +3566,9 @@ const ThreadCard = memo(function ThreadCard({
               className="icon-btn h-7 w-7"
               title={thread.resolved ? "Re-open" : "Resolve"}
               aria-label={thread.resolved ? "Re-open" : "Resolve"}
-              onClick={() => void ops.resolve(thread.id, !thread.resolved)}
+              disabled={rootBusy}
+              aria-busy={rootBusy || undefined}
+              onClick={resolveThread}
               data-testid="comment-resolve"
             >
               {thread.resolved ? <RotateCcw size={15} /> : <Check size={16} />}
@@ -1336,23 +3579,24 @@ const ThreadCard = memo(function ThreadCard({
               align="end"
               className="w-40"
               trigger={
-                <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions">
+                <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions" disabled={rootBusy} aria-busy={rootBusy || undefined}>
                   <MoreHorizontal size={16} />
                 </button>
               }
             >
               {thread.authorId === me && !thread.suggestionState && (
-                <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing("root")}>
+                <MenuItem icon={<Pencil size={14} />} disabled={rootBusy} onSelect={() => setEditing("root")}>
                   Edit
                 </MenuItem>
               )}
-              <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id)}>
+              <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={rootDeleteBlocked} onSelect={() => deleteTarget(null)}>
                 Delete thread
               </MenuItem>
             </LazyMenu>
           )}
         </div>
       </div>
+      <CommentActionFeedback state={rootAction} />
       {editingRoot && (
         <div className="mt-1" data-testid="comment-edit">
           <Composer
@@ -1361,10 +3605,8 @@ const ThreadCard = memo(function ThreadCard({
             autoFocus
             editing
             submitLabel="Save"
-            onSubmit={async (body) => {
-              await ops.edit(thread.id, body);
-              setEditing(null);
-            }}
+            onSubmit={(body) => ops.edit(thread.id, body)}
+            onSuccess={() => setEditing(null)}
             onCancel={() => setEditing(null)}
           />
         </div>
@@ -1376,6 +3618,9 @@ const ThreadCard = memo(function ThreadCard({
             const block = parseSuggestionBlock(r.body);
             const state = block ? r.suggestionState ?? (outdated ? "outdated" : "pending") : null;
             const editingReply = editing === r.id && !r.suggestionState;
+            const replyAction = rowActions.state(r.id);
+            const replyBusy = replyAction.pending !== null || replyAction.batch !== null;
+            const replyBlocked = replyBusy || rowActions.rootDeleting;
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
                 <div className="flex items-start gap-2.5">
@@ -1410,12 +3655,15 @@ const ThreadCard = memo(function ThreadCard({
                               state={state}
                               canAccept={canAcceptHere}
                               canReject={canComment}
+                              disabled={replyBlocked}
                               onAccept={() => accept(block, r)}
-                              onReject={() => ops.rejectSuggestion(thread.id, r.id)}
+                              onReject={() => {
+                                if (!rowActions.blocked(r.id)) return ops.rejectSuggestion(thread.id, r.id);
+                              }}
                             />
                           </div>
                         )}
-                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} onToggle={(emoji) => void ops.react(thread.id, r.id, emoji)} />
+                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={replyBlocked} onToggle={(emoji) => reactTo(r.id, r.reactions, emoji)} />
                       </>
                     )}
                   </div>
@@ -1425,23 +3673,24 @@ const ThreadCard = memo(function ThreadCard({
                         align="end"
                         className="w-36"
                         trigger={
-                          <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions">
+                          <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions" disabled={replyBlocked} aria-busy={replyBusy || undefined}>
                             <MoreHorizontal size={14} />
                           </button>
                         }
                       >
                         {r.authorId === me && !r.suggestionState && (
-                          <MenuItem icon={<Pencil size={14} />} onSelect={() => setEditing(r.id)}>
+                          <MenuItem icon={<Pencil size={14} />} disabled={replyBlocked} onSelect={() => setEditing(r.id)}>
                             Edit
                           </MenuItem>
                         )}
-                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" onSelect={() => void ops.remove(thread.id, r.id)}>
+                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={replyBlocked} onSelect={() => deleteTarget(r.id)}>
                           Delete
                         </MenuItem>
                       </LazyMenu>
                     </div>
                   )}
                 </div>
+                <CommentActionFeedback state={replyAction} />
                 {editingReply && (
                   <div className="mt-1" data-testid="comment-edit">
                     <Composer
@@ -1450,10 +3699,8 @@ const ThreadCard = memo(function ThreadCard({
                       autoFocus
                       editing
                       submitLabel="Save"
-                      onSubmit={async (body) => {
-                        await ops.edit(thread.id, body, r.id);
-                        setEditing(null);
-                      }}
+                      onSubmit={(body) => ops.edit(thread.id, body, r.id)}
+                      onSuccess={() => setEditing(null)}
                       onCancel={() => setEditing(null)}
                     />
                   </div>
@@ -1473,8 +3720,8 @@ const ThreadCard = memo(function ThreadCard({
               submitLabel="Reply"
               quote={thread.range && !isDocument ? thread.quote : undefined}
               request={onRequest ? { canEdit: canRequestEdits, defaultMode: request?.mode ?? "suggest" } : undefined}
-              onSubmit={async (body, req) => {
-                await ops.reply(thread.id, body);
+              onSubmit={(body) => ops.reply(thread.id, body)}
+              onSuccess={(_result, body, req) => {
                 setReplying(false);
                 if (req && onRequest) onRequest(thread.id, body, req.mode);
               }}
@@ -1571,66 +3818,2259 @@ export function isReviewOpen(review: ReviewDto, threads: CommentThread[], text: 
   return commentSuggestionTargets(mine, text).some((target) => target.state === "pending" || target.state === "outdated");
 }
 
-/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
-function ReviewCard({ review, threads, session, text, ops, onToast }: { review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; onToast?: CommentsPanelProps["onToast"] }) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+function snapshotCommentSuggestionTarget(session: CollabSession, target: CommentSuggestionTarget): CommentSuggestionBatchTarget | null {
+  const replyId = target.reply?.id ?? null;
+  const identity = storedCommentTargetIdentity(session, target.thread.id, replyId);
+  const current = session.comments.get(target.thread.id);
+  const currentBody = replyId === null ? current?.body : current?.replies.find((reply) => reply.id === replyId)?.body;
+  if (!identity || currentBody !== (target.reply?.body ?? target.thread.body) || parseSuggestionBlock(currentBody ?? "")?.text !== target.block.text) return null;
+  return Object.freeze({
+    kind: "comment-suggestion",
+    key: commentTargetKey(target.thread.id, replyId),
+    threadId: target.thread.id,
+    replyId,
+    identity,
+    body: currentBody,
+    proposed: target.block.text,
+    initiallyOutdated: target.state === "outdated",
+  });
+}
+
+function snapshotCommentResolveTarget(session: CollabSession, thread: CommentThread): CommentResolveBatchTarget | null {
+  const identity = storedCommentTargetIdentity(session, thread.id, null);
+  const current = session.comments.get(thread.id);
+  if (!identity || !current || current.resolved) return null;
+  return Object.freeze({
+    kind: "comment-resolve",
+    key: commentTargetKey(thread.id, null),
+    threadId: thread.id,
+    replyId: null,
+    identity,
+  });
+}
+
+function indexLocalSuggestionGroups(groups: readonly SuggestionGroup[]): ReadonlyMap<string, SuggestionGroup> {
+  return new Map(groups.map((group) => [group.id, group]));
+}
+
+function snapshotLocalSuggestionTarget(
+  session: CollabSession,
+  suggestion: SuggestionGroup,
+  currentGroups: ReadonlyMap<string, SuggestionGroup>,
+): LocalSuggestionBatchTarget | null {
+  const memberIds = suggestion.members.map((member) => member.id);
+  const memberIdentities = memberIds.map((id) => session.suggestions.ymap.get(id));
+  if (memberIdentities.some((identity) => !identity)) return null;
+  const current = currentGroups.get(suggestion.id);
+  if (!current || current.members.map((member) => member.id).join("\0") !== memberIds.join("\0") || current.before !== suggestion.before || current.after !== suggestion.after) return null;
+  return Object.freeze({
+    kind: "local-suggestion",
+    key: localSuggestionTargetKey(suggestion.id),
+    suggestionId: suggestion.id,
+    memberIds: Object.freeze(memberIds),
+    memberIdentities: Object.freeze(memberIdentities as object[]),
+    before: suggestion.before,
+    after: suggestion.after,
+  });
+}
+
+function snapshotLocalSuggestionTargets(
+  session: CollabSession,
+  sources: readonly SuggestionGroup[],
+  currentGroups: readonly SuggestionGroup[],
+): readonly (LocalSuggestionBatchTarget | null)[] {
+  const index = indexLocalSuggestionGroups(currentGroups);
+  return sources.map((source) => snapshotLocalSuggestionTarget(session, source, index));
+}
+
+function commentSuggestionTargetStatus(session: CollabSession, target: CommentSuggestionBatchTarget): "ready" | "outdated" | "missing" {
+  if (!sameCommentTargetIdentity(session, target)) return "missing";
+  const thread = session.comments.get(target.threadId);
+  const item = target.replyId === null ? thread : thread?.replies.find((reply) => reply.id === target.replyId);
+  if (!thread || !item || item.body !== target.body || parseSuggestionBlock(item.body)?.text !== target.proposed) return "missing";
+  if (item.suggestionState) return "outdated";
+  return isSuggestionOutdated(thread, session.ytext.toString()) ? "outdated" : "ready";
+}
+
+function resolveTargetStatus(session: CollabSession, target: CommentResolveBatchTarget): "ready" | "outdated" | "missing" {
+  if (!sameCommentTargetIdentity(session, target)) return "missing";
+  const thread = session.comments.get(target.threadId);
+  if (!thread) return "missing";
+  return thread.resolved ? "outdated" : "ready";
+}
+
+function sameCommentBatchTargetDefinition(session: CollabSession, target: CommentSuggestionBatchTarget | CommentResolveBatchTarget): boolean {
+  if (!sameCommentTargetIdentity(session, target)) return false;
+  if (target.kind === "comment-resolve") return session.comments.get(target.threadId) !== null;
+  const thread = session.comments.get(target.threadId);
+  const item = target.replyId === null ? thread : thread?.replies.find((reply) => reply.id === target.replyId);
+  return !!item && item.body === target.body && parseSuggestionBlock(item.body)?.text === target.proposed;
+}
+
+function commentBatchResult(owner: CommentBatchOwner, done: number, failed: number, skipped: number): { message: string; kind: "success" | "error" } {
+  const accepting = owner.action === "review-accept" || owner.action === "suggestions-accept";
+  const resolving = owner.action === "review-resolve";
+  const noun = resolving ? "comment" : "suggestion";
+  const verb = resolving ? "Resolved" : accepting ? "Accepted" : "Rejected";
+  const author = owner.authorName ? ` from ${owner.authorName}` : "";
+  const base = `${verb} ${done} ${noun}${done === 1 ? "" : "s"}${author}.`;
+  if (failed === 0 && skipped === 0) return { message: base, kind: "success" };
+  return {
+    message: `${base.slice(0, -1)} (${done} done, ${failed} failed, ${skipped} outdated skipped).`,
+    kind: failed > 0 ? "error" : "success",
+  };
+}
+
+async function executeCommentBatch(
+  coordinator: CommentRowActionCoordinator,
+  owner: CommentBatchOwner,
+  ops: Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">,
+  onToast?: CommentsPanelProps["onToast"],
+  reviewSuggestion?: CollabSession["reviewSuggestion"],
+) {
+  let done = 0;
+  let failed = 0;
+  let skipped = 0;
+  let index = 0;
+  const accepting = owner.action === "review-accept" || owner.action === "suggestions-accept";
+  const localTargets = owner.targets.filter((target): target is LocalSuggestionBatchTarget => target.kind === "local-suggestion");
+
+  if (localTargets.length > 0) {
+    if (!currentCommentBatchContext(coordinator, owner)) return;
+    const currentReviewSuggestion = owner.session.reviewSuggestion;
+    const currentLocalGroups = owner.session.suggestions.groups(owner.session.ytext.toString());
+    const currentLocalTargets = snapshotLocalSuggestionTargets(owner.session, currentLocalGroups, currentLocalGroups);
+    const exactLocalBatch =
+      reviewSuggestion !== undefined &&
+      currentReviewSuggestion === reviewSuggestion &&
+      currentLocalGroups.length === localTargets.length &&
+      currentLocalTargets.length === localTargets.length &&
+      currentLocalTargets.every((target, targetIndex) =>
+        sameLocalSuggestionTarget(target, localTargets[targetIndex] ?? null),
+      ) &&
+      currentLocalGroups.every((group) => !group.outdated);
+    if (!exactLocalBatch) {
+      skipped += owner.targets.length;
+      index = owner.targets.length;
+    } else {
+      try {
+        const decided = suggestionReflectApply(reviewSuggestion, owner.session, [
+          accepting ? "acceptAll" : "rejectAll",
+        ]) as number;
+        done += Math.min(decided, localTargets.length);
+        skipped += Math.max(0, localTargets.length - decided);
+      } catch (error) {
+        if (!currentCommentBatchContext(coordinator, owner)) return;
+        if (error instanceof SuggestionConflictError) {
+          skipped += owner.targets.length;
+          index = owner.targets.length;
+        } else {
+          failed += localTargets.length;
+        }
+      }
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      index = Math.max(index, localTargets.length);
+    }
+  }
+
+  for (; index < owner.targets.length; index++) {
+    const target = owner.targets[index];
+    if (!currentCommentBatchContext(coordinator, owner)) return;
+    if (target.kind === "local-suggestion") continue;
+    const status = target.kind === "comment-resolve" ? resolveTargetStatus(owner.session, target) : commentSuggestionTargetStatus(owner.session, target);
+    if (status === "missing") {
+      skipped += owner.targets.length - index;
+      break;
+    }
+    if (status === "outdated" && (target.kind === "comment-resolve" || accepting)) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      const ok =
+        target.kind === "comment-resolve"
+          ? (await ops.resolve(target.threadId, true), true)
+          : accepting
+            ? await ops.acceptSuggestion(target.threadId, target.proposed, target.replyId ?? undefined)
+            : await ops.rejectSuggestion(target.threadId, target.replyId ?? undefined);
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      if (!sameCommentBatchTargetDefinition(owner.session, target)) {
+        skipped += owner.targets.length - index;
+        break;
+      }
+      if (ok) done++;
+      else if (target.kind === "comment-suggestion" && accepting && commentSuggestionTargetStatus(owner.session, target) === "outdated") skipped++;
+      else failed++;
+    } catch {
+      if (!currentCommentBatchContext(coordinator, owner)) return;
+      if (!sameCommentBatchTargetDefinition(owner.session, target)) {
+        skipped += owner.targets.length - index;
+        break;
+      }
+      failed++;
+    }
+  }
+
+  if (!currentCommentBatchContext(coordinator, owner)) return;
+  releaseCommentBatch(coordinator, owner);
+  const result = commentBatchResult(owner, done, failed, skipped);
+  onToast?.(result.message, result.kind);
+}
+
+const REVIEW_CARD_CLASS = "review-card";
+const REVIEW_HEADER_CLASS = "flex items-start gap-2.5";
+const REVIEW_TOGGLE_CLASS = "icon-btn h-7 w-7 shrink-0";
+const REVIEW_SUGGESTION_ACTIONS_CLASS = "@container mt-2 grid grid-cols-2 gap-2";
+const REVIEW_RESOLVE_ACTIONS_CLASS = "mt-2 flex";
+const REVIEW_ACCEPT_CLASS = "btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2";
+const REVIEW_REJECT_CLASS = "btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2";
+const REVIEW_RESOLVE_CLASS = "btn btn-sm btn-outline gap-1.5 whitespace-nowrap";
+const REVIEW_THREADS_CLASS = "mt-2 flex flex-col gap-1 border-t border-line pt-2";
+const REVIEW_THREAD_LINK_CLASS = "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2";
+const SUGGESTION_BATCH_ACTIONS_CLASS = "flex items-center justify-end gap-2 text-xs";
+const SUGGESTION_BATCH_ACCEPT_CLASS = "btn btn-sm btn-ghost text-success";
+const SUGGESTION_BATCH_REJECT_CLASS = "btn btn-sm btn-ghost text-danger";
+
+interface ReviewPrimitiveSnapshot {
+  readonly id: string;
+  readonly documentId: string;
+  readonly authorId: string;
+  readonly authorName: string;
+  readonly collabAuthorId: string;
+  readonly agent: string | null;
+  readonly verdict: ReviewDto["verdict"];
+  readonly summary: string;
+  readonly threadIds: readonly string[];
+  readonly createdAt: string;
+}
+
+interface ReviewReplyPrimitiveSnapshot {
+  readonly source: CommentReply;
+  readonly id: string;
+  readonly body: string;
+  readonly suggestionState: CommentReply["suggestionState"];
+}
+
+interface ReviewThreadPrimitiveSnapshot {
+  readonly source: CommentThread;
+  readonly identity: object;
+  readonly id: string;
+  readonly quote: string;
+  readonly body: string;
+  readonly resolved: boolean;
+  readonly range: Readonly<{ from: number; to: number }> | null;
+  readonly suggestionState: CommentThread["suggestionState"];
+  readonly replies: readonly ReviewReplyPrimitiveSnapshot[];
+  readonly suggestionLabel: string | null;
+}
+
+interface ReviewSuggestionPrimitiveSnapshot {
+  readonly threadSource: CommentThread;
+  readonly replySource: CommentReply | null;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly body: string;
+  readonly proposed: string;
+  readonly state: CommentSuggestionState;
+}
+
+interface SuggestionBatchClaimCells {
+  readonly authorities: WeakSet<SuggestionBatchAuthority>;
+  readonly targets: WeakSet<object>;
+  readonly owners: WeakSet<CommentBatchOwner>;
+}
+
+interface SuggestionBatchAuthority {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly role: CollabSession["role"];
+  readonly canAct: boolean;
+  readonly text: string;
+  readonly localSources: readonly SuggestionGroup[];
+  readonly localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  readonly localOutdated: readonly boolean[];
+  readonly commentSources: readonly CommentSuggestionTarget[];
+  readonly commentTargetSnapshots: readonly (CommentSuggestionBatchTarget | null)[];
+  readonly commentStates: readonly CommentSuggestionState[];
+  readonly targets: readonly CommentBatchTarget[];
+  readonly pendingCount: number;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly batchOwner: CommentBatchOwner | null;
+  readonly busy: boolean;
+  readonly blocked: boolean;
+  readonly acceptDisabled: boolean;
+  readonly rejectDisabled: boolean;
+  readonly opsSource: ReturnType<typeof useCommentOps>;
+  readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
+  readonly reviewSuggestion: CollabSession["reviewSuggestion"];
+  readonly onToast: CommentsPanelProps["onToast"];
+  readonly presentation: SuggestionActionPresentation;
+  readonly claims: SuggestionBatchClaimCells;
+}
+
+type ReviewCardActionKind = "toggle" | "accept" | "reject" | "resolve" | "thread";
+
+interface ReviewCardAuthority {
+  readonly mount: symbol;
+  readonly position: number;
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly role: CollabSession["role"];
+  readonly canEdit: boolean;
+  readonly canComment: boolean;
+  readonly text: string;
+  readonly reviewSource: ReviewDto;
+  readonly review: ReviewDto;
+  readonly reviewSnapshot: ReviewPrimitiveSnapshot;
+  readonly threadsSource: CommentThread[];
+  readonly threads: readonly CommentThread[];
+  readonly mine: readonly ReviewThreadPrimitiveSnapshot[];
+  readonly suggestions: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly pending: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly applicable: readonly ReviewSuggestionPrimitiveSnapshot[];
+  readonly unresolved: readonly ReviewThreadPrimitiveSnapshot[];
+  readonly suggestionTargetSnapshots: readonly (CommentSuggestionBatchTarget | null)[];
+  readonly resolveTargetSnapshots: readonly (CommentResolveBatchTarget | null)[];
+  readonly renderedSuggestionTargets: readonly CommentSuggestionBatchTarget[];
+  readonly renderedResolveTargets: readonly CommentResolveBatchTarget[];
+  readonly renderedTargets: readonly CommentBatchTarget[];
+  readonly scope: string;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly batchOwner: CommentBatchOwner | null;
+  readonly busy: boolean;
+  readonly blocked: boolean;
+  readonly open: boolean;
+  readonly actionRegion: "suggestions" | "resolve" | null;
+  readonly partial: boolean;
+  readonly verdictLabel: string;
+  readonly verdictClass: string;
+  readonly timestampLabel: string;
+  readonly countsLabel: string;
+  readonly acceptTitle: string;
+  readonly resolveTitle: string;
+  readonly opsSource: ReturnType<typeof useCommentOps>;
+  readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
+  readonly onToast: CommentsPanelProps["onToast"];
+  readonly setOpen: (open: boolean) => void;
+  readonly setActiveComment: CollabSession["setActiveComment"];
+}
+
+interface ReviewCardElements {
+  readonly card: HTMLDivElement;
+  readonly header: HTMLDivElement;
+  readonly toggle: HTMLButtonElement;
+  readonly actions: HTMLDivElement | null;
+  readonly accept: HTMLButtonElement | null;
+  readonly reject: HTMLButtonElement | null;
+  readonly resolve: HTMLButtonElement | null;
+  readonly list: HTMLUListElement | null;
+  readonly rows: readonly Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[];
+}
+
+interface ReviewCardPresentation {
+  readonly identity: symbol;
+  readonly render: ReviewCardRender;
+  readonly authority: ReviewCardAuthority;
+  readonly elements: ReviewCardElements;
+  readonly ownerDocument: Document;
+  readonly dom: ReviewCardDomSnapshot;
+  readonly placement: ReviewCardPlacement;
+}
+
+interface ReviewCardCells {
+  readonly active: { current: ReviewCardPresentation | null };
+  readonly successorOf: { current: ReviewCardPresentation | null };
+  readonly replay: { current: ReviewCardReplay | null };
+  readonly retired: WeakSet<ReviewCardPresentation>;
+  readonly claimedPresentations: WeakSet<ReviewCardPresentation>;
+  readonly claimedEvents: WeakSet<object>;
+  readonly claimedActions: WeakSet<ReviewCardAction>;
+}
+
+interface ReviewCardAction {
+  readonly identity: symbol;
+  readonly renderIdentity: symbol;
+  readonly kind: ReviewCardActionKind;
+  readonly index: number | null;
+  readonly threadId: string | null;
+  readonly enabled: boolean;
+  readonly capture: (element: HTMLButtonElement | null) => void;
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+interface ReviewCardRender {
+  readonly identity: symbol;
+  readonly authority: ReviewCardAuthority;
+  readonly toggle: ReviewCardAction;
+  readonly accept: ReviewCardAction | null;
+  readonly reject: ReviewCardAction | null;
+  readonly resolve: ReviewCardAction | null;
+  readonly threadLinks: readonly ReviewCardAction[];
+  readonly captureCard: (element: HTMLDivElement | null) => void;
+  readonly captureHeader: (element: HTMLDivElement | null) => void;
+  readonly captureActions: (element: HTMLDivElement | null) => void;
+  readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly captureRows: readonly ((element: HTMLLIElement | null) => void)[];
+  readonly captureToggle: (element: HTMLButtonElement | null) => void;
+  readonly onToggle: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureReject: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onReject: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureResolve: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onResolve: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
+  readonly captureThreadLinks: readonly ((element: HTMLButtonElement | null) => void)[];
+  readonly onThreadClicks: readonly ((event: MouseEvent<HTMLButtonElement>) => void)[];
+  readonly establish: () => void | (() => void);
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface ReviewCardElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface ReviewCardRefReplay {
+  readonly owner: ReviewCardElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+  handoffDetached: boolean;
+}
+
+interface ReviewCardDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly ReviewCardDomSnapshot[];
+}
+
+interface ReviewCardPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface ReviewCardReplay {
+  readonly source: ReviewCardPresentation;
+  readonly dom: ReviewCardDomSnapshot;
+  readonly placement: ReviewCardPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly refsAreExact: () => boolean;
+  readonly release: () => void;
+}
+
+interface ReviewCardDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface ReviewCardPublicationRuntime {
+  readonly presentation: ReviewCardPresentation;
+  readonly publish: (owners: readonly ReviewCardElementOwnerView[]) => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly retireForAction: () => void;
+  readonly noteRef: (owner: ReviewCardElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly stageSuccessorHandoff: () => boolean;
+  readonly successorHandoffIsExact: () => boolean;
+  readonly mutationHistoryIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+class ReviewCardElementOwner<T extends HTMLElement> implements ReviewCardElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: ReviewCardElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+function reviewCardSnapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotReviewCardDom(node: Node): ReviewCardDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: reviewCardSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotReviewCardDom)),
+  });
+}
+
+function reviewCardDomMatches(snapshot: ReviewCardDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = reviewCardSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) => node.childNodes.item(index) === child.node && reviewCardDomMatches(child))
+  );
+}
+
+function reviewCardDomContains(snapshot: ReviewCardDomSnapshot, target: Node): boolean {
+  return snapshot.node === target || snapshot.children.some((child) => reviewCardDomContains(child, target));
+}
+
+function captureReviewCardPlacement(card: HTMLDivElement): ReviewCardPlacement | null {
+  const parent = card.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: card.ownerDocument,
+    parent,
+    previousSibling: card.previousSibling,
+    nextSibling: card.nextSibling,
+  });
+}
+
+function reviewCardPlacementMatches(card: HTMLDivElement, placement: ReviewCardPlacement): boolean {
+  return (
+    card.ownerDocument === placement.document &&
+    card.parentNode === placement.parent &&
+    card.previousSibling === placement.previousSibling &&
+    card.nextSibling === placement.nextSibling
+  );
+}
+
+function createReviewCardDomGuard(card: HTMLDivElement, placement: ReviewCardPlacement): ReviewCardDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === card || card.contains(record.target)) return true;
+      return record.type === "childList" && record.target === placement.parent;
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(card, { attributes: true, characterData: true, childList: true, subtree: true });
+  observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function reviewCardControlIsEnabled(control: HTMLButtonElement): boolean {
+  if (control.disabled || control.matches(":disabled") || control.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  for (let element: HTMLElement | null = control; element; element = element.parentElement) {
+    if (element.hasAttribute("inert") || element.getAttribute("aria-disabled")?.toLowerCase() === "true") return false;
+  }
+  return true;
+}
+
+function freezeReview(review: ReviewDto): { review: ReviewDto; snapshot: ReviewPrimitiveSnapshot } {
+  const threadIds = [...review.threadIds];
+  Object.freeze(threadIds);
+  const snapshot: ReviewPrimitiveSnapshot = Object.freeze({
+    id: review.id,
+    documentId: review.documentId,
+    authorId: review.authorId,
+    authorName: review.authorName,
+    collabAuthorId: review.collabAuthorId,
+    agent: review.agent,
+    verdict: review.verdict,
+    summary: review.summary,
+    threadIds,
+    createdAt: review.createdAt,
+  });
+  const frozen: ReviewDto = {
+    id: snapshot.id,
+    documentId: snapshot.documentId,
+    authorId: snapshot.authorId,
+    authorName: snapshot.authorName,
+    collabAuthorId: snapshot.collabAuthorId,
+    agent: snapshot.agent,
+    verdict: snapshot.verdict,
+    summary: snapshot.summary,
+    threadIds,
+    createdAt: snapshot.createdAt,
+  };
+  return { review: Object.freeze(frozen), snapshot };
+}
+
+function sameReviewPrimitives(review: ReviewDto, snapshot: ReviewPrimitiveSnapshot): boolean {
+  return (
+    review.id === snapshot.id &&
+    review.documentId === snapshot.documentId &&
+    review.authorId === snapshot.authorId &&
+    review.authorName === snapshot.authorName &&
+    review.collabAuthorId === snapshot.collabAuthorId &&
+    review.agent === snapshot.agent &&
+    review.verdict === snapshot.verdict &&
+    review.summary === snapshot.summary &&
+    review.createdAt === snapshot.createdAt &&
+    review.threadIds.length === snapshot.threadIds.length &&
+    snapshot.threadIds.every((id, index) => review.threadIds[index] === id)
+  );
+}
+
+function suggestionLabel(targets: readonly ReviewSuggestionPrimitiveSnapshot[]): string | null {
+  const pending = targets.filter((target) => target.state === "pending" || target.state === "outdated");
+  return targets.length === 1 ? targets[0]!.state : pending.length > 0 ? `${pending.length} pending` : targets.length > 0 ? "all decided" : null;
+}
+
+function snapshotReviewThread(
+  session: CollabSession,
+  thread: CommentThread,
+  targets: readonly ReviewSuggestionPrimitiveSnapshot[],
+): ReviewThreadPrimitiveSnapshot | null {
+  const identity = storedCommentTargetIdentity(session, thread.id, null)?.thread;
+  if (!identity) return null;
+  return Object.freeze({
+    source: thread,
+    identity,
+    id: thread.id,
+    quote: thread.quote,
+    body: thread.body,
+    resolved: thread.resolved,
+    range: thread.range ? Object.freeze({ from: thread.range.from, to: thread.range.to }) : null,
+    suggestionState: thread.suggestionState,
+    replies: Object.freeze(
+      thread.replies.map((reply) =>
+        Object.freeze({
+          source: reply,
+          id: reply.id,
+          body: reply.body,
+          suggestionState: reply.suggestionState,
+        }),
+      ),
+    ),
+    suggestionLabel: suggestionLabel(targets),
+  });
+}
+
+function sameThreadPrimitives(thread: CommentThread, snapshot: ReviewThreadPrimitiveSnapshot, requireSource: boolean): boolean {
+  return (
+    (!requireSource || thread === snapshot.source) &&
+    thread.id === snapshot.id &&
+    thread.quote === snapshot.quote &&
+    thread.body === snapshot.body &&
+    thread.resolved === snapshot.resolved &&
+    (thread.suggestionState ?? null) === (snapshot.suggestionState ?? null) &&
+    (thread.range?.from ?? null) === (snapshot.range?.from ?? null) &&
+    (thread.range?.to ?? null) === (snapshot.range?.to ?? null) &&
+    thread.replies.length === snapshot.replies.length &&
+    snapshot.replies.every((reply, index) => {
+      const current = thread.replies[index];
+      return (
+        !!current &&
+        (!requireSource || current === reply.source) &&
+        current.id === reply.id &&
+        current.body === reply.body &&
+        (current.suggestionState ?? null) === (reply.suggestionState ?? null)
+      );
+    })
+  );
+}
+
+function sameSuggestionPrimitives(target: CommentSuggestionTarget, snapshot: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    target.thread === snapshot.threadSource &&
+    target.reply === snapshot.replySource &&
+    target.thread.id === snapshot.threadId &&
+    (target.reply?.id ?? null) === snapshot.replyId &&
+    (target.reply?.body ?? target.thread.body) === snapshot.body &&
+    target.block.text === snapshot.proposed &&
+    target.state === snapshot.state
+  );
+}
+
+function sameLiveSuggestionPrimitives(target: CommentSuggestionTarget, snapshot: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    target.thread.id === snapshot.threadId &&
+    (target.reply?.id ?? null) === snapshot.replyId &&
+    (target.reply?.body ?? target.thread.body) === snapshot.body &&
+    target.block.text === snapshot.proposed &&
+    target.state === snapshot.state
+  );
+}
+
+function sameSuggestionTarget(left: CommentSuggestionBatchTarget | null, right: CommentSuggestionBatchTarget | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.kind === right.kind &&
+    left.key === right.key &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.identity.thread === right.identity.thread &&
+    left.identity.reply === right.identity.reply &&
+    left.body === right.body &&
+    left.proposed === right.proposed &&
+    left.initiallyOutdated === right.initiallyOutdated
+  );
+}
+
+function sameResolveTarget(left: CommentResolveBatchTarget | null, right: CommentResolveBatchTarget | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.kind === right.kind &&
+    left.key === right.key &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.identity.thread === right.identity.thread &&
+    left.identity.reply === right.identity.reply
+  );
+}
+
+function createReviewCardAuthority({
+  mount,
+  position,
+  review,
+  threads,
+  session,
+  text,
+  ops,
+  coordinator,
+  onToast,
+  open,
+  setOpen,
+}: {
+  mount: symbol;
+  position: number;
+  review: ReviewDto;
+  threads: CommentThread[];
+  session: CollabSession;
+  text: string;
+  ops: ReturnType<typeof useCommentOps>;
+  coordinator: CommentRowActionCoordinator;
+  onToast?: CommentsPanelProps["onToast"];
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}): ReviewCardAuthority {
   const canEdit = session.role === "owner" || session.role === "editor";
   const canComment = session.canComment;
+  const mineSources = reviewThreads(review, threads);
+  const sourceSuggestions = commentSuggestionTargets(mineSources, text);
+  const suggestions = Object.freeze(
+    sourceSuggestions.map((target) =>
+      Object.freeze({
+        threadSource: target.thread,
+        replySource: target.reply,
+        threadId: target.thread.id,
+        replyId: target.reply?.id ?? null,
+        body: target.reply?.body ?? target.thread.body,
+        proposed: target.block.text,
+        state: target.state,
+      }),
+    ),
+  );
+  const mine = mineSources.map((thread) => snapshotReviewThread(session, thread, suggestions.filter((target) => target.threadId === thread.id)));
+  const validMine = mine.filter((thread): thread is ReviewThreadPrimitiveSnapshot => thread !== null);
+  const pendingIndexes = suggestions.flatMap((target, index) => (target.state === "pending" || target.state === "outdated" ? [index] : []));
+  const pending = Object.freeze(pendingIndexes.map((index) => suggestions[index]!));
+  const applicable = Object.freeze(pending.filter((target) => target.state === "pending"));
+  const unresolved = Object.freeze(validMine.filter((thread) => !thread.resolved));
+  const pendingSourceTargets = pendingIndexes.map((index) => sourceSuggestions[index]!);
+  const suggestionTargetSnapshots = Object.freeze(pendingSourceTargets.map((target) => snapshotCommentSuggestionTarget(session, target)));
+  const resolveTargetSnapshots = Object.freeze(unresolved.map((thread) => snapshotCommentResolveTarget(session, thread.source)));
+  const renderedSuggestionTargets = Object.freeze(suggestionTargetSnapshots.filter((target): target is CommentSuggestionBatchTarget => target !== null));
+  const renderedResolveTargets = Object.freeze(resolveTargetSnapshots.filter((target): target is CommentResolveBatchTarget => target !== null));
+  const renderedTargets: readonly CommentBatchTarget[] = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
+  const scope = reviewBatchScope(review.id);
+  const batchOwner = coordinator.batchOwners.get(scope) ?? null;
+  const blocked = isCommentBatchBlocked(coordinator, renderedTargets);
+  const partial = applicable.length !== pending.length;
+  const { review: frozenReview, snapshot: reviewSnapshot } = freezeReview(review);
+  const actionRegion = canEdit && pending.length > 0 ? "suggestions" : canComment && pending.length === 0 && unresolved.length > 0 ? "resolve" : null;
+  const opsSnapshot = Object.freeze({
+    acceptSuggestion: ops.acceptSuggestion,
+    rejectSuggestion: ops.rejectSuggestion,
+    resolve: ops.resolve,
+  });
+
+  return Object.freeze({
+    mount,
+    position,
+    session,
+    documentId: session.docId,
+    role: session.role,
+    canEdit,
+    canComment,
+    text,
+    reviewSource: review,
+    review: frozenReview,
+    reviewSnapshot,
+    threadsSource: threads,
+    threads: Object.freeze([...threads]),
+    mine: Object.freeze(validMine),
+    suggestions,
+    pending,
+    applicable,
+    unresolved,
+    suggestionTargetSnapshots,
+    resolveTargetSnapshots,
+    renderedSuggestionTargets,
+    renderedResolveTargets,
+    renderedTargets: Object.freeze([...renderedTargets]),
+    scope,
+    coordinator,
+    batchOwner,
+    busy: batchOwner !== null,
+    blocked,
+    open,
+    actionRegion,
+    partial,
+    verdictLabel: reviewVerdictLabel(review.authorName, review.verdict),
+    verdictClass: cn("text-[13px] font-semibold", verdictTone(review.verdict)),
+    timestampLabel: relativeTime(new Date(review.createdAt).getTime()),
+    countsLabel: `${reviewSummaryLabel(validMine.length, suggestions.length)}${suggestions.length > 0 && pending.length === 0 ? " · all decided" : ""}`,
+    acceptTitle: partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions",
+    resolveTitle: `Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`,
+    opsSource: ops,
+    ops: opsSnapshot,
+    onToast,
+    setOpen,
+    setActiveComment: session.setActiveComment,
+  });
+}
+
+function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingReviewPublication = false): boolean {
+  const {
+    session,
+    reviewSource,
+    reviewSnapshot,
+    threadsSource,
+    threads,
+    mine,
+    suggestions,
+    pending,
+    applicable,
+    unresolved,
+    suggestionTargetSnapshots,
+    resolveTargetSnapshots,
+    coordinator,
+    scope,
+  } = authority;
+  if (
+    session.docId !== authority.documentId ||
+    session.role !== authority.role ||
+    (session.role === "owner" || session.role === "editor") !== authority.canEdit ||
+    session.canComment !== authority.canComment ||
+    session.ytext.toString() !== authority.text ||
+    session.setActiveComment !== authority.setActiveComment ||
+    !sameReviewPrimitives(reviewSource, reviewSnapshot) ||
+    authority.review.documentId !== authority.documentId ||
+    threadsSource !== authority.threadsSource ||
+    threadsSource.length !== threads.length ||
+    !threads.every((thread, index) => threadsSource[index] === thread) ||
+    authority.opsSource.acceptSuggestion !== authority.ops.acceptSuggestion ||
+    authority.opsSource.rejectSuggestion !== authority.ops.rejectSuggestion ||
+    authority.opsSource.resolve !== authority.ops.resolve ||
+    coordinator.session !== session ||
+    coordinator.documentId !== authority.documentId ||
+    !coordinator.mounted ||
+    (!allowPendingReviewPublication || coordinator.reviewSignatures.has(reviewSnapshot.id)) &&
+      coordinator.reviewSignatures.get(reviewSnapshot.id) !== reviewIdentitySignature(authority.review)
+  ) {
+    return false;
+  }
+
+  const currentMineSources = reviewThreads(reviewSource, threadsSource);
+  if (
+    currentMineSources.length !== mine.length ||
+    !mine.every((thread, index) => {
+      const source = currentMineSources[index];
+      const current = session.comments.get(thread.id);
+      return (
+        !!source &&
+        !!current &&
+        source === thread.source &&
+        sameThreadPrimitives(source, thread, true) &&
+        sameThreadPrimitives(current, thread, false) &&
+        storedCommentTargetIdentity(session, thread.id, null)?.thread === thread.identity
+      );
+    })
+  ) {
+    return false;
+  }
+
+  const sourceSuggestions = commentSuggestionTargets(currentMineSources, authority.text);
+  const liveThreads = mine.map((thread) => session.comments.get(thread.id)).filter((thread): thread is CommentThread => thread !== null);
+  const liveSuggestions = commentSuggestionTargets(liveThreads, authority.text);
+  if (
+    sourceSuggestions.length !== suggestions.length ||
+    liveSuggestions.length !== suggestions.length ||
+    !suggestions.every(
+      (suggestion, index) =>
+        sameSuggestionPrimitives(sourceSuggestions[index]!, suggestion) &&
+        sameLiveSuggestionPrimitives(liveSuggestions[index]!, suggestion),
+    )
+  ) {
+    return false;
+  }
+
+  const currentPending = suggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const currentApplicable = currentPending.filter((target) => target.state === "pending");
+  const currentUnresolved = mine.filter((thread) => !thread.resolved);
+  if (
+    currentPending.length !== pending.length ||
+    !pending.every((target, index) => currentPending[index] === target) ||
+    currentApplicable.length !== applicable.length ||
+    !applicable.every((target, index) => currentApplicable[index] === target) ||
+    currentUnresolved.length !== unresolved.length ||
+    !unresolved.every((thread, index) => currentUnresolved[index] === thread)
+  ) {
+    return false;
+  }
+
+  const livePending = liveSuggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const currentSuggestionTargets = livePending.map((target) => snapshotCommentSuggestionTarget(session, target));
+  const currentResolveTargets = currentUnresolved.map((thread) => {
+    const live = session.comments.get(thread.id);
+    return live ? snapshotCommentResolveTarget(session, live) : null;
+  });
+  const renderedTargets: readonly CommentBatchTarget[] =
+    pending.length > 0
+      ? currentSuggestionTargets.filter((target): target is CommentSuggestionBatchTarget => target !== null)
+      : currentResolveTargets.filter((target): target is CommentResolveBatchTarget => target !== null);
+  const expectedActionRegion =
+    authority.canEdit && pending.length > 0
+      ? "suggestions"
+      : authority.canComment && pending.length === 0 && unresolved.length > 0
+        ? "resolve"
+        : null;
+  const matches =
+    currentSuggestionTargets.length === suggestionTargetSnapshots.length &&
+    suggestionTargetSnapshots.every((target, index) => sameSuggestionTarget(target, currentSuggestionTargets[index] ?? null)) &&
+    currentResolveTargets.length === resolveTargetSnapshots.length &&
+    resolveTargetSnapshots.every((target, index) => sameResolveTarget(target, currentResolveTargets[index] ?? null)) &&
+    (coordinator.batchOwners.get(scope) ?? null) === authority.batchOwner &&
+    ((coordinator.batchOwners.get(scope) ?? null) !== null) === authority.busy &&
+    isCommentBatchBlocked(coordinator, renderedTargets) === authority.blocked &&
+    expectedActionRegion === authority.actionRegion &&
+    (currentApplicable.length !== currentPending.length) === authority.partial &&
+    renderedTargets.length === authority.renderedTargets.length &&
+    authority.renderedTargets.every((target, index) => {
+      const current = renderedTargets[index];
+      if (!current || target.kind !== current.kind) return false;
+      if (target.kind === "comment-suggestion" && current.kind === "comment-suggestion") return sameSuggestionTarget(target, current);
+      if (target.kind === "comment-resolve" && current.kind === "comment-resolve") return sameResolveTarget(target, current);
+      return false;
+    });
+  return matches;
+}
+
+function sameReviewSnapshots(left: ReviewPrimitiveSnapshot, right: ReviewPrimitiveSnapshot): boolean {
+  return (
+    left.id === right.id &&
+    left.documentId === right.documentId &&
+    left.authorId === right.authorId &&
+    left.authorName === right.authorName &&
+    left.collabAuthorId === right.collabAuthorId &&
+    left.agent === right.agent &&
+    left.verdict === right.verdict &&
+    left.summary === right.summary &&
+    left.createdAt === right.createdAt &&
+    left.threadIds.length === right.threadIds.length &&
+    left.threadIds.every((id, index) => id === right.threadIds[index])
+  );
+}
+
+function sameReviewThreadSnapshots(left: ReviewThreadPrimitiveSnapshot, right: ReviewThreadPrimitiveSnapshot): boolean {
+  return (
+    left.source === right.source &&
+    left.identity === right.identity &&
+    left.id === right.id &&
+    left.quote === right.quote &&
+    left.body === right.body &&
+    left.resolved === right.resolved &&
+    (left.range?.from ?? null) === (right.range?.from ?? null) &&
+    (left.range?.to ?? null) === (right.range?.to ?? null) &&
+    (left.suggestionState ?? null) === (right.suggestionState ?? null) &&
+    left.suggestionLabel === right.suggestionLabel &&
+    left.replies.length === right.replies.length &&
+    left.replies.every((reply, index) => {
+      const current = right.replies[index];
+      return (
+        !!current &&
+        reply.source === current.source &&
+        reply.id === current.id &&
+        reply.body === current.body &&
+        (reply.suggestionState ?? null) === (current.suggestionState ?? null)
+      );
+    })
+  );
+}
+
+function sameReviewSuggestionSnapshots(left: ReviewSuggestionPrimitiveSnapshot, right: ReviewSuggestionPrimitiveSnapshot): boolean {
+  return (
+    left.threadSource === right.threadSource &&
+    left.replySource === right.replySource &&
+    left.threadId === right.threadId &&
+    left.replyId === right.replyId &&
+    left.body === right.body &&
+    left.proposed === right.proposed &&
+    left.state === right.state
+  );
+}
+
+function sameReviewTargetSnapshots(left: CommentBatchTarget, right: CommentBatchTarget): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "comment-suggestion" && right.kind === "comment-suggestion") return sameSuggestionTarget(left, right);
+  if (left.kind === "comment-resolve" && right.kind === "comment-resolve") return sameResolveTarget(left, right);
+  return (
+    left.kind === "local-suggestion" &&
+    right.kind === "local-suggestion" &&
+    left.key === right.key &&
+    left.suggestionId === right.suggestionId &&
+    left.before === right.before &&
+    left.after === right.after &&
+    left.memberIds.length === right.memberIds.length &&
+    left.memberIds.every((id, index) => id === right.memberIds[index]) &&
+    left.memberIdentities.length === right.memberIdentities.length &&
+    left.memberIdentities.every((identity, index) => identity === right.memberIdentities[index])
+  );
+}
+
+function sameLocalSuggestionTarget(
+  left: LocalSuggestionBatchTarget | null,
+  right: LocalSuggestionBatchTarget | null,
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.key === right.key &&
+    left.suggestionId === right.suggestionId &&
+    left.before === right.before &&
+    left.after === right.after &&
+    left.memberIds.length === right.memberIds.length &&
+    left.memberIds.every((id, index) => id === right.memberIds[index]) &&
+    left.memberIdentities.length === right.memberIdentities.length &&
+    left.memberIdentities.every((identity, index) => identity === right.memberIdentities[index])
+  );
+}
+
+function sameSuggestionBatchTarget(
+  left: CommentBatchTarget | null,
+  right: CommentBatchTarget | null,
+): boolean {
+  if (!left || !right) return left === right;
+  if (left.kind === "local-suggestion" || right.kind === "local-suggestion") {
+    return left.kind === "local-suggestion" && right.kind === "local-suggestion" && sameLocalSuggestionTarget(left, right);
+  }
+  if (left.kind === "comment-suggestion" || right.kind === "comment-suggestion") {
+    return left.kind === "comment-suggestion" && right.kind === "comment-suggestion" && sameSuggestionTarget(left, right);
+  }
+  return sameResolveTarget(left, right);
+}
+
+function suggestionBatchPresentation(
+  acceptDisabled: boolean,
+  rejectDisabled: boolean,
+  batchOwner: CommentBatchOwner | null,
+): SuggestionActionPresentation {
+  const accepting = batchOwner?.action === "suggestions-accept";
+  const rejecting = batchOwner?.action === "suggestions-reject";
+  return Object.freeze({
+    rootClassName: SUGGESTION_BATCH_ACTIONS_CLASS,
+    rootTestId: "suggestion-batch-actions",
+    accept: Object.freeze({
+      className: SUGGESTION_BATCH_ACCEPT_CLASS,
+      testId: "accept-all",
+      label: accepting ? "Accepting…" : "Accept all",
+      disabled: acceptDisabled,
+      busy: accepting,
+      title: null,
+      ariaLabel: null,
+    }),
+    reject: Object.freeze({
+      className: SUGGESTION_BATCH_REJECT_CLASS,
+      testId: "reject-all",
+      label: rejecting ? "Rejecting…" : "Reject all",
+      disabled: rejectDisabled,
+      busy: rejecting,
+      title: null,
+      ariaLabel: null,
+    }),
+  });
+}
+
+function createSuggestionBatchAuthority({
+  session,
+  text,
+  localSources,
+  localTargetSnapshots,
+  commentSources,
+  targets,
+  coordinator,
+  batchOwner,
+  blocked,
+  ops,
+  onToast,
+  claims,
+}: {
+  session: CollabSession;
+  text: string;
+  localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  commentSources: readonly CommentSuggestionTarget[];
+  targets: readonly CommentBatchTarget[];
+  coordinator: CommentRowActionCoordinator;
+  batchOwner: CommentBatchOwner | null;
+  blocked: boolean;
+  ops: ReturnType<typeof useCommentOps>;
+  onToast: CommentsPanelProps["onToast"];
+  claims: SuggestionBatchClaimCells;
+}): SuggestionBatchAuthority {
+  const commentTargetSnapshots = Object.freeze(commentSources.map((target) => snapshotCommentSuggestionTarget(session, target)));
+  const localOutdated = Object.freeze(localSources.map((target) => target.outdated));
+  const commentStates = Object.freeze(commentSources.map((target) => target.state));
+  const pendingCount = localSources.length + commentSources.length;
+  const busy = batchOwner !== null;
+  const acceptDisabled =
+    busy ||
+    blocked ||
+    targets.length !== pendingCount ||
+    localOutdated.some(Boolean) ||
+    (localSources.length === 0 && commentStates.every((state) => state === "outdated"));
+  const rejectDisabled =
+    busy ||
+    blocked ||
+    targets.length !== pendingCount ||
+    localOutdated.some(Boolean);
+  const presentation = suggestionBatchPresentation(acceptDisabled, rejectDisabled, batchOwner);
+  return Object.freeze({
+    session,
+    documentId: session.docId,
+    role: session.role,
+    canAct: session.role === "owner" || session.role === "editor",
+    text,
+    localSources: Object.freeze([...localSources]),
+    localTargetSnapshots: Object.freeze([...localTargetSnapshots]),
+    localOutdated,
+    commentSources: Object.freeze([...commentSources]),
+    commentTargetSnapshots,
+    commentStates,
+    targets: Object.freeze([...targets]),
+    pendingCount,
+    coordinator,
+    batchOwner,
+    busy,
+    blocked,
+    acceptDisabled,
+    rejectDisabled,
+    opsSource: ops,
+    ops: Object.freeze({
+      acceptSuggestion: ops.acceptSuggestion,
+      rejectSuggestion: ops.rejectSuggestion,
+      resolve: ops.resolve,
+    }),
+    reviewSuggestion: session.reviewSuggestion,
+    onToast,
+    presentation,
+    claims,
+  });
+}
+
+function suggestionBatchAuthoritiesMatch(
+  previous: SuggestionBatchAuthority | null,
+  current: SuggestionBatchAuthority | null,
+): boolean {
+  const sameArray = <T,>(left: readonly T[], right: readonly T[], matches: (a: T, b: T) => boolean) =>
+    left.length === right.length && left.every((value, index) => matches(value, right[index]!));
+  return (
+    previous === current ||
+    (!!previous &&
+      !!current &&
+      previous.session === current.session &&
+      previous.documentId === current.documentId &&
+      previous.role === current.role &&
+      previous.canAct === current.canAct &&
+      previous.text === current.text &&
+      sameArray(previous.localSources, current.localSources, (left, right) => left === right) &&
+      sameArray(previous.localTargetSnapshots, current.localTargetSnapshots, sameLocalSuggestionTarget) &&
+      sameArray(previous.localOutdated, current.localOutdated, (left, right) => left === right) &&
+      sameArray(previous.commentSources, current.commentSources, (left, right) => left === right) &&
+      sameArray(previous.commentTargetSnapshots, current.commentTargetSnapshots, sameSuggestionTarget) &&
+      sameArray(previous.commentStates, current.commentStates, (left, right) => left === right) &&
+      sameArray(previous.targets, current.targets, sameReviewTargetSnapshots) &&
+      previous.pendingCount === current.pendingCount &&
+      previous.coordinator === current.coordinator &&
+      previous.batchOwner === current.batchOwner &&
+      previous.busy === current.busy &&
+      previous.blocked === current.blocked &&
+      previous.acceptDisabled === current.acceptDisabled &&
+      previous.rejectDisabled === current.rejectDisabled &&
+      previous.opsSource === current.opsSource &&
+      previous.ops.acceptSuggestion === current.ops.acceptSuggestion &&
+      previous.ops.rejectSuggestion === current.ops.rejectSuggestion &&
+      previous.ops.resolve === current.ops.resolve &&
+      previous.reviewSuggestion === current.reviewSuggestion &&
+      previous.onToast === current.onToast &&
+      suggestionActionPresentationsMatch(previous.presentation, current.presentation) &&
+      previous.claims === current.claims)
+  );
+}
+
+function suggestionBatchAuthorityFactsAreCurrent(batch: SuggestionBatchAuthority): boolean {
+  const { session, coordinator } = batch;
+  if (
+    session.docId !== batch.documentId ||
+    session.role !== batch.role ||
+    (session.role === "owner" || session.role === "editor") !== batch.canAct ||
+    !batch.canAct ||
+    session.ytext.toString() !== batch.text ||
+    coordinator.session !== session ||
+    coordinator.documentId !== batch.documentId ||
+    !coordinator.mounted ||
+    (coordinator.batchOwners.get(SUGGESTIONS_SCOPE) ?? null) !== batch.batchOwner ||
+    ((coordinator.batchOwners.get(SUGGESTIONS_SCOPE) ?? null) !== null) !== batch.busy ||
+    batch.opsSource.acceptSuggestion !== batch.ops.acceptSuggestion ||
+    batch.opsSource.rejectSuggestion !== batch.ops.rejectSuggestion ||
+    batch.opsSource.resolve !== batch.ops.resolve ||
+    session.reviewSuggestion !== batch.reviewSuggestion
+  ) {
+    return false;
+  }
+
+  const currentLocalSources = session.suggestions.groups(batch.text);
+  const sourceLocalTargets = snapshotLocalSuggestionTargets(session, batch.localSources, currentLocalSources);
+  const sourceCommentTargets = batch.commentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
+  if (
+    sourceLocalTargets.length !== batch.localTargetSnapshots.length ||
+    !sourceLocalTargets.every((target, index) => sameLocalSuggestionTarget(target, batch.localTargetSnapshots[index] ?? null)) ||
+    batch.localSources.some((target, index) => target.outdated !== batch.localOutdated[index]) ||
+    sourceCommentTargets.length !== batch.commentTargetSnapshots.length ||
+    !sourceCommentTargets.every((target, index) => sameSuggestionTarget(target, batch.commentTargetSnapshots[index] ?? null)) ||
+    batch.commentSources.some((target, index) => target.state !== batch.commentStates[index])
+  ) {
+    return false;
+  }
+
+  const currentCommentSources = commentSuggestionTargets(session.comments.list(), batch.text).filter(
+    (target) => target.state === "pending" || target.state === "outdated",
+  );
+  const currentLocalTargets = snapshotLocalSuggestionTargets(session, currentLocalSources, currentLocalSources);
+  const currentCommentTargets = currentCommentSources.map((target) => snapshotCommentSuggestionTarget(session, target));
+  const currentTargets = [...currentLocalTargets, ...currentCommentTargets].filter(
+    (target): target is LocalSuggestionBatchTarget | CommentSuggestionBatchTarget => target !== null,
+  );
+  const pendingCount = currentLocalSources.length + currentCommentSources.length;
+  const blocked = isCommentBatchBlocked(coordinator, currentTargets);
+  const acceptDisabled =
+    batch.busy ||
+    blocked ||
+    currentTargets.length !== pendingCount ||
+    currentLocalSources.some((target) => target.outdated) ||
+    (currentLocalSources.length === 0 && currentCommentSources.every((target) => target.state === "outdated"));
+  const rejectDisabled =
+    batch.busy ||
+    blocked ||
+    currentTargets.length !== pendingCount ||
+    currentLocalSources.some((target) => target.outdated);
+  return (
+    currentLocalTargets.length === batch.localTargetSnapshots.length &&
+    currentLocalTargets.every((target, index) => sameLocalSuggestionTarget(target, batch.localTargetSnapshots[index] ?? null)) &&
+    currentLocalSources.every((target, index) => target.outdated === batch.localOutdated[index]) &&
+    currentCommentTargets.length === batch.commentTargetSnapshots.length &&
+    currentCommentTargets.every((target, index) => sameSuggestionTarget(target, batch.commentTargetSnapshots[index] ?? null)) &&
+    currentCommentSources.every((target, index) => target.state === batch.commentStates[index]) &&
+    pendingCount === batch.pendingCount &&
+    currentTargets.length === batch.targets.length &&
+    currentTargets.every((target, index) => sameSuggestionBatchTarget(target, batch.targets[index] ?? null)) &&
+    blocked === batch.blocked &&
+    acceptDisabled === batch.acceptDisabled &&
+    rejectDisabled === batch.rejectDisabled &&
+    suggestionActionPresentationsMatch(
+      suggestionBatchPresentation(acceptDisabled, rejectDisabled, batch.batchOwner),
+      batch.presentation,
+    )
+  );
+}
+
+function suggestionActionAuthorityFactsAreCurrent(authority: SuggestionActionAuthority): boolean {
+  return authority.batch === null || suggestionBatchAuthorityFactsAreCurrent(authority.batch);
+}
+
+function invokeSuggestionBatch(authority: SuggestionBatchAuthority, accept: boolean): boolean {
+  if (
+    !suggestionBatchAuthorityFactsAreCurrent(authority) ||
+    authority.claims.authorities.has(authority) ||
+    authority.claims.targets.has(authority.targets)
+  ) {
+    return false;
+  }
+  authority.claims.authorities.add(authority);
+  authority.claims.targets.add(authority.targets);
+  const owner = claimCommentBatch(authority.coordinator, {
+    scope: SUGGESTIONS_SCOPE,
+    review: null,
+    authorName: null,
+    action: accept ? "suggestions-accept" : "suggestions-reject",
+    targets: authority.targets,
+  });
+  if (!owner) {
+    authority.claims.authorities.delete(authority);
+    authority.claims.targets.delete(authority.targets);
+    return false;
+  }
+  authority.claims.owners.add(owner);
+  void executeCommentBatch(
+    authority.coordinator,
+    owner,
+    authority.ops,
+    authority.onToast,
+    authority.reviewSuggestion,
+  );
+  return true;
+}
+
+function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: ReviewCardAuthority): boolean {
+  const sameArray = <T,>(left: readonly T[], right: readonly T[], matches: (a: T, b: T) => boolean) =>
+    left.length === right.length && left.every((value, index) => matches(value, right[index]!));
+  return (
+    previous.mount === current.mount &&
+    previous.position === current.position &&
+    previous.session === current.session &&
+    previous.documentId === current.documentId &&
+    previous.role === current.role &&
+    previous.canEdit === current.canEdit &&
+    previous.canComment === current.canComment &&
+    previous.text === current.text &&
+    previous.reviewSource === current.reviewSource &&
+    sameReviewSnapshots(previous.reviewSnapshot, current.reviewSnapshot) &&
+    sameReviewPrimitives(previous.review, current.reviewSnapshot) &&
+    previous.threadsSource === current.threadsSource &&
+    sameArray(previous.threads, current.threads, (left, right) => left === right) &&
+    sameArray(previous.mine, current.mine, sameReviewThreadSnapshots) &&
+    sameArray(previous.suggestions, current.suggestions, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.pending, current.pending, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.applicable, current.applicable, sameReviewSuggestionSnapshots) &&
+    sameArray(previous.unresolved, current.unresolved, sameReviewThreadSnapshots) &&
+    sameArray(previous.suggestionTargetSnapshots, current.suggestionTargetSnapshots, sameSuggestionTarget) &&
+    sameArray(previous.resolveTargetSnapshots, current.resolveTargetSnapshots, sameResolveTarget) &&
+    sameArray(previous.renderedSuggestionTargets, current.renderedSuggestionTargets, sameSuggestionTarget) &&
+    sameArray(previous.renderedResolveTargets, current.renderedResolveTargets, sameResolveTarget) &&
+    sameArray(previous.renderedTargets, current.renderedTargets, sameReviewTargetSnapshots) &&
+    previous.scope === current.scope &&
+    previous.coordinator === current.coordinator &&
+    previous.batchOwner === current.batchOwner &&
+    previous.busy === current.busy &&
+    previous.blocked === current.blocked &&
+    previous.open === current.open &&
+    previous.actionRegion === current.actionRegion &&
+    previous.partial === current.partial &&
+    previous.verdictLabel === current.verdictLabel &&
+    previous.verdictClass === current.verdictClass &&
+    previous.timestampLabel === current.timestampLabel &&
+    previous.countsLabel === current.countsLabel &&
+    previous.acceptTitle === current.acceptTitle &&
+    previous.resolveTitle === current.resolveTitle &&
+    previous.opsSource === current.opsSource &&
+    previous.ops.acceptSuggestion === current.ops.acceptSuggestion &&
+    previous.ops.rejectSuggestion === current.ops.rejectSuggestion &&
+    previous.ops.resolve === current.ops.resolve &&
+    previous.onToast === current.onToast &&
+    previous.setOpen === current.setOpen &&
+    previous.setActiveComment === current.setActiveComment
+  );
+}
+
+function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): boolean {
+  const { authority, elements } = presentation;
+  const { card, header, toggle, actions, accept, reject, resolve, list, rows } = elements;
+  const document = card.ownerDocument;
+  const NodeConstructor = document.defaultView?.Node;
+  if (
+    !NodeConstructor ||
+    !card.isConnected ||
+    card.tagName !== "DIV" ||
+    card.className !== REVIEW_CARD_CLASS ||
+    card.dataset.testid !== "review-card" ||
+    card.dataset.reviewId !== authority.reviewSnapshot.id ||
+    card.dataset.verdict !== authority.reviewSnapshot.verdict ||
+    !card.parentElement ||
+    card.parentElement.dataset.testid !== "review-cards" ||
+    card.parentElement.children.item(authority.position) !== card ||
+    !header.isConnected ||
+    header.ownerDocument !== document ||
+    header.parentElement !== card ||
+    header.className !== REVIEW_HEADER_CLASS ||
+    header.dataset.testid !== "review-header" ||
+    header.children.length !== 3 ||
+    header.children.item(2) !== toggle ||
+    !toggle.isConnected ||
+    toggle.ownerDocument !== document ||
+    toggle.parentElement !== header ||
+    toggle.tagName !== "BUTTON" ||
+    toggle.type !== "button" ||
+    !reviewCardControlIsEnabled(toggle) ||
+    toggle.className !== REVIEW_TOGGLE_CLASS ||
+    toggle.dataset.testid !== "review-toggle" ||
+    toggle.getAttribute("aria-expanded") !== String(authority.open) ||
+    toggle.getAttribute("aria-label") !== (authority.open ? "Collapse review" : "Expand review")
+  ) {
+    return false;
+  }
+
+  const details = header.children.item(1);
+  const heading = details?.children.item(0);
+  const verdict = heading?.children.item(0);
+  const timestamp = heading?.children.item(1);
+  const counts = details?.children.item(1);
+  const summary = details?.children.item(2);
+  if (
+    !(details instanceof NodeConstructor) ||
+    details?.children.length !== (authority.reviewSnapshot.summary ? 3 : 2) ||
+    !(verdict instanceof NodeConstructor) ||
+    !(timestamp instanceof NodeConstructor) ||
+    !(counts instanceof NodeConstructor) ||
+    (verdict as HTMLElement).dataset.testid !== "review-verdict" ||
+    (verdict as HTMLElement).className !== authority.verdictClass ||
+    verdict.textContent !== authority.verdictLabel ||
+    (timestamp as HTMLElement).dataset.testid !== "comment-timestamp" ||
+    timestamp.textContent !== authority.timestampLabel ||
+    (counts as HTMLElement).dataset.testid !== "review-counts" ||
+    counts.textContent !== authority.countsLabel ||
+    (authority.reviewSnapshot.summary
+      ? (summary as HTMLElement | null)?.dataset.testid !== "comment-body"
+      : summary !== null)
+  ) {
+    return false;
+  }
+
+  const expectedChildren: Element[] = [header];
+  if (authority.actionRegion) expectedChildren.push(actions!);
+  if (authority.open) expectedChildren.push(list!);
+  if (card.children.length !== expectedChildren.length || !expectedChildren.every((element, index) => card.children.item(index) === element)) return false;
+
+  if (authority.actionRegion === null) {
+    if (actions || accept || reject || resolve) return false;
+  } else {
+    const suggestionActions = authority.actionRegion === "suggestions";
+    if (
+      !actions ||
+      !actions.isConnected ||
+      actions.ownerDocument !== document ||
+      actions.parentElement !== card ||
+      actions.dataset.testid !== "review-actions" ||
+      actions.className !== (suggestionActions ? REVIEW_SUGGESTION_ACTIONS_CLASS : REVIEW_RESOLVE_ACTIONS_CLASS)
+    ) {
+      return false;
+    }
+    if (suggestionActions) {
+      const acceptEnabled =
+        !authority.busy &&
+        !authority.blocked &&
+        authority.renderedSuggestionTargets.length === authority.pending.length &&
+        authority.applicable.length > 0;
+      const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
+      if (
+        !accept ||
+        !reject ||
+        resolve !== null ||
+        actions.children.length !== 2 ||
+        actions.children.item(0) !== accept ||
+        actions.children.item(1) !== reject ||
+        !accept.isConnected ||
+        !reject.isConnected ||
+        accept.ownerDocument !== document ||
+        reject.ownerDocument !== document ||
+        accept.parentElement !== actions ||
+        reject.parentElement !== actions ||
+        accept.type !== "button" ||
+        reject.type !== "button" ||
+        accept.disabled === acceptEnabled ||
+        reject.disabled === rejectEnabled ||
+        (acceptEnabled && !reviewCardControlIsEnabled(accept)) ||
+        (rejectEnabled && !reviewCardControlIsEnabled(reject)) ||
+        accept.className !== REVIEW_ACCEPT_CLASS ||
+        reject.className !== REVIEW_REJECT_CLASS ||
+        accept.dataset.testid !== "review-accept-all" ||
+        reject.dataset.testid !== "review-reject-all" ||
+        accept.getAttribute("aria-label") !== authority.acceptTitle ||
+        accept.title !== authority.acceptTitle ||
+        reject.getAttribute("aria-label") !== "Reject all suggestions" ||
+        reject.title !== "Reject all suggestions" ||
+        accept.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-accept" ? "true" : null) ||
+        reject.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-reject" ? "true" : null) ||
+        accept.textContent?.trim() !==
+          (authority.batchOwner?.action === "review-accept"
+            ? "Accepting…"
+            : `Accept all${authority.partial ? `(${authority.applicable.length} of ${authority.pending.length})` : ""}`) ||
+        reject.textContent?.trim() !== (authority.batchOwner?.action === "review-reject" ? "Rejecting…" : "Reject all")
+      ) {
+        return false;
+      }
+    } else {
+      const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
+      if (
+        accept !== null ||
+        reject !== null ||
+        !resolve ||
+        actions.children.length !== 1 ||
+        actions.children.item(0) !== resolve ||
+        !resolve.isConnected ||
+        resolve.ownerDocument !== document ||
+        resolve.parentElement !== actions ||
+        resolve.type !== "button" ||
+        resolve.disabled === resolveEnabled ||
+        (resolveEnabled && !reviewCardControlIsEnabled(resolve)) ||
+        resolve.className !== REVIEW_RESOLVE_CLASS ||
+        resolve.dataset.testid !== "review-resolve-all" ||
+        resolve.title !== authority.resolveTitle ||
+        resolve.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-resolve" ? "true" : null) ||
+        resolve.textContent?.trim() !== (authority.batchOwner?.action === "review-resolve" ? "Resolving…" : "Resolve all")
+      ) {
+        return false;
+      }
+    }
+  }
+
+  if (!authority.open) return list === null && rows.length === 0;
+  if (
+    !list ||
+    !list.isConnected ||
+    list.ownerDocument !== document ||
+    list.parentElement !== card ||
+    list.tagName !== "UL" ||
+    list.className !== REVIEW_THREADS_CLASS ||
+    list.dataset.testid !== "review-threads" ||
+    rows.length !== authority.mine.length ||
+    list.children.length !== (authority.mine.length || 1)
+  ) {
+    return false;
+  }
+  if (authority.mine.length === 0) {
+    return list.children.item(0)?.textContent === "The comments of this review were deleted.";
+  }
+  return authority.mine.every((thread, index) => {
+    const row = rows[index];
+    if (
+      !row ||
+      !row.item.isConnected ||
+      !row.link.isConnected ||
+      row.item.ownerDocument !== document ||
+      row.link.ownerDocument !== document ||
+      row.item.parentElement !== list ||
+      list.children.item(index) !== row.item ||
+      row.item.tagName !== "LI" ||
+      row.item.dataset.testid !== "review-thread-row" ||
+      row.item.children.length !== 1 ||
+      row.item.children.item(0) !== row.link ||
+      row.link.parentElement !== row.item ||
+      row.link.tagName !== "BUTTON" ||
+      row.link.type !== "button" ||
+      !reviewCardControlIsEnabled(row.link) ||
+      row.link.className !== REVIEW_THREAD_LINK_CLASS ||
+      row.link.dataset.testid !== "review-thread-link" ||
+      row.link.dataset.threadId !== thread.id ||
+      row.link.children.length !== (thread.suggestionLabel ? 3 : 2)
+    ) {
+      return false;
+    }
+    const icon = row.link.children.item(0);
+    const quote = row.link.children.item(1);
+    const state = row.link.children.item(2);
+    return (
+      icon?.getAttribute("aria-label") === (thread.resolved ? "Resolved" : null) &&
+      quote?.getAttribute("title") === thread.quote &&
+      quote?.textContent === (thread.quote || "(comment)") &&
+      (thread.suggestionLabel
+        ? state?.className === "suggestion-badge shrink-0" && state.textContent === thread.suggestionLabel
+        : state === null)
+    );
+  });
+}
+
+function createReviewCardRender(
+  authority: ReviewCardAuthority,
+  cells: ReviewCardCells,
+  requestSuccessor: () => void,
+): ReviewCardRender {
+  const render = {} as ReviewCardRender;
+  const identity = Symbol("review-card-render");
+  let currentRuntime: ReviewCardPublicationRuntime | null = null;
+  let lastRuntime: ReviewCardPublicationRuntime | null = null;
+  let successorRequested = false;
+  let renderRetired = false;
+  let invalidBeforeEstablish = false;
+
+  const acceptsSuccessorOf = (presentation: ReviewCardPresentation) =>
+    cells.active.current === null &&
+    cells.successorOf.current === presentation &&
+    cells.retired.has(presentation) &&
+    presentation.render.isRetired() &&
+    !cells.claimedPresentations.has(presentation);
+
+  const requestReplaySuccessor = (runtime: ReviewCardPublicationRuntime) => {
+    const { presentation } = runtime;
+    if (
+      successorRequested ||
+      cells.replay.current !== null ||
+      !acceptsSuccessorOf(presentation) ||
+      !reviewCardFactsAreCurrent(authority, true) ||
+      !exactReviewCardDomIsCurrent(presentation) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    if (!runtime.stageSuccessorHandoff()) return;
+    successorRequested = true;
+    cells.replay.current = Object.freeze({
+      source: presentation,
+      dom: presentation.dom,
+      placement: presentation.placement,
+      historyIsClean: runtime.mutationHistoryIsClean,
+      refsAreExact: runtime.successorHandoffIsExact,
+      release: runtime.release,
+    });
+    requestSuccessor();
+  };
+
+  const onElementChange = (
+    owner: ReviewCardElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      if (currentRuntime) currentRuntime.retireForElement();
+      else if (!lastRuntime) {
+        renderRetired = true;
+        invalidBeforeEstablish = true;
+      }
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.presentation)) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const cardOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const headerOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const actionsOwner = new ReviewCardElementOwner<HTMLDivElement>(onElementChange);
+  const listOwner = new ReviewCardElementOwner<HTMLUListElement>(onElementChange);
+  const rowOwners = authority.mine.map(() => new ReviewCardElementOwner<HTMLLIElement>(onElementChange));
+  const controlOwners: ReviewCardElementOwner<HTMLButtonElement>[] = [];
+
+  const committedElements = (): ReviewCardElements | null => {
+    const card = cardOwner.element();
+    const header = headerOwner.element();
+    const toggleElement = controlOwners[0]?.element() ?? null;
+    const actions = actionsOwner.element();
+    const list = listOwner.element();
+    const actionOffset = 1;
+    const acceptElement = render.accept ? controlOwners[actionOffset]?.element() ?? null : null;
+    const rejectElement = render.reject ? controlOwners[actionOffset + 1]?.element() ?? null : null;
+    const resolveElement = render.resolve ? controlOwners[actionOffset]?.element() ?? null : null;
+    const threadOffset = 1 + (render.accept ? 2 : render.resolve ? 1 : 0);
+    const rowElements = authority.open
+      ? authority.mine.map((_, index) => {
+          const item = rowOwners[index]?.element() ?? null;
+          const link = controlOwners[threadOffset + index]?.element() ?? null;
+          return item && link ? Object.freeze({ item, link }) : null;
+        })
+      : [];
+    if (
+      !card ||
+      !header ||
+      !toggleElement ||
+      (authority.actionRegion !== null) !== !!actions ||
+      (authority.actionRegion === "suggestions" && (!acceptElement || !rejectElement)) ||
+      (authority.actionRegion === "resolve" && !resolveElement) ||
+      authority.open !== !!list ||
+      rowElements.some((row) => row === null)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      card,
+      header,
+      toggle: toggleElement,
+      actions,
+      accept: acceptElement,
+      reject: rejectElement,
+      resolve: resolveElement,
+      list,
+      rows: Object.freeze(rowElements as Readonly<{ item: HTMLLIElement; link: HTMLButtonElement }>[]),
+    });
+  };
+
+  const expectedOwners = (): readonly ReviewCardElementOwnerView[] => [
+    cardOwner,
+    headerOwner,
+    ...(authority.actionRegion ? [actionsOwner] : []),
+    ...(authority.open ? [listOwner, ...rowOwners] : []),
+    ...controlOwners,
+  ];
+
+  const createRuntime = (
+    presentation: ReviewCardPresentation,
+    replayOwners: ReadonlySet<ReviewCardElementOwnerView>,
+  ): ReviewCardPublicationRuntime => {
+    type Retirement = "element" | "layout" | "action";
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let successorStaged = false;
+    let replayRefs: ReviewCardRefReplay[] = [];
+    let domGuard: ReviewCardDomGuard | null = null;
+
+    const retire = (reason: Retirement) => {
+      if (renderRetired) return false;
+      renderRetired = true;
+      retirement = reason;
+      cells.retired.add(presentation);
+      if (cells.active.current === presentation) {
+        cells.active.current = null;
+        cells.successorOf.current = presentation;
+      }
+      if (currentRuntime?.presentation === presentation) currentRuntime = null;
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== presentation) domGuard?.release();
+      });
+      return true;
+    };
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every((entry) => !entry.detached && !entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every((entry) => entry.detached && entry.reattached && entry.owner.element() === entry.element);
+    const refsHaveExactMountedReplay = () =>
+      !invalidReplay &&
+      replayOwners.size > 0 &&
+      replayRefs.every((entry) =>
+        replayOwners.has(entry.owner)
+          ? entry.detached && entry.reattached && entry.owner.element() === entry.element
+          : !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+      );
+    const publishedDomMatches = () =>
+      Boolean(
+        domGuard &&
+        domGuard.isClean() &&
+        presentation.elements.card === presentation.dom.node &&
+        presentation.elements.card.isConnected &&
+        reviewCardPlacementMatches(presentation.elements.card, presentation.placement) &&
+        reviewCardDomMatches(presentation.dom),
+      );
+
+    const runtime: ReviewCardPublicationRuntime = Object.freeze({
+      presentation,
+      publish: (owners: readonly ReviewCardElementOwnerView[]) => {
+        if (renderRetired || established) return false;
+        domGuard = createReviewCardDomGuard(presentation.elements.card, presentation.placement);
+        if (!domGuard) return false;
+        replayRefs = owners.map((owner) => {
+          const element = owner.element();
+          if (!element) throw new Error("Cannot publish a review card without every committed ref");
+          return { owner, element, detached: false, reattached: false, handoffDetached: false };
+        });
+        established = true;
+        cells.active.current = presentation;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      retireForAction: () => {
+        retire("action");
+      },
+      noteRef: (owner: ReviewCardElementOwnerView, element: HTMLElement | null, previous: HTMLElement | null) => {
+        if (!established) return;
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (successorStaged) {
+          if (element === null && previous === proof.element && !proof.handoffDetached) {
+            proof.handoffDetached = true;
+          } else if (element !== previous) {
+            invalidReplay = true;
+          }
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (element === proof.element && previous === null && proof.detached) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isRetired: () => renderRetired,
+      publishedDomMatches,
+      isExactElementReplay: () =>
+        renderRetired &&
+        retirement === "element" &&
+        established &&
+        ((layoutRetired && refsHaveExactReplay()) || (!layoutRetired && refsHaveExactMountedReplay())) &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        renderRetired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      stageSuccessorHandoff: () => {
+        if (successorStaged) return false;
+        successorStaged = true;
+        return true;
+      },
+      successorHandoffIsExact: () =>
+        successorStaged &&
+        !invalidReplay &&
+        replayRefs.every((entry) => entry.handoffDetached && entry.owner.element() === null),
+      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
+      release: () => {
+        domGuard?.release();
+      },
+    });
+    return runtime;
+  };
+
+  const nativeClick = (
+    presentation: ReviewCardPresentation,
+    source: HTMLButtonElement,
+    event: MouseEvent<HTMLButtonElement>,
+  ): globalThis.MouseEvent | null => {
+    if (!event || typeof event !== "object") return null;
+    const ownerWindow = presentation.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    const reactEvent = event as MouseEvent<HTMLButtonElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    const reactEventPrototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
+    if (
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      !nativeEvent.bubbles ||
+      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      !event.bubbles ||
+      event.defaultPrevented ||
+      nativeEvent.defaultPrevented ||
+      event.currentTarget !== source ||
+      target !== nativeEvent.target ||
+      !(target instanceof ownerWindow.Node) ||
+      target.ownerDocument !== presentation.ownerDocument ||
+      !source.contains(target) ||
+      !nativeEvent.composedPath().includes(source) ||
+      !nativeEvent.composedPath().includes(presentation.elements.card) ||
+      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
+      reactEvent._reactName !== "onClick" ||
+      typeof reactEvent.isDefaultPrevented !== "function" ||
+      typeof reactEvent.isPropagationStopped !== "function" ||
+      typeof reactEvent.persist !== "function" ||
+      !reviewCardDomContains(presentation.dom, target)
+    ) {
+      return null;
+    }
+    return nativeEvent;
+  };
+
+  const currentPresentation = (
+    action: ReviewCardAction,
+    event: MouseEvent<HTMLButtonElement>,
+  ): { presentation: ReviewCardPresentation; nativeEvent: globalThis.MouseEvent } | null => {
+    const runtime = currentRuntime;
+    const presentation = runtime?.presentation;
+    const element =
+      action.kind === "toggle"
+        ? presentation?.elements.toggle
+        : action.kind === "accept"
+          ? presentation?.elements.accept
+          : action.kind === "reject"
+            ? presentation?.elements.reject
+            : action.kind === "resolve"
+              ? presentation?.elements.resolve
+              : action.index === null
+                ? null
+                : presentation?.elements.rows[action.index]?.link;
+    const expectedAction =
+      action.kind === "toggle"
+        ? render.toggle
+        : action.kind === "accept"
+          ? render.accept
+          : action.kind === "reject"
+            ? render.reject
+            : action.kind === "resolve"
+              ? render.resolve
+              : action.index === null
+                ? null
+                : render.threadLinks[action.index];
+    if (
+      !runtime ||
+      !presentation ||
+      runtime.isRetired() ||
+      presentation.render !== render ||
+      presentation.authority !== authority ||
+      cells.active.current !== presentation ||
+      cells.retired.has(presentation) ||
+      action.renderIdentity !== identity ||
+      expectedAction !== action ||
+      !element ||
+      !element.isConnected ||
+      !reviewCardControlIsEnabled(element) ||
+      !action.enabled ||
+      !reviewCardFactsAreCurrent(authority) ||
+      !exactReviewCardDomIsCurrent(presentation) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return null;
+    }
+    const nativeEvent = nativeClick(presentation, element, event);
+    return nativeEvent ? { presentation, nativeEvent } : null;
+  };
+
+  const reserve = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>) => {
+    const current = currentPresentation(action, event);
+    if (
+      !current ||
+      cells.claimedEvents.has(event) ||
+      cells.claimedEvents.has(current.nativeEvent) ||
+      cells.claimedActions.has(action)
+    ) {
+      return null;
+    }
+    const presentationWasClaimed = cells.claimedPresentations.has(current.presentation);
+    cells.claimedPresentations.add(current.presentation);
+    cells.claimedEvents.add(event);
+    cells.claimedEvents.add(current.nativeEvent);
+    cells.claimedActions.add(action);
+    let pending = true;
+    return Object.freeze({
+      rollback: () => {
+        if (!pending) return;
+        pending = false;
+        cells.claimedEvents.delete(event);
+        cells.claimedEvents.delete(current.nativeEvent);
+        cells.claimedActions.delete(action);
+        if (!presentationWasClaimed) cells.claimedPresentations.delete(current.presentation);
+      },
+      retain: () => {
+        pending = false;
+      },
+      releaseAction: () => {
+        if (!pending) return;
+        pending = false;
+        cells.claimedActions.delete(action);
+      },
+    });
+  };
+
+  const invoke = (action: ReviewCardAction, event: MouseEvent<HTMLButtonElement>) => {
+    const claim = reserve(action, event);
+    if (!claim) return;
+    if (action.kind === "toggle") {
+      claim.retain();
+      render.retire();
+      authority.setOpen(!authority.open);
+      return;
+    }
+    if (action.kind === "thread") {
+      try {
+        authority.setActiveComment.call(authority.session, action.threadId!);
+      } finally {
+        claim.releaseAction();
+      }
+      return;
+    }
+
+    const targets = action.kind === "resolve" ? authority.renderedResolveTargets : authority.renderedSuggestionTargets;
+    const owner = claimCommentBatch(authority.coordinator, {
+      scope: authority.scope,
+      review: authority.review,
+      authorName: authority.reviewSnapshot.authorName,
+      action: action.kind === "accept" ? "review-accept" : action.kind === "reject" ? "review-reject" : "review-resolve",
+      targets,
+    });
+    if (!owner) {
+      claim.rollback();
+      return;
+    }
+    claim.retain();
+    void executeCommentBatch(authority.coordinator, owner, authority.ops, authority.onToast);
+  };
+
+  const action = (kind: ReviewCardActionKind, enabled: boolean, index: number | null = null, threadId: string | null = null) => {
+    const owner = new ReviewCardElementOwner<HTMLButtonElement>(onElementChange);
+    controlOwners.push(owner);
+    const owned = {} as ReviewCardAction;
+    Object.assign(owned, {
+      identity: Symbol(`review-card-${kind}`),
+      renderIdentity: identity,
+      kind,
+      index,
+      threadId,
+      enabled,
+      capture: owner.capture,
+      onClick: (event: MouseEvent<HTMLButtonElement>) => invoke(owned, event),
+    });
+    return Object.freeze(owned);
+  };
+
+  const toggle = action("toggle", true);
+  const acceptEnabled =
+    !authority.busy &&
+    !authority.blocked &&
+    authority.renderedSuggestionTargets.length === authority.pending.length &&
+    authority.applicable.length > 0;
+  const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
+  const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
+  const accept = authority.actionRegion === "suggestions" ? action("accept", acceptEnabled) : null;
+  const reject = authority.actionRegion === "suggestions" ? action("reject", rejectEnabled) : null;
+  const resolve = authority.actionRegion === "resolve" ? action("resolve", resolveEnabled) : null;
+  const threadLinks = authority.open ? authority.mine.map((thread, index) => action("thread", true, index, thread.id)) : [];
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay()) &&
+        acceptsSuccessorOf(lastRuntime.presentation)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (renderRetired || invalidBeforeEstablish) return undefined;
+    if (!reviewCardFactsAreCurrent(authority, true)) return undefined;
+    const elements = committedElements();
+    const placement = elements ? captureReviewCardPlacement(elements.card) : null;
+    if (!elements || !placement) return undefined;
+    const presentation: ReviewCardPresentation = Object.freeze({
+      identity: Symbol("review-card-presentation"),
+      render,
+      authority,
+      elements,
+      ownerDocument: elements.card.ownerDocument,
+      dom: snapshotReviewCardDom(elements.card),
+      placement,
+    });
+    if (!exactReviewCardDomIsCurrent(presentation)) return undefined;
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameAuthority = reviewCardAuthoritiesMatch(replay.source.authority, authority);
+      const exactReplay =
+        sameAuthority &&
+        replay.source.render.isRetired() &&
+        cells.retired.has(replay.source) &&
+        cells.successorOf.current === replay.source &&
+        replay.refsAreExact() &&
+        replay.historyIsClean() &&
+        elements.card === replay.dom.node &&
+        reviewCardPlacementMatches(elements.card, replay.placement) &&
+        reviewCardDomMatches(replay.dom);
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+      if (sameAuthority && !exactReplay) {
+        renderRetired = true;
+        cells.retired.add(presentation);
+        return undefined;
+      }
+    }
+
+    const previous = cells.active.current;
+    if (previous && previous !== presentation) previous.render.retire();
+    const transitionSource = cells.successorOf.current;
+    const owners = expectedOwners();
+    const replayOwners = new Set<ReviewCardElementOwnerView>();
+    // On an update, Strict Mode replays only refs for DOM that the update mounted.
+    if (transitionSource?.authority.mount === authority.mount) {
+      for (const owner of owners) {
+        const element = owner.element();
+        if (element && !reviewCardDomContains(transitionSource.dom, element)) replayOwners.add(owner);
+      }
+    }
+    const runtime = createRuntime(presentation, replayOwners);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish(owners)) {
+      runtime.retireForElement();
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const retire = () => {
+    if (renderRetired) return false;
+    if (currentRuntime) {
+      currentRuntime.retireForAction();
+      return true;
+    }
+    renderRetired = true;
+    return true;
+  };
+
+  Object.assign(render, {
+    identity,
+    authority,
+    toggle,
+    accept,
+    reject,
+    resolve,
+    threadLinks: Object.freeze(threadLinks),
+    captureCard: cardOwner.capture,
+    captureHeader: headerOwner.capture,
+    captureActions: actionsOwner.capture,
+    captureList: listOwner.capture,
+    captureRows: Object.freeze(rowOwners.map((owner) => owner.capture)),
+    captureToggle: toggle.capture,
+    onToggle: toggle.onClick,
+    captureAccept: accept?.capture ?? null,
+    onAccept: accept?.onClick ?? null,
+    captureReject: reject?.capture ?? null,
+    onReject: reject?.onClick ?? null,
+    captureResolve: resolve?.capture ?? null,
+    onResolve: resolve?.onClick ?? null,
+    captureThreadLinks: Object.freeze(threadLinks.map((link) => link.capture)),
+    onThreadClicks: Object.freeze(threadLinks.map((link) => link.onClick)),
+    establish,
+    retire,
+    isRetired: () => renderRetired,
+  });
+  return Object.freeze(render);
+}
+
+/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
+const ReviewCard = memo(function ReviewCard({ position, review, threads, session, text, ops, coordinator, onToast }: { position: number; review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"] }) {
+  const [open, setOpen] = useState(false);
+  const [mount] = useState(() => Symbol("review-card"));
+  const [cells] = useState<ReviewCardCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet<ReviewCardPresentation>(),
+    claimedPresentations: new WeakSet<ReviewCardPresentation>(),
+    claimedEvents: new WeakSet<object>(),
+    claimedActions: new WeakSet<ReviewCardAction>(),
+  }));
+  const replayCleanup = useRef(0);
+  useLayoutEffect(() => {
+    replayCleanup.current += 1;
+    return () => {
+      replayCleanup.current += 1;
+      const cleanup = replayCleanup.current;
+      queueMicrotask(() => {
+        // A Strict Mode setup cancels this; a real unmount releases a staged observer.
+        if (replayCleanup.current !== cleanup) return;
+        const replay = cells.replay.current;
+        if (!replay) return;
+        cells.replay.current = null;
+        if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+        replay.release();
+      });
+    };
+  }, [cells]);
+  const [, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const mine = reviewThreads(review, threads);
   const withSuggestion = commentSuggestionTargets(mine, text);
   const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
   const applicable = pending.filter((target) => target.state === "pending");
   const unresolved = mine.filter((t) => !t.resolved);
-
-  /** Each suggestion is its own transaction (its own undo step); failures are counted, not fatal. */
-  const decideAll = async (accept: boolean) => {
-    setBusy(true);
-    let done = 0;
-    let failed = 0;
-    try {
-      for (const { thread, reply, block } of accept ? applicable : pending) {
-        try {
-          const ok = accept ? await ops.acceptSuggestion(thread.id, block.text, reply?.id) : await ops.rejectSuggestion(thread.id, reply?.id);
-          if (ok) done++;
-          else failed++;
-        } catch {
-          failed++;
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-    const skipped = accept ? pending.length - applicable.length : 0;
-    const tail = [failed ? `${failed} failed` : "", skipped ? `${skipped} outdated skipped` : ""].filter(Boolean).join(", ");
-    onToast?.(`${accept ? "Accepted" : "Rejected"} ${done} suggestion${done === 1 ? "" : "s"} from ${review.authorName}${tail ? ` (${tail})` : ""}.`, failed ? "error" : "success");
-  };
-
-  /** Resolves every open thread of the review so a fully decided review can leave the Open tab (it lists under Resolved). */
-  const resolveAll = async () => {
-    setBusy(true);
-    let done = 0;
-    try {
-      for (const t of unresolved) {
-        try {
-          await ops.resolve(t.id, true);
-          done++;
-        } catch {
-          // Another collaborator may have resolved or deleted it while this batch was running.
-        }
-      }
-    } finally {
-      setBusy(false);
-    }
-    onToast?.(`Resolved ${done} comment${done === 1 ? "" : "s"} from ${review.authorName}.`, "success");
-  };
-
+  const renderedSuggestionTargets = pending.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
+  const renderedResolveTargets = unresolved.map((thread) => snapshotCommentResolveTarget(session, thread)).filter((target): target is CommentResolveBatchTarget => target !== null);
+  const renderedTargets = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
+  const scope = reviewBatchScope(review.id);
+  const batchState = useCommentBatchState(coordinator, scope, renderedTargets);
+  const busy = batchState.owner !== null;
   const partial = applicable.length !== pending.length;
   const acceptTitle = partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions";
+  const authority = createReviewCardAuthority({
+    mount,
+    position,
+    review,
+    threads,
+    session,
+    text,
+    ops,
+    coordinator,
+    onToast,
+    open,
+    setOpen,
+  });
+  const publication = createReviewCardRender(authority, cells, requestPublicationSuccessor);
+  useLayoutEffect(() => publication.establish(), [publication]);
+  const {
+    captureCard,
+    captureHeader,
+    captureActions,
+    captureList,
+    captureRows,
+    captureToggle,
+    onToggle,
+    captureAccept,
+    onAccept,
+    captureReject,
+    onReject,
+    captureResolve,
+    onResolve,
+    captureThreadLinks,
+    onThreadClicks,
+  } = publication;
 
   return (
-    <div className="review-card" data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
-      <div className="flex items-start gap-2.5">
+    <div ref={captureCard} className={REVIEW_CARD_CLASS} data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
+      <div ref={captureHeader} className={REVIEW_HEADER_CLASS} data-testid="review-header">
         <AuthorAvatar id={review.collabAuthorId} name={review.authorName} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2">
@@ -1647,66 +6087,76 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
           </div>
           {review.summary && <MentionBody body={review.summary} className="mt-1 text-[13px] leading-5 text-ink-2" />}
         </div>
-        <button type="button" className="icon-btn h-7 w-7 shrink-0" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
+        <button ref={captureToggle} type="button" className={REVIEW_TOGGLE_CLASS} onClick={onToggle} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
           {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         </button>
       </div>
       {/* Two equal columns, single-line labels at every panel width (280–720 px). The "(n of m)" count only
           shows once the row is wide enough for it; the tooltip always carries the full wording. */}
-      {canEdit && pending.length > 0 && (
-        <div className="@container mt-2 grid grid-cols-2 gap-2">
+      {authority.actionRegion === "suggestions" && (
+        <div ref={captureActions} className={REVIEW_SUGGESTION_ACTIONS_CLASS} data-testid="review-actions">
           <button
+            ref={captureAccept}
             type="button"
-            className="btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2"
-            disabled={busy || applicable.length === 0}
-            onClick={() => void decideAll(true)}
+            className={REVIEW_ACCEPT_CLASS}
+            disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length || applicable.length === 0}
+            aria-busy={batchState.owner?.action === "review-accept" || undefined}
+            onClick={onAccept!}
             title={acceptTitle}
             aria-label={acceptTitle}
             data-testid="review-accept-all"
           >
-            <CheckCheck size={13} aria-hidden /> Accept all
+            {batchState.owner?.action === "review-accept" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <CheckCheck size={13} aria-hidden />}
+            {batchState.owner?.action === "review-accept" ? "Accepting…" : "Accept all"}
             {partial && <span className="hidden text-[11px] opacity-80 @min-[18rem]:inline">({applicable.length} of {pending.length})</span>}
           </button>
           <button
+            ref={captureReject}
             type="button"
-            className="btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2"
-            disabled={busy}
-            onClick={() => void decideAll(false)}
+            className={REVIEW_REJECT_CLASS}
+            disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length}
+            aria-busy={batchState.owner?.action === "review-reject" || undefined}
+            onClick={onReject!}
             title="Reject all suggestions"
             aria-label="Reject all suggestions"
             data-testid="review-reject-all"
           >
-            <X size={13} aria-hidden /> Reject all
+            {batchState.owner?.action === "review-reject" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <X size={13} aria-hidden />}
+            {batchState.owner?.action === "review-reject" ? "Rejecting…" : "Reject all"}
           </button>
         </div>
       )}
       {/* Every suggestion decided but comments still open: one click clears the review from Open. */}
-      {canComment && pending.length === 0 && unresolved.length > 0 && (
-        <div className="mt-2 flex">
+      {authority.actionRegion === "resolve" && (
+        <div ref={captureActions} className={REVIEW_RESOLVE_ACTIONS_CLASS} data-testid="review-actions">
           <button
+            ref={captureResolve}
             type="button"
-            className="btn btn-sm btn-outline gap-1.5 whitespace-nowrap"
-            disabled={busy}
-            onClick={() => void resolveAll()}
+            className={REVIEW_RESOLVE_CLASS}
+            disabled={busy || batchState.blocked || renderedResolveTargets.length !== unresolved.length}
+            aria-busy={batchState.owner?.action === "review-resolve" || undefined}
+            onClick={onResolve!}
             title={`Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`}
             data-testid="review-resolve-all"
           >
-            <Check size={13} aria-hidden /> Resolve all
+            {batchState.owner?.action === "review-resolve" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Check size={13} aria-hidden />}
+            {batchState.owner?.action === "review-resolve" ? "Resolving…" : "Resolve all"}
           </button>
         </div>
       )}
       {open && (
-        <ul className="mt-2 flex flex-col gap-1 border-t border-line pt-2" data-testid="review-threads">
-          {mine.map((t) => {
+        <ul ref={captureList} className={REVIEW_THREADS_CLASS} data-testid="review-threads">
+          {mine.map((t, index) => {
             const targets = withSuggestion.filter((target) => target.thread.id === t.id);
             const pendingTargets = targets.filter((target) => target.state === "pending" || target.state === "outdated");
             const state = targets.length === 1 ? targets[0].state : pendingTargets.length > 0 ? `${pendingTargets.length} pending` : targets.length > 0 ? "all decided" : null;
             return (
-              <li key={t.id}>
+              <li ref={captureRows[index]} key={t.id} data-testid="review-thread-row">
                 <button
+                  ref={captureThreadLinks[index]}
                   type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2"
-                  onClick={() => session.setActiveComment(t.id)}
+                  className={REVIEW_THREAD_LINK_CLASS}
+                  onClick={onThreadClicks[index]}
                   data-testid="review-thread-link"
                   data-thread-id={t.id}
                 >
@@ -1724,26 +6174,172 @@ function ReviewCard({ review, threads, session, text, ops, onToast }: { review: 
       )}
     </div>
   );
+});
+
+interface ReviewLoadState {
+  documentId: string;
+  reviews: ReviewDto[];
+  loaded: boolean;
+  loading: boolean;
+  error: boolean;
 }
 
-/** Review cards for the document; re-fetched when a `review.create` shows up in the live activity (cheap: reviews are rare). */
-function useReviews(session: CollabSession): ReviewDto[] {
-  const [reviews, setReviews] = useState<ReviewDto[]>([]);
+interface ReviewLoadCoordinator {
+  mounted: boolean;
+  initialized: boolean;
+  documentId: string;
+  threadCount: number;
+  version: number;
+  request: { documentId: string; version: number } | null;
+}
+
+function initialReviewLoadState(documentId: string): ReviewLoadState {
+  return { documentId, reviews: [], loaded: false, loading: true, error: false };
+}
+
+/** Review cards for the document; thread-count changes coalesce behind one stale-safe request. */
+function useReviews(session: CollabSession): ReviewLoadState & { retry: () => void } {
   const threadCount = useSessionValue(session, (s) => s.comments.ymap.size);
-  useEffect(() => {
-    let cancelled = false;
-    api.documents
-      .reviews(session.docId)
-      .then((r) => {
-        if (!cancelled) setReviews(r.reviews);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
+  const [state, setState] = useState<ReviewLoadState>(() => initialReviewLoadState(session.docId));
+  const coordinator = useRef<ReviewLoadCoordinator>({
+    mounted: true,
+    initialized: false,
+    documentId: session.docId,
+    threadCount,
+    version: 0,
+    request: null,
+  });
+
+  const load = useCallback(function loadReviews() {
+    const current = coordinator.current;
+    if (!current.mounted || current.request) return;
+
+    const request = { documentId: current.documentId, version: current.version };
+    current.request = request;
+    setState((previous) =>
+      previous.documentId === request.documentId
+        ? { ...previous, loading: true }
+        : initialReviewLoadState(request.documentId),
+    );
+
+    const settle = (reviews: ReviewDto[] | null) => {
+      const latest = coordinator.current;
+      if (latest.request !== request) return;
+      latest.request = null;
+      if (!latest.mounted) return;
+      if (request.documentId !== latest.documentId || request.version !== latest.version) {
+        loadReviews();
+        return;
+      }
+      setState((previous) => {
+        if (previous.documentId !== request.documentId) return previous;
+        if (reviews === null) return { ...previous, loading: false, error: true };
+        return { ...previous, reviews, loaded: true, loading: false, error: false };
+      });
     };
-    // A review adds threads to the shared doc; a changed thread count is the cue to re-fetch.
-  }, [session.docId, threadCount]);
-  return reviews;
+
+    void api.documents.reviews(request.documentId).then(
+      (response) => settle(response.reviews),
+      () => settle(null),
+    );
+  }, []);
+
+  useEffect(() => {
+    const current = coordinator.current;
+    current.mounted = true;
+    return () => {
+      current.mounted = false;
+      current.version += 1;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const current = coordinator.current;
+    current.mounted = true;
+    if (!current.initialized || current.documentId !== session.docId) {
+      current.initialized = true;
+      current.documentId = session.docId;
+      current.threadCount = threadCount;
+      current.version += 1;
+      setState(initialReviewLoadState(session.docId));
+      load();
+    }
+  }, [load, session.docId, threadCount]);
+
+  useEffect(() => {
+    const current = coordinator.current;
+    if (!current.mounted || current.documentId !== session.docId || current.threadCount === threadCount) return;
+    current.threadCount = threadCount;
+    current.version += 1;
+    load();
+  }, [load, session.docId, threadCount]);
+
+  const retry = useCallback(() => {
+    const current = coordinator.current;
+    if (!current.mounted || current.documentId !== session.docId || current.request) return;
+    current.version += 1;
+    load();
+  }, [load, session.docId]);
+
+  const visibleState = state.documentId === session.docId ? state : initialReviewLoadState(session.docId);
+  return { ...visibleState, retry };
+}
+
+function PublishedSuggestionBatchActions({
+  session,
+  text,
+  localSources,
+  localTargetSnapshots,
+  commentSources,
+  targets,
+  coordinator,
+  batchOwner,
+  blocked,
+  ops,
+  onToast,
+}: {
+  session: CollabSession;
+  text: string;
+  localSources: readonly SuggestionGroup[];
+  localTargetSnapshots: readonly (LocalSuggestionBatchTarget | null)[];
+  commentSources: readonly CommentSuggestionTarget[];
+  targets: readonly CommentBatchTarget[];
+  coordinator: CommentRowActionCoordinator;
+  batchOwner: CommentBatchOwner | null;
+  blocked: boolean;
+  ops: ReturnType<typeof useCommentOps>;
+  onToast: CommentsPanelProps["onToast"];
+}) {
+  const [claims] = useState<SuggestionBatchClaimCells>(() => ({
+    authorities: new WeakSet<SuggestionBatchAuthority>(),
+    targets: new WeakSet<object>(),
+    owners: new WeakSet<CommentBatchOwner>(),
+  }));
+  const authority = createSuggestionBatchAuthority({
+    session,
+    text,
+    localSources,
+    localTargetSnapshots,
+    commentSources,
+    targets,
+    coordinator,
+    batchOwner,
+    blocked,
+    ops,
+    onToast,
+    claims,
+  });
+  return (
+    <PublishedSuggestionActions
+      state="pending"
+      canAccept
+      canReject
+      onAccept={() => invokeSuggestionBatch(authority, true)}
+      onReject={() => invokeSuggestionBatch(authority, false)}
+      presentation={authority.presentation}
+      batch={authority}
+    />
+  );
 }
 
 export function CommentsPanel({
@@ -1758,9 +6354,11 @@ export function CommentsPanel({
   focusOnMount = false,
   onToast,
 }: CommentsPanelProps) {
+  const [visit] = useState<CommentPanelVisit>(() => ({ marker: "comment-panel-visit" }));
   // Threads are selected on their own so a change elsewhere (active thread, reveal, pending composer)
   // keeps the same thread objects and the memoised cards skip their render.
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
+  const actionCoordinator = useCommentRowActionCoordinator(session, visit, threads);
   const text = useSessionValue(session, (s) => s.ytext.toString());
   const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode, canEdit } = useSessionValue(
     session,
@@ -1776,8 +6374,23 @@ export function CommentsPanel({
     jsonEqual,
   );
   const ops = useCommentOps(session);
-  // The user's own tokens join the picker once a picker has opened; most panels never mention anyone.
-  const [withOwnTokens, setWithOwnTokens] = useState(false);
+  // A replacement session gets its own lazy-load gate: an old picker opening must not eagerly fetch the new viewer.
+  const tokenViewerLogin = session.user.login?.toLowerCase() ?? null;
+  const tokenViewerName = session.user.name;
+  const [tokenRequestIdentity, setTokenRequestIdentity] = useState<{ session: CollabSession; viewerLogin: string; viewerName: string } | null>(null);
+  const withOwnTokens =
+    tokenViewerLogin !== null &&
+    tokenRequestIdentity?.session === session &&
+    tokenRequestIdentity.viewerLogin === tokenViewerLogin &&
+    tokenRequestIdentity.viewerName === tokenViewerName;
+  const requestOwnTokens = useCallback(() => {
+    if (tokenViewerLogin === null) return;
+    setTokenRequestIdentity((current) =>
+      current?.session === session && current.viewerLogin === tokenViewerLogin && current.viewerName === tokenViewerName
+        ? current
+        : { session, viewerLogin: tokenViewerLogin, viewerName: tokenViewerName },
+    );
+  }, [session, tokenViewerLogin, tokenViewerName]);
   const { candidates, tokenCount } = useMentionCandidates(session, withOwnTokens);
   // "Connect an agent" under the picker for a user whose token list came back empty, until dismissed (#1025).
   const [connectDismissed, setConnectDismissed] = useState(readConnectDismissed);
@@ -1793,10 +6406,10 @@ export function CommentsPanel({
     () => ({
       candidates,
       viewerLogin: session.user.login ?? null,
-      onPickerOpen: () => setWithOwnTokens(true),
+      onPickerOpen: requestOwnTokens,
       connect: { due: tokenCount === 0 && !connectDismissed, onCreateToken, onDismiss: dismissConnect },
     }),
-    [candidates, session.user.login, tokenCount, connectDismissed, onCreateToken, dismissConnect],
+    [candidates, session.user.login, requestOwnTokens, tokenCount, connectDismissed, onCreateToken, dismissConnect],
   );
   // The agent entries only, and the same reference while they read the same: the cards' request chips read this
   // and stay out of every other candidate change (#1382).
@@ -1853,7 +6466,8 @@ export function CommentsPanel({
     },
     [session, postAgentRequest],
   );
-  const reviews = useReviews(session);
+  const { reviews, loaded: reviewsLoaded, loading: reviewsLoading, error: reviewsError, retry: retryReviews } = useReviews(session);
+  useLayoutEffect(() => syncCommentBatchReviews(actionCoordinator, reviews), [actionCoordinator, reviews]);
   const unreadRefs = useUnreadRefs(session.docId);
   const hasUnread = (t: CommentThread) => unreadRefs.has(t.id) || t.replies.some((r) => unreadRefs.has(r.id));
   const open = threads.filter((t) => !t.resolved);
@@ -1878,7 +6492,13 @@ export function CommentsPanel({
     }
     return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
   });
-  const [bulkBusy, setBulkBusy] = useState(false);
+  const renderedLocalSuggestionTargetSnapshots = snapshotLocalSuggestionTargets(session, suggestions, suggestions);
+  const renderedLocalSuggestionTargets = renderedLocalSuggestionTargetSnapshots.filter((target): target is LocalSuggestionBatchTarget => target !== null);
+  const renderedCommentSuggestionTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
+  const renderedSuggestionBatchTargets = [...renderedLocalSuggestionTargets, ...renderedCommentSuggestionTargets];
+  // The global controls only exist on this tab. Elsewhere, do not subscribe the panel to every row owner:
+  // the affected review and thread cards update without rerendering unrelated cards.
+  const suggestionBatchState = useCommentBatchState(actionCoordinator, SUGGESTIONS_SCOPE, tab === "suggestions" ? renderedSuggestionBatchTargets : []);
   const canAct = session.role === "owner" || session.role === "editor";
   const tablistRef = useRef<HTMLDivElement>(null);
 
@@ -1968,34 +6588,21 @@ export function CommentsPanel({
     items[next]?.focus();
   };
 
-  const decideAllSuggestions = async (accept: boolean) => {
-    setBulkBusy(true);
-    try {
-      session.reviewSuggestion(accept ? "acceptAll" : "rejectAll");
-      for (const { thread, reply, block, state } of commentSuggestions) {
-        if (accept && state === "outdated") continue;
-        try {
-          if (accept) await ops.acceptSuggestion(thread.id, block.text, reply?.id);
-          else await ops.rejectSuggestion(thread.id, reply?.id);
-        } catch {
-          // Another collaborator may have decided it while this batch was running.
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof SuggestionConflictError)) throw error;
-      onToast?.(error.message, "error");
-    } finally {
-      setBulkBusy(false);
-    }
-  };
-
   return (
     <MentionCandidatesContext.Provider value={mentionValue}>
     <AgentNamesContext.Provider value={agentNamesValue}>
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="comments-panel">
       <div className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
         <span className="pane-label">Comments</span>
-        <button type="button" className="icon-btn h-8 w-8" onClick={onClose} aria-label="Close comments">
+        <button
+          type="button"
+          className="icon-btn h-8 w-8"
+          onClick={() => {
+            retireCommentRowActions(actionCoordinator);
+            onClose();
+          }}
+          aria-label="Close comments"
+        >
           <X size={16} />
         </button>
       </div>
@@ -2028,10 +6635,25 @@ export function CommentsPanel({
         )}
       </div>
       <div className="scrollbar-thin flex flex-1 flex-col gap-3 overflow-x-hidden overflow-y-auto p-3" role="tabpanel" id="comments-tabpanel" aria-labelledby={`comments-tab-${tab}`}>
+        {tab !== "suggestions" && reviewsError && (
+          <div className="flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="reviews-error">
+            <span className="min-w-0 flex-1">{reviewsLoaded ? "Review details may be out of date." : "Couldn’t load review details."}</span>
+            <button type="button" className="btn btn-sm btn-outline shrink-0 gap-1.5" onClick={retryReviews} disabled={reviewsLoading} aria-busy={reviewsLoading || undefined}>
+              {reviewsLoading && <Loader2 size={13} className="animate-spin" aria-hidden />}
+              {reviewsLoading ? "Retrying…" : "Retry"}
+            </button>
+          </div>
+        )}
+        {tab !== "suggestions" && !reviewsError && reviewsLoading && (
+          <div className="flex items-center gap-2 rounded-lg bg-surface px-3 py-2 text-xs text-ink-3 ring-1 ring-line" role="status" data-testid="reviews-loading">
+            <Loader2 size={13} className="animate-spin" aria-hidden />
+            {reviewsLoaded ? "Refreshing review details…" : "Loading review details…"}
+          </div>
+        )}
         {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
-            {openReviews.map((r) => (
-              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
+            {openReviews.map((r, index) => (
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
@@ -2054,9 +6676,11 @@ export function CommentsPanel({
               initial={seed?.initial ?? ""}
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               request={{ canEdit, defaultMode: "suggest" }}
-              onSubmit={async (body, req) => {
+              onSubmit={(body) => {
                 const quote = session.ytext.toString().slice(pending.from, pending.to);
-                const id = await ops.add(pending.from, pending.to, body);
+                return ops.add(pending.from, pending.to, body).then((id) => ({ id, quote }));
+              }}
+              onSuccess={({ id, quote }, body, req) => {
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
                 onPendingDone?.();
@@ -2072,7 +6696,7 @@ export function CommentsPanel({
           </div>
         )}
         {tab === "open" &&
-          (open.length === 0 && !pending ? (
+          (open.length === 0 && !pending && reviewsLoaded ? (
             <EmptyState icon={<MessageSquare size={28} />} title="No open comments">
               {suggestionCount > 0 && (
                 <span className="mb-3 flex flex-wrap items-center justify-center gap-1 text-ink-3" data-testid="comments-empty-suggestions">
@@ -2097,6 +6721,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
+                actionCoordinator={actionCoordinator}
                 outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
@@ -2112,13 +6737,13 @@ export function CommentsPanel({
           ))}
         {tab === "resolved" && resolvedReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
-            {resolvedReviews.map((r) => (
-              <ReviewCard key={r.id} review={r} threads={threads} session={session} text={text} ops={ops} onToast={onToast} />
+            {resolvedReviews.map((r, index) => (
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
             ))}
           </div>
         )}
         {tab === "resolved" &&
-          (resolved.length === 0 && resolvedReviews.length === 0 ? (
+          (resolved.length === 0 && resolvedReviews.length === 0 && reviewsLoaded ? (
             <EmptyState title="Nothing resolved yet" />
           ) : (
             resolved.map((t) => (
@@ -2126,6 +6751,7 @@ export function CommentsPanel({
                 key={t.id}
                 thread={t}
                 session={session}
+                actionCoordinator={actionCoordinator}
                 outdated={isSuggestionOutdated(t, text)}
                 active={t.id === activeCommentId}
                 unread={hasUnread(t)}
@@ -2147,20 +6773,19 @@ export function CommentsPanel({
           ) : (
             <>
               {canAct && (
-                <div className="flex items-center justify-end gap-2 text-xs">
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost text-success"
-                    disabled={bulkBusy || suggestions.some((s) => s.outdated) || (suggestions.length === 0 && commentSuggestions.every((target) => target.state === "outdated"))}
-                    onClick={() => void decideAllSuggestions(true)}
-                    data-testid="accept-all"
-                  >
-                    Accept all
-                  </button>
-                  <button type="button" className="btn btn-sm btn-ghost text-danger" disabled={bulkBusy || suggestions.some((s) => s.outdated)} onClick={() => void decideAllSuggestions(false)} data-testid="reject-all">
-                    Reject all
-                  </button>
-                </div>
+                <PublishedSuggestionBatchActions
+                  session={session}
+                  text={text}
+                  localSources={suggestions}
+                  localTargetSnapshots={renderedLocalSuggestionTargetSnapshots}
+                  commentSources={commentSuggestions}
+                  targets={renderedSuggestionBatchTargets}
+                  coordinator={actionCoordinator}
+                  batchOwner={suggestionBatchState.owner}
+                  blocked={suggestionBatchState.blocked}
+                  ops={ops}
+                  onToast={onToast}
+                />
               )}
               {suggestions.map((s) => (
                 <SuggestionCard key={s.id} s={s} session={session} active={s.id === activeSuggestionId} onReveal={onReveal} onToast={onToast} />
@@ -2170,6 +6795,7 @@ export function CommentsPanel({
                   key={`suggestion-${thread.id}`}
                   thread={thread}
                   session={session}
+                  actionCoordinator={actionCoordinator}
                   outdated={isSuggestionOutdated(thread, text)}
                   active={thread.id === activeCommentId}
                   unread={hasUnread(thread)}

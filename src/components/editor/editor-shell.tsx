@@ -1,7 +1,8 @@
 "use client";
 import { navigateTo } from "@/lib/nav";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { flushSync } from "react-dom";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import type { EditorView as CMView } from "@codemirror/view";
@@ -14,7 +15,7 @@ import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
 import { activateHighlight } from "@/editor/highlight-activation";
-import { api, ApiError, apiErrorText, type SyncStatusDto } from "@/lib/api";
+import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
@@ -33,6 +34,7 @@ import { StatusBar, type Layout } from "./status-bar";
 import type { VersionPreview } from "./versions-panel";
 import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY, clampPanelWidth, panelMaxFor, parseStoredPanelWidth } from "./panel-resize-handle";
 import type { SyncActions } from "./sync-dialog";
+import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 import { emptySync, useSyncPolling } from "./use-sync-polling";
@@ -71,7 +73,12 @@ const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { 
 // exactly one `import()` here, shared by its components and by any prefetch (`prefetchVersions`), so it gets
 // exactly one chunk.
 const loadCommentsPanel = () => import("./comments-panel");
-const loadVersionsPanel = () => import("./versions-panel");
+let loadedVersionsPanelModule: typeof import("./versions-panel") | null = null;
+const loadVersionsPanel = () =>
+  import("./versions-panel").then((module) => {
+    loadedVersionsPanelModule = module;
+    return module;
+  });
 const loadActivityPanel = () => import("./activity-panel");
 const loadShareDialog = () => import("./share-dialog");
 const loadGitHubDialog = () => import("./github-dialog");
@@ -83,7 +90,11 @@ const loadCommandPalette = () => import("./command-palette");
 const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
 const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
 const ActivityPanel = lazyOnFirstUse(loadActivityPanel, (m) => m.ActivityPanel, () => <SidePanelPlaceholder title="Activity" />);
-const VersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const LazyVersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const VersionDiffView: typeof import("./versions-panel").VersionDiffView = (props) => {
+  const Ready = loadedVersionsPanelModule?.VersionDiffView;
+  return Ready ? <Ready {...props} /> : <LazyVersionDiffView {...props} />;
+};
 const ShareDialog = lazyOnFirstUse(loadShareDialog, (m) => m.ShareDialog);
 const GitHubDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.GitHubDialog);
 const CommitDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.CommitDialog);
@@ -110,7 +121,7 @@ import { buildCommands, type EditorCommandContext } from "./commands";
 import type { NotificationDto } from "@/lib/api";
 import { notificationHref } from "@/components/notifications/open";
 import type { FindMatch } from "@/editor/find";
-import type { PresenceUser } from "@/editor/collab/session";
+import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import type { NoticeAction } from "@/editor/markdown/tsv";
 import { findShortcutAction, isMac } from "@/lib/utils";
 
@@ -134,16 +145,1500 @@ export interface EditorShellProps {
   initialHtml?: string | null;
 }
 
-interface Toast {
-  id: number;
-  message: string;
-  kind: "info" | "error" | "success";
-  action?: { label: string; href?: string; onClick?: () => void };
+type PublishPullKind = "publish" | "pull";
+type EditorIdentity = { documentId: string; session: CollabSession };
+type PreviewSourceKind = "versions" | "github-compare";
+type PreviewProducer = (preview: VersionPreview | null) => void;
+const PREVIEW_ROOT_CLASS = "flex h-full min-h-0 min-w-0 flex-col";
+const PREVIEW_BAR_CLASS = "flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2";
+const PREVIEW_BACK_CLASS = "btn btn-sm btn-outline ml-auto";
+const PREVIEW_MESSAGE = "Comparing GitHub\\u2019s copy with this document.";
+type ToastKind = "info" | "error" | "success";
+interface ToastAction {
+  readonly label: string;
+  readonly href?: string;
+  readonly onClick?: () => void;
 }
+interface ToastAuthority {
+  readonly mount: symbol;
+  readonly editor: EditorIdentity;
+  readonly userId: string;
+  readonly role: Role;
+}
+interface ToastPublication {
+  readonly authority: ToastAuthority;
+  readonly message: string;
+  readonly kind: ToastKind;
+  readonly action?: ToastAction;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+type PublishPullOwner = { editor: EditorIdentity; kind: PublishPullKind };
+type DocumentMutationAction = "delete" | "duplicate";
+type DocumentMutationOwner = {
+  editor: EditorIdentity;
+  session: CollabSession;
+  documentId: string;
+  title: string;
+  storage: DocumentDto["storage"];
+  action: DocumentMutationAction;
+  operation: number;
+};
+interface EditorPreviewVisit {
+  readonly generation: symbol;
+  readonly revision: number;
+  readonly mount: symbol;
+  readonly editor: EditorIdentity;
+  readonly document: DocumentDto;
+  readonly documentId: string;
+  readonly storage: DocumentDto["storage"];
+  readonly gistId: string | null;
+  readonly gistFile: string | null;
+  readonly repoOwner: string | null;
+  readonly repoName: string | null;
+  readonly repoBranch: string | null;
+  readonly repoPath: string | null;
+  readonly githubUrl: string | null;
+  readonly session: CollabSession;
+  readonly actions: EditorActions;
+  readonly versionsProducer: PreviewProducer;
+  readonly githubProducer: (preview: VersionPreview) => void;
+  readonly captureContainer: (element: HTMLDivElement | null) => void;
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+  readonly owns: () => boolean;
+  readonly container: () => HTMLDivElement | null;
+}
+interface PreviewValueFacts {
+  readonly preview: VersionPreview;
+  readonly version: VersionPreview["version"];
+  readonly versionFacts: Readonly<VersionSummary>;
+  readonly content: string;
+  readonly base: VersionPreview["base"];
+  readonly baseVersion: VersionSummary | null;
+  readonly baseVersionFacts: Readonly<VersionSummary> | null;
+  readonly baseContent: string | null;
+  readonly range: VersionPreview["range"];
+  readonly rangeVersions: readonly VersionPreview["version"][] | null;
+  readonly rangeFacts: readonly Readonly<VersionSummary>[] | null;
+}
+interface PreviewSelection {
+  readonly action: symbol;
+  readonly visit: EditorPreviewVisit;
+  readonly producer: PreviewProducer;
+  readonly source: PreviewSourceKind;
+  readonly value: PreviewValueFacts;
+}
+interface PreviewPresentationAuthority {
+  readonly generation: symbol;
+  readonly revision: number;
+  readonly mount: symbol;
+  readonly selection: PreviewSelection;
+  readonly rootClass: string;
+  readonly barClass: string;
+  readonly backClass: string;
+  readonly message: string;
+}
+interface PreviewPresentation {
+  readonly authority: PreviewPresentationAuthority;
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly captureBack: (element: HTMLButtonElement | null) => void;
+  readonly establish: () => void;
+  readonly retireLayout: () => boolean;
+  readonly retire: () => void;
+  readonly activateBack: (event: React.MouseEvent<HTMLButtonElement>) => void;
+}
+interface PreviewGrant {
+  readonly generation: symbol;
+  readonly publication: PreviewPresentation;
+  readonly committed: PreviewDomSnapshot;
+  actionClaimed: boolean;
+  retired: boolean;
+  readonly retire: () => void;
+}
+interface PreviewVisitCells {
+  readonly active: {
+    current: EditorPreviewVisit | null;
+    revision: number;
+  };
+  readonly replay: { current: PreviewVisitSuccessor | null };
+  readonly retired: WeakSet<EditorPreviewVisit>;
+}
+interface PreviewPublicationCells {
+  readonly active: {
+    current: PreviewGrant | null;
+    revision: number;
+  };
+  readonly replay: { current: PreviewPublicationSuccessor | null };
+  readonly claimedEvents: WeakSet<object>;
+  readonly claimedActions: WeakSet<object>;
+}
+interface PreviewPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+}
+interface PreviewContainerSnapshot extends PreviewPlacement {
+  readonly element: HTMLDivElement;
+  readonly className: string;
+}
+interface PreviewVisitSuccessor {
+  readonly source: EditorPreviewVisit;
+  readonly snapshot: PreviewContainerSnapshot;
+  readonly revision: number;
+}
+interface PreviewNodeSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly PreviewNodeSnapshot[];
+}
+interface PreviewDomSnapshot extends PreviewPlacement {
+  readonly root: HTMLDivElement;
+  readonly content: HTMLDivElement;
+  readonly bar: HTMLDivElement | null;
+  readonly back: HTMLButtonElement | null;
+  readonly rootAttributes: readonly (readonly [string, string])[];
+  readonly rootChildren: readonly Node[];
+  readonly barSnapshot: PreviewNodeSnapshot | null;
+  readonly backTargets: readonly Node[];
+}
+interface PreviewPublicationSuccessor {
+  readonly source: PreviewPresentation;
+  readonly authority: PreviewPresentationAuthority;
+  readonly committed: PreviewDomSnapshot;
+  readonly history: PreviewMutationHistory;
+  readonly revision: number;
+}
+interface GitHubCompareRequest {
+  readonly visit: EditorPreviewVisit;
+  readonly document: DocumentDto;
+  readonly documentId: string;
+  readonly request: symbol;
+}
+
+type PreviewVisitPhase =
+  | "mounting"
+  | "active"
+  | "layout-retired"
+  | "ref-detached"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+type PreviewPresentationPhase =
+  | "mounting"
+  | "active"
+  | "refs-detaching"
+  | "refs-detached"
+  | "refs-attaching"
+  | "layout-retired"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+type PreviewElementName = "root" | "back";
+
+function freezeVersionSummary(version: VersionSummary): Readonly<VersionSummary> {
+  return Object.freeze({
+    id: version.id,
+    number: version.number,
+    title: version.title,
+    kind: version.kind,
+    createdBy: version.createdBy,
+    createdByName: version.createdByName,
+    commitSha: version.commitSha,
+    createdAt: version.createdAt,
+    size: version.size,
+  });
+}
+
+function versionSummaryMatches(version: VersionSummary, facts: Readonly<VersionSummary>) {
+  return (
+    version.id === facts.id &&
+    version.number === facts.number &&
+    version.title === facts.title &&
+    version.kind === facts.kind &&
+    version.createdBy === facts.createdBy &&
+    version.createdByName === facts.createdByName &&
+    version.commitSha === facts.commitSha &&
+    version.createdAt === facts.createdAt &&
+    version.size === facts.size
+  );
+}
+
+function freezePreviewValue(preview: VersionPreview): PreviewValueFacts {
+  const rangeVersions = preview.range ? Object.freeze([...preview.range]) : null;
+  return Object.freeze({
+    preview,
+    version: preview.version,
+    versionFacts: freezeVersionSummary(preview.version),
+    content: preview.content,
+    base: preview.base,
+    baseVersion: preview.base?.version ?? null,
+    baseVersionFacts: preview.base ? freezeVersionSummary(preview.base.version) : null,
+    baseContent: preview.base?.content ?? null,
+    range: preview.range,
+    rangeVersions,
+    rangeFacts: rangeVersions
+      ? Object.freeze(rangeVersions.map(freezeVersionSummary))
+      : null,
+  });
+}
+
+function previewValueMatches(value: PreviewValueFacts) {
+  const { preview } = value;
+  if (
+    preview !== value.preview ||
+    preview.version !== value.version ||
+    !versionSummaryMatches(preview.version, value.versionFacts) ||
+    preview.content !== value.content ||
+    preview.base !== value.base ||
+    preview.range !== value.range
+  ) {
+    return false;
+  }
+  if (value.base) {
+    if (
+      value.base.version !== value.baseVersion ||
+      !value.baseVersionFacts ||
+      !versionSummaryMatches(value.base.version, value.baseVersionFacts) ||
+      value.base.content !== value.baseContent
+    ) {
+      return false;
+    }
+  } else if (
+    value.baseVersion !== null ||
+    value.baseVersionFacts !== null ||
+    value.baseContent !== null
+  ) {
+    return false;
+  }
+  if (!value.range || !value.rangeVersions || !value.rangeFacts) {
+    return (
+      value.range === undefined &&
+      value.rangeVersions === null &&
+      value.rangeFacts === null
+    );
+  }
+  return (
+    value.range.length === value.rangeVersions.length &&
+    value.range.length === value.rangeFacts.length &&
+    value.range.every((version, index) =>
+      version === value.rangeVersions?.[index] &&
+      Boolean(value.rangeFacts?.[index] &&
+        versionSummaryMatches(version, value.rangeFacts[index]!)))
+  );
+}
+
+function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function attributesMatch(
+  element: Element,
+  expected: readonly (readonly [string, string])[],
+) {
+  const current = snapshotAttributes(element);
+  return Boolean(
+    current &&
+    current.length === expected.length &&
+    current.every(([name, value], index) =>
+      name === expected[index]?.[0] && value === expected[index]?.[1]),
+  );
+}
+
+function snapshotPreviewNode(node: Node): PreviewNodeSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotPreviewNode)),
+  });
+}
+
+function previewNodeMatches(snapshot: PreviewNodeSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) =>
+      name !== snapshot.attributes?.[index]?.[0] ||
+      value !== snapshot.attributes?.[index]?.[1])
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && previewNodeMatches(child))
+  );
+}
+
+function descendantsOf(element: Element): readonly Node[] {
+  const nodes: Node[] = [];
+  const collect = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) collect(child);
+  };
+  collect(element);
+  return Object.freeze(nodes);
+}
+
+function capturePreviewPlacement(element: HTMLElement): PreviewPlacement | null {
+  const parent = element.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: element.ownerDocument,
+    parent,
+  });
+}
+
+function previewPlacementMatches(element: HTMLElement, placement: PreviewPlacement) {
+  return (
+    element.ownerDocument === placement.document &&
+    element.parentNode === placement.parent
+  );
+}
+
+class PreviewMutationHistory {
+  private dirty = false;
+  private readonly rootObserver: MutationObserver;
+  private readonly placementObserver: MutationObserver;
+
+  constructor(
+    private readonly committed: PreviewDomSnapshot,
+    private readonly onDirty: () => void,
+  ) {
+    const ownerWindow = committed.document.defaultView;
+    if (!ownerWindow) throw new Error("The preview root has no owner window");
+    this.rootObserver = new ownerWindow.MutationObserver((records) => {
+      if (this.recordRoot(records)) this.onDirty();
+    });
+    this.placementObserver = new ownerWindow.MutationObserver((records) => {
+      if (this.recordPlacement(records)) this.onDirty();
+    });
+    this.rootObserver.observe(committed.root, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    this.placementObserver.observe(committed.parent, { childList: true });
+  }
+
+  private recordRoot(records: readonly MutationRecord[]) {
+    const { root, bar } = this.committed;
+    for (const record of records) {
+      if (
+        record.target === root ||
+        (bar && (record.target === bar || bar.contains(record.target)))
+      ) {
+        this.dirty = true;
+      }
+    }
+    return this.dirty;
+  }
+
+  private recordPlacement(records: readonly MutationRecord[]) {
+    const root = this.committed.root;
+    for (const record of records) {
+      if (
+        [...record.addedNodes, ...record.removedNodes].includes(root)
+      ) {
+        this.dirty = true;
+      }
+    }
+    return this.dirty;
+  }
+
+  readonly isPristine = () => {
+    this.recordRoot(this.rootObserver.takeRecords());
+    this.recordPlacement(this.placementObserver.takeRecords());
+    return !this.dirty;
+  };
+
+  readonly disconnect = () => {
+    this.recordRoot(this.rootObserver.takeRecords());
+    this.recordPlacement(this.placementObserver.takeRecords());
+    this.rootObserver.disconnect();
+    this.placementObserver.disconnect();
+  };
+}
+
+function sameVisitFacts(left: EditorPreviewVisit, right: EditorPreviewVisit) {
+  return (
+    left.mount === right.mount &&
+    left.editor === right.editor &&
+    left.document === right.document &&
+    left.documentId === right.documentId &&
+    left.storage === right.storage &&
+    left.gistId === right.gistId &&
+    left.gistFile === right.gistFile &&
+    left.repoOwner === right.repoOwner &&
+    left.repoName === right.repoName &&
+    left.repoBranch === right.repoBranch &&
+    left.repoPath === right.repoPath &&
+    left.githubUrl === right.githubUrl &&
+    left.session === right.session &&
+    left.actions === right.actions
+  );
+}
+
+function createEditorPreviewVisit({
+  revision,
+  mount,
+  editor,
+  document,
+  session,
+  actions,
+  cells,
+  requestSuccessor,
+  publishPreview,
+  retireWork,
+}: {
+  revision: number;
+  mount: symbol;
+  editor: EditorIdentity;
+  document: DocumentDto;
+  session: CollabSession;
+  actions: EditorActions;
+  cells: PreviewVisitCells;
+  requestSuccessor: () => void;
+  publishPreview: (
+    visit: EditorPreviewVisit,
+    producer: PreviewProducer,
+    source: PreviewSourceKind,
+    preview: VersionPreview | null,
+  ) => void;
+  retireWork: (visit: EditorPreviewVisit) => void;
+}): EditorPreviewVisit {
+  const generation = Symbol("editor-preview-visit");
+  const documentId = document.id;
+  const storage = document.storage;
+  const gistId = document.gistId;
+  const gistFile = document.gistFile;
+  const repoOwner = document.repoOwner;
+  const repoName = document.repoName;
+  const repoBranch = document.repoBranch;
+  const repoPath = document.repoPath;
+  const githubUrl = document.githubUrl;
+  let phase: PreviewVisitPhase = "mounting";
+  let container: HTMLDivElement | null = null;
+  let committed: PreviewContainerSnapshot | null = null;
+  let expiry = 0;
+
+  const factsAreCurrent = () =>
+    visit.generation === generation &&
+    visit.revision === revision &&
+    visit.mount === mount &&
+    visit.editor === editor &&
+    visit.document === document &&
+    visit.documentId === documentId &&
+    visit.storage === storage &&
+    visit.gistId === gistId &&
+    visit.gistFile === gistFile &&
+    visit.repoOwner === repoOwner &&
+    visit.repoName === repoName &&
+    visit.repoBranch === repoBranch &&
+    visit.repoPath === repoPath &&
+    visit.githubUrl === githubUrl &&
+    visit.session === session &&
+    visit.actions === actions &&
+    document.id === documentId &&
+    document.storage === storage &&
+    document.gistId === gistId &&
+    document.gistFile === gistFile &&
+    document.repoOwner === repoOwner &&
+    document.repoName === repoName &&
+    document.repoBranch === repoBranch &&
+    document.repoPath === repoPath &&
+    document.githubUrl === githubUrl &&
+    editor.documentId === documentId &&
+    editor.session === session &&
+    session.docId === documentId &&
+    visit.versionsProducer === versionsProducer &&
+    visit.githubProducer === githubProducer;
+
+  const exactContainer = (snapshot: PreviewContainerSnapshot | null) =>
+    Boolean(
+      container &&
+      container.isConnected &&
+      container.tagName === "DIV" &&
+      container.getAttribute("class") === PANES_BOX &&
+      container.ownerDocument.defaultView &&
+      container.parentNode &&
+      (!snapshot ||
+        (container === snapshot.element &&
+          container.getAttribute("class") === snapshot.className &&
+          previewPlacementMatches(container, snapshot))),
+    );
+
+  const clearActive = () => {
+    cells.retired.add(visit);
+    if (cells.active.current === visit) {
+      cells.active.current = null;
+      cells.active.revision++;
+      retireWork(visit);
+    }
+  };
+
+  const releaseReplay = () => {
+    if (cells.replay.current?.source === visit) cells.replay.current = null;
+  };
+
+  const invalidate = () => {
+    expiry++;
+    phase = "dead";
+    releaseReplay();
+    clearActive();
+  };
+
+  const captureContainer = (element: HTMLDivElement | null) => {
+    if (container === element || phase === "dead" || phase === "successor-requested") return;
+    const previous = container;
+    container = element;
+    if (phase === "mounting") {
+      if (previous !== null || element === null) invalidate();
+      return;
+    }
+    if (phase === "active" || phase === "replay-ready") {
+      invalidate();
+      return;
+    }
+    if (phase === "layout-retired") {
+      if (!committed || previous !== committed.element || element !== null) {
+        invalidate();
+        return;
+      }
+      phase = "ref-detached";
+      return;
+    }
+    if (
+      phase !== "ref-detached" ||
+      previous !== null ||
+      !committed ||
+      element !== committed.element
+    ) {
+      invalidate();
+      return;
+    }
+    phase = "replay-ready";
+  };
+
+  function versionsProducer(preview: VersionPreview | null) {
+    publishPreview(visit, versionsProducer, "versions", preview);
+  }
+
+  function githubProducer(preview: VersionPreview | null) {
+    if (preview) publishPreview(visit, githubProducer, "github-compare", preview);
+  }
+
+  const activate = (snapshot: PreviewContainerSnapshot) => {
+    const previous = cells.active.current;
+    if (previous && previous !== visit) previous.retire();
+    if (cells.active.current) {
+      invalidate();
+      return;
+    }
+    committed = snapshot;
+    cells.active.current = visit;
+    cells.active.revision++;
+    phase = "active";
+  };
+
+  const establishInitial = () => {
+    let successor = cells.replay.current;
+    if (successor && !sameVisitFacts(successor.source, visit)) {
+      cells.replay.current = null;
+      successor = null;
+    }
+    if (
+      successor &&
+      (cells.active.current !== null ||
+        cells.active.revision !== successor.revision ||
+        !exactContainer(successor.snapshot))
+    ) {
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    if (!factsAreCurrent() || !exactContainer(null) || !container) {
+      invalidate();
+      return;
+    }
+    const placement = capturePreviewPlacement(container);
+    if (!placement) {
+      invalidate();
+      return;
+    }
+    const snapshot = Object.freeze({
+      element: container,
+      className: PANES_BOX,
+      ...placement,
+    });
+    if (
+      Boolean(successor && !exactContainer(successor.snapshot)) ||
+      !factsAreCurrent() ||
+      !exactContainer(snapshot)
+    ) {
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    cells.replay.current = null;
+    activate(snapshot);
+  };
+
+  const establishReplay = () => {
+    if (
+      phase !== "replay-ready" ||
+      !committed ||
+      cells.active.current !== null ||
+      !factsAreCurrent() ||
+      !exactContainer(committed)
+    ) {
+      invalidate();
+      return;
+    }
+    cells.replay.current = Object.freeze({
+      source: visit,
+      snapshot: committed,
+      revision: cells.active.revision,
+    });
+    phase = "successor-requested";
+    const ticket = ++expiry;
+    requestSuccessor();
+    queueMicrotask(() => {
+      if (expiry === ticket && cells.replay.current?.source === visit) invalidate();
+    });
+  };
+
+  const establish = () => {
+    if (phase === "mounting") establishInitial();
+    else if (phase === "replay-ready") establishReplay();
+    else invalidate();
+  };
+
+  const retire = () => {
+    if (phase === "successor-requested") return false;
+    if (
+      phase !== "active" ||
+      !committed ||
+      cells.active.current !== visit ||
+      !exactContainer(committed)
+    ) {
+      invalidate();
+      return false;
+    }
+    clearActive();
+    phase = "layout-retired";
+    const ticket = ++expiry;
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        (phase === "layout-retired" ||
+          phase === "ref-detached" ||
+          phase === "replay-ready")
+      ) {
+        invalidate();
+      }
+    });
+    return true;
+  };
+
+  const owns = () =>
+    phase === "active" &&
+    cells.active.current === visit &&
+    !cells.retired.has(visit) &&
+    factsAreCurrent() &&
+    exactContainer(null);
+
+  const visit: EditorPreviewVisit = Object.freeze({
+    generation,
+    revision,
+    mount,
+    editor,
+    document,
+    documentId,
+    storage,
+    gistId,
+    gistFile,
+    repoOwner,
+    repoName,
+    repoBranch,
+    repoPath,
+    githubUrl,
+    session,
+    actions,
+    versionsProducer,
+    githubProducer,
+    captureContainer,
+    establish,
+    retire,
+    owns,
+    container: () => container,
+  });
+  return visit;
+}
+
+function samePreviewAuthorityFacts(
+  left: PreviewPresentationAuthority,
+  right: PreviewPresentationAuthority,
+) {
+  return (
+    left.mount === right.mount &&
+    left.selection === right.selection &&
+    left.rootClass === right.rootClass &&
+    left.barClass === right.barClass &&
+    left.backClass === right.backClass &&
+    left.message === right.message
+  );
+}
+
+class PreviewElementOwner<T extends HTMLElement> {
+  private current: T | null = null;
+
+  constructor(
+    private readonly name: PreviewElementName,
+    private readonly onChange: (
+      name: PreviewElementName,
+      previous: T | null,
+      current: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    this.current = element;
+    this.onChange(this.name, previous, element);
+  };
+}
+
+function createPreviewPresentation({
+  authority,
+  cells,
+  selectionCurrent,
+  requestSuccessor,
+  clearSelection,
+}: {
+  authority: PreviewPresentationAuthority;
+  cells: PreviewPublicationCells;
+  selectionCurrent: () => PreviewSelection | null;
+  requestSuccessor: () => void;
+  clearSelection: (selection: PreviewSelection) => void;
+}): PreviewPresentation {
+  const {
+    generation,
+    revision,
+    mount,
+    selection,
+    rootClass,
+    barClass,
+    backClass,
+    message,
+  } = authority;
+  const expectedRefs: readonly PreviewElementName[] =
+    selection.source === "github-compare"
+      ? ["root", "back"]
+      : ["root"];
+  let phase: PreviewPresentationPhase = "mounting";
+  let grant: PreviewGrant | null = null;
+  let history: PreviewMutationHistory | null = null;
+  let replay: {
+    readonly committed: PreviewDomSnapshot;
+    readonly revision: number;
+    readonly detached: Set<PreviewElementName>;
+    readonly attached: Set<PreviewElementName>;
+  } | null = null;
+  let replayIncludesLayout = false;
+  let expiry = 0;
+  const initialRefs = new Set<PreviewElementName>();
+
+  const refsComplete = (refs: ReadonlySet<PreviewElementName>) =>
+    expectedRefs.every((name) => refs.has(name));
+
+  const releaseOwnedSuccessor = () => {
+    const pending = cells.replay.current;
+    if (!pending || pending.source !== presentation) return;
+    pending.history.disconnect();
+    cells.replay.current = null;
+  };
+
+  const clearGrant = (current: PreviewGrant) => {
+    current.retired = true;
+    if (cells.active.current === current) {
+      cells.active.current = null;
+      cells.active.revision++;
+    }
+    if (grant === current) grant = null;
+  };
+
+  const invalidate = () => {
+    expiry++;
+    phase = "dead";
+    replay = null;
+    releaseOwnedSuccessor();
+    const currentHistory = history;
+    history = null;
+    currentHistory?.disconnect();
+    if (grant) clearGrant(grant);
+  };
+
+  const elementOf = (snapshot: PreviewDomSnapshot, name: PreviewElementName) => {
+    if (name === "root") return snapshot.root;
+    return snapshot.back;
+  };
+
+  const onElementChange = (
+    name: PreviewElementName,
+    previous: HTMLElement | null,
+    element: HTMLElement | null,
+  ) => {
+    if (phase === "dead") return;
+    if (history && !history.isPristine()) {
+      invalidate();
+      return;
+    }
+    if (phase === "successor-requested") return;
+    if (phase === "mounting") {
+      if (previous !== null || element === null || initialRefs.has(name)) {
+        invalidate();
+        return;
+      }
+      initialRefs.add(name);
+      return;
+    }
+    if (phase === "active") {
+      const current = grant;
+      if (
+        !current ||
+        current.retired ||
+        cells.active.current !== current ||
+        previous !== elementOf(current.committed, name) ||
+        element !== null ||
+        !history ||
+        !history.isPristine() ||
+        !liveFactsMatch() ||
+        !exactDomIsCurrent(current.committed, false)
+      ) {
+        invalidate();
+        return;
+      }
+      clearGrant(current);
+      replay = {
+        committed: current.committed,
+        revision: cells.active.revision,
+        detached: new Set<PreviewElementName>([name]),
+        attached: new Set<PreviewElementName>(),
+      };
+      replayIncludesLayout = false;
+      phase = refsComplete(replay.detached) ? "refs-detached" : "refs-detaching";
+      const ticket = ++expiry;
+      queueMicrotask(() => {
+        if (
+          expiry === ticket &&
+          (phase === "refs-detaching" ||
+            phase === "refs-detached" ||
+            phase === "refs-attaching" ||
+            phase === "layout-retired" ||
+            phase === "replay-ready")
+        ) {
+          invalidate();
+        }
+      });
+      return;
+    }
+    if (phase === "replay-ready") {
+      invalidate();
+      return;
+    }
+    if (!replay) {
+      invalidate();
+      return;
+    }
+    const expected = elementOf(replay.committed, name);
+    if (!expected) {
+      invalidate();
+      return;
+    }
+    if (phase === "refs-detaching") {
+      if (
+        previous !== expected ||
+        element !== null ||
+        replay.detached.has(name) ||
+        replay.attached.size > 0
+      ) {
+        invalidate();
+        return;
+      }
+      replay.detached.add(name);
+      if (refsComplete(replay.detached)) phase = "refs-detached";
+      return;
+    }
+    if (
+      (phase !== "refs-detached" &&
+        phase !== "refs-attaching" &&
+        phase !== "layout-retired") ||
+      previous !== null ||
+      element !== expected ||
+      !replay.detached.has(name) ||
+      replay.attached.has(name)
+    ) {
+      invalidate();
+      return;
+    }
+    replay.attached.add(name);
+    if (!refsComplete(replay.attached)) {
+      phase = "refs-attaching";
+      return;
+    }
+    phase = "replay-ready";
+    if (!replayIncludesLayout) establishReplay();
+  };
+
+  const rootOwner = new PreviewElementOwner<HTMLDivElement>("root", onElementChange);
+  const backOwner = new PreviewElementOwner<HTMLButtonElement>("back", onElementChange);
+
+  const authorityMatches = () =>
+    authority.generation === generation &&
+    authority.revision === revision &&
+    authority.mount === mount &&
+    authority.selection === selection &&
+    authority.rootClass === rootClass &&
+    authority.barClass === barClass &&
+    authority.backClass === backClass &&
+    authority.message === message &&
+    presentation.authority === authority;
+
+  const liveFactsMatch = () => {
+    const expectedProducer =
+      selection.source === "versions"
+        ? selection.visit.versionsProducer
+        : selection.visit.githubProducer;
+    return (
+      authorityMatches() &&
+      selectionCurrent() === selection &&
+      selection.visit.mount === mount &&
+      selection.visit.owns() &&
+      selection.producer === expectedProducer &&
+      previewValueMatches(selection.value)
+    );
+  };
+
+  const currentElements = () => {
+    const root = rootOwner.element();
+    const back = backOwner.element();
+    if (
+      !root ||
+      (selection.source === "github-compare" ? !back : back !== null)
+    ) {
+      return null;
+    }
+    return { root, back };
+  };
+
+  const exactDomIsCurrent = (
+    snapshot: PreviewDomSnapshot | null,
+    requireCapturedRefs = true,
+  ) => {
+    const elements = snapshot
+      ? { root: snapshot.root, back: snapshot.back }
+      : currentElements();
+    const container = selection.visit.container();
+    if (!elements || !container) return false;
+    const { root, back } = elements;
+    const ownerDocument = root.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const content = root.children.item(root.children.length - 1);
+    const bar = selection.source === "github-compare"
+      ? root.children.item(0)
+      : null;
+    const messageElement = bar?.children.item(0);
+    if (
+      !ownerWindow ||
+      !root.isConnected ||
+      root.parentElement !== container ||
+      root.tagName !== "DIV" ||
+      root.getAttribute("class") !== rootClass ||
+      (requireCapturedRefs &&
+        (rootOwner.element() !== root || backOwner.element() !== back)) ||
+      !(content instanceof ownerWindow.HTMLDivElement) ||
+      content.ownerDocument !== ownerDocument ||
+      !content.isConnected ||
+      content.tagName !== "DIV" ||
+      content.parentElement !== root ||
+      root.children.item(root.children.length - 1) !== content ||
+      (selection.source === "versions"
+        ? root.children.length !== 1 ||
+          root.childNodes.length !== 1 ||
+          root.children.item(0) !== content ||
+          root.querySelector("[data-testid='sync-compare-bar']") !== null
+        : !(bar instanceof ownerWindow.HTMLDivElement) ||
+          bar.ownerDocument !== ownerDocument ||
+          !bar.isConnected ||
+          bar.parentElement !== root ||
+          bar.getAttribute("class") !== barClass ||
+          bar.getAttribute("data-testid") !== "sync-compare-bar" ||
+          root.children.length !== 2 ||
+          root.childNodes.length !== 2 ||
+          bar.children.length !== 2 ||
+          bar.childNodes.length !== 2 ||
+          !(messageElement instanceof ownerWindow.HTMLSpanElement) ||
+          messageElement.parentElement !== bar ||
+          messageElement.textContent !== message ||
+          !(back instanceof ownerWindow.HTMLButtonElement) ||
+          back.ownerDocument !== ownerDocument ||
+          !back.isConnected ||
+          back.parentElement !== bar ||
+          bar.children.item(1) !== back ||
+          back.tagName !== "BUTTON" ||
+          back.getAttribute("type") !== "button" ||
+          back.type !== "button" ||
+          back.disabled ||
+          back.matches(":disabled") ||
+          back.getAttribute("class") !== backClass ||
+          back.getAttribute("data-testid") !== "sync-compare-close" ||
+          back.children.length !== 0 ||
+          back.childNodes.length !== 1 ||
+          back.textContent !== "Back to editing")
+    ) {
+      return false;
+    }
+    if (!snapshot) return true;
+    return (
+      snapshot.root === root &&
+      snapshot.content === content &&
+      snapshot.bar === bar &&
+      snapshot.back === back &&
+      attributesMatch(root, snapshot.rootAttributes) &&
+      root.childNodes.length === snapshot.rootChildren.length &&
+      snapshot.rootChildren.every((node, index) =>
+        root.childNodes.item(index) === node) &&
+      (snapshot.barSnapshot
+        ? previewNodeMatches(snapshot.barSnapshot)
+        : bar === null) &&
+      previewPlacementMatches(root, snapshot)
+    );
+  };
+
+  const snapshotDom = (): PreviewDomSnapshot | null => {
+    const elements = currentElements();
+    if (!elements) return null;
+    const { root, back } = elements;
+    const content = root.children.item(root.children.length - 1);
+    const ownerWindow = root.ownerDocument.defaultView;
+    const placement = capturePreviewPlacement(root);
+    const rootAttributes = snapshotAttributes(root);
+    const bar = selection.source === "github-compare"
+      ? root.children.item(0)
+      : null;
+    if (
+      !ownerWindow ||
+      !placement ||
+      !(content instanceof ownerWindow.HTMLDivElement) ||
+      !rootAttributes ||
+      (bar !== null && !(bar instanceof ownerWindow.HTMLDivElement))
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      root,
+      content,
+      bar: bar as HTMLDivElement | null,
+      back,
+      rootAttributes,
+      rootChildren: Object.freeze([...root.childNodes]),
+      barSnapshot: bar ? snapshotPreviewNode(bar) : null,
+      backTargets: back ? descendantsOf(back) : Object.freeze([]),
+      ...placement,
+    });
+  };
+
+  const activate = (
+    committed: PreviewDomSnapshot,
+    currentHistory: PreviewMutationHistory,
+  ) => {
+    const current: PreviewGrant = {
+      generation: Symbol("preview-publication"),
+      publication: presentation,
+      committed,
+      actionClaimed: false,
+      retired: false,
+      retire: () => {
+        if (current.retired) return;
+        if (grant === current) invalidate();
+        else current.retired = true;
+      },
+    };
+    const previous = cells.active.current;
+    previous?.retire();
+    if (cells.active.current) {
+      currentHistory.disconnect();
+      current.retired = true;
+      invalidate();
+      return;
+    }
+    history = currentHistory;
+    grant = current;
+    cells.active.current = current;
+    cells.active.revision++;
+    phase = "active";
+  };
+
+  const establishInitial = () => {
+    let successor = cells.replay.current;
+    if (successor && !samePreviewAuthorityFacts(successor.authority, authority)) {
+      successor.history.disconnect();
+      cells.replay.current = null;
+      successor = null;
+    }
+    if (
+      successor &&
+      (cells.active.current !== null ||
+        cells.active.revision !== successor.revision ||
+        !successor.history.isPristine() ||
+        !exactDomIsCurrent(successor.committed))
+    ) {
+      successor.history.disconnect();
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    if (
+      !refsComplete(initialRefs) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(null)
+    ) {
+      invalidate();
+      return;
+    }
+    const committed = snapshotDom();
+    if (!committed) {
+      invalidate();
+      return;
+    }
+    const currentHistory = new PreviewMutationHistory(committed, () => {
+      if (history === currentHistory && phase === "active") invalidate();
+    });
+    if (
+      !currentHistory.isPristine() ||
+      Boolean(successor && !successor.history.isPristine()) ||
+      Boolean(successor && !exactDomIsCurrent(successor.committed)) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed)
+    ) {
+      currentHistory.disconnect();
+      successor?.history.disconnect();
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    successor?.history.disconnect();
+    cells.replay.current = null;
+    if (
+      !currentHistory.isPristine() ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed)
+    ) {
+      currentHistory.disconnect();
+      invalidate();
+      return;
+    }
+    activate(committed, currentHistory);
+  };
+
+  function establishReplay() {
+    const candidate = replay;
+    const previousHistory = history;
+    if (
+      !candidate ||
+      !previousHistory ||
+      phase !== "replay-ready" ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision ||
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch() ||
+      cells.replay.current
+    ) {
+      invalidate();
+      return;
+    }
+    if (
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch() ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision ||
+      cells.replay.current
+    ) {
+      invalidate();
+      return;
+    }
+    cells.replay.current = Object.freeze({
+      source: presentation,
+      authority,
+      committed: candidate.committed,
+      history: previousHistory,
+      revision: candidate.revision,
+    });
+    history = null;
+    replay = null;
+    phase = "successor-requested";
+    const ticket = ++expiry;
+    requestSuccessor();
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        cells.replay.current?.source === presentation
+      ) {
+        invalidate();
+      }
+    });
+  }
+
+  const establish = () => {
+    if (phase === "mounting") establishInitial();
+    else if (phase === "replay-ready") establishReplay();
+    else invalidate();
+  };
+
+  const retireLayout = () => {
+    if (phase === "successor-requested") return false;
+    if (
+      phase !== "refs-detached" ||
+      !replay ||
+      !history ||
+      cells.active.current !== null ||
+      cells.active.revision !== replay.revision ||
+      !history.isPristine() ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(replay.committed, false)
+    ) {
+      invalidate();
+      return false;
+    }
+    replayIncludesLayout = true;
+    phase = "layout-retired";
+    return true;
+  };
+
+  const activateBack = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const current = grant;
+    if (
+      !current ||
+      current.retired ||
+      cells.active.current !== current ||
+      phase !== "active" ||
+      current.actionClaimed ||
+      selection.source !== "github-compare" ||
+      !event ||
+      typeof event !== "object"
+    ) {
+      return;
+    }
+    const { committed } = current;
+    const back = committed.back;
+    if (!back) return;
+    const ownerDocument = back.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !ownerWindow ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      event.currentTarget !== back ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      nativeEvent.target !== target ||
+      !(target instanceof ownerWindow.Node) ||
+      target.ownerDocument !== ownerDocument ||
+      !committed.backTargets.includes(target) ||
+      event.defaultPrevented ||
+      nativeEvent.defaultPrevented ||
+      cells.claimedEvents.has(event) ||
+      cells.claimedEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    current.actionClaimed = true;
+    cells.claimedEvents.add(event);
+    cells.claimedEvents.add(nativeEvent);
+    if (
+      !history ||
+      !history.isPristine() ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed) ||
+      current.retired ||
+      cells.active.current !== current
+    ) {
+      invalidate();
+      return;
+    }
+    invalidate();
+    clearSelection(selection);
+  };
+
+  const presentation: PreviewPresentation = Object.freeze({
+    authority,
+    captureRoot: rootOwner.capture,
+    captureBack: backOwner.capture,
+    establish,
+    retireLayout,
+    retire: invalidate,
+    activateBack,
+  });
+  return presentation;
+}
+
+const publishPullBusyError = () => new Error("Another publish or pull is already in progress.");
 
 type SidePanel = "comments" | "versions" | "activity" | null;
 
 const noopSubscribe = () => () => {};
+
+interface CollaboratorFollowVisitOptions {
+  session: CollabSession;
+  actions: EditorActions;
+  richView: Pick<PMView, "dom"> | null;
+  codeView: Pick<CMView, "scrollDOM" | "contentDOM"> | null;
+  richScroller: HTMLElement | null;
+  showCode: boolean;
+  showRich: boolean;
+  syncScroll: boolean;
+  userId: string | null;
+  cursor: number | null;
+}
+
+interface CollaboratorFollowTimer {
+  readonly handle: ReturnType<typeof setTimeout>;
+  fired: boolean;
+}
+
+interface CollaboratorFollowVisit extends CollaboratorFollowVisitOptions {
+  active: boolean;
+  retired: boolean;
+  timer: CollaboratorFollowTimer | null;
+  readonly scrollers: readonly HTMLElement[];
+  readonly editors: readonly HTMLElement[];
+  readonly onWheel: (event: WheelEvent) => void;
+  readonly onTouchMove: (event: TouchEvent) => void;
+  readonly onBeforeInput: (event: InputEvent) => void;
+  readonly onKeyDown: (event: KeyboardEvent) => void;
+}
+
+/**
+ * Owns collaborator-follow scrolling and stop gestures as one layout-timed visit. Exported for the
+ * deterministic lifecycle harness; the editor shell is its only production caller.
+ */
+export function useCollaboratorFollowVisit(options: CollaboratorFollowVisitOptions) {
+  const currentRef = useRef<CollaboratorFollowVisit | null>(null);
+  const { session, actions, richView, codeView, richScroller, showCode, showRich, syncScroll, userId, cursor } = options;
+
+  useLayoutEffect(() => {
+    if (!userId) return;
+
+    const scrollers = Array.from(
+      new Set<HTMLElement>(
+        [richScroller, codeView?.scrollDOM].filter((element): element is HTMLElement => !!element),
+      ),
+    );
+    const editors = Array.from(
+      new Set<HTMLElement>(
+        [richView?.dom, codeView?.contentDOM].filter((element): element is HTMLElement => !!element),
+      ),
+    );
+    const ownsVisit = () => visit.active && !visit.retired && currentRef.current === visit;
+    const stop = (type: "user-scroll" | "typing") => {
+      if (ownsVisit()) session.dispatchFollow({ type });
+    };
+    const visit: CollaboratorFollowVisit = {
+      session,
+      actions,
+      richView,
+      codeView,
+      richScroller,
+      showCode,
+      showRich,
+      syncScroll,
+      userId,
+      cursor,
+      active: true,
+      retired: false,
+      timer: null,
+      scrollers,
+      editors,
+      onWheel: () => stop("user-scroll"),
+      onTouchMove: () => stop("user-scroll"),
+      onBeforeInput: () => stop("typing"),
+      onKeyDown: (event) => {
+        if (event.key === "Escape" && ownsVisit()) session.dispatchFollow({ type: "stop" });
+      },
+    };
+    currentRef.current = visit;
+
+    if (cursor !== null) {
+      const intent = {
+        offset: cursor,
+        code: showCode,
+        rich: showRich,
+        synced: syncScroll && showCode && showRich,
+      };
+      const run = (timer: CollaboratorFollowTimer) => {
+        if (!ownsVisit() || visit.timer !== timer || timer.fired) return;
+        timer.fired = true;
+        visit.timer = null;
+        actions.scrollToSource(intent.offset, {
+          code: intent.code,
+          rich: intent.rich,
+          synced: intent.synced,
+        });
+      };
+      const timer: CollaboratorFollowTimer = {
+        handle: setTimeout(() => run(timer), 150),
+        fired: false,
+      };
+      visit.timer = timer;
+    }
+
+    for (const element of scrollers) {
+      element.addEventListener("wheel", visit.onWheel, { passive: true });
+      element.addEventListener("touchmove", visit.onTouchMove, { passive: true });
+    }
+    for (const element of editors) element.addEventListener("beforeinput", visit.onBeforeInput, true);
+    window.addEventListener("keydown", visit.onKeyDown, true);
+
+    return () => {
+      if (visit.retired) return;
+      visit.active = false;
+      visit.retired = true;
+      const ownsRef = currentRef.current === visit;
+      if (ownsRef) currentRef.current = null;
+      const timer = visit.timer;
+      if (ownsRef && timer && visit.timer === timer) {
+        visit.timer = null;
+        clearTimeout(timer.handle);
+      }
+      for (const element of visit.scrollers) {
+        element.removeEventListener("wheel", visit.onWheel);
+        element.removeEventListener("touchmove", visit.onTouchMove);
+      }
+      for (const element of visit.editors) element.removeEventListener("beforeinput", visit.onBeforeInput, true);
+      window.removeEventListener("keydown", visit.onKeyDown, true);
+    };
+  }, [session, actions, richView, codeView, richScroller, showCode, showRich, syncScroll, userId, cursor]);
+}
 
 const subscribeResize = (notify: () => void) => {
   window.addEventListener("resize", notify);
@@ -186,6 +1681,15 @@ export function EditorShell({
 }: EditorShellProps) {
   const router = useRouter();
   const session = useCollabSession(initialDoc.id, user, role, embed);
+  const editorIdentity = useMemo<EditorIdentity>(
+    () => ({ documentId: initialDoc.id, session }),
+    [initialDoc.id, session],
+  );
+  const [toastMount] = useState(() => Symbol("editor-toasts"));
+  const toastAuthority = useMemo<ToastAuthority>(
+    () => Object.freeze({ mount: toastMount, editor: editorIdentity, userId: user.id, role }),
+    [editorIdentity, role, toastMount, user.id],
+  );
   const [doc, setDoc] = useState(initialDoc);
   const [layout, setLayoutState] = useState<Layout>("split");
   const [outlineOpen, setOutlineOpen] = useState(true);
@@ -230,12 +1734,46 @@ export function EditorShell({
   const [lineWrapping, setLineWrapping] = useState(true);
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [commitOpen, setCommitOpen] = useState(false);
-  const [publishing, setPublishing] = useState(false);
+  const [publishingOwner, setPublishingOwner] = useState<PublishPullOwner | null>(null);
+  const [documentMutationOwner, setDocumentMutationOwner] = useState<DocumentMutationOwner | null>(null);
+  const [nameVersionVisit, setNameVersionVisit] = useState<NameVersionVisit | null>(null);
+  const currentEditorRef = useRef<EditorIdentity | null>(null);
+  const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
+  const documentMutationOwnerRef = useRef<DocumentMutationOwner | null>(null);
+  const documentMutationSequence = useRef(0);
+  const leavingEditorRef = useRef<EditorIdentity | null>(null);
+  const currentNameVersionVisitRef = useRef<NameVersionVisit | null>(null);
+  const namedVersionOwnerRef = useRef<NameVersionSaveOwner | null>(null);
+  const nameVersionVisitSequence = useRef(0);
+  const namedVersionOperationSequence = useRef(0);
   const [sync, setSync] = useState<SyncStatusDto | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const [versionPreview, setVersionPreview] = useState<VersionPreview | null>(null);
+  const toastAuthorityRef = useRef<ToastAuthority | null>(null);
+  const pendingNoticeConsumedRef = useRef<ToastAuthority | null>(null);
+  const toastPublicationsRef = useRef<readonly ToastPublication[]>([]);
+  const toastTimersRef = useRef<Set<ToastPublication>>(new Set());
+  const toastRenderKeysRef = useRef<WeakMap<ToastPublication, string>>(new WeakMap());
+  const toastRenderKeySequence = useRef(0);
+  const [toastPublications, setToastPublications] = useState<readonly ToastPublication[]>([]);
+  const [previewMount] = useState(() => Symbol("editor-previews"));
+  const [previewVisitCells] = useState<PreviewVisitCells>(() => ({
+    active: { current: null, revision: 0 },
+    replay: { current: null },
+    retired: new WeakSet<EditorPreviewVisit>(),
+  }));
+  const [previewPublicationCells] = useState<PreviewPublicationCells>(() => ({
+    active: { current: null, revision: 0 },
+    replay: { current: null },
+    claimedEvents: new WeakSet<object>(),
+    claimedActions: new WeakSet<object>(),
+  }));
+  const previewValueClaimsRef = useRef(new WeakMap<EditorPreviewVisit, WeakSet<VersionPreview>>());
+  const previewSelectionRef = useRef<PreviewSelection | null>(null);
+  const githubCompareRequestsRef = useRef<Set<GitHubCompareRequest>>(new Set());
+  const [previewSelection, setPreviewSelection] = useState<PreviewSelection | null>(null);
+  const [previewVisitRevision, setPreviewVisitRevision] = useState(0);
+  const [previewPresentationRevision, setPreviewPresentationRevision] = useState(0);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
@@ -246,6 +1784,157 @@ export function EditorShell({
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const ownsPreviewVisit = useCallback((visit: EditorPreviewVisit) => visit.owns(), []);
+  const clearPreviewSelection = useCallback((selection: PreviewSelection) => {
+    if (previewSelectionRef.current !== selection) return;
+    const grant = previewPublicationCells.active.current;
+    if (grant?.publication.authority.selection === selection) grant.retire();
+    previewSelectionRef.current = null;
+    setPreviewSelection((current) => current === selection ? null : current);
+  }, [previewPublicationCells]);
+  const publishPreview = useCallback(
+    (
+      visit: EditorPreviewVisit,
+      producer: PreviewProducer,
+      source: PreviewSourceKind,
+      preview: VersionPreview | null,
+    ) => {
+      const exactProducer =
+        source === "versions"
+          ? visit.versionsProducer === producer
+          : visit.githubProducer === producer;
+      if (!exactProducer || !visit.owns()) return;
+      if (!preview) {
+        const selection = previewSelectionRef.current;
+        if (
+          !selection ||
+          selection.visit !== visit ||
+          selection.producer !== producer ||
+          selection.source !== source ||
+          !previewValueMatches(selection.value) ||
+          previewPublicationCells.claimedActions.has(selection)
+        ) {
+          return;
+        }
+        previewPublicationCells.claimedActions.add(selection);
+        clearPreviewSelection(selection);
+        return;
+      }
+      let claimedValues = previewValueClaimsRef.current.get(visit);
+      if (!claimedValues) {
+        claimedValues = new WeakSet<VersionPreview>();
+        previewValueClaimsRef.current.set(visit, claimedValues);
+      }
+      if (claimedValues.has(preview)) return;
+      claimedValues.add(preview);
+      const selection: PreviewSelection = Object.freeze({
+        action: Symbol("preview-producer-action"),
+        visit,
+        producer,
+        source,
+        value: freezePreviewValue(preview),
+      });
+      previewPublicationCells.active.current?.retire();
+      previewSelectionRef.current = selection;
+      setPreviewSelection(selection);
+    },
+    [clearPreviewSelection, previewPublicationCells],
+  );
+  const retirePreviewVisitWork = useCallback((visit: EditorPreviewVisit) => {
+    for (const request of githubCompareRequestsRef.current) {
+      if (request.visit === visit) githubCompareRequestsRef.current.delete(request);
+    }
+    const selection = previewSelectionRef.current;
+    if (selection?.visit === visit) clearPreviewSelection(selection);
+  }, [clearPreviewSelection]);
+  const requestPreviewVisitSuccessor = useCallback(() => {
+    setPreviewVisitRevision((revision) => revision + 1);
+  }, []);
+  const requestPreviewPresentationSuccessor = useCallback(() => {
+    setPreviewPresentationRevision((revision) => revision + 1);
+  }, []);
+  const dismissToast = useCallback((publication: ToastPublication, timerFired = false) => {
+    if (
+      toastAuthorityRef.current !== publication.authority ||
+      !toastPublicationsRef.current.includes(publication)
+    ) {
+      return false;
+    }
+    toastPublicationsRef.current = toastPublicationsRef.current.filter((current) => current !== publication);
+    const timerPending = toastTimersRef.current.delete(publication);
+    if (timerPending && !timerFired) clearTimeout(publication.timer);
+    setToastPublications((current) => current.filter((candidate) => candidate !== publication));
+    return true;
+  }, []);
+  const retireToastAuthority = useCallback((authority: ToastAuthority) => {
+    const retiring = toastPublicationsRef.current.filter((publication) => publication.authority === authority);
+    if (retiring.length === 0) return;
+    const retiringSet = new Set(retiring);
+    toastPublicationsRef.current = toastPublicationsRef.current.filter((publication) => !retiringSet.has(publication));
+    for (const publication of retiring) {
+      if (toastTimersRef.current.delete(publication)) clearTimeout(publication.timer);
+    }
+    setToastPublications((current) => current.filter((publication) => publication.authority !== authority));
+  }, []);
+  const toastRenderKey = useCallback((publication: ToastPublication) => {
+    const existing = toastRenderKeysRef.current.get(publication);
+    if (existing) return existing;
+    const key = `toast-${++toastRenderKeySequence.current}`;
+    toastRenderKeysRef.current.set(publication, key);
+    return key;
+  }, []);
+  useLayoutEffect(() => {
+    currentEditorRef.current = editorIdentity;
+    publishPullOwnerRef.current = null;
+    setPublishingOwner(null);
+    documentMutationOwnerRef.current = null;
+    setDocumentMutationOwner(null);
+    const previousVisit = currentNameVersionVisitRef.current;
+    if (previousVisit && previousVisit.editor !== editorIdentity) {
+      const replacement = {
+        id: ++nameVersionVisitSequence.current,
+        editor: editorIdentity,
+        documentId: editorIdentity.documentId,
+      };
+      namedVersionOwnerRef.current = null;
+      currentNameVersionVisitRef.current = replacement;
+      setNameVersionVisit(replacement);
+    }
+    return () => {
+      if (currentEditorRef.current === editorIdentity) currentEditorRef.current = null;
+      if (publishPullOwnerRef.current?.editor === editorIdentity) publishPullOwnerRef.current = null;
+      if (documentMutationOwnerRef.current?.editor === editorIdentity) documentMutationOwnerRef.current = null;
+      if (leavingEditorRef.current === editorIdentity) leavingEditorRef.current = null;
+    };
+  }, [editorIdentity]);
+  useLayoutEffect(() => {
+    toastAuthorityRef.current = toastAuthority;
+    setToastPublications((current) =>
+      current.filter(
+        (publication) =>
+          publication.authority === toastAuthority &&
+          toastPublicationsRef.current.includes(publication),
+      ),
+    );
+    return () => {
+      if (toastAuthorityRef.current === toastAuthority) toastAuthorityRef.current = null;
+      retireToastAuthority(toastAuthority);
+    };
+  }, [retireToastAuthority, toastAuthority]);
+  useLayoutEffect(() => () => {
+    currentNameVersionVisitRef.current = null;
+    namedVersionOwnerRef.current = null;
+  }, []);
+  useLayoutEffect(() => {
+    setDoc((current) => current.id === initialDoc.id ? current : initialDoc);
+  }, [initialDoc]);
+  const publishing = publishingOwner !== null && currentEditorRef.current === publishingOwner.editor;
+  const documentMutation =
+    documentMutationOwner !== null &&
+    currentEditorRef.current === documentMutationOwner.editor &&
+    documentMutationOwnerRef.current === documentMutationOwner
+      ? documentMutationOwner.action
+      : null;
   const richScrollRef = useRef<HTMLDivElement>(null);
   const setRichScrollRef = useCallback((el: HTMLDivElement | null) => {
     richScrollRef.current = el;
@@ -345,24 +2034,144 @@ export function EditorShell({
     if (panelWidth > panelMax) setPanelWidth(panelMax);
   }, [panelWidth, panelMax, setPanelWidth]);
 
-  const actions = useMemo(() => new EditorActions(session, setDialog), [session]);
+  const openNameVersion = useCallback(() => {
+    const editor = currentEditorRef.current;
+    if (!editor) return;
+    const visit = {
+      id: ++nameVersionVisitSequence.current,
+      editor,
+      documentId: editor.documentId,
+    };
+    namedVersionOwnerRef.current = null;
+    currentNameVersionVisitRef.current = visit;
+    setNameVersionVisit(visit);
+    setDialog("versionName");
+  }, []);
+  const setEditorDialog = useCallback((kind: DialogKind) => {
+    if (kind === "versionName") openNameVersion();
+    else setDialog(kind);
+  }, [openNameVersion]);
+  const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
+  const previewVisit = useMemo(
+    () =>
+      createEditorPreviewVisit({
+        revision: previewVisitRevision,
+        mount: previewMount,
+        editor: editorIdentity,
+        document: initialDoc,
+        session,
+        actions,
+        cells: previewVisitCells,
+        requestSuccessor: requestPreviewVisitSuccessor,
+        publishPreview,
+        retireWork: retirePreviewVisitWork,
+      }),
+    [
+      actions,
+      editorIdentity,
+      initialDoc,
+      previewMount,
+      previewVisitCells,
+      previewVisitRevision,
+      publishPreview,
+      requestPreviewVisitSuccessor,
+      retirePreviewVisitWork,
+      session,
+    ],
+  );
+  useLayoutEffect(() => {
+    previewVisit.establish();
+    return () => {
+      previewVisit.retire();
+    };
+  }, [previewVisit]);
+  const previewAuthority = useMemo<PreviewPresentationAuthority | null>(
+    () =>
+      previewSelection && previewSelectionRef.current === previewSelection
+        ? Object.freeze({
+            generation: Symbol("preview-presentation"),
+            revision: previewPresentationRevision,
+            mount: previewMount,
+            selection: previewSelection,
+            rootClass: PREVIEW_ROOT_CLASS,
+            barClass: PREVIEW_BAR_CLASS,
+            backClass: PREVIEW_BACK_CLASS,
+            message: PREVIEW_MESSAGE,
+          })
+        : null,
+    [
+      previewMount,
+      previewPresentationRevision,
+      previewSelection,
+    ],
+  );
+  const previewPresentation = useMemo(
+    () =>
+      previewAuthority
+        ? createPreviewPresentation({
+            authority: previewAuthority,
+            cells: previewPublicationCells,
+            selectionCurrent: () => previewSelectionRef.current,
+            requestSuccessor: requestPreviewPresentationSuccessor,
+            clearSelection: clearPreviewSelection,
+          })
+        : null,
+    [
+      clearPreviewSelection,
+      previewAuthority,
+      previewPublicationCells,
+      requestPreviewPresentationSuccessor,
+    ],
+  );
+  useLayoutEffect(() => {
+    if (!previewPresentation) return;
+    previewPresentation.establish();
+    return () => {
+      previewPresentation.retireLayout();
+    };
+  }, [previewPresentation]);
   const slashMenu = useSlashMenuController();
   const isOwner = role === "owner";
   useEffect(() => {
     actions.setRichScroller(richScroller);
   }, [actions, richScroller]);
 
-  const toast = useCallback((message: string, kind: Toast["kind"] = "info", action?: Toast["action"]) => {
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, message, kind, action }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), kind === "error" ? 8000 : 4500);
-  }, []);
+  const toast = useCallback((message: string, kind: ToastKind = "info", action?: ToastAction) => {
+    if (toastAuthorityRef.current !== toastAuthority) return;
+    const immutableAction = action
+      ? Object.freeze({ label: action.label, href: action.href, onClick: action.onClick })
+      : undefined;
+    const publication: ToastPublication = Object.freeze({
+      authority: toastAuthority,
+      message,
+      kind,
+      action: immutableAction,
+      timer: setTimeout(() => {
+        dismissToast(publication, true);
+      }, kind === "error" ? 8000 : 4500),
+    });
+    toastTimersRef.current.add(publication);
+    toastPublicationsRef.current = [...toastPublicationsRef.current, publication];
+    setToastPublications((current) => [...current, publication]);
+  }, [dismissToast, toastAuthority]);
+  const activateToastAction = useCallback((publication: ToastPublication) => {
+    const action = publication.action?.onClick;
+    if (!action || !dismissToast(publication)) return;
+    action();
+  }, [dismissToast]);
 
   // A message left by the previous page (e.g. "Copy created" after "Make a copy").
   useEffect(() => {
+    if (
+      toastAuthorityRef.current !== toastAuthority ||
+      pendingNoticeConsumedRef.current === toastAuthority
+    ) {
+      return;
+    }
+    pendingNoticeConsumedRef.current = toastAuthority;
     const notice = takePendingNotice();
     if (notice) toast(notice.message, notice.kind);
-  }, [toast, doc.id]);
+  }, [toast, toastAuthority]);
 
   // Toolbar state is derived from the live editors. Caret moves reach the session too (setLocalCursor),
   // so the selector runs after selection changes as well as text changes; the shallow comparison keeps
@@ -466,59 +2275,128 @@ export function EditorShell({
     [actions, session, shownLayout, isPhone, setLayout],
   );
 
-  const publishNow = useCallback(
-    async (message?: string, force = false) => {
-      setPublishing(true);
-      try {
-        const res = await api.documents.publish(doc.id, message, { force });
-        if (res.document) setDoc(res.document);
-        setVersionsRefresh((n) => n + 1);
-        setSyncTick((n) => n + 1);
-        if (res.result.skipped) toast("Already up to date on GitHub.", "info");
-        else toast(doc.storage === "gist" ? "Gist updated." : "Committed to GitHub.", "success", res.result.url ? { label: "View", href: res.result.url } : undefined);
-      } catch (e) {
-        // GitHub moved since the last sync: hand the decision to the Sync dialog instead of a raw error.
-        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
-          setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
-          setCommitOpen(false);
-          setSyncOpen(true);
-          throw e;
-        }
-        toast(apiErrorText(e, "Publish failed"), "error");
-        throw e;
-      } finally {
-        setPublishing(false);
-      }
+  const ownsPublishPull = useCallback(
+    (owner: PublishPullOwner) => currentEditorRef.current === owner.editor && publishPullOwnerRef.current === owner,
+    [],
+  );
+  const finishPublishPull = useCallback(
+    (owner: PublishPullOwner) => {
+      if (!ownsPublishPull(owner)) return;
+      publishPullOwnerRef.current = null;
+      setPublishingOwner((current) => current === owner ? null : current);
     },
-    [doc.id, doc.storage, toast],
+    [ownsPublishPull],
+  );
+  const beginPublishPull = useCallback(
+    <T,>(kind: PublishPullKind, request: (documentId: string) => Promise<T>) => {
+      const editor = currentEditorRef.current;
+      if (!editor || publishPullOwnerRef.current) return null;
+      const owner = { editor, kind };
+      publishPullOwnerRef.current = owner;
+      // Commit the pending UI before the initiating event can activate another surface.
+      flushSync(() => setPublishingOwner(owner));
+      let pending: Promise<T>;
+      try {
+        pending = request(editor.documentId);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return { owner, pending };
+    },
+    [],
   );
 
-  const pull = useCallback(
-    async (options: { force?: boolean; merge?: boolean } = {}) => {
-      setPublishing(true);
-      try {
-        const res = await api.documents.pull(doc.id, options);
-        if (res.document) setDoc(res.document);
-        setVersionsRefresh((n) => n + 1);
-        setSyncTick((n) => n + 1);
-        toast(res.result.merged ? "Merged GitHub\u2019s changes — review, then publish." : res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
-        return res;
-      } catch (e) {
-        // Local edits would be lost (or both sides changed): open the Sync dialog; the caller handles merge conflicts.
-        if (e instanceof ApiError && e.status === 409 && e.body?.status) {
-          if (e.body.status !== "conflict") {
-            setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
-            setSyncOpen(true);
+  const startPublish = useCallback(
+    (message?: string, force = false) => {
+      const operation = beginPublishPull("publish", (documentId) => api.documents.publish(documentId, message, { force }));
+      if (!operation) return null;
+      const { owner, pending } = operation;
+      return (async () => {
+        try {
+          const res = await pending;
+          if (!ownsPublishPull(owner)) return;
+          if (res.document) setDoc(res.document);
+          setVersionsRefresh((n) => n + 1);
+          setSyncTick((n) => n + 1);
+          if (res.result.skipped) toast("Already up to date on GitHub.", "info");
+          else toast(doc.storage === "gist" ? "Gist updated." : "Committed to GitHub.", "success", res.result.url ? { label: "View", href: res.result.url } : undefined);
+        } catch (e) {
+          if (ownsPublishPull(owner)) {
+            // GitHub moved since the last sync: hand the decision to the Sync dialog instead of a raw error.
+            if (e instanceof ApiError && e.status === 409 && e.body?.status) {
+              setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
+              setCommitOpen(false);
+              setSyncOpen(true);
+            } else {
+              toast(apiErrorText(e, "Publish failed"), "error");
+            }
           }
           throw e;
+        } finally {
+          finishPublishPull(owner);
         }
-        toast(apiErrorText(e, "Pull failed"), "error");
-        throw e;
-      } finally {
-        setPublishing(false);
+      })();
+    },
+    [beginPublishPull, doc.storage, finishPublishPull, ownsPublishPull, toast],
+  );
+  const publishNow = useCallback(
+    (message?: string, force = false) => startPublish(message, force) ?? Promise.reject(publishPullBusyError()),
+    [startPublish],
+  );
+
+  const beginPull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) =>
+      beginPublishPull("pull", (documentId) => api.documents.pull(documentId, options)),
+    [beginPublishPull],
+  );
+  const applyPullSuccess = useCallback(
+    (owner: PublishPullOwner, res: Awaited<ReturnType<typeof api.documents.pull>>) => {
+      if (!ownsPublishPull(owner)) return;
+      if (res.document) setDoc(res.document);
+      setVersionsRefresh((n) => n + 1);
+      setSyncTick((n) => n + 1);
+      toast(res.result.merged ? "Merged GitHub\u2019s changes — review, then publish." : res.result.changed ? "Pulled the latest version from GitHub." : "Already up to date.", "success");
+    },
+    [ownsPublishPull, toast],
+  );
+  const applyPullError = useCallback(
+    (owner: PublishPullOwner, error: unknown) => {
+      if (!ownsPublishPull(owner)) return;
+      // Local edits would be lost (or both sides changed): open the Sync dialog; merge handles marked conflicts below.
+      if (error instanceof ApiError && error.status === 409 && error.body?.status) {
+        if (error.body.status !== "conflict") {
+          setSync((s) => ({ ...(s ?? emptySync()), ...(error.body as Partial<SyncStatusDto>), status: error.body!.status as SyncStatusDto["status"] }));
+          setSyncOpen(true);
+        }
+      } else {
+        toast(apiErrorText(error, "Pull failed"), "error");
       }
     },
-    [doc.id, toast],
+    [ownsPublishPull, toast],
+  );
+  const startPull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) => {
+      const operation = beginPull(options);
+      if (!operation) return null;
+      const { owner, pending } = operation;
+      return (async () => {
+        try {
+          const res = await pending;
+          applyPullSuccess(owner, res);
+          return res;
+        } catch (error) {
+          applyPullError(owner, error);
+          throw error;
+        } finally {
+          finishPublishPull(owner);
+        }
+      })();
+    },
+    [applyPullError, applyPullSuccess, beginPull, finishPublishPull],
+  );
+  const pull = useCallback(
+    (options: { force?: boolean; merge?: boolean } = {}) => startPull(options) ?? Promise.reject(publishPullBusyError()),
+    [startPull],
   );
 
   // Poll the three-way status while the document is GitHub-backed (60 s, or SYNC_POLL_MS via the response) and
@@ -526,14 +2404,65 @@ export function EditorShell({
   const linkedToGitHub = doc.storage !== "local";
   useSyncPolling({ documentId: doc.id, enabled: linkedToGitHub, refreshKey: syncTick, onStatus: setSync });
 
+  const compareWithGitHub = useCallback(
+    (visit: EditorPreviewVisit) => {
+      if (!ownsPreviewVisit(visit)) return Promise.resolve();
+      const owner: GitHubCompareRequest = {
+        visit,
+        document: visit.document,
+        documentId: visit.documentId,
+        request: Symbol("github-compare-request"),
+      };
+      githubCompareRequestsRef.current.add(owner);
+      const ownsRequest = () =>
+        githubCompareRequestsRef.current.has(owner) &&
+        owner.visit.document === owner.document &&
+        owner.visit.documentId === owner.documentId &&
+        ownsPreviewVisit(owner.visit);
+      return (async () => {
+        try {
+          const versionsModule = loadVersionsPanel();
+          const body = await api.documents.sync(owner.documentId, { fresh: true, content: true });
+          await versionsModule;
+          if (!ownsRequest()) return;
+          const remoteContent = body.remoteContent ?? "";
+          const now = new Date().toISOString();
+          owner.visit.githubProducer({
+            version: {
+              id: "github-remote",
+              number: 0,
+              title: "GitHub",
+              kind: "import",
+              createdBy: null,
+              createdByName: "GitHub",
+              commitSha: body.remote.sha,
+              createdAt: body.remote.updatedAt ?? now,
+              size: remoteContent.length,
+            },
+            content: remoteContent,
+          });
+        } catch (error) {
+          if (ownsRequest()) throw error;
+        } finally {
+          githubCompareRequestsRef.current.delete(owner);
+        }
+      })();
+    },
+    [ownsPreviewVisit],
+  );
   const syncActions = useMemo<SyncActions>(
     () => ({
       merge: async () => {
+        const operation = beginPull({ merge: true });
+        if (!operation) throw publishPullBusyError();
+        const { owner, pending } = operation;
         try {
-          await pull({ merge: true });
+          const res = await pending;
+          applyPullSuccess(owner, res);
           return 0;
         } catch (e) {
           if (e instanceof ApiError && e.status === 409 && e.body?.status === "conflict" && typeof e.body.merged === "string") {
+            if (!ownsPublishPull(owner)) throw e;
             // Put the marked text in the document so the user resolves conflicts inline (the `merge-conflict` lint flags each marker).
             session.replaceSource([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
             session.setActiveSurface("code");
@@ -541,24 +2470,19 @@ export function EditorShell({
             toast(`Merged with ${e.body.conflicts} conflict${e.body.conflicts === 1 ? "" : "s"} — resolve the marked lines, then publish.`, "info");
             return Number(e.body.conflicts ?? 1);
           }
+          applyPullError(owner, e);
           throw e;
+        } finally {
+          finishPublishPull(owner);
         }
       },
       keepMine: (message: string) => publishNow(message, true),
       takeRemote: async () => {
         await pull({ force: true });
       },
-      compare: async () => {
-        const body = await api.documents.sync(doc.id, { fresh: true, content: true });
-        const remoteContent = body.remoteContent ?? "";
-        const now = new Date().toISOString();
-        setVersionPreview({
-          version: { id: "github-remote", number: 0, title: "GitHub", kind: "import", createdBy: null, createdByName: "GitHub", commitSha: body.remote.sha, createdAt: body.remote.updatedAt ?? now, size: remoteContent.length },
-          content: remoteContent,
-        });
-      },
+      compare: () => compareWithGitHub(previewVisit),
     }),
-    [pull, publishNow, session, shownLayout, isPhone, setLayout, toast, doc.id],
+    [applyPullError, applyPullSuccess, beginPull, compareWithGitHub, finishPublishPull, ownsPublishPull, previewVisit, pull, publishNow, session, shownLayout, isPhone, setLayout, toast],
   );
 
   const download = useCallback(
@@ -634,43 +2558,112 @@ export function EditorShell({
     [session, guardImport],
   );
 
-  // Set once this client has decided to leave (own delete or server eviction) so the two paths do not race.
-  const leavingRef = useRef(false);
-  const deleteDoc = useCallback(async () => {
+  const ownsDocumentMutation = useCallback(
+    (owner: DocumentMutationOwner) =>
+      currentEditorRef.current === owner.editor &&
+      owner.editor.session === owner.session &&
+      owner.editor.documentId === owner.documentId &&
+      documentMutationOwnerRef.current === owner,
+    [],
+  );
+  const finishDocumentMutation = useCallback(
+    (owner: DocumentMutationOwner) => {
+      if (!ownsDocumentMutation(owner)) return;
+      documentMutationOwnerRef.current = null;
+      setDocumentMutationOwner((current) => current === owner ? null : current);
+    },
+    [ownsDocumentMutation],
+  );
+  const beginDocumentMutation = useCallback(
+    <T,>(action: DocumentMutationAction, request: (documentId: string) => Promise<T>) => {
+      const editor = currentEditorRef.current;
+      if (
+        !editor ||
+        editor !== editorIdentity ||
+        editor.session !== session ||
+        editor.documentId !== doc.id ||
+        documentMutationOwnerRef.current
+      ) {
+        return null;
+      }
+      const owner: DocumentMutationOwner = {
+        editor,
+        session,
+        documentId: doc.id,
+        title: doc.title,
+        storage: doc.storage,
+        action,
+        operation: ++documentMutationSequence.current,
+      };
+      documentMutationOwnerRef.current = owner;
+      flushSync(() => setDocumentMutationOwner(owner));
+      let pending: Promise<T>;
+      try {
+        pending = request(owner.documentId);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return { owner, pending };
+    },
+    [doc.id, doc.storage, doc.title, editorIdentity, session],
+  );
+
+  // Set once this editor has decided to leave (own delete or server eviction) so the two paths do not race.
+  const deleteDoc = useCallback(() => {
+    if (currentEditorRef.current !== editorIdentity || documentMutationOwnerRef.current) return;
     if (!confirm(`Move “${doc.title}” to trash? You can restore it from the dashboard for 30 days.`)) return;
-    try {
-      await api.documents.delete(doc.id);
-    } catch (e) {
-      toast(apiErrorText(e, "Could not move to trash"), "error");
-      return;
-    }
-    leavingRef.current = true;
-    setPendingNotice(`“${doc.title}” was moved to the trash.`, "success");
-    await session.clearLocal();
-    router.push("/");
-  }, [doc.id, doc.title, router, session, toast]);
+    const mutation = beginDocumentMutation("delete", (documentId) => api.documents.delete(documentId));
+    if (!mutation) return;
+    const { owner, pending } = mutation;
+    void (async () => {
+      try {
+        await pending;
+        if (!ownsDocumentMutation(owner)) return;
+        leavingEditorRef.current = owner.editor;
+        setPendingNotice(`“${owner.title}” was moved to the trash.`, "success");
+        await owner.session.clearLocal();
+        if (!ownsDocumentMutation(owner)) return;
+        router.push("/");
+      } catch (error) {
+        if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not move to trash"), "error");
+      } finally {
+        finishDocumentMutation(owner);
+      }
+    })();
+  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, router, toast]);
 
   // Another owner session (or this one, via the API) trashed the document: leave with a notice.
   const trashed = useSessionValue(session, (s) => s.trashed);
   useEffect(() => {
-    if (!trashed || leavingRef.current) return;
-    leavingRef.current = true;
+    if (!trashed || leavingEditorRef.current === editorIdentity) return;
+    leavingEditorRef.current = editorIdentity;
     setPendingNotice("This document was moved to the trash.", "info");
-    void session.clearLocal().finally(() => router.push("/"));
-  }, [trashed, session, router]);
+    const leaveIfCurrent = () => {
+      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) router.push("/");
+    };
+    void session.clearLocal().then(leaveIfCurrent, leaveIfCurrent);
+  }, [editorIdentity, trashed, session, router]);
 
-  const duplicateDoc = useCallback(async () => {
-    try {
-      const res = await api.documents.duplicate(doc.id);
-      setPendingNotice(
-        doc.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
-        "success",
-      );
-      router.push(`/d/${res.id}`);
-    } catch (e) {
-      toast(apiErrorText(e, "Could not make a copy"), "error");
-    }
-  }, [doc.id, doc.storage, router, toast]);
+  const duplicateDoc = useCallback(() => {
+    const mutation = beginDocumentMutation("duplicate", (documentId) => api.documents.duplicate(documentId));
+    if (!mutation) return;
+    const { owner, pending } = mutation;
+    void (async () => {
+      try {
+        const res = await pending;
+        if (!ownsDocumentMutation(owner)) return;
+        setPendingNotice(
+          owner.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
+          "success",
+        );
+        router.push(`/d/${res.id}`);
+      } catch (error) {
+        if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not make a copy"), "error");
+      } finally {
+        finishDocumentMutation(owner);
+      }
+    })();
+  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(
@@ -818,10 +2811,20 @@ export function EditorShell({
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const openImage = useCallback(() => setDialog("image"), []);
   const openTable = useCallback(() => setDialog("table"), []);
-  const openVersionName = useCallback(() => setDialog("versionName"), []);
+  const openVersionName = openNameVersion;
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
-  const publishFromHeader = useCallback(() => (doc.storage === "gist" ? void publishNow() : setCommitOpen(true)), [doc.storage, publishNow]);
-  const pullFromHeader = useCallback(() => void pull().catch(() => undefined), [pull]);
+  const publishFromHeader = useCallback(() => {
+    if (doc.storage !== "gist") {
+      if (!publishPullOwnerRef.current) setCommitOpen(true);
+      return;
+    }
+    const request = startPublish();
+    if (request) void request.catch(() => undefined);
+  }, [doc.storage, startPublish]);
+  const pullFromHeader = useCallback(() => {
+    const request = startPull();
+    if (request) void request.catch(() => undefined);
+  }, [startPull]);
   const openSync = useCallback(() => setSyncOpen(true), []);
   const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
   const duplicateFromHeader = useCallback(() => void duplicateDoc(), [duplicateDoc]);
@@ -912,7 +2915,7 @@ export function EditorShell({
     isOwner,
     embed,
     slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
-    setDialog,
+    setDialog: setEditorDialog,
     openLink,
     openImage,
     startComment,
@@ -958,6 +2961,23 @@ export function EditorShell({
   // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
   const docView = useMemo(() => (sharedTitle && sharedTitle !== doc.title ? { ...doc, title: sharedTitle } : doc), [doc, sharedTitle]);
+  const operationDialogKey = `${initialDoc.id}:${user.id}:${role}:${embed ? "embed" : "page"}:${session.ydoc.guid}`;
+  const changeCommitOpen = useCallback((open: boolean) => {
+    if (currentEditorRef.current === editorIdentity) setCommitOpen(open);
+  }, [editorIdentity]);
+  const changeSyncOpen = useCallback((open: boolean) => {
+    if (currentEditorRef.current === editorIdentity) setSyncOpen(open);
+  }, [editorIdentity]);
+  const changeNameVersionOpen = useCallback((visit: NameVersionVisit, open: boolean) => {
+    if (currentEditorRef.current !== visit.editor || currentNameVersionVisitRef.current !== visit) return;
+    if (open) {
+      setDialog("versionName");
+      return;
+    }
+    currentNameVersionVisitRef.current = null;
+    if (namedVersionOwnerRef.current?.visit === visit) namedVersionOwnerRef.current = null;
+    setDialog((current) => current === "versionName" ? null : current);
+  }, []);
 
   const authError = useSessionValue(session, (s) => s.authError);
   // Keep the panes covered until either the local copy or the server state is in, so a
@@ -974,6 +2994,15 @@ export function EditorShell({
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;
   const showLoading = hydrated && !contentReady;
+  const renderedPreviewPresentation =
+    previewPresentation &&
+    previewSelectionRef.current === previewPresentation.authority.selection &&
+    previewPresentation.authority.selection.visit === previewVisit &&
+    previewVisit.owns()
+      ? previewPresentation
+      : null;
+  const versionPreview =
+    renderedPreviewPresentation?.authority.selection.value.preview ?? null;
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
   // The code pane mounts the first time a code/split layout shows it and stays mounted (the column hides
@@ -991,39 +3020,18 @@ export function EditorShell({
     actions.setScrollSynced(syncScroll && showCode && showRich);
   }, [actions, syncScroll, showCode, showRich]);
 
-  // Re-centre on the followed cursor (debounced) whenever it moves or the panes change.
-  useEffect(() => {
-    if (!followUserId || followedCursor === null) return;
-    const t = setTimeout(() => actions.scrollToSource(followedCursor, { code: showCode, rich: showRich, synced: syncScroll && showCode && showRich }), 150);
-    return () => clearTimeout(t);
-  }, [actions, followUserId, followedCursor, showCode, showRich, syncScroll]);
-
-  // Following stops on the user's own scroll (wheel/touch, not programmatic), typing in either pane, or Esc.
-  useEffect(() => {
-    if (!followUserId) return;
-    const stop = (event: "user-scroll" | "typing") => () => session.dispatchFollow({ type: event });
-    const onScroll = stop("user-scroll");
-    const onType = stop("typing");
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") session.dispatchFollow({ type: "stop" });
-    };
-    const scrollers = [richScroller, codeView?.scrollDOM ?? null].filter((el): el is HTMLElement => !!el);
-    const editors = [richView?.dom ?? null, codeView?.contentDOM ?? null].filter((el): el is HTMLElement => !!el);
-    for (const el of scrollers) {
-      el.addEventListener("wheel", onScroll, { passive: true });
-      el.addEventListener("touchmove", onScroll, { passive: true });
-    }
-    for (const el of editors) el.addEventListener("beforeinput", onType, true);
-    window.addEventListener("keydown", onKey, true);
-    return () => {
-      for (const el of scrollers) {
-        el.removeEventListener("wheel", onScroll);
-        el.removeEventListener("touchmove", onScroll);
-      }
-      for (const el of editors) el.removeEventListener("beforeinput", onType, true);
-      window.removeEventListener("keydown", onKey, true);
-    };
-  }, [session, followUserId, richScroller, codeView, richView]);
+  useCollaboratorFollowVisit({
+    session,
+    actions,
+    richView,
+    codeView,
+    richScroller,
+    showCode,
+    showRich,
+    syncScroll,
+    userId: followUserId,
+    cursor: followedCursor,
+  });
   const closeSidePanel = useCallback(() => {
     restoreCommentsFocusRef.current = sidePanel === "comments";
     setSidePanel(null);
@@ -1038,7 +3046,7 @@ export function EditorShell({
   // format change) does not re-render the closed ones.
   const dialogOpenChange = useMemo(() => {
     const make = (kind: Exclude<DialogKind, null>) => (open: boolean) => setDialog(open ? kind : null);
-    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), versionName: make("versionName"), shortcuts: make("shortcuts") };
+    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), shortcuts: make("shortcuts") };
   }, []);
   const onPublishDocChange = useCallback((d: DocumentDto) => {
     setDoc(d);
@@ -1050,14 +3058,49 @@ export function EditorShell({
   const insertTable = useCallback((rows: number, cols: number) => actions.insertTable(rows, cols), [actions]);
   const closeFileDrop = useCallback(() => setFileDrop(null), []);
   const fileDropError = useCallback((m: string) => toast(m, "error"), [toast]);
-  const saveNamedVersion = useCallback(
-    async (title: string) => {
-      await api.documents.createVersion(doc.id, title);
-      setVersionsRefresh((n) => n + 1);
-      toast(`Saved version “${title}”.`, "success");
-    },
-    [doc.id, toast],
+  const ownsNamedVersion = useCallback(
+    (owner: NameVersionSaveOwner) =>
+      owner.editor === owner.visit.editor &&
+      owner.documentId === owner.visit.documentId &&
+      currentEditorRef.current === owner.editor &&
+      currentEditorRef.current.documentId === owner.documentId &&
+      currentNameVersionVisitRef.current === owner.visit &&
+      namedVersionOwnerRef.current === owner,
+    [],
   );
+  const saveNamedVersion = useCallback(
+    (owner: NameVersionSaveOwner) => {
+      if (
+        owner.editor !== owner.visit.editor ||
+        owner.documentId !== owner.visit.documentId ||
+        currentEditorRef.current !== owner.editor ||
+        currentEditorRef.current.documentId !== owner.documentId ||
+        currentNameVersionVisitRef.current !== owner.visit ||
+        namedVersionOwnerRef.current
+      ) {
+        return Promise.reject(new Error("This named-version save is no longer current."));
+      }
+      namedVersionOwnerRef.current = owner;
+      let pending: ReturnType<typeof api.documents.createVersion>;
+      try {
+        pending = api.documents.createVersion(owner.documentId, owner.title);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      return (async () => {
+        try {
+          await pending;
+          if (!ownsNamedVersion(owner)) return;
+          setVersionsRefresh((n) => n + 1);
+          toast(`Saved version “${owner.title}”.`, "success");
+        } finally {
+          if (ownsNamedVersion(owner)) namedVersionOwnerRef.current = null;
+        }
+      })();
+    },
+    [ownsNamedVersion, toast],
+  );
+  const nextNamedVersionOperationId = useCallback(() => ++namedVersionOperationSequence.current, []);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const onOutlinePick = useCallback(
     (h: HeadingInfo) => {
@@ -1098,7 +3141,7 @@ export function EditorShell({
         onToast={toast}
       />
     ) : sidePanel === "versions" ? (
-      <VersionsPanel session={session} onClose={closeSidePanel} onPreview={setVersionPreview} refreshKey={versionsRefresh} />
+      <VersionsPanel session={session} onClose={closeSidePanel} onPreview={previewVisit.versionsProducer} refreshKey={versionsRefresh} />
     ) : sidePanel === "activity" ? (
       <ActivityPanel session={session} onClose={closeSidePanel} />
     ) : null;
@@ -1140,6 +3183,7 @@ export function EditorShell({
           onDownload={download}
           onCopyMarkdown={copyFromHeader}
           onNameVersion={openVersionName}
+          documentMutation={documentMutation}
           publishing={publishing}
           isOwner={isOwner}
           githubConfigured={githubConfigured}
@@ -1191,23 +3235,38 @@ export function EditorShell({
             // renders assume a desktop viewport, so without it a phone paints a 224 px rail first (#1470).
             <OutlinePanel className="max-md:hidden" session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
-          <div className={PANES_BOX}>
+          <div ref={previewVisit.captureContainer} className={PANES_BOX}>
             {showLoading && !showRichPlaceholder && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                 Loading…
               </div>
             )}
-            {versionPreview ? (
-              <div className="flex h-full min-h-0 min-w-0 flex-col">
-                {versionPreview.version.id === "github-remote" && (
-                  <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
-                    <span>Comparing GitHub\u2019s copy with this document.</span>
-                    <button type="button" className="btn btn-sm btn-outline ml-auto" onClick={() => setVersionPreview(null)} data-testid="sync-compare-close">
+            {renderedPreviewPresentation ? (
+              <div
+                ref={renderedPreviewPresentation.captureRoot}
+                className={renderedPreviewPresentation.authority.rootClass}
+              >
+                {renderedPreviewPresentation.authority.selection.source === "github-compare" && (
+                  <div
+                    className={renderedPreviewPresentation.authority.barClass}
+                    data-testid="sync-compare-bar"
+                  >
+                    <span>{renderedPreviewPresentation.authority.message}</span>
+                    <button
+                      ref={renderedPreviewPresentation.captureBack}
+                      type="button"
+                      className={renderedPreviewPresentation.authority.backClass}
+                      onClick={renderedPreviewPresentation.activateBack}
+                      data-testid="sync-compare-close"
+                    >
                       Back to editing
                     </button>
                   </div>
                 )}
-                <VersionDiffView session={session} preview={versionPreview} />
+                <VersionDiffView
+                  session={renderedPreviewPresentation.authority.selection.visit.session}
+                  preview={renderedPreviewPresentation.authority.selection.value.preview}
+                />
               </div>
             ) : (
               <>
@@ -1336,53 +3395,65 @@ export function EditorShell({
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}
-            {everOpened.commit && <CommitDialog open={commitOpen} onOpenChange={setCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
-            {everOpened.sync && <SyncDialog open={syncOpen} onOpenChange={setSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
+            {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={changeCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
+            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={changeSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
           </>
         )}
         {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}
         {everOpened.image && <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />}
         {everOpened.fileDrop && <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />}
         {everOpened.table && <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />}
-        {everOpened.versionName && <NameVersionDialog open={dialog === "versionName"} onOpenChange={dialogOpenChange.versionName} onSubmit={saveNamedVersion} />}
+        {everOpened.versionName && nameVersionVisit && (
+          <NameVersionDialog
+            key={`version-name:${operationDialogKey}`}
+            open={dialog === "versionName"}
+            visit={nameVersionVisit}
+            onOpenChange={changeNameVersionOpen}
+            nextOperationId={nextNamedVersionOperationId}
+            onSubmit={saveNamedVersion}
+          />
+        )}
         {everOpened.shortcuts && <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />}
         {everOpened.palette && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />}
 
         <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              className={cn(
-                "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
-                t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
-              )}
-              role="status"
-              data-testid="toast"
-            >
-              <span>{t.message}</span>
-              {t.action?.href && (
-                <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
-                  {t.action.label}
-                </a>
-              )}
-              {t.action?.onClick && (
-                <button
-                  type="button"
-                  className="font-semibold underline decoration-white/40 underline-offset-2"
-                  onClick={() => {
-                    t.action?.onClick?.();
-                    setToasts((list) => list.filter((x) => x.id !== t.id));
-                  }}
-                  data-testid="toast-action"
-                >
-                  {t.action.label}
+          {toastPublications
+            .filter(
+              (publication) =>
+                publication.authority === toastAuthority &&
+                toastPublicationsRef.current.includes(publication),
+            )
+            .map((t) => (
+              <div
+                key={toastRenderKey(t)}
+                className={cn(
+                  "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
+                  t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
+                )}
+                role="status"
+                data-testid="toast"
+              >
+                <span>{t.message}</span>
+                {t.action?.href && (
+                  <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
+                    {t.action.label}
+                  </a>
+                )}
+                {t.action?.onClick && (
+                  <button
+                    type="button"
+                    className="font-semibold underline decoration-white/40 underline-offset-2"
+                    onClick={() => activateToastAction(t)}
+                    data-testid="toast-action"
+                  >
+                    {t.action.label}
+                  </button>
+                )}
+                <button type="button" className="text-white/60 hover:text-white" onClick={() => dismissToast(t)} aria-label="Dismiss">
+                  <X size={14} />
                 </button>
-              )}
-              <button type="button" className="text-white/60 hover:text-white" onClick={() => setToasts((list) => list.filter((x) => x.id !== t.id))} aria-label="Dismiss">
-                <X size={14} />
-              </button>
-            </div>
-          ))}
+              </div>
+            ))}
         </div>
       </div>
     </TooltipProvider>

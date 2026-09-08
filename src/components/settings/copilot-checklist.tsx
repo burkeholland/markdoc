@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Check, ListChecks } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api, type ApiTokenDto } from "@/lib/api";
@@ -21,8 +21,44 @@ export interface ChecklistState {
   mcpCalled: boolean;
 }
 
+interface ChecklistProgress extends ChecklistState {
+  tried: boolean;
+}
+
+interface PollRequest {
+  readonly identity: symbol;
+  settled: boolean;
+}
+
+interface PollVisit {
+  readonly cadence: symbol;
+  readonly document: Document;
+  readonly mount: symbol;
+  request: PollRequest | null;
+  retired: boolean;
+}
+
 export function checklistState(tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "lastMcpCallAt">[]): ChecklistState {
   return { hasToken: tokens.length > 0, mcpSeen: tokens.some((t) => !!t.lastMcpSeenAt), mcpCalled: tokens.some((t) => !!t.lastMcpCallAt) };
+}
+
+function advanceChecklistState(
+  current: ChecklistProgress,
+  next: ChecklistState,
+  hasAgentRequests = false,
+): ChecklistProgress {
+  const advanced = {
+    hasToken: current.hasToken || next.hasToken,
+    mcpSeen: current.mcpSeen || next.mcpSeen,
+    mcpCalled: current.mcpCalled || next.mcpCalled,
+    tried: current.tried || next.mcpCalled || hasAgentRequests,
+  };
+  return advanced.hasToken === current.hasToken &&
+    advanced.mcpSeen === current.mcpSeen &&
+    advanced.mcpCalled === current.mcpCalled &&
+    advanced.tried === current.tried
+    ? current
+    : advanced;
 }
 
 /**
@@ -30,9 +66,12 @@ export function checklistState(tokens: Pick<ApiTokenDto, "lastMcpSeenAt" | "last
  * state — a token exists, an MCP client listed the tools with it (`lastMcpSeenAt`), a tool call went
  * through (`lastMcpCallAt`, so the permission prompt was answered) or a request was sent from the editor.
  */
-export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs = 5000 }: CopilotChecklistProps) {
-  const [tokens, setTokens] = useState(initialTokens);
-  const state = checklistState(tokens);
+export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 5000 }: CopilotChecklistProps) {
+  const activeVisit = useRef<PollVisit | null>(null);
+  const [mount] = useState(() => Symbol("copilot-checklist-mount"));
+  const section = useRef<HTMLElement | null>(null);
+  const initial = checklistState(initialTokens ?? []);
+  const [state, setState] = useState<ChecklistProgress>(() => ({ ...initial, tried: initial.mcpCalled || hasAgentRequests }));
   const steps: { id: string; label: string; detail: React.ReactNode; done: boolean }[] = [
     { id: "token", label: "Create a token", detail: <>Below: name it after the agent (e.g. “GitHub Copilot CLI”) and copy the secret once.</>, done: state.hasToken },
     {
@@ -59,30 +98,86 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens = [], pollMs 
       id: "try",
       label: "Try “read my doc”",
       detail: <>Ask Copilot to read one of your documents, or send a request from the editor (mention it in a comment). Turns green after the first tool call or request.</>,
-      done: state.mcpCalled || hasAgentRequests,
+      done: state.tried,
     },
   ];
-  const allDone = steps.every((s) => s.done);
+  const effectiveState = advanceChecklistState(state, initial, hasAgentRequests);
+  const effectivelyAllDone =
+    effectiveState.hasToken && effectiveState.mcpSeen && effectiveState.mcpCalled && effectiveState.tried;
 
-  useEffect(() => {
-    if (allDone || pollMs <= 0) return;
-    let cancelled = false;
-    const load = () =>
-      api.tokens
+  useLayoutEffect(() => {
+    setState((current) =>
+      advanceChecklistState(
+        current,
+        { hasToken: initial.hasToken, mcpSeen: initial.mcpSeen, mcpCalled: initial.mcpCalled },
+        hasAgentRequests,
+      ),
+    );
+  }, [hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen]);
+
+  useLayoutEffect(() => {
+    if (effectivelyAllDone || pollMs <= 0) return;
+    const ownerDocument = section.current?.ownerDocument;
+    if (!ownerDocument) return;
+
+    const cadence = Symbol("copilot-checklist-cadence");
+    const visit: PollVisit = {
+      cadence,
+      document: ownerDocument,
+      mount,
+      request: null,
+      retired: false,
+    };
+    if (activeVisit.current) activeVisit.current.retired = true;
+    activeVisit.current = visit;
+
+    const ownsCadence = () =>
+      !visit.retired &&
+      activeVisit.current === visit &&
+      visit.cadence === cadence &&
+      visit.mount === mount &&
+      section.current?.ownerDocument === visit.document;
+
+    const load = () => {
+      if (!ownsCadence() || visit.request !== null) return;
+      const request: PollRequest = {
+        identity: Symbol("copilot-checklist-request"),
+        settled: false,
+      };
+      visit.request = request;
+
+      const claimSettlement = () => {
+        if (!ownsCadence() || visit.request !== request || request.settled) return false;
+        request.settled = true;
+        return true;
+      };
+
+      void api.tokens
         .list()
-        .then((r) => !cancelled && setTokens(r.tokens))
-        .catch(() => {});
-    void load();
-    const timer = setInterval(() => void load(), pollMs);
+        .then((r) => {
+          if (claimSettlement()) {
+            setState((current) => advanceChecklistState(current, checklistState(r.tokens)));
+          }
+        })
+        .catch(() => {
+          claimSettlement();
+        })
+        .finally(() => {
+          if (visit.request?.identity === request.identity) visit.request = null;
+        });
+    };
+    load();
+    const timer = setInterval(load, pollMs);
     return () => {
-      cancelled = true;
+      visit.retired = true;
+      if (activeVisit.current === visit) activeVisit.current = null;
       clearInterval(timer);
     };
-  }, [allDone, pollMs]);
+  }, [effectivelyAllDone, hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen, mount, pollMs]);
 
   const doneCount = steps.filter((s) => s.done).length;
   return (
-    <section className="rounded-2xl border border-line bg-surface p-5" aria-labelledby="copilot-checklist-title" data-testid="copilot-checklist" data-done={doneCount}>
+    <section ref={section} className="rounded-2xl border border-line bg-surface p-5" aria-labelledby="copilot-checklist-title" data-testid="copilot-checklist" data-done={doneCount}>
       <div className="mb-3 flex items-center gap-2">
         <ListChecks size={16} className="text-accent" aria-hidden />
         <h2 id="copilot-checklist-title" className="text-sm font-semibold text-ink">

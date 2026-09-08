@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode, createElement, useEffect, useLayoutEffect } from "react";
+import { createRoot, hydrateRoot } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
 
 // A provider that only supplies the awareness instance; tests drive presence by applying a remote client's
@@ -29,19 +32,28 @@ vi.mock("./agent-requests", async (importOriginal) => {
   return { ...actual, claimerName: vi.fn(actual.claimerName) };
 });
 
-vi.mock("@/lib/api", () => ({
-  api: {
-    documents: {
-      collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
-      reviews: vi.fn().mockResolvedValue({ reviews: [] }),
-      comment: vi.fn().mockResolvedValue({ id: "via-api" }),
-      createRequest: vi.fn().mockResolvedValue({ request: { id: "req" } }),
+vi.mock("@/editor/collab/suggestion-block", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/editor/collab/suggestion-block")>();
+  return { ...actual, parseSuggestionBlock: vi.fn(actual.parseSuggestionBlock) };
+});
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    api: {
+      documents: {
+        collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
+        reviews: vi.fn().mockResolvedValue({ reviews: [] }),
+        comment: vi.fn().mockResolvedValue({ id: "via-api" }),
+        createRequest: vi.fn().mockResolvedValue({ request: { id: "req" } }),
+      },
+      tokens: {
+        list: vi.fn().mockResolvedValue({ tokens: [] }),
+      },
     },
-    tokens: {
-      list: vi.fn().mockResolvedValue({ tokens: [] }),
-    },
-  },
-}));
+  };
+});
 
 vi.mock("@/lib/notifications-store", () => ({
   markRefsRead: vi.fn(),
@@ -54,6 +66,7 @@ import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY } from "@/lib/mcp";
+import { parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { AgentRequestMirror } from "@/server/agent-requests";
 import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
@@ -64,10 +77,10 @@ import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps }
 type FakeProvider = { opts: { onAwarenessChange?: (e: { states: unknown[] }) => void } };
 const lastProvider = () => (HocuspocusProvider as unknown as { last: FakeProvider | null }).last!;
 
-function reviewDto(id: string, threadIds: string[]): ReviewDto {
+function reviewDto(id: string, threadIds: string[], documentId = "doc"): ReviewDto {
   return {
     id,
-    documentId: "doc",
+    documentId,
     authorId: "alice",
     authorName: "Copilot",
     collabAuthorId: "agent:alice:Copilot",
@@ -79,14 +92,345 @@ function reviewDto(id: string, threadIds: string[]): ReviewDto {
   };
 }
 
+type ReviewsResponse = Awaited<ReturnType<typeof api.documents.reviews>>;
+type CommentResponse = Awaited<ReturnType<typeof api.documents.comment>>;
+type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
+type TokensResponse = Awaited<ReturnType<typeof api.tokens.list>>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+interface CapturedReviewMouseEvent {
+  type: string;
+  currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  nativeEvent: Event;
+}
+
+type ReviewMouseHandler = (event: CapturedReviewMouseEvent) => void;
+type ReviewElementRef<T extends HTMLElement> = (element: T | null) => void;
+
+interface CapturedReviewControl {
+  element: HTMLButtonElement;
+  click: ReviewMouseHandler;
+  ref: ReviewElementRef<HTMLButtonElement>;
+}
+
+interface CapturedSuggestionControl extends CapturedReviewControl {
+  clickCapture: ReviewMouseHandler;
+}
+
+function reactProperty<T>(element: HTMLElement, property: string): T {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached while capturing ${property}`);
+  const props = (element as unknown as Record<string, Record<string, unknown>>)[propsKey];
+  const value = props[property];
+  if (!value) throw new Error(`React did not publish ${property}`);
+  return value as T;
+}
+
+function interceptReviewClick(
+  element: HTMLButtonElement,
+  invoke: (original: ReviewMouseHandler, event: CapturedReviewMouseEvent) => void,
+  property = "onClick",
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached while intercepting onClick");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  const original = props[property];
+  if (typeof original !== "function") throw new Error(`React did not publish ${property}`);
+  record[propsKey] = {
+    ...props,
+    [property]: (event: CapturedReviewMouseEvent) => invoke(original as ReviewMouseHandler, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function captureReviewControl(element: HTMLElement, clickProperty = "onClick"): CapturedReviewControl {
+  const Button = element.ownerDocument.defaultView?.HTMLButtonElement;
+  if (!Button || !(element instanceof Button)) throw new Error("The review control was not a button");
+  return {
+    element,
+    click: reactProperty<ReviewMouseHandler>(element, clickProperty),
+    ref: reactProperty<ReviewElementRef<HTMLButtonElement>>(element, "ref"),
+  };
+}
+
+function reviewMouseEvent(
+  control: CapturedReviewControl,
+  currentTarget: EventTarget | null = control.element,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+  type = "click",
+): CapturedReviewMouseEvent {
+  const ownerDocument = currentTarget instanceof Node ? currentTarget.ownerDocument ?? document : document;
+  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  const nativeEvent = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: nativeTarget });
+  return { type, currentTarget, target, nativeEvent };
+}
+
+function invokeReviewControl(
+  control: CapturedReviewControl,
+  currentTarget: EventTarget | null = control.element,
+  target: EventTarget | null = currentTarget,
+  nativeTarget: EventTarget | null = target,
+) {
+  control.click(reviewMouseEvent(control, currentTarget, target, nativeTarget));
+}
+
+function dispatchReviewClick(element: HTMLElement, event?: MouseEvent) {
+  const MouseEventConstructor = element.ownerDocument.defaultView?.MouseEvent ?? MouseEvent;
+  element.dispatchEvent(event ?? new MouseEventConstructor("click", { bubbles: true, cancelable: true }));
+}
+
+interface CapturedSuggestionActions {
+  root: HTMLDivElement;
+  rootCapture: ReviewMouseHandler;
+  rootClick: ReviewMouseHandler;
+  rootRef: ReviewElementRef<HTMLDivElement>;
+  accept: CapturedSuggestionControl | null;
+  reject: CapturedSuggestionControl | null;
+}
+
+function captureSuggestionControl(element: HTMLElement): CapturedSuggestionControl {
+  return {
+    ...captureReviewControl(element),
+    clickCapture: reactProperty<ReviewMouseHandler>(element, "onClickCapture"),
+  };
+}
+
+function captureSuggestionActions(scope: ParentNode = document, index = 0): CapturedSuggestionActions {
+  const root = scope.querySelectorAll<HTMLElement>('[data-testid="suggestion-actions"]').item(index);
+  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
+  if (!Root || !(root instanceof Root)) throw new Error("Suggestion actions were not rendered");
+  const accept = root.querySelector<HTMLElement>('[data-testid="suggestion-accept-comment"]');
+  const reject = root.querySelector<HTMLElement>('[data-testid="suggestion-reject-comment"]');
+  return {
+    root,
+    rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
+    rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
+    rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
+    accept: accept ? captureSuggestionControl(accept) : null,
+    reject: reject ? captureSuggestionControl(reject) : null,
+  };
+}
+
+function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSuggestionActions {
+  const root = scope.querySelector<HTMLElement>('[data-testid="suggestion-batch-actions"]');
+  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
+  if (!Root || !(root instanceof Root)) throw new Error("Suggestion batch actions were not rendered");
+  const accept = root.querySelector<HTMLElement>('[data-testid="accept-all"]');
+  const reject = root.querySelector<HTMLElement>('[data-testid="reject-all"]');
+  return {
+    root,
+    rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
+    rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
+    rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
+    accept: accept ? captureSuggestionControl(accept) : null,
+    reject: reject ? captureSuggestionControl(reject) : null,
+  };
+}
+
+function reviewSession(docId: string) {
+  const user = makeCollabUser("alice", "Alice");
+  const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+  session.keepAlive();
+  return { session, user };
+}
+
+function suggestionPanel(session: CollabSession) {
+  return (
+    <TooltipProvider>
+      <CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />
+    </TooltipProvider>
+  );
+}
+
+async function hydrateSuggestionFrame(
+  session: CollabSession,
+  hydrationTarget: "host" | "document",
+  beforeHydrate?: (target: HTMLElement | Document) => void,
+) {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
+  const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
+  const page = (
+    <html>
+      {createElement("head")}
+      <body>{panel}</body>
+    </html>
+  );
+  ownerDocument.open();
+  ownerDocument.write(
+    hydrationTarget === "document"
+      ? `<!doctype html>${renderToString(page)}`
+      : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
+  );
+  ownerDocument.close();
+  const target =
+    hydrationTarget === "document"
+      ? ownerDocument
+      : ownerDocument.getElementById("root");
+  if (!target) throw new Error("The host hydration root was not rendered");
+  beforeHydrate?.(target);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
+  return { frame, ownerDocument, ownerWindow, target, errors, root };
+}
+
+function addCommentSuggestion(
+  session: CollabSession,
+  user: ReturnType<typeof makeCollabUser>,
+  target: "root" | "reply" | "document" = "root",
+) {
+  const text = "The quick brown fox jumps.";
+  if (session.ytext.length === 0) session.ytext.insert(0, text);
+  const body = "Try this.\n\n```suggestion\nslow red\n```";
+  const threadId = session.comments.add({
+    from: target === "document" ? 0 : 4,
+    to: target === "document" ? 0 : 15,
+    body: target === "reply" ? "Could this be clearer?" : body,
+    author: user,
+  });
+  const replyId = target === "reply" ? session.comments.reply(threadId, body, user)! : null;
+  return { threadId, replyId };
+}
+
+interface CapturedFrame {
+  id: number;
+  callback: FrameRequestCallback;
+  cancelled: boolean;
+}
+
+function controlledComposerFrames(reuseIds = false) {
+  let nextId = 1;
+  const captured: CapturedFrame[] = [];
+  const pending = new Set<CapturedFrame>();
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const owner = { id: reuseIds ? 7 : nextId++, callback, cancelled: false };
+    captured.push(owner);
+    pending.add(owner);
+    return owner.id;
+  });
+  const cancel = vi.fn((id: number) => {
+    const owner = [...pending].find((candidate) => candidate.id === id);
+    if (!owner) return;
+    owner.cancelled = true;
+    pending.delete(owner);
+  });
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  return {
+    captured,
+    pending,
+    request,
+    cancel,
+    invoke(owner: CapturedFrame) {
+      pending.delete(owner);
+      owner.callback(0);
+    },
+  };
+}
+
+interface CapturedBlurTimer {
+  id: NodeJS.Timeout;
+  callback: () => void;
+  cancelled: boolean;
+  dueAt: number;
+}
+
+function controlledComposerBlurTimers() {
+  let now = 0;
+  const captured: CapturedBlurTimer[] = [];
+  const pending = new Set<CapturedBlurTimer>();
+  const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+  const reusedId = {} as NodeJS.Timeout;
+  const set = vi.spyOn(window, "setTimeout").mockImplementation((handler: (_: void) => void, delay?: number) => {
+    if (delay !== 120) return nativeSetTimeout(handler, delay);
+    const owner: CapturedBlurTimer = { id: reusedId, callback: () => handler(), cancelled: false, dueAt: now + delay };
+    captured.push(owner);
+    pending.add(owner);
+    return owner.id;
+  });
+  const clear = vi.spyOn(window, "clearTimeout").mockImplementation((id: Parameters<typeof window.clearTimeout>[0]) => {
+    const owner = [...pending].find((candidate) => candidate.id === id);
+    if (!owner) {
+      nativeClearTimeout(id);
+      return;
+    }
+    owner.cancelled = true;
+    pending.delete(owner);
+  });
+  const invoke = (owner: CapturedBlurTimer) => {
+    pending.delete(owner);
+    owner.callback();
+  };
+  return {
+    captured,
+    pending,
+    set,
+    clear,
+    invoke,
+    advance(milliseconds: number) {
+      now += milliseconds;
+      for (const owner of [...pending].filter((candidate) => candidate.dueAt <= now)) invoke(owner);
+    },
+  };
+}
+
+function ComposerBoundary({
+  session,
+  visit,
+  present = true,
+  boundary = 0,
+  onBoundary,
+  onPassiveCleanup,
+}: {
+  session: CollabSession;
+  visit: string;
+  present?: boolean;
+  boundary?: number;
+  onBoundary?: () => void;
+  onPassiveCleanup?: () => void;
+}) {
+  useLayoutEffect(() => {
+    if (boundary > 0) onBoundary?.();
+  }, [boundary, onBoundary]);
+  useEffect(() => onPassiveCleanup, [onPassiveCleanup, visit]);
+  return present ? (
+    <TooltipProvider>
+      <CommentsPanel key={visit} session={session} onClose={() => {}} onReveal={() => {}} />
+    </TooltipProvider>
+  ) : null;
+}
+
 describe("CommentsPanel", () => {
   let session: CollabSession | null = null;
+  let auxiliarySessions: CollabSession[] = [];
 
   afterEach(() => {
     cleanup();
     session?.destroy();
+    for (const extra of auxiliarySessions) extra.destroy();
     session = null;
+    auxiliarySessions = [];
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("uses the canonical session undo action and restores pending reply controls", async () => {
@@ -215,6 +559,847 @@ describe("CommentsPanel", () => {
     expect(box.querySelectorAll("ins, del")).toHaveLength(0);
   });
 
+  describe("suggestion action publication", () => {
+    it.each([
+      { action: "accept" as const, target: "root" as const, buttons: 2 },
+      { action: "reject" as const, target: "reply" as const, buttons: 2 },
+      { action: "reject" as const, target: "document" as const, buttons: 1 },
+    ])("runs one current $action from a $buttons-button set after direct-root Strict Mode replay", async ({ action, target, buttons }) => {
+      const fixture = reviewSession(`suggestion-strict-${action}-${target}`);
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user, target);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      const reject = vi.spyOn(session.comments, target === "reply" ? "rejectReplySuggestion" : "rejectSuggestion");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{suggestionPanel(session!)}</StrictMode>);
+        });
+        const actions = captureSuggestionActions(host);
+        expect(actions.root.children).toHaveLength(buttons);
+        expect(actions.accept === null).toBe(buttons === 1);
+        expect(actions.reject).not.toBeNull();
+        const control = action === "accept" ? actions.accept : actions.reject;
+        if (!control) throw new Error(`Expected the current ${action} control`);
+
+        await act(async () => dispatchReviewClick(control.element));
+
+        expect(action === "accept" ? accept : reject).toHaveBeenCalledTimes(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["pointer Accept", "keyboard Reject"] as const)(
+      "runs one genuine %s action when hydrating at the document root used by Next",
+      async (activation) => {
+        const fixture = reviewSession(`suggestion-document-hydration-${activation.replace(" ", "-")}`);
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const ownerDocument = frame.contentDocument;
+        if (!ownerDocument?.defaultView) throw new Error("The hydration frame did not have a document window");
+        const page = (
+          <html>
+            {createElement("head")}
+            <body>
+              <StrictMode>{suggestionPanel(session)}</StrictMode>
+            </body>
+          </html>
+        );
+        ownerDocument.open();
+        ownerDocument.write(`<!doctype html>${renderToString(page)}`);
+        ownerDocument.close();
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const root = await act(async () => hydrateRoot(ownerDocument, page));
+
+        try {
+          const actions = captureSuggestionActions(ownerDocument);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const user = userEvent.setup({ document: ownerDocument });
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => root.unmount());
+          errors.mockRestore();
+          frame.remove();
+        }
+      },
+    );
+
+    it.each(["pointer Accept", "keyboard Reject"] as const)(
+      "rejects a post-root %s bubble forgery before document delegation and recovers",
+      async (activation) => {
+        const fixture = reviewSession(`suggestion-document-bubble-forgery-${activation.replace(" ", "-")}`);
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const ownerDocument = frame.contentDocument;
+        if (!ownerDocument?.defaultView) throw new Error("The hydration frame did not have a document window");
+        const page = (
+          <html>
+            {createElement("head")}
+            <body>
+              <StrictMode>{suggestionPanel(session)}</StrictMode>
+            </body>
+          </html>
+        );
+        ownerDocument.open();
+        ownerDocument.write(`<!doctype html>${renderToString(page)}`);
+        ownerDocument.close();
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const root = await act(async () => hydrateRoot(ownerDocument, page));
+
+        try {
+          const actions = captureSuggestionActions(ownerDocument);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const stopPropagation = vi.fn();
+          const ancestor = actions.root.parentElement;
+          if (!ancestor) throw new Error("The suggestion action root did not have an ancestor");
+          const forgeBubble = (nativeEvent: Event) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+            click.stopImmediatePropagation();
+          };
+          ancestor.addEventListener("click", forgeBubble, { once: true });
+          const user = userEvent.setup({ document: ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(stopPropagation).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => root.unmount());
+          errors.mockRestore();
+          frame.remove();
+        }
+      },
+    );
+
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "ignores an own currentTarget poison during %s hydration with %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-current-target-poison-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const ownerDocument = frame.contentDocument;
+        const ownerWindow = ownerDocument?.defaultView;
+        if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
+        const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
+        const page = (
+          <html>
+            {createElement("head")}
+            <body>{panel}</body>
+          </html>
+        );
+        ownerDocument.open();
+        ownerDocument.write(
+          hydrationTarget === "document"
+            ? `<!doctype html>${renderToString(page)}`
+            : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
+        );
+        ownerDocument.close();
+        const target =
+          hydrationTarget === "document"
+            ? ownerDocument
+            : ownerDocument.getElementById("root");
+        if (!target) throw new Error("The host hydration root was not rendered");
+        const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+          ownerWindow.Event.prototype,
+          "currentTarget",
+        );
+        const originalCurrentTargetGetter = currentTargetDescriptor?.get;
+        if (!currentTargetDescriptor || !originalCurrentTargetGetter) {
+          throw new Error("The owner realm did not expose Event.currentTarget");
+        }
+        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", {
+          ...currentTargetDescriptor,
+          get(this: Event) {
+            const own = Object.getOwnPropertyDescriptor(this, "currentTarget");
+            return own && "value" in own
+              ? own.value
+              : Reflect.apply(originalCurrentTargetGetter, this, []);
+          },
+        });
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
+        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", currentTargetDescriptor);
+
+        try {
+          const actions = captureSuggestionActions(target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const forgedStopPropagation = vi.fn();
+          const poisonCurrentTarget = (nativeEvent: Event) => {
+            Object.defineProperty(nativeEvent, "currentTarget", { configurable: true, value: actions.root });
+          };
+          const nominateForgedBubble = (nativeEvent: Event) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation: forgedStopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+          };
+          ownerWindow.addEventListener("click", poisonCurrentTarget, { capture: true, once: true });
+          actions.root.addEventListener("click", nominateForgedBubble, { once: true });
+          const user = userEvent.setup({ document: ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(forgedStopPropagation).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => root.unmount());
+          errors.mockRestore();
+          frame.remove();
+        }
+      },
+    );
+
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "rejects an own target/path %s hydration spoof from the action root during %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-target-path-spoof-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const mounted = await hydrateSuggestionFrame(session, hydrationTarget);
+
+        try {
+          const actions = captureSuggestionActions(mounted.target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const physicalPath: EventTarget[] = [];
+          for (let node: Node | null = actions.root; node; node = node.parentNode) physicalPath.push(node);
+          physicalPath.push(mounted.ownerWindow);
+          const nativeEvent = new mounted.ownerWindow.MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            detail: activation === "pointer Accept" ? 1 : 0,
+            view: mounted.ownerWindow,
+          });
+          Object.defineProperties(nativeEvent, {
+            target: { configurable: true, value: control.element },
+            composedPath: {
+              configurable: true,
+              value: () => [control.element, ...physicalPath],
+            },
+          });
+          const dispatchSpoof = () => actions.root.dispatchEvent(nativeEvent);
+          const user = userEvent.setup({ document: mounted.ownerDocument });
+
+          if (activation === "pointer Accept") {
+            const suppressPhysicalButtonClick = (event: Event) => event.stopImmediatePropagation();
+            control.element.addEventListener("pointerup", dispatchSpoof, { once: true });
+            control.element.addEventListener("click", suppressPhysicalButtonClick);
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+            control.element.removeEventListener("click", suppressPhysicalButtonClick);
+          } else {
+            control.element.addEventListener(
+              "keydown",
+              (event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                dispatchSpoof();
+              },
+              { once: true },
+            );
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(mounted.errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => mounted.root.unmount());
+          mounted.errors.mockRestore();
+          mounted.frame.remove();
+        }
+      },
+    );
+
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "keeps the private %s hydration finalizer hidden before React bubble during %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-finalizer-capture-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        let attackBeforeReactBubble: (event: Event) => void = () => {};
+        const mounted = await hydrateSuggestionFrame(session, hydrationTarget, (target) => {
+          target.addEventListener("click", (event) => attackBeforeReactBubble(event), { once: true });
+        });
+
+        try {
+          const actions = captureSuggestionActions(mounted.target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const ownAddDescriptor = Object.getOwnPropertyDescriptor(mounted.target, "addEventListener");
+          const ownerAddEventListener = mounted.ownerWindow.EventTarget.prototype.addEventListener;
+          let capturedFinalizer: EventListener | null = null;
+          Object.defineProperty(mounted.target, "addEventListener", {
+            configurable: true,
+            value(
+              this: EventTarget,
+              type: string,
+              listener: EventListenerOrEventListenerObject | null,
+              options?: boolean | AddEventListenerOptions,
+            ) {
+              if (type === "click" && typeof listener === "function") capturedFinalizer = listener;
+              return Reflect.apply(ownerAddEventListener, this, [type, listener, options]);
+            },
+          });
+          const forgedStopPropagation = vi.fn();
+          attackBeforeReactBubble = (nativeEvent) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation: forgedStopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+            capturedFinalizer?.call(mounted.target, click);
+            click.stopImmediatePropagation();
+          };
+          const user = userEvent.setup({ document: mounted.ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(capturedFinalizer).toBeNull();
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(forgedStopPropagation).not.toHaveBeenCalled();
+
+          if (ownAddDescriptor) {
+            Object.defineProperty(mounted.target, "addEventListener", ownAddDescriptor);
+          } else {
+            Reflect.deleteProperty(mounted.target, "addEventListener");
+          }
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(mounted.errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => mounted.root.unmount());
+          mounted.errors.mockRestore();
+          mounted.frame.remove();
+        }
+      },
+    );
+
+    it("keeps the exact presentation while moving from one-button to two-button authority", async () => {
+      const fixture = reviewSession("suggestion-conditional-actions");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      (session as unknown as { role: string }).role = "commenter";
+      session.setMode("viewing");
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      const rendered = render(suggestionPanel(session));
+      const stale = captureSuggestionActions();
+
+      expect(stale.accept).toBeNull();
+      expect(stale.reject).not.toBeNull();
+      expect(stale.root.children).toHaveLength(1);
+      expect(stale.root.className).toBe("mt-2 flex flex-wrap items-center gap-2");
+      expect(stale.reject!.element).toHaveAttribute("type", "button");
+      expect(stale.reject!.element).toHaveClass("btn", "btn-sm", "btn-outline", "shrink-0", "gap-1.5", "whitespace-nowrap");
+      expect(stale.reject!.element.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+
+      act(() => {
+        (session as unknown as { role: string }).role = "owner";
+        session!.setMode("editing");
+      });
+      await waitFor(() => expect(screen.getByTestId("suggestion-accept-comment")).toBeInTheDocument());
+      const current = captureSuggestionActions();
+      expect(current.root).toBe(stale.root);
+      expect(current.root.children).toHaveLength(2);
+      expect(current.root.children.item(0)).toBe(current.accept!.element);
+      expect(current.root.children.item(1)).toBe(current.reject!.element);
+      expect(current.accept!.element).toHaveTextContent("Accept suggestion");
+      expect(current.accept!.element).toHaveClass("btn", "btn-sm", "btn-primary", "shrink-0", "gap-1.5", "whitespace-nowrap");
+      expect(current.accept!.click).not.toBe(stale.reject!.click);
+
+      act(() => {
+        stale.reject!.click(reviewMouseEvent(current.reject!));
+        dispatchReviewClick(current.accept!.element);
+      });
+      expect(accept).toHaveBeenCalledOnce();
+      rendered.unmount();
+    });
+
+    it.each(["full", "partial"] as const)("retires a %s callback-ref replay and accepts only a fresh successor", async (replay) => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = reviewSession(`suggestion-${replay}-ref-replay`);
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const stale = captureSuggestionActions();
+
+      act(() => {
+        if (replay === "full") stale.rootRef(null);
+        stale.accept!.ref(null);
+        if (replay === "full") stale.reject!.ref(null);
+        if (replay === "full") stale.rootRef(stale.root);
+        stale.accept!.ref(stale.accept!.element);
+        if (replay === "full") stale.reject!.ref(stale.reject!.element);
+        stale.accept!.click(reviewMouseEvent(stale.accept!));
+      });
+      expect(accept).not.toHaveBeenCalled();
+
+      act(() => session!.setActiveComment(fixture.session.comments.list()[0]!.id));
+      await waitFor(() => expect(captureSuggestionActions().accept!.click).not.toBe(stale.accept!.click));
+      const current = captureSuggestionActions();
+      act(() => {
+        stale.accept!.ref(current.accept!.element);
+        stale.accept!.ref(null);
+        dispatchReviewClick(current.accept!.element);
+      });
+      expect(accept).toHaveBeenCalledOnce();
+    });
+
+    it.each(["descendant restore", "root restore", "ancestor restore", "ancestor attribute restore"] as const)(
+      "permanently retires a %s mutation and recovers with a distinct action wrapper",
+      async (mutation) => {
+        const fixture = reviewSession(`suggestion-${mutation.replace(" ", "-")}`);
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        render(suggestionPanel(session));
+        await screen.findByTestId("suggestion-reject-comment");
+        const stale = captureSuggestionActions();
+
+        if (mutation === "descendant restore") {
+          const icon = stale.reject!.element.firstElementChild!;
+          const clone = icon.cloneNode(true) as Element;
+          icon.replaceWith(clone);
+          clone.replaceWith(icon);
+        } else if (mutation === "ancestor attribute restore") {
+          const ancestor = stale.root.parentElement;
+          if (!ancestor) throw new Error("The suggestion publication had no element ancestor");
+          ancestor.setAttribute("inert", "");
+          ancestor.removeAttribute("inert");
+        } else {
+          const restored = mutation === "root restore" ? stale.root : stale.root.closest('[data-testid="comment-thread"]')!;
+          const parent = restored.parentNode;
+          const next = restored.nextSibling;
+          if (!parent) throw new Error("The suggestion publication had no connected parent");
+          restored.remove();
+          parent.insertBefore(restored, next);
+        }
+        await act(async () => {});
+        const current = captureSuggestionActions();
+        expect(current.reject!.click).not.toBe(stale.reject!.click);
+
+        act(() => {
+          stale.reject!.click(reviewMouseEvent(current.reject!));
+          dispatchReviewClick(current.reject!.element);
+        });
+        expect(reject).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["before replay", "during handoff"] as const)(
+      "publishes a fresh successor when Strict Mode discovers mutation history $timing",
+      async (timing) => {
+        const fixture = reviewSession(`suggestion-strict-mutation-${timing.replace(" ", "-")}`);
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        let stale: CapturedSuggestionActions | null = null;
+        let layouts = 0;
+        try {
+          await act(async () => {
+            root.render(
+              <StrictMode>
+                <ComposerBoundary
+                  session={session!}
+                  visit="strict"
+                  boundary={1}
+                  onBoundary={() => {
+                    layouts += 1;
+                    stale ??= captureSuggestionActions(host);
+                    const targetLayout = timing === "before replay" ? 1 : 2;
+                    if (layouts !== targetLayout) return;
+                    const icon = stale.reject!.element.firstElementChild!;
+                    const clone = icon.cloneNode(true) as Element;
+                    icon.replaceWith(clone);
+                    clone.replaceWith(icon);
+                  }}
+                />
+              </StrictMode>,
+            );
+          });
+          if (!stale) throw new Error("Strict Mode did not expose the first suggestion publication");
+          const retired = stale as CapturedSuggestionActions;
+          await waitFor(() => expect(captureSuggestionActions(host).reject!.click).not.toBe(retired.reject!.click));
+          const current = captureSuggestionActions(host);
+
+          act(() => {
+            retired.reject!.click(reviewMouseEvent(current.reject!));
+            dispatchReviewClick(current.reject!.element);
+          });
+          expect(reject).toHaveBeenCalledOnce();
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("ignores nonadjacent mutations without replacing or disabling the current action set", async () => {
+      const fixture = reviewSession("suggestion-nonadjacent-mutation");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      const foreign = document.createElement("section");
+      document.body.prepend(foreign);
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const current = captureSuggestionActions();
+
+      foreign.append(document.createElement("span"));
+      await act(async () => {});
+      expect(captureSuggestionActions().accept!.click).toBe(current.accept!.click);
+      act(() => dispatchReviewClick(current.accept!.element));
+      expect(accept).toHaveBeenCalledOnce();
+      foreign.remove();
+    });
+
+    it.each(["accept-through-reject", "reject-through-accept"] as const)("does not cross $case handlers", async (crossing) => {
+      const fixture = reviewSession(`suggestion-cross-${crossing}`);
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      const reject = vi.spyOn(session.comments, "rejectSuggestion");
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const actions = captureSuggestionActions();
+      const source = crossing === "accept-through-reject" ? actions.reject! : actions.accept!;
+      const crossed = crossing === "accept-through-reject" ? actions.accept! : actions.reject!;
+      const restore = interceptReviewClick(source.element, (_original, event) => crossed.clickCapture(event), "onClickCapture");
+
+      act(() => dispatchReviewClick(source.element));
+      restore();
+      expect(accept).not.toHaveBeenCalled();
+      expect(reject).not.toHaveBeenCalled();
+
+      act(() => dispatchReviewClick(source.element));
+      expect(crossing === "accept-through-reject" ? reject : accept).toHaveBeenCalledOnce();
+    });
+
+    it("rejects a mutable wrapper carrying a live native click before a genuine wrapper acts", async () => {
+      const fixture = reviewSession("suggestion-live-native-forgery");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const actions = captureSuggestionActions();
+      const stopPropagation = vi.fn();
+      const restore = interceptReviewClick(
+        actions.accept!.element,
+        (original, event) => {
+          const delivered = event as CapturedReviewMouseEvent & {
+            button: number;
+            buttons: number;
+            bubbles: boolean;
+            cancelable: boolean;
+            defaultPrevented: boolean;
+          };
+          const forged: CapturedReviewMouseEvent & {
+            button: number;
+            buttons: number;
+            bubbles: boolean;
+            cancelable: boolean;
+            defaultPrevented: boolean;
+            stopPropagation: () => void;
+          } = {
+            type: delivered.type,
+            currentTarget: null,
+            target: delivered.target,
+            nativeEvent: delivered.nativeEvent,
+            button: delivered.button,
+            buttons: delivered.buttons,
+            bubbles: delivered.bubbles,
+            cancelable: delivered.cancelable,
+            defaultPrevented: delivered.defaultPrevented,
+            stopPropagation,
+          };
+          forged.currentTarget = actions.root;
+          actions.rootCapture(forged);
+          forged.currentTarget = actions.accept!.element;
+          original(forged);
+        },
+        "onClickCapture",
+      );
+
+      act(() => dispatchReviewClick(actions.accept!.element));
+      restore();
+      expect(accept).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+
+      act(() => dispatchReviewClick(actions.accept!.element));
+      expect(accept).toHaveBeenCalledOnce();
+    });
+
+    it("uses each native click once across rows without poisoning a later valid delivery", async () => {
+      const fixture = reviewSession("suggestion-cross-row-native");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      addCommentSuggestion(session, fixture.user);
+      const reject = vi.spyOn(session.comments, "rejectSuggestion").mockReturnValue(true);
+      render(suggestionPanel(session));
+      await waitFor(() => expect(screen.getAllByTestId("suggestion-actions")).toHaveLength(2));
+      const first = captureSuggestionActions(document, 0);
+      const second = captureSuggestionActions(document, 1);
+      const firstThreadId = first.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
+      const secondThreadId = second.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
+      if (!firstThreadId || !secondThreadId) throw new Error("Suggestion rows did not retain their thread identities");
+      const reused = new MouseEvent("click", { bubbles: true, cancelable: true });
+      const restore = interceptReviewClick(
+        first.reject!.element,
+        (_original, event) => second.reject!.clickCapture(event),
+        "onClickCapture",
+      );
+
+      act(() => dispatchReviewClick(first.reject!.element, reused));
+      restore();
+      expect(reject).not.toHaveBeenCalled();
+
+      act(() => {
+        dispatchReviewClick(second.reject!.element, reused);
+        dispatchReviewClick(first.reject!.element, reused);
+      });
+      expect(reject).toHaveBeenCalledOnce();
+      expect(reject.mock.calls[0]?.[0]).toBe(secondThreadId);
+
+      act(() => dispatchReviewClick(first.reject!.element));
+      expect(reject).toHaveBeenCalledTimes(2);
+      expect(reject.mock.calls[1]?.[0]).toBe(firstThreadId);
+    });
+
+    it("claims the publication, action, React event, and native event before repeated or reentrant async work", async () => {
+      const fixture = reviewSession("suggestion-one-use-event");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const pending = deferred<boolean>();
+      const captured: { current: CapturedSuggestionActions | null } = { current: null };
+      const accept = vi.spyOn(session, "acceptCommentSuggestion").mockImplementation(() => {
+        captured.current!.accept!.element.click();
+        return pending.promise as unknown as boolean;
+      });
+      render(suggestionPanel(session));
+      await screen.findByTestId("suggestion-accept-comment");
+      const actions = captureSuggestionActions();
+      captured.current = actions;
+      const restore = interceptReviewClick(
+        actions.accept!.element,
+        (original, event) => {
+          original(event);
+          original(event);
+        },
+        "onClickCapture",
+      );
+
+      act(() => {
+        actions.accept!.click(reviewMouseEvent(actions.accept!));
+        actions.accept!.click({
+          ...reviewMouseEvent(actions.accept!),
+          nativeEvent: new Event("click", { bubbles: true, cancelable: true }),
+        });
+      });
+      expect(accept).not.toHaveBeenCalled();
+
+      const native = new MouseEvent("click", { bubbles: true, cancelable: true });
+      act(() => {
+        dispatchReviewClick(actions.accept!.element, native);
+        dispatchReviewClick(actions.accept!.element, native);
+      });
+      restore();
+      expect(accept).not.toHaveBeenCalled();
+
+      act(() => dispatchReviewClick(actions.accept!.element));
+      expect(accept).toHaveBeenCalledOnce();
+      await act(async () => {
+        pending.resolve(true);
+        await pending.promise;
+      });
+      expect(accept).toHaveBeenCalledOnce();
+    });
+
+    it("keeps an equal-looking detached row stale across replacement order and lets the fresh row act", async () => {
+      const fixture = reviewSession("suggestion-equal-remount");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const reject = vi.spyOn(session.comments, "rejectSuggestion");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<ComposerBoundary session={session!} visit="A" />);
+        });
+        const stale = captureSuggestionActions(host);
+        let checkedAtBoundary = false;
+        await act(async () => {
+          root.render(
+            <ComposerBoundary
+              session={session!}
+              visit="B"
+              boundary={1}
+              onBoundary={() => {
+                stale.reject!.click(reviewMouseEvent(stale.reject!));
+                expect(stale.root.isConnected).toBe(false);
+                checkedAtBoundary = true;
+              }}
+            />,
+          );
+        });
+        expect(checkedAtBoundary).toBe(true);
+        const current = captureSuggestionActions(host);
+        expect(current.root).not.toBe(stale.root);
+        expect(current.reject!.click).not.toBe(stale.reject!.click);
+
+        act(() => {
+          stale.reject!.click(reviewMouseEvent(current.reject!));
+          dispatchReviewClick(current.reject!.element);
+        });
+        expect(reject).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+  });
+
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({
@@ -316,6 +1501,211 @@ describe("CommentsPanel", () => {
     editorControl.focus();
     view.rerender(<Harness open focusOnMount />);
     await waitFor(() => expect(screen.getByRole("tab", { name: "Open" })).toHaveFocus());
+  });
+
+  describe("review metadata loading", () => {
+    it("keeps live comments visible behind one neutral initial status until a successful empty result", async () => {
+      const initial = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValueOnce(initial.promise);
+      const created = reviewSession("reviews-loading");
+      session = created.session;
+      session.ytext.insert(0, "A live comment.");
+      session.comments.add({ from: 0, to: 1, body: "Still available.", author: created.user });
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+      expect(screen.getByTestId("reviews-loading")).toHaveTextContent("Loading review details…");
+      expect(screen.getByTestId("comment-thread")).toHaveTextContent("Still available.");
+      expect(screen.queryByText("No open comments")).toBeNull();
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(screen.getAllByTestId("reviews-loading")).toHaveLength(1);
+      expect(screen.queryByText("Nothing resolved yet")).toBeNull();
+
+      await act(async () => {
+        initial.resolve({ reviews: [] });
+        await initial.promise;
+      });
+
+      expect(await screen.findByText("Nothing resolved yet")).toBeInTheDocument();
+      expect(screen.queryByTestId("reviews-loading")).toBeNull();
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+      expect(api.documents.reviews).toHaveBeenCalledWith("reviews-loading");
+    });
+
+    it("retries a first-load failure once and guards repeated activation until genuine empty success", async () => {
+      const retry = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews)
+        .mockReset()
+        .mockRejectedValueOnce(new Error("offline"))
+        .mockReturnValueOnce(retry.promise);
+      session = reviewSession("reviews-retry").session;
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Couldn’t load review details.");
+      expect(within(alert).getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+      expect(screen.queryByText("No open comments")).toBeNull();
+
+      const retryButton = within(alert).getByRole("button", { name: "Retry" });
+      fireEvent.click(retryButton);
+      fireEvent.click(retryButton);
+
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      expect(within(alert).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+      await act(async () => {
+        retry.resolve({ reviews: [] });
+        await retry.promise;
+      });
+
+      expect(await screen.findByText("No open comments")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(api.documents.reviews).toHaveBeenNthCalledWith(2, "reviews-retry");
+    });
+
+    it("keeps cached review cards and live comments visible when a thread-count refresh fails", async () => {
+      const refresh = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset();
+      const created = reviewSession("reviews-cached");
+      session = created.session;
+      session.ytext.insert(0, "Review this text.");
+      const reviewThread = session.comments.add({ from: 0, to: 6, body: "Review finding.", author: created.user });
+      const cached = reviewDto("cached", [reviewThread], session.docId);
+      vi.mocked(api.documents.reviews)
+        .mockResolvedValueOnce({ reviews: [cached] })
+        .mockReturnValueOnce(refresh.promise);
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      expect(await screen.findByText("Review cached.")).toBeInTheDocument();
+
+      act(() => {
+        session!.comments.add({ from: 7, to: 11, body: "A live follow-up.", author: created.user });
+      });
+
+      expect(await screen.findByTestId("reviews-loading")).toHaveTextContent("Refreshing review details…");
+      expect(screen.getByText("Review cached.")).toBeInTheDocument();
+      await act(async () => {
+        refresh.reject(new Error("refresh unavailable"));
+        try {
+          await refresh.promise;
+        } catch {}
+      });
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("Review details may be out of date.");
+      expect(screen.getByText("Review cached.")).toBeInTheDocument();
+      expect(screen.getByText("Review finding.")).toBeInTheDocument();
+      expect(screen.getByText("A live follow-up.")).toBeInTheDocument();
+      expect(screen.getAllByTestId("review-card")).toHaveLength(1);
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+    });
+
+    it("coalesces a burst of thread-count changes during pending work into one current refresh", async () => {
+      const stale = deferred<ReviewsResponse>();
+      const current = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+      const created = reviewSession("reviews-coalesced");
+      session = created.session;
+      session.ytext.insert(0, "One two.");
+
+      render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      act(() => {
+        session!.comments.add({ from: 0, to: 3, body: "First.", author: created.user });
+      });
+      await act(async () => {});
+      act(() => {
+        session!.comments.add({ from: 4, to: 7, body: "Second.", author: created.user });
+      });
+      await act(async () => {});
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        stale.resolve({ reviews: [reviewDto("stale", [], session!.docId)] });
+        await stale.promise;
+      });
+
+      await waitFor(() => expect(api.documents.reviews).toHaveBeenCalledTimes(2));
+      expect(screen.getByTestId("reviews-loading")).toHaveTextContent("Loading review details…");
+      expect(screen.queryByText("Review stale.")).toBeNull();
+
+      await act(async () => {
+        current.resolve({ reviews: [] });
+        await current.promise;
+      });
+
+      expect(await screen.findByText("Nothing resolved yet")).toBeInTheDocument();
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(["resolve", "reject"] as const)("isolates an old document’s stale Retry %s before loading the current document", async (outcome) => {
+      const oldRequest = deferred<ReviewsResponse>();
+      const newRequest = deferred<ReviewsResponse>();
+      let oldCalls = 0;
+      vi.mocked(api.documents.reviews).mockReset().mockImplementation((docId) => {
+        if (docId !== "reviews-old") return newRequest.promise;
+        oldCalls += 1;
+        return oldCalls === 1 ? Promise.reject(new Error("old initial failure")) : oldRequest.promise;
+      });
+      const old = reviewSession("reviews-old");
+      const next = reviewSession("reviews-new");
+      session = next.session;
+
+      const rendered = render(<CommentsPanel session={old.session} onClose={() => {}} onReveal={() => {}} />);
+      const oldAlert = await screen.findByRole("alert");
+      fireEvent.click(within(oldAlert).getByRole("button", { name: "Retry" }));
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      rendered.rerender(<CommentsPanel session={next.session} onClose={() => {}} onReveal={() => {}} />);
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(api.documents.reviews).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("reviews-loading")).toBeInTheDocument();
+
+      await act(async () => {
+        if (outcome === "resolve") oldRequest.resolve({ reviews: [reviewDto("old", [], old.session.docId)] });
+        else oldRequest.reject(new Error("old failure"));
+        try {
+          await oldRequest.promise;
+        } catch {}
+      });
+
+      await waitFor(() => expect(api.documents.reviews).toHaveBeenCalledTimes(3));
+      expect(api.documents.reviews).toHaveBeenNthCalledWith(3, "reviews-new");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByText("Review old.")).toBeNull();
+
+      await act(async () => {
+        newRequest.resolve({ reviews: [reviewDto("new", [], next.session.docId)] });
+        await newRequest.promise;
+      });
+
+      expect(await screen.findByText("Review new.")).toBeInTheDocument();
+      expect(screen.queryByText("Review old.")).toBeNull();
+      old.session.destroy();
+    });
+
+    it.each(["resolve", "reject"] as const)("drops a queued refresh and late %s settlement after unmount", async (outcome) => {
+      const pending = deferred<ReviewsResponse>();
+      vi.mocked(api.documents.reviews).mockReset().mockReturnValue(pending.promise);
+      const created = reviewSession(`reviews-unmount-${outcome}`);
+      session = created.session;
+      const rendered = render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+      act(() => {
+        session!.comments.add({ from: 0, to: 0, body: "Queue a refresh.", author: created.user });
+      });
+      await act(async () => {});
+
+      rendered.unmount();
+      await act(async () => {
+        if (outcome === "resolve") pending.resolve({ reviews: [] });
+        else pending.reject(new Error("late failure"));
+        try {
+          await pending.promise;
+        } catch {}
+      });
+
+      expect(api.documents.reviews).toHaveBeenCalledOnce();
+    });
   });
 
   it("keeps a review in Open until every suggestion is decided and every thread resolved; Resolve all clears it", async () => {
@@ -490,6 +1880,2434 @@ describe("CommentsPanel", () => {
       expect(kind).toBe("info");
     });
   });
+
+  describe("API-backed row action ownership", () => {
+    interface ActionFixture {
+      session: CollabSession;
+      user: ReturnType<typeof makeCollabUser>;
+      threadIds: [string, string];
+      replyIds: [string, string];
+    }
+
+    const response = {} as CommentResponse;
+
+    const makeApiSession = (docId: string, source?: CollabSession): ActionFixture => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const next = new CollabSession({ docId, user, role: "commenter", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      if (source) {
+        Y.applyUpdate(next.ydoc, Y.encodeStateAsUpdate(source.ydoc));
+      } else {
+        next.ytext.insert(0, "Alpha beta gamma delta epsilon.");
+        const first = next.comments.add({ from: 0, to: 5, body: "First root.", author: user });
+        const second = next.comments.add({ from: 6, to: 10, body: "Second root.", author: user });
+        const firstReply = next.comments.reply(first, "First reply.", user)!;
+        const secondReply = next.comments.reply(second, "Second reply.", user)!;
+        next.comments.toggleReaction(first, null, "👍", user);
+        next.comments.toggleReaction(first, firstReply, "👍", user);
+        next.comments.toggleReaction(second, null, "👍", user);
+        next.comments.toggleReaction(second, secondReply, "👍", user);
+      }
+      const threads = next.comments.list();
+      session = next;
+      return {
+        session: next,
+        user,
+        threadIds: [threads[0].id, threads[1].id],
+        replyIds: [threads[0].replies[0].id, threads[1].replies[0].id],
+      };
+    };
+
+    const panel = (current: CollabSession) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} />
+      </TooltipProvider>
+    );
+
+    const card = (threadId: string) => document.querySelector<HTMLElement>(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`)!;
+    const reply = (threadId: string, replyId: string) => card(threadId).querySelector<HTMLElement>(`[data-testid="comment-reply"][data-reply-id="${replyId}"]`)!;
+    const rootReactionRow = (threadId: string) => within(card(threadId)).getAllByTestId("reaction-row")[0];
+    const replyReactionRow = (threadId: string, replyId: string) => within(reply(threadId, replyId)).getByTestId("reaction-row");
+    const reactionChip = (row: HTMLElement, emoji = "👍") => within(row).getAllByTestId("reaction-chip").find((item) => item.getAttribute("data-emoji") === emoji)!;
+    const openRootDelete = async (threadId: string) => {
+      fireEvent.pointerDown(within(card(threadId)).getByRole("button", { name: "Comment actions" }), { button: 0 });
+      return await screen.findByRole("menuitem", { name: "Delete thread" });
+    };
+    const invokeRoot = async (kind: "resolve" | "delete" | "reaction", threadId: string) => {
+      if (kind === "resolve") fireEvent.click(within(card(threadId)).getByTestId("comment-resolve"));
+      else if (kind === "reaction") fireEvent.click(reactionChip(rootReactionRow(threadId)));
+      else fireEvent.click(await openRootDelete(threadId));
+    };
+    const expectRootControlsDisabled = (threadId: string) => {
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeDisabled();
+      expect(within(card(threadId)).getByRole("button", { name: "Comment actions" })).toBeDisabled();
+      expect(reactionChip(rootReactionRow(threadId))).toBeDisabled();
+      expect(within(rootReactionRow(threadId)).getByRole("button", { name: "Add reaction" })).toBeDisabled();
+    };
+    const settle = async (request: ReturnType<typeof deferred<CommentResponse>>, outcome: "resolve" | "reject", reason = "request failed") => {
+      await act(async () => {
+        if (outcome === "resolve") request.resolve(response);
+        else request.reject(new Error(reason));
+        await request.promise.catch(() => {});
+      });
+    };
+
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue(response);
+      vi.mocked(parseSuggestionBlock).mockClear();
+    });
+
+    afterEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
+    });
+
+    it.each(["resolve", "delete", "reaction"] as const)("accepts one immediate duplicate %s, freezes its exact payload, and disables every competing root control", async (kind) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`duplicate-${kind}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+
+      let control: HTMLElement;
+      if (kind === "resolve") control = within(card(threadId)).getByTestId("comment-resolve");
+      else if (kind === "reaction") control = reactionChip(rootReactionRow(threadId));
+      else control = await openRootDelete(threadId);
+      act(() => {
+        control.click();
+        control.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      const [documentId, payload] = vi.mocked(api.documents.comment).mock.calls[0];
+      expect(documentId).toBe(`duplicate-${kind}`);
+      expect(payload).toEqual(
+        kind === "resolve"
+          ? { action: "resolve", threadId, resolved: true }
+          : kind === "delete"
+            ? { action: "delete", threadId, replyId: undefined }
+            : { action: "react", threadId, replyId: undefined, emoji: "👍" },
+      );
+      expect(Object.isFrozen(payload)).toBe(true);
+      const status = within(card(threadId)).getByTestId("comment-action-pending");
+      expect(status).toHaveAttribute("data-action", kind === "reaction" ? "react" : kind);
+      expect(status).toHaveTextContent(kind === "resolve" ? "Resolving comment…" : kind === "delete" ? "Deleting comment…" : "Removing 👍 reaction…");
+      expectRootControlsDisabled(threadId);
+
+      await settle(pending, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+    });
+
+    it("lets the first mixed root action own the target before React commits pending UI", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("mixed-root");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const menuDelete = await openRootDelete(threadId);
+      const resolve = within(card(threadId)).getByTestId("comment-resolve");
+      const reaction = reactionChip(rootReactionRow(threadId));
+
+      act(() => {
+        resolve.click();
+        reaction.click();
+        menuDelete.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("mixed-root", { action: "resolve", threadId, resolved: true });
+      expectRootControlsDisabled(threadId);
+      expect(within(card(threadId)).getAllByTestId("comment-action-pending")).toHaveLength(1);
+      await settle(pending, "resolve");
+    });
+
+    it("keeps the panel visit’s owner when its row unmounts for a tab switch", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("tab-switch-owner");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      await invokeRoot("resolve", threadId);
+
+      fireEvent.click(screen.getByRole("tab", { name: "Resolved" }));
+      expect(document.querySelector(`[data-thread-id="${threadId}"]`)).toBeNull();
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+      act(() => {
+        within(card(threadId)).getByTestId("comment-resolve").click();
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      await settle(pending, "resolve");
+    });
+
+    it("runs independent root, reply, and separate-thread targets concurrently without hiding untouched controls", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise);
+      const fixture = makeApiSession("independent-targets");
+      render(panel(fixture.session));
+      const [first, second] = fixture.threadIds;
+      const [firstReply, secondReply] = fixture.replyIds;
+      const firstResolve = within(card(first)).getByTestId("comment-resolve");
+      const firstReplyReaction = reactionChip(replyReactionRow(first, firstReply));
+      const secondReaction = reactionChip(rootReactionRow(second));
+
+      act(() => {
+        firstResolve.click();
+        firstReplyReaction.click();
+        secondReaction.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(api.documents.comment).mock.calls).toEqual([
+        ["independent-targets", { action: "resolve", threadId: first, resolved: true }],
+        ["independent-targets", { action: "react", threadId: first, replyId: firstReply, emoji: "👍" }],
+        ["independent-targets", { action: "react", threadId: second, replyId: undefined, emoji: "👍" }],
+      ]);
+      expect(within(card(first)).getAllByTestId("comment-action-pending")).toHaveLength(2);
+      expect(within(card(second)).getAllByTestId("comment-action-pending")).toHaveLength(1);
+      expect(reactionChip(replyReactionRow(second, secondReply))).toBeEnabled();
+
+      await settle(requests[0], "resolve");
+      expect(within(card(first)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(reactionChip(replyReactionRow(first, firstReply))).toBeDisabled();
+      expect(reactionChip(rootReactionRow(second))).toBeDisabled();
+      await settle(requests[1], "resolve");
+      await settle(requests[2], "resolve");
+    });
+
+    it("does not race a reply owner with a root delete that would remove it", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("delete-reply-conflict");
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const [replyId] = fixture.replyIds;
+      const rootDelete = await openRootDelete(threadId);
+      const replyReaction = reactionChip(replyReactionRow(threadId, replyId));
+
+      act(() => {
+        replyReaction.click();
+        rootDelete.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("delete-reply-conflict", {
+        action: "react",
+        threadId,
+        replyId,
+        emoji: "👍",
+      });
+      await settle(pending, "resolve");
+    });
+
+    it.each(["resolve", "delete", "reaction"] as const)("shows one current %s failure and clears it for a same-action retry", async (kind) => {
+      const first = deferred<CommentResponse>();
+      const retry = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(first.promise).mockReturnValueOnce(retry.promise);
+      const fixture = makeApiSession(`retry-${kind}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+
+      await invokeRoot(kind, threadId);
+      expectRootControlsDisabled(threadId);
+      await settle(first, "reject", `${kind} unavailable`);
+
+      const alert = within(card(threadId)).getByRole("alert");
+      expect(alert).toHaveTextContent(`${kind} unavailable. Try again.`);
+      expect(within(card(threadId)).getAllByRole("alert")).toHaveLength(1);
+      expect(within(card(threadId)).getByTestId("comment-resolve")).toBeEnabled();
+      expect(reactionChip(rootReactionRow(threadId))).toBeEnabled();
+
+      await invokeRoot(kind, threadId);
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toBeVisible();
+      await settle(retry, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+    });
+
+    it.each(["resolve", "reject"] as const)("keeps a replacement document’s same-id owner locked through old %s and finalizer settlement", async (oldOutcome) => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeApiSession("old-document");
+      const rendered = render(panel(old.session));
+      const [threadId] = old.threadIds;
+      await invokeRoot("resolve", threadId);
+
+      auxiliarySessions.push(old.session);
+      const current = makeApiSession("current-document", old.session);
+      expect(current.threadIds[0]).toBe(threadId);
+      rendered.rerender(panel(current.session));
+      await invokeRoot("resolve", threadId);
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+
+      await settle(oldRequest, oldOutcome);
+      expect(within(card(threadId)).getByTestId("comment-action-pending")).toHaveTextContent("Resolving comment…");
+      expect(within(card(threadId)).queryByRole("alert")).toBeNull();
+      act(() => {
+        within(card(threadId)).getByTestId("comment-resolve").click();
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([documentId]) => documentId)).toEqual(["old-document", "current-document"]);
+
+      await settle(currentRequest, "resolve");
+      expect(within(card(threadId)).queryByTestId("comment-action-pending")).toBeNull();
+      expect(within(card(threadId)).queryByTestId("comment-resolved-state")).toBeNull();
+    });
+
+    it.each(["resolve", "reject"] as const)("does not let old %s replace or clear a newer same-id error", async (oldOutcome) => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeApiSession("retired-error-document");
+      const rendered = render(panel(old.session));
+      const [threadId] = old.threadIds;
+      await invokeRoot("reaction", threadId);
+
+      auxiliarySessions.push(old.session);
+      const current = makeApiSession("new-error-document", old.session);
+      rendered.rerender(panel(current.session));
+      await invokeRoot("reaction", threadId);
+      await settle(currentRequest, "reject", "current reaction failed");
+      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
+
+      await settle(oldRequest, oldOutcome, "old reaction failed");
+      expect(within(card(threadId)).getAllByRole("alert")).toHaveLength(1);
+      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
+      expect(within(card(threadId)).getByRole("alert")).not.toHaveTextContent("old reaction failed");
+    });
+
+    it.each([
+      ["root", "resolve"],
+      ["reply", "reject"],
+    ] as const)("retires a removed %s target before a late %s settlement", async (target, outcome) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`removed-${target}`);
+      render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const [replyId] = fixture.replyIds;
+      if (target === "root") await invokeRoot("resolve", threadId);
+      else fireEvent.click(reactionChip(replyReactionRow(threadId, replyId)));
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        if (target === "root") fixture.session.comments.remove(threadId);
+        else fixture.session.comments.deleteReply(threadId, replyId);
+      });
+      if (target === "root") await waitFor(() => expect(document.querySelector(`[data-thread-id="${threadId}"]`)).toBeNull());
+      else await waitFor(() => expect(card(threadId).querySelector(`[data-reply-id="${replyId}"]`)).toBeNull());
+
+      await settle(pending, outcome, "removed target failed");
+      expect(screen.queryByText(/removed target failed/i)).toBeNull();
+      expect(screen.queryByTestId("comment-action-pending")).toBeNull();
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["resolve", "reject"] as const)("handles a late %s after panel unmount with zero unhandled rejections", async (outcome) => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession(`unmounted-action-${outcome}`);
+      const rendered = render(panel(fixture.session));
+      const [threadId] = fixture.threadIds;
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        await invokeRoot("delete", threadId);
+        rendered.unmount();
+        await settle(pending, outcome, "late action failure");
+        await act(async () => {});
+        expect(unhandled).toEqual([]);
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps unrelated memoised cards at zero renders while one target publishes pending and success", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const fixture = makeApiSession("render-isolation");
+      render(panel(fixture.session));
+      const [first, second] = fixture.threadIds;
+
+      vi.mocked(parseSuggestionBlock).mockClear();
+      fireEvent.click(within(card(first)).getByTestId("comment-resolve"));
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "First reply.")).toHaveLength(1);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "Second reply.")).toHaveLength(0);
+
+      await settle(pending, "resolve");
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "First reply.")).toHaveLength(2);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body === "Second reply.")).toHaveLength(0);
+      expect(within(card(second)).getByTestId("comment-resolve")).toBeEnabled();
+    });
+  });
+
+  describe("bulk review action ownership", () => {
+    interface BatchFixture {
+      session: CollabSession;
+      user: ReturnType<typeof makeCollabUser>;
+      threadIds: string[];
+    }
+
+    const response = {} as CommentResponse;
+    const words = ["Alpha", "beta", "gamma", "delta"];
+
+    const makeBatchSession = (docId: string, count = 2, source?: CollabSession, suggestions = true): BatchFixture => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const next = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      if (source) {
+        Y.applyUpdate(next.ydoc, Y.encodeStateAsUpdate(source.ydoc));
+      } else {
+        const text = "Alpha beta gamma delta.";
+        next.ytext.insert(0, text);
+        const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+        for (const [index, word] of words.slice(0, count).entries()) {
+          next.comments.add({
+            from: text.indexOf(word),
+            to: text.indexOf(word) + word.length,
+            body: suggestions ? `Finding ${index + 1}.\n\n\`\`\`suggestion\n${word.toUpperCase()}\n\`\`\`` : `Finding ${index + 1}.`,
+            author: agent,
+          });
+        }
+      }
+      vi.spyOn(next, "commentsViaApi", "get").mockReturnValue(true);
+      session = next;
+      return { session: next, user, threadIds: next.comments.list().map((thread) => thread.id) };
+    };
+
+    const addLocalBatchSuggestion = (fixture: BatchFixture, word = "delta") => {
+      const text = fixture.session.ytext.toString();
+      const from = text.indexOf(word);
+      const agent = makeCollabUser("agent:alice:Local", "Local");
+      fixture.session.suggestions.proposeEdits(
+        [{ from, to: from + word.length, insert: word.toUpperCase() }],
+        agent,
+      );
+    };
+
+    const batchPanel = (current: CollabSession, onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>(), onClose = () => {}) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={onClose} onReveal={() => {}} onToast={onToast} />
+      </TooltipProvider>
+    );
+    const reviewCard = (reviewId: string) => document.querySelector<HTMLElement>(`[data-testid="review-card"][data-review-id="${reviewId}"]`)!;
+    const reviewControl = (reviewId: string, testId: string) => within(reviewCard(reviewId)).getByTestId(testId);
+    const threadCard = (threadId: string) => document.querySelector<HTMLElement>(`[data-testid="comment-thread"][data-thread-id="${threadId}"]`)!;
+    const settleBatch = async (request: ReturnType<typeof deferred<CommentResponse>>, outcome: "resolve" | "reject", reason = "request failed") => {
+      await act(async () => {
+        if (outcome === "resolve") request.resolve(response);
+        else request.reject(new Error(reason));
+        await request.promise.catch(() => {});
+      });
+    };
+
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue(response);
+      vi.mocked(api.documents.reviews).mockReset().mockResolvedValue({ reviews: [] } as ReviewsResponse);
+    });
+
+    afterEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
+      vi.mocked(api.documents.reviews).mockReset().mockResolvedValue({ reviews: [] } as ReviewsResponse);
+    });
+
+    it.each(["accept", "reject"] as const)("gives the first immediate review %s activation one frozen ordered batch", async (action) => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession(`review-${action}`);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const primary = await screen.findByTestId(`review-${action}-all`);
+      const mixed = screen.getByTestId(`review-${action === "accept" ? "reject" : "accept"}-all`);
+
+      act(() => {
+        primary.click();
+        primary.click();
+        mixed.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenLastCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[0],
+        replyId: undefined,
+        decision: action,
+      });
+      expect(primary).toBeDisabled();
+      expect(mixed).toBeDisabled();
+      expect(primary).toHaveTextContent(action === "accept" ? "Accepting…" : "Rejecting…");
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve")).toBeDisabled();
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-batch-pending")).toHaveTextContent(
+        action === "accept" ? "Accepting suggestion…" : "Rejecting suggestion…",
+      );
+
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(api.documents.comment).toHaveBeenLastCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[1],
+        replyId: undefined,
+        decision: action,
+      });
+      await settleBatch(requests[1], "resolve");
+
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith(`${action === "accept" ? "Accepted" : "Rejected"} 2 suggestions from Copilot.`, "success");
+    });
+
+    it("gives immediate duplicate Resolve all activation one owner and one current summary", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession("review-resolve", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const control = await screen.findByTestId("review-resolve-all");
+
+      act(() => {
+        control.click();
+        control.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith("review-resolve", {
+        action: "resolve",
+        threadId: fixture.threadIds[0],
+        resolved: true,
+      });
+      expect(control).toBeDisabled();
+      expect(control).toHaveTextContent("Resolving…");
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      await settleBatch(requests[1], "resolve");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+    });
+
+    it.each(["accept", "reject"] as const)("owns Suggestions-tab %s all before immediate duplicate or mixed activation", async (action) => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const fixture = makeBatchSession(`suggestions-${action}`);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(screen.getByRole("tab", { name: /Suggestions/ }));
+      const primary = screen.getByTestId(`${action}-all`);
+      const mixed = screen.getByTestId(`${action === "accept" ? "reject" : "accept"}-all`);
+
+      act(() => {
+        primary.click();
+        primary.click();
+        mixed.click();
+      });
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(primary).toBeDisabled();
+      expect(mixed).toBeDisabled();
+      expect(primary).toHaveTextContent(action === "accept" ? "Accepting…" : "Rejecting…");
+      await settleBatch(requests[0], "resolve");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      await settleBatch(requests[1], "resolve");
+      expect(vi.mocked(api.documents.comment).mock.calls).toEqual(
+        fixture.threadIds.map((threadId) => [
+          fixture.session.docId,
+          { action: "suggestion", threadId, replyId: undefined, decision: action },
+        ]),
+      );
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith(`${action === "accept" ? "Accepted" : "Rejected"} 2 suggestions.`, "success");
+    });
+
+    it.each([
+      ["accept", "local", 0, true],
+      ["reject", "local", 0, true],
+      ["accept", "comments", 2, false],
+      ["reject", "comments", 2, false],
+      ["accept", "mixed", 1, true],
+      ["reject", "mixed", 1, true],
+    ] as const)(
+      "publishes one exact direct-root Strict Mode %s batch for %s targets",
+      async (action, source, commentCount, withLocal) => {
+        const fixture = makeBatchSession(`strict-suggestions-${action}-${source}`, commentCount);
+        if (withLocal) addLocalBatchSuggestion(fixture);
+        const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const tab = await within(host).findByRole("tab", { name: /Suggestions/ });
+          if (tab.getAttribute("aria-selected") !== "true") {
+            await act(async () => {
+              dispatchReviewClick(tab);
+            });
+          }
+          const actions = captureSuggestionBatchActions(host);
+          const control = action === "accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`${action} all was not published`);
+
+          await act(async () => {
+            dispatchReviewClick(control.element);
+            await Promise.resolve();
+          });
+
+          if (withLocal) {
+            expect(reviewLocal).toHaveBeenCalledExactlyOnceWith(action === "accept" ? "acceptAll" : "rejectAll");
+          } else {
+            expect(reviewLocal).not.toHaveBeenCalled();
+          }
+          await waitFor(() => expect(api.documents.comment).toHaveBeenCalledTimes(commentCount));
+          expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("claims native and React traversal before repeated, crossed, reentrant, and async batch work", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      const fixture = makeBatchSession("suggestions-exact-traversal", 2);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let primary: CapturedSuggestionControl | null = null;
+      vi.mocked(api.documents.comment)
+        .mockImplementationOnce(() => {
+          primary?.element.click();
+          return requests[0].promise;
+        })
+        .mockReturnValueOnce(requests[1].promise)
+        .mockResolvedValue(response);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const actions = captureSuggestionBatchActions(host);
+        primary = actions.accept;
+        const crossed = actions.reject;
+        if (!primary || !crossed) throw new Error("Both batch actions were not published");
+
+        act(() => {
+          primary!.click(reviewMouseEvent(primary!, crossed.element));
+          crossed.click(reviewMouseEvent(crossed, primary!.element));
+        });
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        const repeated = new MouseEvent("click", { bubbles: true, cancelable: true });
+        act(() => {
+          dispatchReviewClick(primary!.element, repeated);
+          dispatchReviewClick(primary!.element, repeated);
+          crossed.element.click();
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+        await settleBatch(requests[0], "resolve");
+        expect(api.documents.comment).toHaveBeenCalledTimes(2);
+        await settleBatch(requests[1], "resolve");
+
+        const successor = await within(host).findByTestId("accept-all");
+        act(() => dispatchReviewClick(successor));
+        expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps a successor batch owned when the retired session settles late", async () => {
+      const retiredRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(retiredRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise);
+      const retired = makeBatchSession("suggestions-retired-session", 1);
+      const retiredToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const currentToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(retired.session, retiredToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+
+        auxiliarySessions.push(retired.session);
+        const current = makeBatchSession("suggestions-current-session", 1, retired.session);
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(current.session, currentToast)}</StrictMode>);
+        });
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        expect(api.documents.comment).toHaveBeenCalledTimes(2);
+
+        await settleBatch(retiredRequest, "reject", "retired failure");
+        expect(captureSuggestionBatchActions(host).reject?.element).toBeDisabled();
+        expect(retiredToast).not.toHaveBeenCalled();
+        expect(currentToast).not.toHaveBeenCalled();
+        await settleBatch(currentRequest, "resolve");
+        expect(currentToast).toHaveBeenCalledOnce();
+        expect(retiredToast).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["descendant mutation", "disabled restoration", "detach and reinsert"] as const)(
+      "retires Suggestions-tab batch history after %s and admits a fresh successor",
+      async (scenario) => {
+        const fixture = makeBatchSession(`suggestions-${scenario.replaceAll(" ", "-")}`, 1);
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          await act(async () => {
+            dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+          });
+          const stale = captureSuggestionBatchActions(host);
+          const control = stale.reject!;
+          if (scenario === "descendant mutation") {
+            const child = control.element.firstChild;
+            if (!child) throw new Error("Reject all did not have label content");
+            const replacement = child.cloneNode(true);
+            control.element.replaceChild(replacement, child);
+            control.element.replaceChild(child, replacement);
+          } else if (scenario === "disabled restoration") {
+            control.element.disabled = true;
+            control.element.disabled = false;
+          } else {
+            const parent = stale.root.parentNode;
+            const next = stale.root.nextSibling;
+            if (!parent) throw new Error("Batch actions did not have a committed parent");
+            stale.root.remove();
+            parent.insertBefore(stale.root, next);
+          }
+
+          const staleEvent = new MouseEvent("click", { bubbles: true, cancelable: true });
+          act(() => dispatchReviewClick(control.element, staleEvent));
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          await act(async () => {});
+          const current = captureSuggestionBatchActions(host);
+          expect(current.reject?.click).not.toBe(control.click);
+          act(() => dispatchReviewClick(current.reject!.element, staleEvent));
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          act(() => dispatchReviewClick(current.reject!.element));
+          expect(api.documents.comment).toHaveBeenCalledOnce();
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("requires complete same-generation refs and ignores late partial replay after a successor", async () => {
+      const fixture = makeBatchSession("suggestions-partial-replay", 1);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const stale = captureSuggestionBatchActions(host);
+        act(() => {
+          stale.rootRef(null);
+          stale.rootRef(stale.root);
+          stale.accept!.ref(null);
+          stale.accept!.ref(stale.accept!.element);
+          dispatchReviewClick(stale.reject!.element);
+        });
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
+        });
+        const current = captureSuggestionBatchActions(host);
+        expect(current.reject?.click).not.toBe(stale.reject?.click);
+        act(() => {
+          stale.reject!.ref(null);
+          stale.reject!.ref(stale.reject!.element);
+          dispatchReviewClick(current.reject!.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["reorder", "remove", "outdated"] as const)(
+      "rejects a %s target drift without poisoning the restored batch",
+      async (drift) => {
+        const fixture = makeBatchSession(`suggestions-target-${drift}`, 0);
+        addLocalBatchSuggestion(fixture, "gamma");
+        addLocalBatchSuggestion(fixture, "delta");
+        const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const stale = captureSuggestionBatchActions(host).reject!;
+          const groups = fixture.session.suggestions.groups.bind(fixture.session.suggestions);
+          const drifted = vi.spyOn(fixture.session.suggestions, "groups").mockImplementation((sourceText) => {
+            const current = groups(sourceText);
+            if (drift === "reorder") return [...current].reverse();
+            if (drift === "remove") return current.slice(1);
+            return current.map((group) => ({ ...group, outdated: true }));
+          });
+
+          act(() => dispatchReviewClick(stale.element));
+          expect(reviewLocal).not.toHaveBeenCalled();
+          drifted.mockRestore();
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const current = captureSuggestionBatchActions(host).reject!;
+          act(() => dispatchReviewClick(current.element));
+          expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("rejectAll");
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each(["invert", "add-target"] as const)(
+      "retires a local batch when its published callback is replaced to %s",
+      async (replacement) => {
+        const fixture = makeBatchSession(`suggestions-callback-${replacement}`, 0);
+        addLocalBatchSuggestion(fixture, "gamma");
+        const originalReview = fixture.session.reviewSuggestion;
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const stale = captureSuggestionBatchActions(host).reject!;
+          const replacedReview = vi.spyOn(fixture.session, "reviewSuggestion").mockImplementation((action, id) => {
+            if (replacement === "add-target") addLocalBatchSuggestion(fixture, "delta");
+            const nextAction =
+              replacement === "invert"
+                ? action === "acceptAll"
+                  ? "rejectAll"
+                  : action === "rejectAll"
+                    ? "acceptAll"
+                    : action
+                : action;
+            return originalReview.call(fixture.session, nextAction, id);
+          });
+
+          act(() => dispatchReviewClick(stale.element));
+          expect(replacedReview).not.toHaveBeenCalled();
+          expect(fixture.session.suggestions.groups()).toHaveLength(1);
+
+          replacedReview.mockRestore();
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const current = captureSuggestionBatchActions(host).reject!;
+          expect(current.click).not.toBe(stale.click);
+          act(() => dispatchReviewClick(current.element));
+          expect(fixture.session.suggestions.groups()).toHaveLength(0);
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("rejects a new local target introduced after the batch owner is claimed", async () => {
+      const fixture = makeBatchSession("suggestions-target-added-after-claim", 0);
+      addLocalBatchSuggestion(fixture, "gamma");
+      const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+        });
+        const stale = captureSuggestionBatchActions(host).reject!;
+        const intrinsicSet = Map.prototype.set;
+        let introduced = false;
+        Map.prototype.set = function (key, value) {
+          const result = Reflect.apply(intrinsicSet, this, [key, value]);
+          const owner = value as { action?: unknown };
+          if (!introduced && key === "suggestions" && owner.action === "suggestions-reject") {
+            introduced = true;
+            addLocalBatchSuggestion(fixture, "delta");
+          }
+          return result;
+        };
+        try {
+          act(() => dispatchReviewClick(stale.element));
+        } finally {
+          Map.prototype.set = intrinsicSet;
+        }
+
+        expect(introduced).toBe(true);
+        expect(reviewLocal).not.toHaveBeenCalled();
+        expect(fixture.session.suggestions.groups()).toHaveLength(2);
+
+        await act(async () => {});
+        const current = captureSuggestionBatchActions(host).reject!;
+        act(() => dispatchReviewClick(current.element));
+        expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("rejectAll");
+        expect(fixture.session.suggestions.groups()).toHaveLength(0);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("reads canceled native clicks through the intrinsic getter and leaves a clean successor usable", async () => {
+      const fixture = makeBatchSession("suggestions-canceled-native-click", 0);
+      addLocalBatchSuggestion(fixture, "gamma");
+      const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+      const firstToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const secondToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const cancelAndShadow = (event: Event) => {
+        event.preventDefault();
+        Object.defineProperty(event, "defaultPrevented", { configurable: true, value: false });
+      };
+      window.addEventListener("click", cancelAndShadow, true);
+      let cancelListenerInstalled = true;
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, firstToast)}</StrictMode>);
+        });
+        const stale = captureSuggestionBatchActions(host).accept!;
+        const canceled = new MouseEvent("click", { bubbles: true, cancelable: true });
+        let dispatched = true;
+        act(() => {
+          dispatched = stale.element.dispatchEvent(canceled);
+        });
+        expect(dispatched).toBe(false);
+        expect(canceled.defaultPrevented).toBe(false);
+        expect(reviewLocal).not.toHaveBeenCalled();
+
+        window.removeEventListener("click", cancelAndShadow, true);
+        cancelListenerInstalled = false;
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
+        });
+        const current = captureSuggestionBatchActions(host).accept!;
+        expect(current.click).not.toBe(stale.click);
+        act(() => dispatchReviewClick(current.element));
+        expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("acceptAll");
+        expect(firstToast).not.toHaveBeenCalled();
+        expect(secondToast).toHaveBeenCalledOnce();
+      } finally {
+        if (cancelListenerInstalled) window.removeEventListener("click", cancelAndShadow, true);
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps local target scans bounded for a large published batch and one activation", async () => {
+      const created = reviewSession("suggestions-linear-snapshot");
+      session = created.session;
+      const sourceWords = Array.from({ length: 120 }, (_, index) => `word${index}`);
+      const sourceText = sourceWords.join(" ");
+      session.ytext.insert(0, sourceText);
+      const agent = makeCollabUser("agent:alice:Linear", "Linear");
+      let from = 0;
+      session.suggestions.proposeEdits(
+        sourceWords.map((word) => {
+          const edit = { from, to: from + word.length, insert: word.toUpperCase() };
+          from += word.length + 1;
+          return edit;
+        }),
+        agent,
+      );
+      session.undoManager.clear();
+      const groups = vi.spyOn(session.suggestions, "groups");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(session!)}</StrictMode>);
+        });
+        const renderScans = groups.mock.calls.length;
+        groups.mockClear();
+
+        act(() => dispatchReviewClick(captureSuggestionBatchActions(host).reject!.element));
+        const activationScans = groups.mock.calls.length;
+
+        expect(renderScans).toBeLessThan(30);
+        expect(activationScans).toBeLessThan(30);
+        expect(session.suggestions.groups()).toHaveLength(0);
+        expect(session.undoManager.undoStack).toHaveLength(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("retires permission and callback publications while preserving current recovery", async () => {
+      const fixture = makeBatchSession("suggestions-permission-callback", 1);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const firstToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const secondToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      try {
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, firstToast)}</StrictMode>);
+        });
+        await act(async () => {
+          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
+        });
+        const permissionStale = captureSuggestionBatchActions(host).accept!;
+        (fixture.session as unknown as { role: string }).role = "viewer";
+        act(() => dispatchReviewClick(permissionStale.element));
+        expect(api.documents.comment).not.toHaveBeenCalled();
+        (fixture.session as unknown as { role: string }).role = "owner";
+
+        await act(async () => {
+          root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
+        });
+        const callbackStale = permissionStale;
+        const current = captureSuggestionBatchActions(host).accept!;
+        act(() => {
+          callbackStale.click(reviewMouseEvent(current));
+          dispatchReviewClick(current.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+        await waitFor(() => expect(secondToast).toHaveBeenCalledOnce());
+        expect(firstToast).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps local Suggestions-tab bulk review in one text-and-annotation undo step", async () => {
+      const created = reviewSession("local-suggestion-batch");
+      session = created.session;
+      const original = "Alpha beta gamma.";
+      session.ytext.insert(0, original);
+      const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+      session.suggestions.proposeEdits(
+        [
+          { from: 0, to: 5, insert: "ALPHA" },
+          { from: 6, to: 10, insert: "BETA" },
+        ],
+        agent,
+      );
+      session.undoManager.clear();
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(session, onToast));
+      fireEvent.click(screen.getByRole("tab", { name: /Suggestions/ }));
+      fireEvent.click(screen.getByTestId("accept-all"));
+
+      await waitFor(() => expect(screen.queryByTestId("suggestion-card")).toBeNull());
+      expect(session.ytext.toString()).toBe("ALPHA BETA gamma.");
+      expect(session.undoManager.undoStack).toHaveLength(1);
+      act(() => session!.undo());
+      expect(session.suggestions.groups(session.ytext.toString())).toHaveLength(2);
+      expect(session.suggestions.cleanText()).toBe(original);
+      expect(onToast).toHaveBeenCalledOnce();
+      expect(onToast).toHaveBeenCalledWith("Accepted 2 suggestions.", "success");
+    });
+
+    it("runs two non-overlapping review owners independently while a row owner excludes its review batch", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise);
+      const fixture = makeBatchSession("independent-reviews");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-reject-all")).toHaveLength(2));
+
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(reviewControl("r2", "review-reject-all")).toBeEnabled();
+      fireEvent.click(reviewControl("r2", "review-reject-all"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.threadId)).toEqual(fixture.threadIds);
+      await settleBatch(requests[1], "resolve");
+      expect(reviewControl("r1", "review-reject-all")).toBeDisabled();
+      await settleBatch(requests[0], "resolve");
+
+      fireEvent.click(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      expect(reviewControl("r1", "review-reject-all")).toBeDisabled();
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(api.documents.comment).toHaveBeenCalledTimes(3);
+      await settleBatch(requests[2], "resolve");
+      expect(reviewControl("r1", "review-reject-all")).toBeEnabled();
+    });
+
+    it("reports exact partial counts, releases the owner, and retries only the failed target", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment)
+        .mockReturnValueOnce(requests[0].promise)
+        .mockReturnValueOnce(requests[1].promise)
+        .mockReturnValueOnce(requests[2].promise)
+        .mockReturnValueOnce(requests[3].promise);
+      const fixture = makeBatchSession("partial-retry", 3);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[0], fixture.user));
+      await settleBatch(requests[0], "resolve");
+      await settleBatch(requests[1], "reject", "second failed");
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[2], fixture.user));
+      await settleBatch(requests[2], "resolve");
+
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenLastCalledWith("Rejected 2 suggestions from Copilot (2 done, 1 failed, 0 outdated skipped).", "error");
+      const retry = await screen.findByTestId("review-reject-all");
+      expect(retry).toBeEnabled();
+      fireEvent.click(retry);
+      expect(api.documents.comment).toHaveBeenCalledTimes(4);
+      expect(api.documents.comment).toHaveBeenLastCalledWith("partial-retry", {
+        action: "suggestion",
+        threadId: fixture.threadIds[1],
+        replyId: undefined,
+        decision: "reject",
+      });
+      act(() => fixture.session.comments.rejectSuggestion(fixture.threadIds[1], fixture.user));
+      await settleBatch(requests[3], "resolve");
+      expect(onToast).toHaveBeenCalledTimes(2);
+      expect(onToast).toHaveBeenLastCalledWith("Rejected 1 suggestion from Copilot.", "success");
+    });
+
+    it("freezes proposed replacement text and dispatches local accepts in captured order", async () => {
+      const requests = [deferred<boolean>(), deferred<boolean>()];
+      const fixture = makeBatchSession("frozen-proposals");
+      vi.spyOn(fixture.session, "commentsViaApi", "get").mockReturnValue(false);
+      const accept = vi
+        .spyOn(fixture.session, "acceptCommentSuggestion")
+        .mockImplementationOnce(() => requests[0].promise as unknown as boolean)
+        .mockImplementationOnce(() => requests[1].promise as unknown as boolean);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      fireEvent.click(await screen.findByTestId("review-accept-all"));
+
+      expect(accept).toHaveBeenCalledTimes(1);
+      expect(accept).toHaveBeenLastCalledWith(fixture.threadIds[0], "ALPHA", undefined);
+      await act(async () => {
+        requests[0].resolve(true);
+        await requests[0].promise;
+      });
+      expect(accept).toHaveBeenCalledTimes(2);
+      expect(accept).toHaveBeenLastCalledWith(fixture.threadIds[1], "BETA", undefined);
+      await act(async () => {
+        requests[1].resolve(true);
+        await requests[1].promise;
+      });
+    });
+
+    it("counts a newly outdated target without dispatching it and publishes one current summary", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("outdated-count");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      const control = await screen.findByTestId("review-accept-all");
+      fireEvent.click(control);
+      act(() => fixture.session.ytext.insert(7, "!"));
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Accepted 1 suggestion from Copilot (1 done, 0 failed, 1 outdated skipped).", "success");
+    });
+
+    it("stops every later dispatch when a captured target is removed mid-loop", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("removed-mid-loop", 3);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      act(() => fixture.session.comments.remove(fixture.threadIds[1]));
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Rejected 1 suggestion from Copilot (1 done, 0 failed, 2 outdated skipped).", "success");
+    });
+
+    it("retires a removed review before settlement without dispatching or publishing anything later", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("removed-review");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews)
+        .mockResolvedValueOnce({ reviews: [review] } as ReviewsResponse)
+        .mockResolvedValueOnce({ reviews: [] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      act(() => fixture.session.comments.add({ from: 0, to: 0, body: "Refresh reviews.", author: fixture.user }));
+      await waitFor(() => expect(screen.queryByTestId("review-card")).toBeNull());
+      await settleBatch(request, "resolve");
+
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(onToast).not.toHaveBeenCalled();
+      expect(within(threadCard(fixture.threadIds[0])).getByTestId("comment-resolve")).toBeEnabled();
+    });
+
+    it("keeps replacement-session ownership independent when old and new settlements arrive out of order", async () => {
+      const oldRequest = deferred<CommentResponse>();
+      const currentRequest = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(currentRequest.promise);
+      const old = makeBatchSession("old-batch-document", 1);
+      const reviewFor = (current: CollabSession) => reviewDto("same-review", [current.comments.list()[0].id], current.docId);
+      vi.mocked(api.documents.reviews).mockImplementation(async (documentId) => {
+        const current = documentId === old.session.docId ? old.session : session!;
+        return { reviews: [reviewFor(current)] } as ReviewsResponse;
+      });
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const rendered = render(batchPanel(old.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+
+      auxiliarySessions.push(old.session);
+      const current = makeBatchSession("new-batch-document", 1, old.session);
+      rendered.rerender(batchPanel(current.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([documentId]) => documentId)).toEqual(["old-batch-document", "new-batch-document"]);
+
+      await settleBatch(currentRequest, "resolve");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("review-reject-all")).toBeEnabled();
+      await settleBatch(oldRequest, "reject", "old failure");
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId("review-reject-all")).toBeEnabled();
+      expect(screen.queryByText(/old failure/i)).toBeNull();
+    });
+
+    it.each(["close", "unmount"] as const)("retires on %s with no later dispatch, toast, or unhandled rejection", async (retirement) => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession(`batch-${retirement}`);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const rendered = render(batchPanel(fixture.session, onToast));
+      fireEvent.click(await screen.findByTestId("review-reject-all"));
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        if (retirement === "close") fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
+        else rendered.unmount();
+        await settleBatch(request, "reject", "late batch failure");
+        await act(async () => {});
+        expect(api.documents.comment).toHaveBeenCalledTimes(1);
+        expect(onToast).not.toHaveBeenCalled();
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps unrelated cards at zero render effects while one review publishes ownership and settlement", async () => {
+      const request = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(request.promise);
+      const fixture = makeBatchSession("batch-render-isolation");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-reject-all")).toHaveLength(2));
+      await act(async () => {});
+
+      vi.mocked(parseSuggestionBlock).mockClear();
+      fireEvent.click(reviewControl("r1", "review-reject-all"));
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 1."))).not.toHaveLength(0);
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
+      await settleBatch(request, "resolve");
+      expect(vi.mocked(parseSuggestionBlock).mock.calls.filter(([body]) => body.includes("Finding 2."))).toHaveLength(0);
+    });
+
+    it("accepts only a genuine exact owner-document review action event without consuming fabricated sources", async () => {
+      const fixture = makeBatchSession("review-event-provenance");
+      const reviews = [
+        reviewDto("r1", [fixture.threadIds[0]], fixture.session.docId),
+        reviewDto("r2", [fixture.threadIds[1]], fixture.session.docId),
+      ];
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews } as ReviewsResponse);
+      render(batchPanel(fixture.session));
+      await waitFor(() => expect(screen.getAllByTestId("review-accept-all")).toHaveLength(2));
+      const accept = captureReviewControl(reviewControl("r1", "review-accept-all"));
+      const reject = captureReviewControl(reviewControl("r1", "review-reject-all"));
+      const sibling = captureReviewControl(reviewControl("r2", "review-accept-all"));
+      const foreign = document.createElement("button");
+      const foreignChild = document.createElement("span");
+      foreign.append(foreignChild);
+      document.body.append(foreign);
+      const otherDocument = document.implementation.createHTMLDocument("foreign");
+      const otherDocumentButton = otherDocument.createElement("button");
+      otherDocument.body.append(otherDocumentButton);
+      const clone = accept.element.cloneNode(true) as HTMLButtonElement;
+      document.body.append(clone);
+      const icon = accept.element.firstElementChild!;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+      act(() => {
+        invokeReviewControl(accept, sibling.element);
+        invokeReviewControl(accept, reject.element);
+        invokeReviewControl(accept, foreign, foreignChild);
+        invokeReviewControl(accept, otherDocumentButton);
+        invokeReviewControl(accept, clone);
+        accept.click(reviewMouseEvent(accept, accept.element, icon, accept.element));
+        accept.click(reviewMouseEvent(accept, accept.element, accept.element, accept.element, "pointerdown"));
+        accept.click({
+          ...reviewMouseEvent(accept),
+          nativeEvent: new Event("click", { bubbles: true }),
+        });
+      });
+
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      act(() => {
+        dispatchReviewClick(accept.element, event);
+        dispatchReviewClick(accept.element, event);
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenCalledWith(fixture.session.docId, {
+        action: "suggestion",
+        threadId: fixture.threadIds[0],
+        replyId: undefined,
+        decision: "accept",
+      });
+      foreign.remove();
+      clone.remove();
+    });
+
+    it.each(["toggle", "accept", "reject", "resolve", "thread"] as const)(
+      "keeps the %s review control exact and usable after direct-root Strict Mode replay",
+      async (kind) => {
+        Element.prototype.scrollIntoView ??= () => {};
+        const suggestions = kind !== "resolve" && kind !== "thread";
+        const fixture = makeBatchSession(`review-strict-${kind}`, 1, undefined, suggestions);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const active = vi.spyOn(fixture.session, "setActiveComment");
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        try {
+          await act(async () => {
+            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
+          });
+          const card = await within(host).findByTestId("review-card");
+          if (kind === "toggle") {
+            act(() => dispatchReviewClick(within(card).getByTestId("review-toggle")));
+            expect(within(card).getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+          } else if (kind === "thread") {
+            act(() => dispatchReviewClick(within(card).getByTestId("review-toggle")));
+            act(() => dispatchReviewClick(within(card).getByTestId("review-thread-link")));
+            expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+          } else {
+            const testId = kind === "accept" ? "review-accept-all" : kind === "reject" ? "review-reject-all" : "review-resolve-all";
+            act(() => dispatchReviewClick(within(card).getByTestId(testId)));
+            expect(api.documents.comment).toHaveBeenCalledTimes(1);
+            expect(api.documents.comment).toHaveBeenCalledWith(
+              fixture.session.docId,
+              kind === "resolve"
+                ? { action: "resolve", threadId: fixture.threadIds[0], resolved: true }
+                : { action: "suggestion", threadId: fixture.threadIds[0], replyId: undefined, decision: kind },
+            );
+          }
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each(["transient descendant mutation", "transient disabled state", "detach and reinsert"] as const)(
+      "fails closed after %s even when the exact review-card DOM is restored",
+      async (scenario) => {
+        const fixture = makeBatchSession(`review-${scenario.replaceAll(" ", "-")}`);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+        const rendered = render(batchPanel(fixture.session, onToast));
+        const stale = captureReviewControl(await screen.findByTestId("review-accept-all"));
+        const card = reviewCard("r1");
+
+        if (scenario === "transient descendant mutation") {
+          const descendant = stale.element.firstElementChild;
+          if (!descendant) throw new Error("Accept all did not render its committed icon");
+          const replacement = descendant.cloneNode(true) as Element;
+          descendant.replaceWith(replacement);
+          replacement.replaceWith(descendant);
+        } else if (scenario === "transient disabled state") {
+          stale.element.disabled = true;
+          stale.element.disabled = false;
+        } else {
+          const parent = card.parentNode;
+          const next = card.nextSibling;
+          if (!parent) throw new Error("Review card did not have a committed parent");
+          card.remove();
+          parent.insertBefore(card, next);
+        }
+
+        act(() => dispatchReviewClick(stale.element));
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        rendered.rerender(batchPanel(fixture.session, vi.fn()));
+        const current = captureReviewControl(screen.getByTestId("review-accept-all"));
+        expect(current.click).not.toBe(stale.click);
+        act(() => {
+          stale.click(reviewMouseEvent(current));
+          dispatchReviewClick(current.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("requires complete callback-ref replay and ignores late stale refs after a current successor", async () => {
+      const fixture = makeBatchSession("review-partial-ref-replay");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const rendered = render(batchPanel(fixture.session));
+      const stale = captureReviewControl(await screen.findByTestId("review-reject-all"));
+
+      act(() => {
+        stale.ref(null);
+        stale.ref(stale.element);
+        dispatchReviewClick(stale.element);
+      });
+      expect(api.documents.comment).not.toHaveBeenCalled();
+
+      rendered.rerender(batchPanel(fixture.session));
+      const current = captureReviewControl(screen.getByTestId("review-reject-all"));
+      act(() => {
+        stale.ref(current.element);
+        stale.ref(null);
+        dispatchReviewClick(current.element);
+      });
+      expect(api.documents.comment).toHaveBeenCalledOnce();
+    });
+
+    it("consumes one native event and action before repeated or reentrant thread work", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-thread-one-use", 1, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      render(batchPanel(fixture.session));
+      const toggle = await screen.findByTestId("review-toggle");
+      act(() => dispatchReviewClick(toggle));
+      const link = captureReviewControl(screen.getByTestId("review-thread-link"));
+      active.mockImplementation(() => {
+        link.element.click();
+      });
+      const restore = interceptReviewClick(link.element, (original, event) => {
+        original(event);
+        original(event);
+      });
+      const repeated = new MouseEvent("click", { bubbles: true, cancelable: true });
+
+      act(() => {
+        dispatchReviewClick(link.element, repeated);
+        dispatchReviewClick(link.element, repeated);
+      });
+      restore();
+      expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+
+      act(() => dispatchReviewClick(link.element));
+      expect(active).toHaveBeenCalledTimes(2);
+    });
+
+    it("binds toggle and ordered thread links to their one exact card publication", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-toggle-links", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      const rendered = render(batchPanel(fixture.session));
+      const toggleA = captureReviewControl(await screen.findByTestId("review-toggle"));
+
+      act(() => dispatchReviewClick(toggleA.element));
+      const toggleB = captureReviewControl(screen.getByTestId("review-toggle"));
+      expect(toggleB.element).toHaveAttribute("aria-expanded", "true");
+      expect(toggleB.element).toBe(toggleA.element);
+      act(() => invokeReviewControl(toggleA, toggleB.element));
+      expect(toggleB.element).toHaveAttribute("aria-expanded", "true");
+
+      const links = screen.getAllByTestId("review-thread-link").map((element) => captureReviewControl(element));
+      const rows = screen.getAllByTestId("review-thread-row");
+      const list = screen.getByTestId("review-threads");
+      act(() => invokeReviewControl(links[0], links[1].element));
+      expect(active).not.toHaveBeenCalled();
+      act(() => dispatchReviewClick(links[0].element));
+      expect(active).toHaveBeenCalledOnce();
+      expect(active).toHaveBeenCalledWith(fixture.threadIds[0]);
+
+      list.append(rows[0]);
+      act(() => dispatchReviewClick(links[0].element));
+      expect(active).toHaveBeenCalledOnce();
+      list.insertBefore(rows[0], rows[1]);
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      act(() => {
+        dispatchReviewClick(links[0].element, event);
+        dispatchReviewClick(links[0].element, event);
+      });
+      expect(active).toHaveBeenCalledOnce();
+      rendered.rerender(batchPanel(fixture.session));
+      const currentLink = screen.getAllByTestId("review-thread-link")[0];
+      act(() => dispatchReviewClick(currentLink));
+      expect(active).toHaveBeenCalledTimes(2);
+      expect(active).toHaveBeenLastCalledWith(fixture.threadIds[0]);
+
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("permanently rejects a publication after exact-card DOM replacement or reorder", async () => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const fixture = makeBatchSession("review-dom-replacement", 2, undefined, false);
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const active = vi.spyOn(fixture.session, "setActiveComment");
+      const rendered = render(batchPanel(fixture.session));
+      const toggle = captureReviewControl(await screen.findByTestId("review-toggle"));
+      const card = reviewCard("r1");
+      const header = within(card).getByTestId("review-header");
+      const actions = within(card).getByTestId("review-actions");
+
+      for (const replaced of [card, header, actions, toggle.element]) {
+        const clone = replaced.cloneNode(true) as HTMLElement;
+        replaced.replaceWith(clone);
+        act(() => invokeReviewControl(toggle));
+        expect(within(card).getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+        clone.replaceWith(replaced);
+      }
+      card.append(header);
+      act(() => invokeReviewControl(toggle));
+      expect(toggle.element).toHaveAttribute("aria-expanded", "false");
+      card.insertBefore(header, card.firstChild);
+      act(() => dispatchReviewClick(toggle.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "false");
+      rendered.rerender(batchPanel(fixture.session));
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+
+      const link = captureReviewControl(screen.getAllByTestId("review-thread-link")[0]);
+      const list = screen.getByTestId("review-threads");
+      const row = screen.getAllByTestId("review-thread-row")[0];
+      for (const replaced of [list, row, link.element]) {
+        const clone = replaced.cloneNode(true) as HTMLElement;
+        replaced.replaceWith(clone);
+        act(() => invokeReviewControl(link));
+        expect(active).not.toHaveBeenCalled();
+        clone.replaceWith(replaced);
+      }
+      act(() => dispatchReviewClick(link.element));
+      expect(active).not.toHaveBeenCalled();
+      rendered.rerender(batchPanel(fixture.session));
+      act(() => dispatchReviewClick(screen.getAllByTestId("review-thread-link")[0]));
+      expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+    });
+
+    it("retires text and operation publications while preserving the current same-DOM control", async () => {
+      const fixture = makeBatchSession("review-fact-replacement");
+      const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const rendered = render(batchPanel(fixture.session));
+      const staleToggle = captureReviewControl(await screen.findByTestId("review-toggle"));
+
+      act(() => {
+        fixture.session.ytext.insert(fixture.session.ytext.length, "!");
+        rendered.rerender(batchPanel(fixture.session));
+      });
+      const currentToggle = captureReviewControl(screen.getByTestId("review-toggle"));
+      expect(currentToggle.element).toBe(staleToggle.element);
+      act(() => invokeReviewControl(staleToggle, currentToggle.element));
+      expect(currentToggle.element).toHaveAttribute("aria-expanded", "false");
+      act(() => dispatchReviewClick(currentToggle.element));
+      expect(screen.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+
+      act(() => dispatchReviewClick(screen.getByTestId("review-toggle")));
+      const staleReject = captureReviewControl(screen.getByTestId("review-reject-all"));
+      vi.spyOn(fixture.session, "commentsViaApi", "get").mockReturnValue(false);
+      rendered.rerender(batchPanel(fixture.session));
+      const currentReject = captureReviewControl(screen.getByTestId("review-reject-all"));
+      expect(currentReject.element).toBe(staleReject.element);
+      act(() => invokeReviewControl(staleReject, currentReject.element));
+      expect(fixture.session.comments.get(fixture.threadIds[0])?.suggestionState).toBeFalsy();
+      act(() => dispatchReviewClick(currentReject.element));
+      expect(fixture.session.comments.get(fixture.threadIds[0])?.suggestionState).toBe("rejected");
+    });
+
+    it.each(["review", "thread", "permission"] as const)(
+      "re-reads mutable %s primitives before a batch claim without poisoning the restored control",
+      async (mutation) => {
+        const fixture = makeBatchSession(`review-mutable-${mutation}`);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        render(batchPanel(fixture.session));
+        const control = captureReviewControl(await screen.findByTestId("review-reject-all"));
+        const storedThread = fixture.session.comments.ymap.get(fixture.threadIds[0]) as Y.Map<unknown>;
+
+        if (mutation === "review") review.summary = "Mutated in place";
+        if (mutation === "permission") (fixture.session as unknown as { role: string }).role = "viewer";
+
+        act(() => {
+          if (mutation === "thread") storedThread.set("body", "Mutated in place");
+          invokeReviewControl(control);
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          if (mutation === "review") review.summary = "Review r1.";
+          if (mutation === "thread") storedThread.set("body", "Finding 1.\n\n```suggestion\nALPHA\n```");
+          if (mutation === "permission") (fixture.session as unknown as { role: string }).role = "owner";
+          dispatchReviewClick(control.element);
+        });
+        expect(api.documents.comment).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each(["stale-before-current", "current-before-stale"] as const)(
+      "retires an equal-looking remount before parent layout and keeps the current control usable %s",
+      async (order) => {
+        const fixture = makeBatchSession(`review-remount-${order}`, 1, undefined, false);
+        const review = reviewDto("same-review", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const host = document.createElement("div");
+        document.body.append(host);
+        const root = createRoot(host);
+        let passiveCleanups = 0;
+        try {
+          await act(async () => {
+            root.render(<ComposerBoundary session={fixture.session} visit="A" />);
+          });
+          const stale = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          let checkedAtBoundary = false;
+          await act(async () => {
+            root.render(
+              <ComposerBoundary
+                session={fixture.session}
+                visit="B"
+                boundary={1}
+                onBoundary={() => {
+                  stale.click(reviewMouseEvent(stale));
+                  expect(stale.element.isConnected).toBe(false);
+                  expect(host.querySelector('[data-testid="review-toggle"]')).toBeNull();
+                  expect(passiveCleanups).toBe(0);
+                  checkedAtBoundary = true;
+                }}
+                onPassiveCleanup={() => {
+                  passiveCleanups += 1;
+                }}
+              />,
+            );
+          });
+          expect(checkedAtBoundary).toBe(true);
+          await waitFor(() => expect(host.querySelector('[data-testid="review-toggle"]')).toBeInTheDocument());
+          const current = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          act(() => {
+            if (order === "stale-before-current") {
+              invokeReviewControl(stale, current.element);
+              dispatchReviewClick(current.element);
+            } else {
+              dispatchReviewClick(current.element);
+              invokeReviewControl(stale, current.element);
+            }
+          });
+          expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "true");
+          act(() => {
+            stale.ref(current.element);
+            stale.ref(null);
+          });
+          const currentAfterLateRefs = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+          act(() => dispatchReviewClick(currentAfterLateRefs.element));
+          expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "false");
+        } finally {
+          act(() => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("retires a removed card before parent layout and late old refs cannot clear its replacement", async () => {
+      const fixture = makeBatchSession("review-removal-layout", 1, undefined, false);
+      const review = reviewDto("same-review", fixture.threadIds, fixture.session.docId);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let passiveCleanups = 0;
+      try {
+        await act(async () => {
+          root.render(<ComposerBoundary session={fixture.session} visit="A" />);
+        });
+        const stale = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+        let checkedAtBoundary = false;
+        act(() =>
+          root.render(
+            <ComposerBoundary
+              session={fixture.session}
+              visit="B"
+              present={false}
+              boundary={1}
+              onBoundary={() => {
+                invokeReviewControl(stale);
+                expect(passiveCleanups).toBe(0);
+                checkedAtBoundary = true;
+              }}
+              onPassiveCleanup={() => {
+                passiveCleanups += 1;
+              }}
+            />,
+          ),
+        );
+        expect(checkedAtBoundary).toBe(true);
+        await act(async () => {
+          root.render(<ComposerBoundary session={fixture.session} visit="C" />);
+        });
+        const current = captureReviewControl(host.querySelector('[data-testid="review-toggle"]')!);
+        act(() => {
+          stale.ref(current.element);
+          stale.ref(null);
+          dispatchReviewClick(current.element);
+        });
+        expect(host.querySelector('[data-testid="review-toggle"]')).toHaveAttribute("aria-expanded", "true");
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+  });
+
+  describe("composer submission ownership", () => {
+    const TEXT = "Intro text. The quick brown fox jumps.";
+    const AGENTS = [
+      { name: "First agent", login: "alice/First", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false },
+      { name: "Second agent", login: "alice/Second", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false },
+    ];
+
+    const mountComposer = async (
+      opts: {
+        documentComposer?: CommentsPanelProps["documentComposer"];
+        onClose?: () => void;
+      } = {},
+    ) => {
+      Element.prototype.scrollIntoView ??= () => {};
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session = new CollabSession({ docId: "composer-doc", user, role: "owner", getToken: async () => "token", autoConnect: false });
+      session.keepAlive();
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: AGENTS,
+      } as unknown as CollaboratorsResponse);
+      const add = vi.spyOn(session.comments, "add");
+      const onPendingDone = vi.fn();
+      const props = (documentComposer: CommentsPanelProps["documentComposer"]) => (
+        <TooltipProvider>
+          <CommentsPanel
+            session={session!}
+            onClose={opts.onClose ?? (() => {})}
+            onReveal={() => {}}
+            onPendingDone={onPendingDone}
+            documentComposer={documentComposer}
+          />
+        </TooltipProvider>
+      );
+      const view = render(props(opts.documentComposer ?? null));
+      if (!opts.documentComposer) act(() => session!.setPendingComment({ from: 0, to: 5 }));
+      const box = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      return {
+        add,
+        box,
+        onPendingDone,
+        user,
+        view,
+        setDocumentComposer: (next: CommentsPanelProps["documentComposer"]) => view.rerender(props(next)),
+      };
+    };
+
+    const invokeSubmitHandler = (button: HTMLElement): Promise<void> => {
+      const propsKey = Object.keys(button).find((key) => key.startsWith("__reactProps$"));
+      if (!propsKey) throw new Error("React props were not attached to the submit button");
+      const props = (button as unknown as Record<string, { onClick?: () => Promise<void> } | undefined>)[propsKey];
+      const result = props?.onClick?.();
+      if (!result) throw new Error("The submit button did not return its submission");
+      return result;
+    };
+
+    afterEach(() => {
+      vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as CollaboratorsResponse);
+    });
+
+    it("claims mixed Enter/click activation once and freezes body, mode and ordered agent intent while pending", async () => {
+      const request = deferred<string>();
+      const { add, box, onPendingDone, user } = await mountComposer();
+      add.mockReturnValue(request.promise as unknown as string);
+      const submitted = "  @alice/First @alice/Second draft  ";
+      fireEvent.change(box, { target: { value: submitted } });
+      await screen.findByTestId("composer-agent-row");
+      fireEvent.click(screen.getByTestId("composer-mode-rewrite"));
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+
+      const submit = screen.getByTestId("comment-submit");
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      const suggestion = screen.getByTestId("comment-suggest-change");
+      const chip = screen.getAllByTestId("composer-chip")[0];
+      act(() => {
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        fireEvent.change(box, { target: { value: "changed after claim" } });
+        screen.getByTestId("composer-mode-comment").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        chip.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        suggestion.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        cancel.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "b", ctrlKey: true, bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+        box.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith({ from: 0, to: 5, body: submitted.trim(), author: user });
+      expect(box).toHaveValue(submitted);
+      expect(box).toBeDisabled();
+      expect(submit).toBeDisabled();
+      expect(cancel).toBeDisabled();
+      expect(suggestion).toBeDisabled();
+      expect(chip).toBeDisabled();
+      expect(screen.getByTestId("composer-mode-comment")).toBeDisabled();
+      expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
+      expect(onPendingDone).not.toHaveBeenCalled();
+
+      await act(async () => request.resolve("thread-1"));
+      await waitFor(() =>
+        expect(api.documents.createRequest).toHaveBeenCalledWith("composer-doc", {
+          mode: "rewrite",
+          instruction: "draft",
+          selection: { from: 0, to: 5, quote: "Intro" },
+          threadId: "thread-1",
+          agent: "alice/First",
+        }),
+      );
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("claims two immediate clicks as one physical submission and clears current work once", async () => {
+      const request = deferred<string>();
+      const { add, box, onPendingDone, user } = await mountComposer();
+      add.mockReturnValue(request.promise as unknown as string);
+      fireEvent.change(box, { target: { value: "@ali" } });
+      await screen.findByTestId("mention-suggestions");
+      const submit = screen.getByTestId("comment-submit");
+      const mention = screen.getAllByTestId("mention-option")[0];
+
+      act(() => {
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        submit.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        mention.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add).toHaveBeenCalledWith({ from: 0, to: 5, body: "@ali", author: user });
+      expect(box).toHaveValue("@ali");
+      expect(onPendingDone).not.toHaveBeenCalled();
+      await act(async () => request.resolve("thread-1"));
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("retains a current failed draft, releases its controls and allows one deliberate retry", async () => {
+      const first = deferred<string>();
+      const retry = deferred<string>();
+      const failure = new Error("submit failed");
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        const { add, box, onPendingDone, user } = await mountComposer();
+        add.mockReturnValueOnce(first.promise as unknown as string).mockReturnValueOnce(retry.promise as unknown as string);
+        fireEvent.change(box, { target: { value: "retry this" } });
+        let currentSubmission!: Promise<void>;
+        act(() => {
+          currentSubmission = invokeSubmitHandler(screen.getByTestId("comment-submit"));
+        });
+        expect(add).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          const rejection = expect(currentSubmission).rejects.toBe(failure);
+          first.reject(failure);
+          await rejection;
+        });
+        await waitFor(() => expect(screen.getByTestId("comment-submit")).toBeEnabled());
+        expect(box).toBeEnabled();
+        expect(box).toHaveValue("retry this");
+        expect(onPendingDone).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        expect(add).toHaveBeenCalledTimes(2);
+        expect(add).toHaveBeenNthCalledWith(1, { from: 0, to: 5, body: "retry this", author: user });
+        expect(add).toHaveBeenNthCalledWith(2, { from: 0, to: 5, body: "retry this", author: user });
+        await act(async () => retry.resolve("thread-2"));
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it("keeps a keyed replacement draft locked until its own later success when the old success settles first", async () => {
+      const oldRequest = deferred<string>();
+      const currentRequest = deferred<string>();
+      const { add, box: oldBox, onPendingDone, setDocumentComposer } = await mountComposer({ documentComposer: { mention: false, nonce: 1 } });
+      add.mockReturnValueOnce(oldRequest.promise as unknown as string).mockReturnValueOnce(currentRequest.promise as unknown as string);
+      fireEvent.change(oldBox, { target: { value: "old draft" } });
+      fireEvent.click(screen.getByTestId("comment-submit"));
+
+      setDocumentComposer({ mention: false, nonce: 2 });
+      const currentBox = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      expect(currentBox).not.toBe(oldBox);
+      fireEvent.change(currentBox, { target: { value: "current draft" } });
+      fireEvent.click(screen.getByTestId("comment-submit"));
+      expect(add).toHaveBeenCalledTimes(2);
+
+      await act(async () => oldRequest.resolve("old-thread"));
+      expect(currentBox).toHaveValue("current draft");
+      expect(currentBox).toBeDisabled();
+      expect(screen.getByTestId("comment-submit")).toBeDisabled();
+      expect(onPendingDone).not.toHaveBeenCalled();
+
+      await act(async () => currentRequest.resolve("current-thread"));
+      expect(onPendingDone).toHaveBeenCalledTimes(1);
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+    });
+
+    it("lets current replacement success retire first, then consumes the old rejection without stale or unhandled effects", async () => {
+      const oldRequest = deferred<string>();
+      const currentRequest = deferred<string>();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      try {
+        const { add, box: oldBox, onPendingDone, setDocumentComposer } = await mountComposer({ documentComposer: { mention: false, nonce: 1 } });
+        add.mockReturnValueOnce(oldRequest.promise as unknown as string).mockReturnValueOnce(currentRequest.promise as unknown as string);
+        fireEvent.change(oldBox, { target: { value: "old draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        setDocumentComposer({ mention: false, nonce: 2 });
+        const currentBox = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+        fireEvent.change(currentBox, { target: { value: "current draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+
+        await act(async () => currentRequest.resolve("current-thread"));
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(screen.queryByTestId("pending-comment")).toBeNull();
+        await act(async () => {
+          oldRequest.reject(new Error("old failure"));
+          await Promise.allSettled([oldRequest.promise]);
+        });
+        expect(onPendingDone).toHaveBeenCalledTimes(1);
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+
+    it.each(["removal", "close", "layout unmount"] as const)("retires pending ownership on %s before a late rejection", async (retirement) => {
+      const request = deferred<string>();
+      const unhandled: unknown[] = [];
+      const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+      window.addEventListener("unhandledrejection", onUnhandled);
+      let removePanel = () => {};
+      try {
+        const mounted = await mountComposer({ onClose: () => removePanel() });
+        removePanel = () => mounted.view.unmount();
+        mounted.add.mockReturnValue(request.promise as unknown as string);
+        fireEvent.change(mounted.box, { target: { value: "retired draft" } });
+        fireEvent.click(screen.getByTestId("comment-submit"));
+
+        if (retirement === "removal") {
+          act(() => session!.setPendingComment(null));
+          await waitFor(() => expect(screen.queryByTestId("pending-comment")).toBeNull());
+        }
+        else if (retirement === "close") fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
+        else mounted.view.unmount();
+
+        if (retirement === "removal") {
+          act(() => session!.setPendingComment({ from: 0, to: 5 }));
+          const replacement = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+          fireEvent.change(replacement, { target: { value: "replacement draft" } });
+          expect(replacement).toBeEnabled();
+          await act(async () => {
+            request.reject(new Error("removed failure"));
+            await Promise.allSettled([request.promise]);
+          });
+          expect(replacement).toHaveValue("replacement draft");
+          expect(replacement).toBeEnabled();
+        } else {
+          await act(async () => {
+            request.reject(new Error("unmounted failure"));
+            await Promise.allSettled([request.promise]);
+          });
+          expect(screen.queryByTestId("comments-panel")).toBeNull();
+        }
+        expect(mounted.add).toHaveBeenCalledTimes(1);
+        expect(mounted.onPendingDone).not.toHaveBeenCalled();
+        expect(unhandled).toEqual([]);
+      } finally {
+        window.removeEventListener("unhandledrejection", onUnhandled);
+      }
+    });
+  });
+
+  describe("composer focus and selection ownership", () => {
+    const TEXT = "Intro text. The quick brown fox jumps.";
+    const AGENT = {
+      name: "Copilot CLI",
+      login: "alice/Copilot-CLI",
+      ownerLogin: "alice",
+      ownerName: "Alice",
+      present: false,
+      collaboratorsMayAsk: false,
+    };
+
+    const mountDirectComposer = (frames: ReturnType<typeof controlledComposerFrames>, visit = "A") => {
+      const fixture = reviewSession(`composer-focus-${visit}`);
+      session = fixture.session;
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 12, to: 27 });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      act(() => root.render(<ComposerBoundary session={session!} visit={visit} />));
+      const box = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+      if (!box || frames.captured.length === 0) throw new Error("Composer did not mount with its focus frame");
+      return { box, host, root };
+    };
+
+    const focusCallsFor = (spy: ReturnType<typeof vi.spyOn>, element: HTMLTextAreaElement) =>
+      spy.mock.instances.filter((instance: unknown) => instance === element);
+
+    const replaceAtBoundary = (
+      mounted: ReturnType<typeof mountDirectComposer>,
+      transition: "replacement" | "removal",
+      onBoundary: () => void,
+      onPassiveCleanup: () => void,
+    ) => {
+      act(() => {
+        mounted.root.render(
+          <ComposerBoundary
+            session={session!}
+            visit="B"
+            present={transition === "replacement"}
+            boundary={1}
+            onBoundary={onBoundary}
+            onPassiveCleanup={onPassiveCleanup}
+          />,
+        );
+      });
+      if (transition === "removal") {
+        act(() => mounted.root.render(<ComposerBoundary session={session!} visit="B" boundary={2} onPassiveCleanup={onPassiveCleanup} />));
+      }
+      const box = mounted.host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+      if (!box) throw new Error("Current composer did not mount");
+      return box;
+    };
+
+    afterEach(() => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as CollaboratorsResponse);
+    });
+
+    it.each([
+      ["replacement", "stale-before-current"],
+      ["replacement", "current-before-stale"],
+      ["removal", "stale-before-current"],
+      ["removal", "current-before-stale"],
+    ] as const)("physically retires the initial focus frame before parent layout on %s (%s)", (transition, order) => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+      const staleBox = mounted.box;
+      const staleFrame = frames.captured[0];
+      let passiveCleanups = 0;
+
+      try {
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+            expect(passiveCleanups).toBe(0);
+          },
+          () => {
+            passiveCleanups += 1;
+          },
+        );
+        const currentFrame = frames.captured.at(-1)!;
+        expect(currentFrame).not.toBe(staleFrame);
+        expect(currentFrame.id).toBe(staleFrame.id);
+        focus.mockClear();
+        selection.mockClear();
+
+        act(() => {
+          if (order === "stale-before-current") {
+            frames.invoke(staleFrame);
+            frames.invoke(currentFrame);
+          } else {
+            frames.invoke(currentFrame);
+            frames.invoke(staleFrame);
+          }
+        });
+
+        expect(focusCallsFor(focus, staleBox)).toHaveLength(0);
+        expect(focusCallsFor(focus, currentBox)).toHaveLength(1);
+        expect(focusCallsFor(selection, staleBox)).toHaveLength(0);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it("keeps replayed visits independent when React preserves the same textarea element", () => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = reviewSession("composer-focus-replay");
+      session = fixture.session;
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 12, to: 27 });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        act(() =>
+          root.render(
+            <StrictMode>
+              <ComposerBoundary session={session!} visit="strict" />
+            </StrictMode>,
+          ),
+        );
+        const box = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]')!;
+        const staleFrame = frames.captured[0];
+        const currentFrame = frames.captured.at(-1)!;
+        expect(currentFrame).not.toBe(staleFrame);
+        expect(currentFrame.id).toBe(staleFrame.id);
+        expect(staleFrame.cancelled).toBe(true);
+        expect(frames.pending.has(currentFrame)).toBe(true);
+        focus.mockClear();
+        act(() => {
+          frames.invoke(staleFrame);
+          frames.invoke(currentFrame);
+        });
+        expect(focusCallsFor(focus, box)).toHaveLength(1);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("applies each current suggestion and formatting range exactly once", () => {
+      const frames = controlledComposerFrames();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        focus.mockClear();
+        selection.mockClear();
+        fireEvent.click(screen.getByTestId("comment-suggest-change"));
+        const suggestionFrame = frames.captured.at(-1)!;
+        act(() => frames.invoke(suggestionFrame));
+        expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+
+        const cases = [
+          { key: "b", value: "**draft**", range: [2, 7] },
+          { key: "i", value: "*draft*", range: [1, 6] },
+          { key: "e", value: "`draft`", range: [1, 6] },
+          { key: "k", value: "[draft]()", range: [8, 8] },
+        ] as const;
+        for (const current of cases) {
+          fireEvent.change(mounted.box, { target: { value: "draft" } });
+          mounted.box.setSelectionRange(0, 5);
+          fireEvent.select(mounted.box);
+          focus.mockClear();
+          selection.mockClear();
+          fireEvent.keyDown(mounted.box, { key: current.key, ctrlKey: true });
+          const operation = frames.captured.at(-1)!;
+          expect([...frames.pending]).toEqual([operation]);
+          act(() => frames.invoke(operation));
+          expect(mounted.box).toHaveValue(current.value);
+          expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
+          expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
+          expect(selection).toHaveBeenLastCalledWith(...current.range);
+        }
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each([
+      ["suggestion", "replacement"],
+      ["suggestion", "removal"],
+      ["formatting", "replacement"],
+      ["formatting", "removal"],
+    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (operation, transition) => {
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        if (operation === "suggestion") {
+          fireEvent.click(screen.getByTestId("comment-suggest-change"));
+        } else {
+          fireEvent.change(mounted.box, { target: { value: "draft" } });
+          mounted.box.setSelectionRange(0, 5);
+          fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
+        }
+        const staleFrame = frames.captured.at(-1)!;
+        expect(frames.pending.has(staleFrame)).toBe(true);
+        let passiveCleanups = 0;
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+            expect(passiveCleanups).toBe(0);
+          },
+          () => {
+            passiveCleanups += 1;
+          },
+        );
+        const currentAutoFocus = frames.captured.at(-1)!;
+        focus.mockClear();
+        selection.mockClear();
+        act(() => {
+          frames.invoke(staleFrame);
+          frames.invoke(currentAutoFocus);
+        });
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+
+        fireEvent.change(currentBox, { target: { value: "current" } });
+        currentBox.setSelectionRange(0, 7);
+        focus.mockClear();
+        selection.mockClear();
+        fireEvent.keyDown(currentBox, { key: "i", ctrlKey: true });
+        const currentFormat = frames.captured.at(-1)!;
+        act(() => frames.invoke(currentFormat));
+        expect(focusCallsFor(focus, currentBox)).toHaveLength(1);
+        expect(focusCallsFor(selection, currentBox)).toHaveLength(1);
+        expect(selection).toHaveBeenLastCalledWith(1, 8);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each([
+      ["instruction", "replacement"],
+      ["instruction", "removal"],
+      ["mention", "replacement"],
+      ["mention", "removal"],
+    ] as const)("retires a pending %s caret before parent layout on %s without changing B", async (operation, transition) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const frames = controlledComposerFrames(true);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalled());
+        if (operation === "instruction") {
+          fireEvent.change(mounted.box, { target: { value: `@${AGENT.login}` } });
+          await screen.findByTestId("composer-agent-row");
+          fireEvent.click(screen.getAllByTestId("composer-chip")[0]);
+        } else {
+          fireEvent.change(mounted.box, { target: { value: "@alice/C" } });
+          fireEvent.click((await screen.findAllByTestId("mention-option"))[0]);
+        }
+        const staleFrame = frames.captured.at(-1)!;
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleFrame.cancelled).toBe(true);
+            expect(frames.pending.has(staleFrame)).toBe(false);
+          },
+          () => {},
+        );
+        const currentAutoFocus = frames.captured.at(-1)!;
+        act(() => frames.invoke(currentAutoFocus));
+        fireEvent.change(currentBox, { target: { value: "current draft" } });
+        focus.mockClear();
+        selection.mockClear();
+        act(() => frames.invoke(staleFrame));
+        expect(currentBox).toHaveValue("current draft");
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it("supersedes an older frame and preserves a newer user caret action", () => {
+      const frames = controlledComposerFrames();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        fireEvent.change(mounted.box, { target: { value: "draft" } });
+        mounted.box.setSelectionRange(0, 5);
+        fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
+        const older = frames.captured.at(-1)!;
+        fireEvent.keyDown(mounted.box, { key: "i", ctrlKey: true });
+        const newer = frames.captured.at(-1)!;
+        expect(older.cancelled).toBe(true);
+        expect([...frames.pending]).toEqual([newer]);
+
+        mounted.box.setSelectionRange(2, 2);
+        fireEvent.select(mounted.box);
+        expect(newer.cancelled).toBe(true);
+        expect(frames.pending.size).toBe(0);
+        focus.mockClear();
+        selection.mockClear();
+        act(() => {
+          frames.invoke(older);
+          frames.invoke(newer);
+        });
+        expect(focusCallsFor(focus, mounted.box)).toHaveLength(0);
+        expect(focusCallsFor(selection, mounted.box)).toHaveLength(0);
+        expect(mounted.box.selectionStart).toBe(2);
+        expect(mounted.box.selectionEnd).toBe(2);
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
+    it.each(["replacement", "removal"] as const)("clears A's blur timer before parent layout on %s and leaves B's reused timer authoritative", async (transition) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const frames = controlledComposerFrames(true);
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        fireEvent.change(mounted.box, { target: { value: "@alice/C" } });
+        await screen.findByTestId("mention-suggestions");
+        const timers = controlledComposerBlurTimers();
+        fireEvent.blur(mounted.box);
+        const staleTimer = timers.captured[0];
+        expect(timers.set).toHaveBeenCalledWith(expect.any(Function), 120);
+
+        const currentBox = replaceAtBoundary(
+          mounted,
+          transition,
+          () => {
+            expect(staleTimer.cancelled).toBe(true);
+            expect(timers.pending.has(staleTimer)).toBe(false);
+          },
+          () => {},
+        );
+        act(() => frames.invoke(frames.captured.at(-1)!));
+        fireEvent.change(currentBox, { target: { value: "@alice/C" } });
+        await screen.findByTestId("mention-suggestions");
+        fireEvent.blur(currentBox);
+        const currentTimer = timers.captured.at(-1)!;
+        expect(currentTimer).not.toBe(staleTimer);
+        expect(currentTimer.id).toBe(staleTimer.id);
+
+        act(() => timers.invoke(staleTimer));
+        expect(timers.pending.has(currentTimer)).toBe(true);
+        expect(currentBox).toHaveValue("@alice/C");
+        expect(screen.getByTestId("mention-suggestions")).toBeInTheDocument();
+        act(() => timers.advance(119));
+        expect(screen.getByTestId("mention-suggestions")).toBeInTheDocument();
+        act(() => timers.advance(1));
+        expect(screen.queryByTestId("mention-suggestions")).toBeNull();
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+  });
+
   describe("agent requests from comments (#1024)", () => {
     // As the collaborators route lists it (#1296): whose it is, and — off by default — whether others may ask it.
     const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: false };
@@ -1128,6 +4946,284 @@ describe("CommentsPanel", () => {
     });
   });
 
+  describe("mention candidate identity lifecycle", () => {
+    const ownedSessions = new Set<CollabSession>();
+    const remoteAwareness = new Set<Awareness>();
+
+    const collaboratorResponse = (opts: {
+      owner?: { login: string; name: string; image: null } | null;
+      collaborators?: { login: string; name: string; image: null }[];
+      agents?: CollaboratorsResponse["agents"];
+    } = {}) =>
+      ({
+        owner: opts.owner ?? null,
+        collaborators: opts.collaborators ?? [],
+        agents: opts.agents ?? [],
+      }) as CollaboratorsResponse;
+
+    const tokenResponse = (...names: string[]) =>
+      ({
+        tokens: names.map((name, index) => ({ id: `token-${index}`, name })),
+      }) as TokensResponse;
+
+    const makeSession = (docId: string, name: string, login: string | null) => {
+      const user = makeCollabUser(`${docId}-${login ?? "anonymous"}`, name, null, login);
+      const next = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      next.setPendingComment({ from: 0, to: 0 });
+      ownedSessions.add(next);
+      session = next;
+      return next;
+    };
+
+    const addPresence = (target: CollabSession, user: Record<string, unknown>) => {
+      const doc = new Y.Doc();
+      const awareness = new Awareness(doc);
+      remoteAwareness.add(awareness);
+      awareness.setLocalState({ user: { color: "#2563eb", colorLight: "#2563eb33", avatar: null, role: "editor", ...user }, lastActive: Date.now() });
+      applyAwarenessUpdate(target.awareness, encodeAwarenessUpdate(awareness, [doc.clientID]), "server");
+    };
+
+    const panel = (current: CollabSession) => (
+      <TooltipProvider>
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} onCreateToken={() => {}} />
+      </TooltipProvider>
+    );
+
+    const mountPanel = (initial: CollabSession) => {
+      const view = render(panel(initial));
+      return {
+        replace(next: CollabSession) {
+          session = next;
+          view.rerender(panel(next));
+        },
+        unmount: view.unmount,
+      };
+    };
+
+    const openPicker = async () => {
+      const box = (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
+      box.focus();
+      await userEvent.setup().paste("@");
+      return box;
+    };
+
+    const option = (login: string) => screen.queryAllByTestId("mention-option").find((row) => row.getAttribute("data-login") === login);
+
+    beforeEach(() => {
+      vi.mocked(api.tokens.list).mockReset().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockReset().mockResolvedValue({ owner: null, collaborators: [], agents: [] } as never);
+    });
+
+    afterEach(() => {
+      for (const awareness of remoteAwareness) awareness.destroy();
+      remoteAwareness.clear();
+      for (const owned of ownedSessions) owned.destroy();
+      ownedSessions.clear();
+      session = null;
+      window.localStorage.removeItem(AGENT_CONNECT_DISMISSED_KEY);
+      vi.mocked(api.tokens.list).mockReset().mockResolvedValue({ tokens: [] } as never);
+      vi.mocked(api.documents.collaborators).mockReset().mockResolvedValue({ owner: null, collaborators: [], agents: [] } as never);
+    });
+
+    it("shows only current presence while replacement viewer requests settle, then publishes only current collaborators, agents, permissions, and tokens", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      const currentTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise).mockImplementationOnce(() => currentTokens.promise);
+
+      const oldSession = makeSession("old-doc", "Alice", "Alice");
+      const view = mountPanel(oldSession);
+      await openPicker();
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+
+      const currentSession = makeSession("current-doc", "Carol", "CAROL");
+      addPresence(currentSession, { id: "live", name: "Live Person", login: "live" });
+      addPresence(currentSession, {
+        id: "agent:old-owner:Shared Agent",
+        name: "Shared Agent",
+        login: null,
+        isAgent: true,
+        status: "reading",
+        userLogin: "old-owner",
+        userName: "Old Owner",
+      });
+      view.replace(currentSession);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(api.tokens.list).toHaveBeenCalledTimes(2);
+        expect(option("live")).toBeVisible();
+      });
+      expect(option("old-owner/Shared-Agent")).toHaveAttribute("data-locked");
+
+      await act(async () => {
+        oldCollaborators.resolve(
+          collaboratorResponse({
+            collaborators: [{ login: "retired", name: "Retired Person", image: null }],
+            agents: [
+              { name: "Retired Agent", login: "alice/Retired-Agent", ownerLogin: "alice", ownerName: "Alice", present: false, collaboratorsMayAsk: true },
+              { name: "Shared Agent", login: "old-owner/Shared-Agent", ownerLogin: "old-owner", ownerName: "Old Owner", present: false, collaboratorsMayAsk: true },
+            ],
+          }),
+        );
+        oldTokens.resolve(tokenResponse("Old Token"));
+        await Promise.all([oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("retired")).toBeUndefined();
+      expect(option("alice/Retired-Agent")).toBeUndefined();
+      expect(option("alice/Old-Token")).toBeUndefined();
+      expect(option("old-owner/Shared-Agent")).toHaveAttribute("data-locked");
+
+      await act(async () => {
+        currentCollaborators.resolve(
+          collaboratorResponse({
+            owner: { login: "carol", name: "Carol", image: null },
+            collaborators: [{ login: "current", name: "Current Person", image: null }],
+            agents: [{ name: "Current Agent", login: "drew/Current-Agent", ownerLogin: "drew", ownerName: "Drew", present: false, collaboratorsMayAsk: true }],
+          }),
+        );
+        currentTokens.resolve(tokenResponse("Current Token"));
+        await Promise.all([currentCollaborators.promise, currentTokens.promise]);
+      });
+      await waitFor(() => {
+        expect(option("current")).toBeVisible();
+        expect(option("drew/Current-Agent")).not.toHaveAttribute("data-locked");
+        expect(option("CAROL/Current-Token")).toHaveAttribute("data-own");
+      });
+      expect(option("retired")).toBeUndefined();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+      expect(api.tokens.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a same-viewer replacement session empty until its own evidence settles, including the Connect-an-agent decision", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      const currentTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise).mockImplementationOnce(() => currentTokens.promise);
+
+      const view = mountPanel(makeSession("first-doc", "Alice", "Alice"));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+
+      const replacement = makeSession("second-doc", "Alice", "alice");
+      addPresence(replacement, { id: "current-live", name: "Current Live", login: "current-live" });
+      view.replace(replacement);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(api.tokens.list).toHaveBeenCalledTimes(2);
+        expect(option("current-live")).toBeVisible();
+      });
+
+      await act(async () => {
+        oldCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "first-doc-person", name: "First Doc Person", image: null }] }));
+        oldTokens.resolve(tokenResponse());
+        await Promise.all([oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("first-doc-person")).toBeUndefined();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+
+      await act(async () => {
+        currentCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "second-doc-person", name: "Second Doc Person", image: null }] }));
+        currentTokens.resolve(tokenResponse());
+        await Promise.all([currentCollaborators.promise, currentTokens.promise]);
+      });
+      expect(await screen.findByTestId("mention-connect-row")).toBeVisible();
+      expect(option("second-doc-person")).toBeVisible();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+      expect(api.tokens.list).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not let an old picker opening eagerly load tokens for a closed replacement session", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(collaboratorResponse({ collaborators: [{ login: "person", name: "Person", image: null }] }));
+      vi.mocked(api.tokens.list).mockResolvedValue(tokenResponse("Agent"));
+
+      const oldSession = makeSession("old-doc", "Alice", "alice");
+      const view = mountPanel(oldSession);
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+      act(() => oldSession.setPendingComment(null));
+      await waitFor(() => expect(screen.queryByTestId("comment-composer")).toBeNull());
+
+      const replacement = makeSession("replacement-doc", "Carol", "carol");
+      replacement.setPendingComment(null);
+      view.replace(replacement);
+      await waitFor(() => expect(api.documents.collaborators).toHaveBeenCalledTimes(2));
+      await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+
+      act(() => replacement.setPendingComment({ from: 0, to: 0 }));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(2));
+    });
+
+    it("publishes no old viewer result or failure after replacement with a null-login viewer", async () => {
+      const oldCollaborators = deferred<CollaboratorsResponse>();
+      const currentCollaborators = deferred<CollaboratorsResponse>();
+      const oldTokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => oldCollaborators.promise).mockImplementationOnce(() => currentCollaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => oldTokens.promise);
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const view = mountPanel(makeSession("old-doc", "Alice", "alice"));
+      await openPicker();
+      await waitFor(() => expect(api.tokens.list).toHaveBeenCalledTimes(1));
+
+      const anonymous = makeSession("anonymous-doc", "Anonymous", null);
+      addPresence(anonymous, { id: "anonymous-live", name: "Anonymous Live", login: "anonymous-live" });
+      view.replace(anonymous);
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(option("anonymous-live")).toBeVisible();
+      });
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        currentCollaborators.resolve(collaboratorResponse({ collaborators: [{ login: "anonymous-current", name: "Anonymous Current", image: null }] }));
+        oldCollaborators.reject(new Error("old collaborators failed"));
+        oldTokens.reject(new Error("old tokens failed"));
+        await Promise.allSettled([currentCollaborators.promise, oldCollaborators.promise, oldTokens.promise]);
+      });
+      expect(option("anonymous-current")).toBeVisible();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+      expect(debug).not.toHaveBeenCalled();
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores collaborator success and token failure after unmount", async () => {
+      const collaborators = deferred<CollaboratorsResponse>();
+      const tokens = deferred<TokensResponse>();
+      vi.mocked(api.documents.collaborators).mockImplementationOnce(() => collaborators.promise);
+      vi.mocked(api.tokens.list).mockImplementationOnce(() => tokens.promise);
+      const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+
+      const view = mountPanel(makeSession("unmounted-doc", "Alice", "alice"));
+      await openPicker();
+      await waitFor(() => {
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+      view.unmount();
+
+      await act(async () => {
+        collaborators.resolve(collaboratorResponse({ collaborators: [{ login: "late", name: "Late Person", image: null }] }));
+        tokens.reject(new Error("late tokens failed"));
+        await Promise.allSettled([collaborators.promise, tokens.promise]);
+      });
+      expect(screen.queryByTestId("mention-option")).toBeNull();
+      expect(screen.queryByTestId("mention-connect-row")).toBeNull();
+      expect(debug).not.toHaveBeenCalled();
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+      expect(api.tokens.list).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("document comments, empty state and the connect row (#1025)", () => {
     const AGENT = { name: "Copilot CLI", login: "alice/Copilot-CLI", ownerLogin: "alice", present: false };
     const TEXT = "Intro text. The quick brown fox jumps.";
@@ -1205,7 +5301,7 @@ describe("CommentsPanel", () => {
     it("the empty state's 'Comment and mention an agent' seeds `@`, opens the picker at once and posts a request with selection: null", async () => {
       mount();
       expect(screen.queryByText(/Ask an agent/)).toBeNull();
-      fireEvent.click(screen.getByTestId("comments-empty-agent"));
+      fireEvent.click(await screen.findByTestId("comments-empty-agent"));
       const box = await composer();
       await waitFor(() => expect(box).toHaveFocus());
       expect(box.value).toBe("@");
@@ -1352,14 +5448,14 @@ describe("CommentsPanel", () => {
       expect(box.value).toBe("@");
     });
 
-    it("a viewer sees neither the header button nor the empty-state line", () => {
+    it("a viewer sees neither the header button nor the empty-state line", async () => {
       const user = makeCollabUser("vic", "Vic", null, "vic");
       session = new CollabSession({ docId: "doc", user, role: "viewer", getToken: async () => "token", autoConnect: false });
       session.keepAlive();
       render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
       expect(screen.queryByTestId("comment-document")).toBeNull();
       expect(screen.queryByTestId("comments-empty-agent")).toBeNull();
-      expect(screen.getByText("No open comments")).toBeInTheDocument();
+      expect(await screen.findByText("No open comments")).toBeInTheDocument();
     });
   });
 });

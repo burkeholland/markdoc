@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import * as Y from "yjs";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import type { CollabSession } from "@/editor/collab/session";
@@ -13,6 +24,7 @@ import { jsonEqual, useSessionValue } from "./use-session";
 export type SourceSelection = { from: number; to: number } | null;
 
 type RelJSON = Parameters<typeof Y.createRelativePositionFromJSON>[0];
+type SelectionAuthority = { session: CollabSession };
 
 function resolve(session: CollabSession, rel: unknown): number | null {
   if (!rel) return null;
@@ -22,6 +34,30 @@ function resolve(session: CollabSession, rel: unknown): number | null {
   } catch {
     return null;
   }
+}
+
+function isStatsFocusGuard(node: Node | null) {
+  return (
+    node instanceof Element &&
+    node.tagName === "SPAN" &&
+    node.hasAttribute("data-radix-focus-guard")
+  );
+}
+
+function previousStatsSibling(node: Node): Node | null {
+  let sibling = node.previousSibling;
+  while (isStatsFocusGuard(sibling)) {
+    sibling = sibling?.previousSibling ?? null;
+  }
+  return sibling;
+}
+
+function nextStatsSibling(node: Node): Node | null {
+  let sibling = node.nextSibling;
+  while (isStatsFocusGuard(sibling)) {
+    sibling = sibling?.nextSibling ?? null;
+  }
+  return sibling;
 }
 
 function readLocalSelection(session: CollabSession): SourceSelection {
@@ -39,16 +75,25 @@ function readLocalSelection(session: CollabSession): SourceSelection {
  */
 export function useLocalSelection(session: CollabSession): SourceSelection {
   const [sel, setSel] = useState<SourceSelection>(null);
-  useEffect(() => {
+  const authorityRef = useRef<SelectionAuthority | null>(null);
+  useLayoutEffect(() => {
+    const authority = { session };
+    authorityRef.current = authority;
     const update = () => {
-      const next = readLocalSelection(session);
-      setSel((prev) => (prev?.from === next?.from && prev?.to === next?.to ? prev : next));
+      if (authorityRef.current !== authority) return;
+      const next = readLocalSelection(authority.session);
+      if (authorityRef.current !== authority) return;
+      setSel((prev) => {
+        if (authorityRef.current !== authority) return prev;
+        return prev?.from === next?.from && prev?.to === next?.to ? prev : next;
+      });
     };
     update();
-    session.awareness.on("change", update);
-    const unsubscribe = session.subscribe(update);
+    authority.session.awareness.on("change", update);
+    const unsubscribe = authority.session.subscribe(update);
     return () => {
-      session.awareness.off("change", update);
+      if (authorityRef.current === authority) authorityRef.current = null;
+      authority.session.awareness.off("change", update);
       unsubscribe();
     };
   }, [session]);
@@ -105,112 +150,3379 @@ export interface StatsPopoverProps {
   hydrated: boolean;
 }
 
+type StatsLayoutDomain = "trigger" | "portal";
+type StatsElementRole = "trigger" | "content";
+type StatsRetirement = "layout" | "ref" | "mutation" | "drift" | "other";
+type StatsOwnerWindow = Window & typeof globalThis;
+
+interface StatsDisclosureMount {
+  readonly identity: symbol;
+}
+
+interface StatsDisclosureVisit {
+  readonly identity: symbol;
+  readonly revision: number;
+  readonly mount: StatsDisclosureMount;
+  readonly session: CollabSession;
+  readonly docId: string;
+  readonly ydoc: Y.Doc;
+  readonly ytext: Y.Text;
+  readonly role: CollabSession["role"];
+  readonly claimedEvents: WeakSet<object>;
+  retired: boolean;
+}
+
+interface StatsDisclosureAuthority {
+  readonly identity: symbol;
+  readonly visit: StatsDisclosureVisit;
+  readonly claimedEvents: WeakSet<object>;
+  retired: boolean;
+}
+
+interface StatsDisclosureState {
+  readonly visit: StatsDisclosureVisit;
+  readonly authority: StatsDisclosureAuthority | null;
+  readonly open: boolean;
+}
+
+type StatsSnapshot = DocStats & { stats: DocStats };
+type GoalSnapshot = {
+  goal: WritingGoal | null;
+  kind: GoalKind | null;
+  mode: GoalMode | null;
+  value: number | null;
+  setBy: string | null;
+  setAt: number | null;
+};
+type ProgressSnapshot = {
+  progress: GoalProgress | null;
+  current: number | null;
+  target: number | null;
+  fraction: number | null;
+  state: GoalProgress["state"] | null;
+};
+
+interface GoalDraft {
+  session: CollabSession;
+  sharedGoal: WritingGoal | null;
+  kind: GoalKind;
+  mode: GoalMode;
+  value: string;
+}
+
+interface GoalPresentation {
+  session: CollabSession;
+  sharedGoal: GoalSnapshot;
+  progress: ProgressSnapshot;
+  canEdit: boolean;
+  draft: GoalDraft;
+  kind: GoalKind;
+  mode: GoalMode;
+  value: string;
+  setBy: string | null;
+  setDisabled: boolean;
+}
+
+interface GoalElementSlot<T extends HTMLElement> {
+  expected: T | null;
+  connection: { element: T } | null;
+}
+
+interface GoalGeneration {
+  presentation: GoalPresentation;
+  form: GoalElementSlot<HTMLFormElement>;
+  modeSelect: GoalElementSlot<HTMLSelectElement>;
+  valueInput: GoalElementSlot<HTMLInputElement>;
+  kindSelect: GoalElementSlot<HTMLSelectElement>;
+  setButton: GoalElementSlot<HTMLButtonElement>;
+  clearButton: GoalElementSlot<HTMLButtonElement>;
+}
+
+interface GoalPublication {
+  generation: GoalGeneration;
+  presentation: GoalPresentation;
+  form: HTMLFormElement;
+  modeSelect: HTMLSelectElement;
+  modeMinOption: HTMLOptionElement;
+  modeMaxOption: HTMLOptionElement;
+  valueInput: HTMLInputElement;
+  kindSelect: HTMLSelectElement;
+  kindWordsOption: HTMLOptionElement;
+  kindMinutesOption: HTMLOptionElement;
+  actions: HTMLSpanElement;
+  setButton: HTMLButtonElement;
+  clearButton: HTMLButtonElement | null;
+  claimed: boolean;
+  retired: boolean;
+}
+
+interface StatsDisclosureRender {
+  visit: StatsDisclosureVisit;
+  state: StatsDisclosureState;
+  authority: StatsDisclosureAuthority | null;
+  session: CollabSession;
+  source: string;
+  selection: SourceSelection;
+  selectionFrom: number | null;
+  selectionTo: number | null;
+  hydrated: boolean;
+  stats: StatsSnapshot;
+  selectionStats: StatsSnapshot | null;
+  goal: GoalSnapshot;
+  canEdit: boolean;
+  mode: CollabSession["mode"];
+  progress: ProgressSnapshot;
+  open: boolean;
+  shortcutLabel: string;
+  triggerTitle: string;
+  triggerLabel: string;
+  selectionLabel: string | null;
+  goalPresentation: GoalPresentation;
+  commitState: (
+    expected: StatsDisclosureState,
+    next: StatsDisclosureState,
+  ) => void;
+}
+
+interface StatsDisclosurePublication {
+  identity: symbol;
+  render: StatsDisclosureRender;
+  elements: {
+    trigger: HTMLButtonElement | null;
+    content: HTMLDivElement | null;
+  };
+  connections: {
+    trigger: StatsElementConnection<HTMLButtonElement> | null;
+    content: StatsElementConnection<HTMLDivElement> | null;
+  };
+  established: boolean;
+  retired: boolean;
+  retirement: StatsRetirement | null;
+  consumed: boolean;
+  successorRequested: boolean;
+  visitSuccessorRequested: boolean;
+  layoutEstablished: Set<StatsLayoutDomain>;
+  layoutRetired: Set<StatsLayoutDomain>;
+  invalidReplay: Set<StatsLayoutDomain>;
+  replayRefs: StatsRefReplay[];
+  triggerDom: StatsDomSnapshot | null;
+  triggerPlacement: StatsPlacement | null;
+  contentDom: StatsDomSnapshot | null;
+  contentPlacement: StatsPlacement | null;
+  focusDestination: HTMLElement | null;
+  guard: StatsDomGuard | null;
+  requestSuccessor: (replaceVisit: boolean) => void;
+  current: StatsDisclosureCurrent;
+}
+
+interface StatsElementConnection<T extends HTMLElement> {
+  readonly identity: symbol;
+  readonly element: T;
+}
+
+interface StatsElementOwner {
+  readonly publication: StatsDisclosurePublication;
+  readonly publicationIdentity: symbol;
+  readonly role: StatsElementRole;
+  readonly connectionIdentity: symbol;
+}
+
+interface StatsRefReplay {
+  readonly role: StatsElementRole;
+  readonly domain: StatsLayoutDomain;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface StatsDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly StatsDomSnapshot[];
+}
+
+interface StatsPlacementEntry {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+}
+
+interface StatsPlacement {
+  readonly document: Document;
+  readonly entries: readonly StatsPlacementEntry[];
+}
+
+interface StatsDomGuard {
+  readonly isClean: () => boolean;
+  readonly deactivate: () => void;
+  readonly release: () => void;
+}
+
+interface StatsReplay {
+  readonly source: StatsDisclosurePublication;
+  readonly triggerDom: StatsDomSnapshot;
+  readonly triggerPlacement: StatsPlacement;
+  readonly contentDom: StatsDomSnapshot | null;
+  readonly contentPlacement: StatsPlacement | null;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface StatsNativeProvenance {
+  readonly publication: StatsDisclosurePublication;
+  readonly event: Event;
+  readonly kind: "click" | "keydown" | "pointerdown" | "focusin";
+  readonly document: Document;
+  readonly ownerWindow: Window;
+  timeoutId: number;
+}
+
+interface StatsPointerProvenance extends StatsNativeProvenance {
+  readonly kind: "pointerdown";
+  readonly pointerDown: StatsPointerEventProof;
+  pointerUp: StatsPointerEventProof | null;
+  click: StatsPointerEventProof | null;
+  expiresAt: number;
+}
+
+interface StatsPointerEventProof {
+  readonly event: PointerEvent;
+  readonly type: "pointerdown" | "pointerup" | "click";
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly phase: number;
+  readonly timeStamp: number;
+  readonly button: number;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+  readonly detail: number;
+}
+
+interface StatsNativeCapture {
+  readonly document: Document;
+  readonly ownerWindow: StatsOwnerWindow;
+  readonly remove: VoidFunction;
+}
+
+interface StatsDisclosureProof {
+  readonly publication: StatsDisclosurePublication;
+  readonly authority: StatsDisclosureAuthority;
+  readonly nextOpen: boolean;
+  readonly source: "trigger" | "shortcut" | "escape" | "pointer" | "focus";
+  readonly event: object;
+  readonly nativeEvent: Event;
+  readonly ownerWindow: Window;
+  timeoutId: number;
+}
+
+interface StatsOpenFocus {
+  readonly visit: StatsDisclosureVisit;
+  readonly authority: StatsDisclosureAuthority;
+}
+
+interface StatsCloseFocus {
+  readonly publication: StatsDisclosurePublication;
+  readonly visit: StatsDisclosureVisit;
+  readonly authority: StatsDisclosureAuthority;
+  readonly source: StatsDisclosureProof["source"];
+  readonly trigger: HTMLButtonElement;
+  expected: StatsDisclosurePublication | null;
+  claimed: boolean;
+}
+
+const STATS_RESPONSIVE_TRIGGER_ATTRIBUTES = new Set([
+  "data-radix-popper-align",
+  "data-radix-popper-side",
+]);
+const STATS_RESPONSIVE_CONTENT_ATTRIBUTES = new Set([
+  "data-align",
+  "data-side",
+  "style",
+]);
+const STATS_POINTER_CALLBACK_LEASE_MS = 1_000;
+const STATS_POINTER_GESTURE_LEASE_MS = 5_000;
+
+function statsSnapshot(stats: DocStats): StatsSnapshot {
+  return Object.freeze({ stats, ...stats });
+}
+
+function statsSnapshotIsExact(snapshot: StatsSnapshot): boolean {
+  const stats = snapshot.stats;
+  return (
+    stats.words === snapshot.words &&
+    stats.characters === snapshot.characters &&
+    stats.charactersNoSpaces === snapshot.charactersNoSpaces &&
+    stats.sentences === snapshot.sentences &&
+    stats.paragraphs === snapshot.paragraphs &&
+    stats.headings === snapshot.headings &&
+    stats.readingMinutes === snapshot.readingMinutes &&
+    stats.speakingMinutes === snapshot.speakingMinutes
+  );
+}
+
+function goalSnapshot(goal: WritingGoal | null): GoalSnapshot {
+  return Object.freeze({
+    goal,
+    kind: goal?.kind ?? null,
+    mode: goal?.mode ?? null,
+    value: goal?.value ?? null,
+    setBy: goal?.setBy ?? null,
+    setAt: goal?.setAt ?? null,
+  });
+}
+
+function goalSnapshotIsExact(snapshot: GoalSnapshot): boolean {
+  const goal = snapshot.goal;
+  return goal
+    ? goal.kind === snapshot.kind &&
+        goal.mode === snapshot.mode &&
+        goal.value === snapshot.value &&
+        goal.setBy === snapshot.setBy &&
+        goal.setAt === snapshot.setAt
+    : snapshot.kind === null &&
+        snapshot.mode === null &&
+        snapshot.value === null &&
+        snapshot.setBy === null &&
+        snapshot.setAt === null;
+}
+
+function goalMatchesSnapshot(goal: WritingGoal | null, snapshot: GoalSnapshot): boolean {
+  return goal
+    ? goal.kind === snapshot.kind &&
+        goal.mode === snapshot.mode &&
+        goal.value === snapshot.value &&
+        goal.setBy === snapshot.setBy &&
+        goal.setAt === snapshot.setAt
+    : snapshot.kind === null &&
+        snapshot.mode === null &&
+        snapshot.value === null &&
+        snapshot.setBy === null &&
+        snapshot.setAt === null;
+}
+
+function progressSnapshot(progress: GoalProgress | null): ProgressSnapshot {
+  return Object.freeze({
+    progress,
+    current: progress?.current ?? null,
+    target: progress?.target ?? null,
+    fraction: progress?.fraction ?? null,
+    state: progress?.state ?? null,
+  });
+}
+
+function progressSnapshotIsExact(snapshot: ProgressSnapshot): boolean {
+  const progress = snapshot.progress;
+  return progress
+    ? progress.current === snapshot.current &&
+        progress.target === snapshot.target &&
+        progress.fraction === snapshot.fraction &&
+        progress.state === snapshot.state
+    : snapshot.current === null &&
+        snapshot.target === null &&
+        snapshot.fraction === null &&
+        snapshot.state === null;
+}
+
+function goalPresentationIsExact(presentation: GoalPresentation): boolean {
+  const draft = presentation.draft;
+  return (
+    goalSnapshotIsExact(presentation.sharedGoal) &&
+    goalMatchesSnapshot(getGoal(presentation.session), presentation.sharedGoal) &&
+    progressSnapshotIsExact(presentation.progress) &&
+    presentation.session.canEdit === presentation.canEdit &&
+    presentation.session.user.login === presentation.setBy &&
+    draft.session === presentation.session &&
+    draft.sharedGoal === presentation.sharedGoal.goal &&
+    draft.kind === presentation.kind &&
+    draft.mode === presentation.mode &&
+    draft.value === presentation.value &&
+    presentation.setDisabled === !(Number(presentation.value) > 0)
+  );
+}
+
+function snapshotStatsAttributes(
+  node: Node,
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  const element = node as Element;
+  return Object.freeze(
+    [...element.attributes]
+      .filter(
+        ({ name }) =>
+          !(
+            element.getAttribute("data-testid") === "stats-button" &&
+            STATS_RESPONSIVE_TRIGGER_ATTRIBUTES.has(name)
+          ) &&
+          !(
+            element.getAttribute("data-testid") === "stats-popover" &&
+            STATS_RESPONSIVE_CONTENT_ATTRIBUTES.has(name)
+          ) &&
+          !(
+            element.hasAttribute(
+              "data-radix-popper-content-wrapper",
+            ) &&
+            name === "style"
+          ),
+      )
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotStatsDom(node: Node): StatsDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotStatsAttributes(node),
+    children: Object.freeze(
+      [...node.childNodes].map((child) => snapshotStatsDom(child)),
+    ),
+  });
+}
+
+function statsAttributesMatch(
+  node: Node,
+  expected: readonly (readonly [string, string])[] | null,
+) {
+  const current = snapshotStatsAttributes(node);
+  if (current === null || expected === null) return current === expected;
+  return (
+    current.length === expected.length &&
+    current.every(
+      ([name, value], index) =>
+        expected[index]?.[0] === name && expected[index]?.[1] === value,
+    )
+  );
+}
+
+function statsDomMatches(snapshot: StatsDomSnapshot): boolean {
+  const { node } = snapshot;
+  return (
+    node.nodeValue === snapshot.nodeValue &&
+    statsAttributesMatch(node, snapshot.attributes) &&
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node && statsDomMatches(child),
+    )
+  );
+}
+
+function captureStatsPlacement(element: HTMLElement): StatsPlacement | null {
+  const document = element.ownerDocument;
+  if (!element.isConnected || !document.defaultView) return null;
+  const entries: StatsPlacementEntry[] = [];
+  let node: Node = element;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    entries.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: previousStatsSibling(node),
+        nextSibling: nextStatsSibling(node),
+        attributes: snapshotStatsAttributes(node),
+      }),
+    );
+    node = parent;
+  }
+  return Object.freeze({
+    document,
+    entries: Object.freeze(entries),
+  });
+}
+
+function statsPlacementMatches(
+  element: HTMLElement,
+  placement: StatsPlacement,
+): boolean {
+  return (
+    element === placement.entries[0]?.node &&
+    element.ownerDocument === placement.document &&
+    element.isConnected &&
+    placement.entries.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        previousStatsSibling(entry.node) === entry.previousSibling &&
+        nextStatsSibling(entry.node) === entry.nextSibling &&
+        statsAttributesMatch(entry.node, entry.attributes),
+    )
+  );
+}
+
+function statsPlacementStructureMatches(
+  element: HTMLElement,
+  placement: StatsPlacement,
+): boolean {
+  return (
+    element === placement.entries[0]?.node &&
+    element.ownerDocument === placement.document &&
+    element.isConnected &&
+    placement.entries.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        previousStatsSibling(entry.node) === entry.previousSibling &&
+        nextStatsSibling(entry.node) === entry.nextSibling,
+    )
+  );
+}
+
+function mutationTouchesStatsPlacement(
+  mutation: MutationRecord,
+  roots: readonly HTMLElement[],
+  placements: readonly StatsPlacement[],
+) {
+  if (
+    mutation.type === "attributes" &&
+    mutation.target instanceof Element &&
+    mutation.attributeName !== null &&
+    ((mutation.target.getAttribute("data-testid") === "stats-button" &&
+      STATS_RESPONSIVE_TRIGGER_ATTRIBUTES.has(
+        mutation.attributeName,
+      )) ||
+      (mutation.target.getAttribute("data-testid") ===
+        "stats-popover" &&
+        STATS_RESPONSIVE_CONTENT_ATTRIBUTES.has(
+          mutation.attributeName,
+        )) ||
+      (mutation.target.hasAttribute(
+        "data-radix-popper-content-wrapper",
+      ) &&
+        mutation.attributeName === "style") ||
+      (mutation.target.getAttribute("data-testid") === "goal-value" &&
+        ((mutation.attributeName === "name" &&
+          !mutation.target.hasAttribute("name")) ||
+          (mutation.attributeName === "type" &&
+            mutation.target.getAttribute("type") === "number"))))
+  ) {
+    return false;
+  }
+  if (
+    roots.some(
+      (root) => mutation.target === root || root.contains(mutation.target),
+    )
+  ) {
+    return true;
+  }
+  const entries = placements.flatMap((placement) => placement.entries);
+  if (
+    mutation.type !== "childList" &&
+    entries.some((entry) => mutation.target === entry.node)
+  ) {
+    return true;
+  }
+  if (mutation.type !== "childList") return false;
+  if (
+    [...mutation.addedNodes, ...mutation.removedNodes].every(
+      isStatsFocusGuard,
+    )
+  ) {
+    return false;
+  }
+  return entries.some((entry) => {
+    if (mutation.target !== entry.parent) return false;
+    if (
+      mutation.previousSibling === entry.node ||
+      mutation.nextSibling === entry.node
+    ) {
+      return true;
+    }
+    return [...mutation.addedNodes, ...mutation.removedNodes].some(
+      (node) =>
+        node === entry.node ||
+        (node.nodeType === 1 && (node as Element).contains(entry.node)),
+    );
+  });
+}
+
+function createStatsMutationGuard(
+  roots: readonly HTMLElement[],
+  placements: readonly StatsPlacement[],
+  onMutation: () => void,
+): Pick<StatsDomGuard, "isClean" | "release"> | null {
+  const document = placements[0]?.document;
+  const Observer = document?.defaultView?.MutationObserver;
+  if (
+    !document ||
+    !Observer ||
+    placements.some((placement) => placement.document !== document)
+  ) {
+    return null;
+  }
+  let changed = false;
+  let released = false;
+  const record = (records: readonly MutationRecord[]) => {
+    if (changed || released) return;
+    const relevant = records.find((mutation) =>
+      mutationTouchesStatsPlacement(mutation, roots, placements),
+    );
+    if (relevant) {
+      changed = true;
+      onMutation();
+    }
+  };
+  const observer = new Observer(record);
+  observer.observe(document, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    characterDataOldValue: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    isClean: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      if (released) return;
+      record(observer.takeRecords());
+      released = true;
+      observer.disconnect();
+    },
+  });
+}
+
+function statsNodeFromDocument(
+  value: EventTarget | null,
+  document: Document,
+): value is Node {
+  const NodeConstructor = document.defaultView?.Node;
+  return Boolean(
+    NodeConstructor &&
+      value instanceof NodeConstructor &&
+      value.ownerDocument === document,
+  );
+}
+
+function statsOwnerWindowTarget(
+  value: EventTarget | null,
+  document: Document,
+  ownerWindow: StatsOwnerWindow,
+) {
+  return (
+    value === ownerWindow ||
+    (value instanceof ownerWindow.Window &&
+      Reflect.get(value, "document") === document)
+  );
+}
+
+function statsElementIsEnabled(element: HTMLElement) {
+  if (
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    if (
+      current.hasAttribute("inert") ||
+      current.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function statsSnapshotEqual(left: StatsSnapshot, right: StatsSnapshot) {
+  return (
+    left.stats === right.stats &&
+    left.words === right.words &&
+    left.characters === right.characters &&
+    left.charactersNoSpaces === right.charactersNoSpaces &&
+    left.sentences === right.sentences &&
+    left.paragraphs === right.paragraphs &&
+    left.headings === right.headings &&
+    left.readingMinutes === right.readingMinutes &&
+    left.speakingMinutes === right.speakingMinutes
+  );
+}
+
+function goalSnapshotEqual(left: GoalSnapshot, right: GoalSnapshot) {
+  return (
+    left.goal === right.goal &&
+    left.kind === right.kind &&
+    left.mode === right.mode &&
+    left.value === right.value &&
+    left.setBy === right.setBy &&
+    left.setAt === right.setAt
+  );
+}
+
+function progressSnapshotEqual(
+  left: ProgressSnapshot,
+  right: ProgressSnapshot,
+) {
+  return (
+    left.progress === right.progress &&
+    left.current === right.current &&
+    left.target === right.target &&
+    left.fraction === right.fraction &&
+    left.state === right.state
+  );
+}
+
+function statsVisitsMatch(
+  left: StatsDisclosureVisit,
+  right: StatsDisclosureVisit,
+) {
+  return (
+    left.mount === right.mount &&
+    left.session === right.session &&
+    left.docId === right.docId &&
+    left.ydoc === right.ydoc &&
+    left.ytext === right.ytext &&
+    left.role === right.role
+  );
+}
+
+function statsRenderFactsMatch(
+  left: StatsDisclosureRender,
+  right: StatsDisclosureRender,
+) {
+  return (
+    statsVisitsMatch(left.visit, right.visit) &&
+    left.session === right.session &&
+    left.source === right.source &&
+    left.selection === right.selection &&
+    left.selectionFrom === right.selectionFrom &&
+    left.selectionTo === right.selectionTo &&
+    left.hydrated === right.hydrated &&
+    statsSnapshotEqual(left.stats, right.stats) &&
+    (left.selectionStats && right.selectionStats
+      ? statsSnapshotEqual(left.selectionStats, right.selectionStats)
+      : left.selectionStats === right.selectionStats) &&
+    goalSnapshotEqual(left.goal, right.goal) &&
+    left.canEdit === right.canEdit &&
+    progressSnapshotEqual(left.progress, right.progress) &&
+    left.shortcutLabel === right.shortcutLabel &&
+    left.triggerTitle === right.triggerTitle &&
+    left.triggerLabel === right.triggerLabel &&
+    left.selectionLabel === right.selectionLabel &&
+    left.goalPresentation.session === right.goalPresentation.session &&
+    left.goalPresentation.sharedGoal.goal ===
+      right.goalPresentation.sharedGoal.goal &&
+    left.goalPresentation.progress.progress ===
+      right.goalPresentation.progress.progress &&
+    left.goalPresentation.canEdit === right.goalPresentation.canEdit &&
+    left.mode === right.mode &&
+    left.goalPresentation.draft === right.goalPresentation.draft &&
+    left.goalPresentation.kind === right.goalPresentation.kind &&
+    left.goalPresentation.mode === right.goalPresentation.mode &&
+    left.goalPresentation.value === right.goalPresentation.value &&
+    left.goalPresentation.setBy === right.goalPresentation.setBy &&
+    left.goalPresentation.setDisabled === right.goalPresentation.setDisabled &&
+    left.commitState === right.commitState
+  );
+}
+
+function statsRendersMatch(
+  left: StatsDisclosureRender,
+  right: StatsDisclosureRender,
+) {
+  return (
+    statsRenderFactsMatch(left, right) &&
+    left.open === right.open &&
+    left.authority === right.authority
+  );
+}
+
+function statsCloseSuccessorMatches(
+  open: StatsDisclosureRender,
+  closed: StatsDisclosureRender,
+) {
+  return (
+    open.visit === closed.visit &&
+    open.open &&
+    open.authority !== null &&
+    open.state.visit === open.visit &&
+    open.state.authority === open.authority &&
+    open.state.open &&
+    !closed.open &&
+    closed.authority === null &&
+    closed.state.visit === open.visit &&
+    closed.state.authority === null &&
+    !closed.state.open &&
+    statsRenderFactsMatch(open, closed)
+  );
+}
+
+function statsClosedSuccessorsMatch(
+  expected: StatsDisclosureRender,
+  current: StatsDisclosureRender,
+) {
+  return (
+    expected.visit === current.visit &&
+    !expected.open &&
+    expected.authority === null &&
+    !current.open &&
+    current.authority === null &&
+    statsRendersMatch(expected, current)
+  );
+}
+
+class StatsDisclosureCurrent {
+  #visit: StatsDisclosureVisit | null = null;
+  #authority: StatsDisclosureAuthority | null = null;
+
+  publishVisit(visit: StatsDisclosureVisit) {
+    if (visit.retired || (this.#visit && this.#visit !== visit)) return false;
+    this.#visit = visit;
+    return true;
+  }
+
+  retireVisit(visit: StatsDisclosureVisit) {
+    visit.retired = true;
+    if (this.#visit === visit) this.#visit = null;
+    if (this.#authority?.visit === visit) {
+      this.#authority.retired = true;
+      this.#authority = null;
+    }
+  }
+
+  ownsVisit(visit: StatsDisclosureVisit) {
+    return !visit.retired && this.#visit === visit;
+  }
+
+  authority() {
+    return this.#authority;
+  }
+
+  canPublishAuthority(authority: StatsDisclosureAuthority) {
+    return (
+      !authority.retired &&
+      this.#authority === null &&
+      this.ownsVisit(authority.visit)
+    );
+  }
+
+  publishAuthority(authority: StatsDisclosureAuthority) {
+    if (!this.canPublishAuthority(authority)) return false;
+    this.#authority = authority;
+    return true;
+  }
+
+  ownsAuthority(authority: StatsDisclosureAuthority | null) {
+    return (
+      authority !== null &&
+      !authority.retired &&
+      this.ownsVisit(authority.visit) &&
+      this.#authority === authority
+    );
+  }
+
+  retireAuthority(authority: StatsDisclosureAuthority) {
+    if (!this.ownsAuthority(authority)) return false;
+    authority.retired = true;
+    this.#authority = null;
+    return true;
+  }
+
+  clear() {
+    if (this.#visit) this.#visit.retired = true;
+    if (this.#authority) this.#authority.retired = true;
+    this.#visit = null;
+    this.#authority = null;
+  }
+}
+
+class StatsDisclosureCoordinator {
+  #current: StatsDisclosurePublication | null = null;
+  #successorOf: StatsDisclosurePublication | null = null;
+  #replay: StatsReplay | null = null;
+  #poisoned: StatsDisclosurePublication | null = null;
+  #lease = 0;
+  #elementOwners = new WeakMap<HTMLElement, StatsElementOwner>();
+  #claimedEvents = new WeakSet<object>();
+  #nativeProvenance = new WeakMap<Event, StatsNativeProvenance>();
+  #provenanceRecords = new Set<StatsNativeProvenance>();
+  #pointerProvenance: StatsPointerProvenance | null = null;
+  #capture: StatsNativeCapture | null = null;
+  #proof: StatsDisclosureProof | null = null;
+  #openFocus: StatsOpenFocus | null = null;
+  #closeFocus: StatsCloseFocus | null = null;
+  #retiredCloseFocus = new Map<
+    StatsDisclosurePublication,
+    StatsCloseFocus
+  >();
+
+  beginLease() {
+    this.#lease += 1;
+    return this.#lease;
+  }
+
+  endLease(lease: number) {
+    this.releaseCapture();
+    queueMicrotask(() => {
+      if (this.#lease !== lease) return;
+      const close = this.#closeFocus;
+      if (close) {
+        this.retireCloseFocus(
+          close,
+          close.expected ?? close.publication,
+        );
+      }
+      this.#current?.guard?.release();
+      this.#replay?.release();
+      this.#poisoned?.guard?.release();
+      this.clearProof();
+      this.clearProvenance();
+      this.#current?.current.clear();
+      this.#current = null;
+      this.#successorOf = null;
+      this.#replay = null;
+      this.#poisoned = null;
+      this.#openFocus = null;
+      this.#closeFocus = null;
+    });
+  }
+
+  domainFor(role: StatsElementRole): StatsLayoutDomain {
+    return role === "trigger" ? "trigger" : "portal";
+  }
+
+  releaseOwner(
+    publication: StatsDisclosurePublication,
+    role: StatsElementRole,
+    connection: StatsElementConnection<HTMLElement> | null,
+  ) {
+    if (!connection) return;
+    const owner = this.#elementOwners.get(connection.element);
+    if (
+      owner?.publication === publication &&
+      owner.publicationIdentity === publication.identity &&
+      owner.role === role &&
+      owner.connectionIdentity === connection.identity
+    ) {
+      this.#elementOwners.delete(connection.element);
+    }
+  }
+
+  detachElement(
+    publication: StatsDisclosurePublication,
+    role: StatsElementRole,
+    connection: StatsElementConnection<HTMLElement>,
+  ) {
+    const current =
+      role === "trigger"
+        ? publication.connections.trigger
+        : publication.connections.content;
+    if (current !== connection) return;
+    this.releaseOwner(publication, role, connection);
+    if (role === "trigger") {
+      publication.connections.trigger = null;
+      publication.elements.trigger = null;
+    } else {
+      publication.connections.content = null;
+      publication.elements.content = null;
+    }
+    if (!publication.established && !publication.retired) return;
+    const replay = publication.replayRefs.find((entry) => entry.role === role);
+    if (
+      !replay ||
+      replay.element !== connection.element ||
+      replay.detached ||
+      replay.reattached
+    ) {
+      publication.invalidReplay.add(this.domainFor(role));
+      this.retire(publication, "other");
+      return;
+    }
+    replay.detached = true;
+    this.retire(publication, "ref", this.domainFor(role));
+  }
+
+  bindElement(
+    publication: StatsDisclosurePublication,
+    role: "trigger",
+    element: HTMLButtonElement | null,
+  ): (() => void) | undefined;
+  bindElement(
+    publication: StatsDisclosurePublication,
+    role: "content",
+    element: HTMLDivElement | null,
+  ): (() => void) | undefined;
+  bindElement(
+    publication: StatsDisclosurePublication,
+    role: StatsElementRole,
+    element: HTMLButtonElement | HTMLDivElement | null,
+  ): (() => void) | undefined {
+    const previous =
+      role === "trigger"
+        ? publication.connections.trigger
+        : publication.connections.content;
+    if (!element) {
+      if (previous) this.detachElement(publication, role, previous);
+      return;
+    }
+    const existingOwner = this.#elementOwners.get(element);
+    if (existingOwner && existingOwner.publication !== publication) {
+      publication.invalidReplay.add(this.domainFor(role));
+      this.retire(publication, "other");
+      return;
+    }
+    if (previous?.element === element) {
+      return () => this.detachElement(publication, role, previous);
+    }
+    if (previous) {
+      publication.invalidReplay.add(this.domainFor(role));
+      this.retire(publication, "other");
+      return;
+    }
+
+    if (publication.established || publication.retired) {
+      const replay = publication.replayRefs.find(
+        (entry) => entry.role === role,
+      );
+      if (
+        !replay ||
+        replay.element !== element ||
+        !replay.detached ||
+        replay.reattached ||
+        !element.isConnected
+      ) {
+        publication.invalidReplay.add(this.domainFor(role));
+        this.retire(publication, "other");
+        return;
+      }
+      replay.reattached = true;
+    }
+
+    let connection: StatsElementConnection<HTMLElement>;
+    if (role === "trigger") {
+      if (!(element instanceof HTMLButtonElement)) return;
+      const triggerConnection = {
+        identity: Symbol("stats-trigger-connection"),
+        element,
+      };
+      connection = triggerConnection;
+      publication.connections.trigger = triggerConnection;
+      publication.elements.trigger = element;
+    } else {
+      if (!(element instanceof HTMLDivElement)) return;
+      const contentConnection = {
+        identity: Symbol("stats-content-connection"),
+        element,
+      };
+      connection = contentConnection;
+      publication.connections.content = contentConnection;
+      publication.elements.content = element;
+    }
+    this.#elementOwners.set(element, {
+      publication,
+      publicationIdentity: publication.identity,
+      role,
+      connectionIdentity: connection.identity,
+    });
+    if (publication.retired) {
+      this.stageReplay(publication, this.domainFor(role));
+    } else if (
+      publication.layoutEstablished.has(this.domainFor(role))
+    ) {
+      this.establish(publication, this.domainFor(role));
+    }
+    return () => this.detachElement(publication, role, connection);
+  }
+
+  requestSuccessor(
+    publication: StatsDisclosurePublication,
+    replaceVisit = !this.visitIsExact(publication.render.visit),
+  ) {
+    if (replaceVisit) {
+      if (publication.visitSuccessorRequested) return;
+      publication.visitSuccessorRequested = true;
+      publication.requestSuccessor(true);
+      return;
+    }
+    if (publication.successorRequested) return;
+    publication.successorRequested = true;
+    publication.requestSuccessor(false);
+  }
+
+  clearProvenance(publication?: StatsDisclosurePublication) {
+    for (const provenance of [...this.#provenanceRecords]) {
+      if (publication && provenance.publication !== publication) continue;
+      provenance.ownerWindow.clearTimeout(provenance.timeoutId);
+      this.#provenanceRecords.delete(provenance);
+      this.#nativeProvenance.delete(provenance.event);
+      if (this.#pointerProvenance === provenance) {
+        this.#pointerProvenance = null;
+      }
+    }
+  }
+
+  releaseCapture() {
+    this.#capture?.remove();
+    this.#capture = null;
+    this.clearProvenance();
+  }
+
+  ensureCapture(document: Document, ownerWindow: StatsOwnerWindow) {
+    if (
+      this.#capture?.document === document &&
+      this.#capture.ownerWindow === ownerWindow
+    ) {
+      return true;
+    }
+    this.releaseCapture();
+    let active = true;
+    const capturePointerEvent = (
+      event: Event,
+      type: StatsPointerEventProof["type"],
+    ): StatsPointerEventProof | null => {
+      const PointerEventConstructor = ownerWindow.PointerEvent;
+      const target = event.target;
+      const path = event.composedPath();
+      if (
+        !PointerEventConstructor ||
+        !(event instanceof PointerEventConstructor) ||
+        event.type !== type ||
+        event.currentTarget !== document ||
+        event.eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        !statsNodeFromDocument(target, document) ||
+        !target.isConnected ||
+        !path.includes(target) ||
+        !path.includes(document) ||
+        event.button !== 0 ||
+        typeof event.pointerId !== "number" ||
+        typeof event.pointerType !== "string" ||
+        typeof event.isPrimary !== "boolean"
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        event,
+        type,
+        target,
+        path: Object.freeze([...path]),
+        phase: event.eventPhase,
+        timeStamp: event.timeStamp,
+        button: event.button,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        isPrimary: event.isPrimary,
+        detail: event.detail,
+      });
+    };
+    const pointerPathsMatch = (
+      first: readonly EventTarget[],
+      second: readonly EventTarget[],
+    ) =>
+      first.length === second.length &&
+      first.every((value, index) => value === second[index]);
+    const pointerPartMatches = (
+      pointerDown: StatsPointerEventProof,
+      next: StatsPointerEventProof,
+    ) =>
+      next.target === pointerDown.target &&
+      pointerPathsMatch(next.path, pointerDown.path) &&
+      next.phase === pointerDown.phase &&
+      next.timeStamp >= pointerDown.timeStamp &&
+      next.button === pointerDown.button &&
+      next.ctrlKey === pointerDown.ctrlKey &&
+      next.altKey === pointerDown.altKey &&
+      next.metaKey === pointerDown.metaKey &&
+      next.shiftKey === pointerDown.shiftKey &&
+      next.pointerId === pointerDown.pointerId &&
+      next.pointerType === pointerDown.pointerType &&
+      (next.type === "click" ||
+        next.isPrimary === pointerDown.isPrimary) &&
+      (next.type !== "click" || next.detail > 0);
+    const pointerProvenanceIsCurrent = (
+      provenance: StatsPointerProvenance,
+    ) => {
+      if (
+        this.#pointerProvenance !== provenance ||
+        ownerWindow.performance.now() >= provenance.expiresAt
+      ) {
+        this.forgetProvenance(provenance.event);
+        return false;
+      }
+      return true;
+    };
+    const remember = (event: Event) => {
+      const publication = this.#current;
+      if (
+        !active ||
+        !publication ||
+        event.currentTarget !== document
+      ) {
+        return;
+      }
+      const capturedPointer = this.#pointerProvenance;
+      if (event.type === "pointercancel") {
+        if (capturedPointer) {
+          this.forgetProvenance(capturedPointer.event);
+        }
+        return;
+      }
+      if (event.type === "pointerup") {
+        if (!capturedPointer) return;
+        const pointerUp = capturePointerEvent(event, "pointerup");
+        if (
+          capturedPointer.publication !== publication ||
+          !pointerProvenanceIsCurrent(capturedPointer) ||
+          capturedPointer.pointerUp ||
+          capturedPointer.click ||
+          !pointerUp ||
+          !pointerPartMatches(capturedPointer.pointerDown, pointerUp)
+        ) {
+          this.forgetProvenance(capturedPointer.event);
+          return;
+        }
+        capturedPointer.pointerUp = pointerUp;
+        return;
+      }
+      if (event.type === "click" && capturedPointer) {
+        const click = capturePointerEvent(event, "click");
+        if (
+          capturedPointer.publication !== publication ||
+          !pointerProvenanceIsCurrent(capturedPointer) ||
+          !capturedPointer.pointerUp ||
+          capturedPointer.click ||
+          !click ||
+          click.timeStamp < capturedPointer.pointerUp.timeStamp ||
+          !pointerPartMatches(capturedPointer.pointerDown, click)
+        ) {
+          this.forgetProvenance(capturedPointer.event);
+        } else {
+          capturedPointer.click = click;
+          capturedPointer.expiresAt =
+            ownerWindow.performance.now() + STATS_POINTER_CALLBACK_LEASE_MS;
+          capturedPointer.ownerWindow.clearTimeout(capturedPointer.timeoutId);
+          capturedPointer.timeoutId = ownerWindow.setTimeout(
+            () => this.forgetProvenance(capturedPointer.event),
+            STATS_POINTER_CALLBACK_LEASE_MS,
+          );
+        }
+      } else if (
+        event.type === "keydown" ||
+        (event.type === "pointerdown" && capturedPointer) ||
+        (event.type === "focusin" && !capturedPointer)
+      ) {
+        this.clearProvenance(publication);
+      }
+      const kind =
+        event.type === "click"
+          ? "click"
+          : event.type === "keydown"
+            ? "keydown"
+            : event.type === "pointerdown"
+              ? "pointerdown"
+              : event.type === "focusin"
+                ? "focusin"
+                : null;
+      const target = event.target;
+      if (
+        !kind ||
+        !(event instanceof ownerWindow.Event) ||
+        event.eventPhase === ownerWindow.Event.NONE ||
+        !statsNodeFromDocument(target, document) ||
+        !target.isConnected ||
+        !event.composedPath().includes(document) ||
+        !this.matches(publication)
+      ) {
+        return;
+      }
+      if (
+        (kind === "click" || kind === "pointerdown") &&
+        typeof Reflect.get(event, "button") === "number" &&
+        Reflect.get(event, "button") !== 0
+      ) {
+        return;
+      }
+      const provenance: StatsNativeProvenance = {
+        publication,
+        event,
+        kind,
+        document,
+        ownerWindow,
+        timeoutId: 0,
+      };
+      if (kind === "pointerdown") {
+        const pointerDown = capturePointerEvent(event, "pointerdown");
+        if (!pointerDown || pointerDown.isPrimary !== true) return;
+        const expiresAt =
+          ownerWindow.performance.now() + STATS_POINTER_GESTURE_LEASE_MS;
+        const pointerProvenance: StatsPointerProvenance = {
+          ...provenance,
+          kind,
+          pointerDown,
+          pointerUp: null,
+          click: null,
+          expiresAt,
+        };
+        this.#pointerProvenance = pointerProvenance;
+        this.#nativeProvenance.set(event, pointerProvenance);
+        this.#provenanceRecords.add(pointerProvenance);
+        pointerProvenance.timeoutId = ownerWindow.setTimeout(
+          () => this.forgetProvenance(event),
+          STATS_POINTER_GESTURE_LEASE_MS,
+        );
+        return;
+      }
+      this.#nativeProvenance.set(event, provenance);
+      this.#provenanceRecords.add(provenance);
+      provenance.timeoutId = ownerWindow.setTimeout(
+        () => this.forgetProvenance(event),
+        0,
+      );
+    };
+    const onShortcut = (event: KeyboardEvent) => {
+      const publication = this.#current;
+      if (publication) this.consumeShortcut(publication, event);
+    };
+    document.addEventListener("click", remember, true);
+    document.addEventListener("keydown", remember, true);
+    document.addEventListener("pointerdown", remember, true);
+    document.addEventListener("pointerup", remember, true);
+    document.addEventListener("pointercancel", remember, true);
+    document.addEventListener("focusin", remember, true);
+    ownerWindow.addEventListener("keydown", onShortcut);
+    this.#capture = {
+      document,
+      ownerWindow,
+      remove: () => {
+        if (!active) return;
+        active = false;
+        document.removeEventListener("click", remember, true);
+        document.removeEventListener("keydown", remember, true);
+        document.removeEventListener("pointerdown", remember, true);
+        document.removeEventListener("pointerup", remember, true);
+        document.removeEventListener("pointercancel", remember, true);
+        document.removeEventListener("focusin", remember, true);
+        ownerWindow.removeEventListener("keydown", onShortcut);
+      },
+    };
+    return true;
+  }
+
+  clearProof(expected?: StatsDisclosureProof) {
+    const proof = this.#proof;
+    if (!proof || (expected && proof !== expected)) return;
+    proof.ownerWindow.clearTimeout(proof.timeoutId);
+    this.#proof = null;
+  }
+
+  clearCloseFocus(expected?: StatsCloseFocus) {
+    if (!expected) {
+      this.#closeFocus = null;
+      return;
+    }
+    if (this.#closeFocus === expected) {
+      this.#closeFocus = null;
+    }
+    const publication = expected?.expected;
+    if (
+      publication &&
+      this.#retiredCloseFocus.get(publication) === expected
+    ) {
+      this.#retiredCloseFocus.delete(publication);
+    }
+  }
+
+  retireCloseFocus(
+    expected?: StatsCloseFocus,
+    callbackPublication?: StatsDisclosurePublication | null,
+  ) {
+    const close = expected ?? this.#closeFocus;
+    if (!close || (expected && this.#closeFocus !== expected)) return;
+    this.#closeFocus = null;
+    const publication =
+      callbackPublication ?? close.expected ?? close.publication;
+    const ownerWindow =
+      close.publication.triggerPlacement?.document.defaultView;
+    if (!publication || !ownerWindow || close.claimed) return;
+    this.#retiredCloseFocus.set(publication, close);
+  }
+
+  releaseCloseFocusAfterPortal(
+    publication: StatsDisclosurePublication,
+  ) {
+    const ownerWindow =
+      publication.triggerPlacement?.document.defaultView;
+    if (!ownerWindow) return;
+    ownerWindow.setTimeout(() => {
+      ownerWindow.setTimeout(() => {
+        const active = this.#closeFocus;
+        if (active?.publication === publication) {
+          this.clearCloseFocus(active);
+        }
+        for (const [callbackPublication, close] of this
+          .#retiredCloseFocus) {
+          if (close.publication === publication) {
+            this.#retiredCloseFocus.delete(callbackPublication);
+          }
+        }
+      }, 0);
+    }, 0);
+  }
+
+  retire(
+    publication: StatsDisclosurePublication | null,
+    reason: StatsRetirement,
+    domain?: StatsLayoutDomain,
+  ) {
+    if (!publication) return false;
+    if (reason === "layout" && domain) {
+      publication.layoutRetired.add(domain);
+    }
+    if (reason === "other" && domain) {
+      publication.invalidReplay.add(domain);
+    }
+    const wasCurrent = this.#current === publication;
+    if (
+      reason === "mutation" &&
+      publication.retired &&
+      !wasCurrent &&
+      this.#successorOf !== publication &&
+      this.#replay?.source !== publication
+    ) {
+      publication.guard?.release();
+      return false;
+    }
+    publication.guard?.deactivate();
+    this.clearProvenance(publication);
+    if (this.#proof?.publication === publication) this.clearProof();
+    if (!publication.retired) {
+      publication.retired = true;
+      publication.retirement = reason;
+      if (wasCurrent) {
+        this.#current = null;
+        this.#successorOf = publication;
+      }
+    } else if (publication.retirement === "layout" && reason !== "layout") {
+      publication.retirement = reason;
+    }
+
+    if (reason === "mutation" || reason === "drift" || reason === "other") {
+      if (reason === "mutation" && publication.triggerDom) {
+        this.#poisoned = publication;
+      }
+      if (this.#replay?.source === publication) {
+        this.#replay = null;
+      }
+      publication.guard?.release();
+      this.requestSuccessor(publication);
+      return wasCurrent;
+    }
+
+    queueMicrotask(() => {
+      if (
+        this.#successorOf !== publication ||
+        this.#replay?.source === publication ||
+        this.#current
+      ) {
+        if (
+          this.#replay?.source !== publication &&
+          this.#poisoned !== publication
+        ) {
+          publication.guard?.release();
+        }
+        return;
+      }
+      publication.guard?.release();
+      this.requestSuccessor(publication);
+    });
+    return wasCurrent;
+  }
+
+  retireLayout(
+    publication: StatsDisclosurePublication,
+    domain: StatsLayoutDomain,
+  ) {
+    this.retire(publication, "layout", domain);
+  }
+
+  visitIsExact(visit: StatsDisclosureVisit) {
+    return (
+      visit.session.docId === visit.docId &&
+      visit.session.ydoc === visit.ydoc &&
+      visit.session.ytext === visit.ytext &&
+      visit.session.role === visit.role
+    );
+  }
+
+  renderIsExact(render: StatsDisclosureRender, allowRetiredVisit = false) {
+    const selection = render.selection;
+    return (
+      (allowRetiredVisit || !render.visit.retired) &&
+      this.visitIsExact(render.visit) &&
+      render.visit.session === render.session &&
+      render.state.visit === render.visit &&
+      render.state.authority === render.authority &&
+      render.state.open === render.open &&
+      (selection
+        ? selection.from === render.selectionFrom &&
+          selection.to === render.selectionTo
+        : render.selectionFrom === null && render.selectionTo === null) &&
+      statsSnapshotIsExact(render.stats) &&
+      (!render.selectionStats ||
+        statsSnapshotIsExact(render.selectionStats)) &&
+      goalSnapshotIsExact(render.goal) &&
+      goalMatchesSnapshot(getGoal(render.session), render.goal) &&
+      progressSnapshotIsExact(render.progress) &&
+      render.session.canEdit === render.canEdit &&
+      render.session.mode === render.mode &&
+      render.shortcutLabel === shortcut("Mod-Shift-C") &&
+      render.triggerTitle ===
+        (render.goal.goal && render.progress.progress
+          ? describeGoal(render.goal.goal, render.progress.progress)
+          : `Document statistics (${render.shortcutLabel})`) &&
+      render.triggerLabel ===
+        (render.hydrated
+          ? `${formatNumber(render.stats.words)} words`
+          : "— words") &&
+      render.selectionLabel ===
+        (render.hydrated && render.selectionStats
+          ? `${formatNumber(render.selectionStats.words)} of ${formatNumber(render.stats.words)} selected`
+          : null) &&
+      goalPresentationIsExact(render.goalPresentation)
+    );
+  }
+
+  factsMatch(publication: StatsDisclosurePublication) {
+    const { render, current } = publication;
+    return (
+      current.ownsVisit(render.visit) &&
+      (render.open
+        ? current.ownsAuthority(render.authority)
+        : render.authority === null && current.authority() === null) &&
+      this.renderIsExact(render)
+    );
+  }
+
+  ownsElement(
+    publication: StatsDisclosurePublication,
+    role: StatsElementRole,
+    element: HTMLElement,
+  ) {
+    const owner = this.#elementOwners.get(element);
+    const connection = publication.connections[role];
+    return (
+      owner?.publication === publication &&
+      owner.publicationIdentity === publication.identity &&
+      owner.role === role &&
+      owner.connectionIdentity === connection?.identity &&
+      connection.element === element &&
+      publication.elements[role] === element
+    );
+  }
+
+  controlsMatch(publication: StatsDisclosurePublication) {
+    const { render } = publication;
+    const { trigger, content } = publication.elements;
+    const ownerWindow = trigger?.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      !(trigger instanceof ownerWindow.HTMLButtonElement) ||
+      !trigger.isConnected ||
+      trigger.type !== "button" ||
+      !statsElementIsEnabled(trigger) ||
+      !this.ownsElement(publication, "trigger", trigger) ||
+      trigger.dataset.testid !== "stats-button" ||
+      trigger.title !== render.triggerTitle ||
+      trigger.querySelector('[data-testid="word-count"]')?.textContent !==
+        render.triggerLabel
+    ) {
+      return false;
+    }
+    const selection = trigger.querySelector(
+      '[data-testid="selection-count"]',
+    );
+    if (
+      render.selectionLabel
+        ? selection?.textContent?.trim() !== `· ${render.selectionLabel}`
+        : selection !== null
+    ) {
+      return false;
+    }
+    if (!render.open) return content === null;
+    return Boolean(
+      content &&
+        content instanceof ownerWindow.HTMLDivElement &&
+        content.isConnected &&
+        content.ownerDocument === trigger.ownerDocument &&
+        this.ownsElement(publication, "content", content) &&
+        content.dataset.testid === "stats-popover" &&
+        content.dataset.state === "open" &&
+        !trigger.contains(content) &&
+        content.querySelector('[data-testid="stats-table"]') &&
+        content.querySelector('[data-testid="goal-section"]'),
+    );
+  }
+
+  closingCallbackMatches(
+    close: StatsCloseFocus,
+    publication: StatsDisclosurePublication,
+  ) {
+    const { trigger, content } = publication.elements;
+    const closingContent = close.publication.contentDom?.node;
+    const ownerWindow = trigger?.ownerDocument.defaultView;
+    return Boolean(
+      closingContent &&
+        ownerWindow &&
+        trigger === close.trigger &&
+        content === closingContent &&
+        trigger instanceof ownerWindow.HTMLButtonElement &&
+        content instanceof ownerWindow.HTMLDivElement &&
+        trigger.isConnected &&
+        content.isConnected &&
+        content.ownerDocument === trigger.ownerDocument &&
+        this.ownsElement(publication, "trigger", trigger) &&
+        this.ownsElement(publication, "content", content) &&
+        !publication.render.open &&
+        publication.render.authority === null &&
+        publication.render.state.visit === publication.render.visit &&
+        publication.render.state.authority === null &&
+        !publication.render.state.open &&
+        content.dataset.testid === "stats-popover" &&
+        content.dataset.state === "closed" &&
+        !trigger.contains(content) &&
+        close.publication.triggerPlacement &&
+        statsPlacementStructureMatches(
+          trigger,
+          close.publication.triggerPlacement,
+        ),
+    );
+  }
+
+  publicationDomMatches(publication: StatsDisclosurePublication) {
+    const { trigger, content } = publication.elements;
+    return Boolean(
+      publication.guard?.isClean() &&
+        trigger &&
+        publication.triggerDom &&
+        publication.triggerPlacement &&
+        trigger === publication.triggerDom.node &&
+        statsPlacementMatches(trigger, publication.triggerPlacement) &&
+        statsDomMatches(publication.triggerDom) &&
+        (publication.render.open
+          ? content &&
+            publication.contentDom &&
+            publication.contentPlacement &&
+            content === publication.contentDom.node &&
+            statsPlacementMatches(content, publication.contentPlacement) &&
+            statsDomMatches(publication.contentDom)
+          : !content &&
+            !publication.contentDom &&
+            !publication.contentPlacement),
+    );
+  }
+
+  matches(
+    publication: StatsDisclosurePublication,
+    allowConsumed = false,
+  ) {
+    const current =
+      this.#current === publication &&
+      publication.established &&
+      !publication.retired &&
+      (allowConsumed || !publication.consumed);
+    if (!current) return false;
+    if (
+      !this.factsMatch(publication) ||
+      !this.controlsMatch(publication) ||
+      !this.publicationDomMatches(publication)
+    ) {
+      this.retire(publication, "drift");
+      return false;
+    }
+    return true;
+  }
+
+  exactRefReplay(
+    publication: StatsDisclosurePublication,
+    domain: StatsLayoutDomain,
+  ) {
+    const refs = publication.replayRefs.filter(
+      (entry) => entry.domain === domain,
+    );
+    return (
+      !publication.invalidReplay.has(domain) &&
+      refs.length > 0 &&
+      refs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          publication.elements[entry.role] === entry.element &&
+          publication.connections[entry.role]?.element === entry.element,
+      )
+    );
+  }
+
+  replayDomMatches(replay: StatsReplay) {
+    const trigger = replay.triggerDom.node;
+    const content = replay.contentDom?.node ?? null;
+    return Boolean(
+      trigger instanceof HTMLElement &&
+        statsPlacementMatches(trigger, replay.triggerPlacement) &&
+        statsDomMatches(replay.triggerDom) &&
+        (replay.contentDom
+          ? content instanceof HTMLElement &&
+            replay.contentPlacement &&
+            statsPlacementMatches(content, replay.contentPlacement) &&
+            statsDomMatches(replay.contentDom)
+          : !replay.contentPlacement) &&
+        replay.historyIsClean(),
+    );
+  }
+
+  stageReplay(
+    publication: StatsDisclosurePublication,
+    domain: StatsLayoutDomain,
+  ) {
+    if (
+      this.#successorOf !== publication ||
+      publication.consumed ||
+      !publication.layoutRetired.has(domain) ||
+      !this.exactRefReplay(publication, domain) ||
+      !publication.triggerDom ||
+      !publication.triggerPlacement ||
+      !publication.guard?.isClean() ||
+      !this.renderIsExact(publication.render, true)
+    ) {
+      return;
+    }
+    if (!this.#replay) {
+      this.#replay = Object.freeze({
+        source: publication,
+        triggerDom: publication.triggerDom,
+        triggerPlacement: publication.triggerPlacement,
+        contentDom: publication.contentDom,
+        contentPlacement: publication.contentPlacement,
+        historyIsClean: publication.guard.isClean,
+        release: publication.guard.release,
+      });
+    }
+    this.requestSuccessor(
+      publication,
+      publication.render.visit.retired,
+    );
+  }
+
+  canPublish(publication: StatsDisclosurePublication) {
+    const hasContent = publication.elements.content !== null;
+    return (
+      this.factsMatch(publication) &&
+      this.controlsMatch(publication) &&
+      (publication.render.open ? hasContent : !hasContent)
+    );
+  }
+
+  baselineMatches(
+    source: StatsDisclosurePublication,
+    publication: StatsDisclosurePublication,
+  ) {
+    const trigger = publication.elements.trigger;
+    const content = publication.elements.content;
+    return Boolean(
+      trigger &&
+        source.triggerDom &&
+        source.triggerPlacement &&
+        trigger === source.triggerDom.node &&
+        statsPlacementMatches(trigger, source.triggerPlacement) &&
+        statsDomMatches(source.triggerDom) &&
+        (source.contentDom
+          ? content &&
+            source.contentPlacement &&
+            content === source.contentDom.node &&
+            statsPlacementMatches(content, source.contentPlacement) &&
+            statsDomMatches(source.contentDom)
+          : !content),
+    );
+  }
+
+  initialize(publication: StatsDisclosurePublication) {
+    const { trigger, content } = publication.elements;
+    const triggerPlacement = trigger
+      ? captureStatsPlacement(trigger)
+      : null;
+    const contentPlacement = content
+      ? captureStatsPlacement(content)
+      : null;
+    if (
+      !trigger ||
+      !triggerPlacement ||
+      (publication.render.open && (!content || !contentPlacement))
+    ) {
+      return false;
+    }
+    const roots =
+      publication.render.open && content
+        ? [trigger, content]
+        : [trigger];
+    const placements =
+      publication.render.open && contentPlacement
+        ? [triggerPlacement, contentPlacement]
+        : [triggerPlacement];
+    const mutationGuard = createStatsMutationGuard(
+      roots,
+      placements,
+      () => this.retire(publication, "mutation"),
+    );
+    const document = trigger.ownerDocument;
+    const ownerWindow = document.defaultView;
+    if (
+      !mutationGuard ||
+      !ownerWindow ||
+      !this.ensureCapture(document, ownerWindow)
+    ) {
+      mutationGuard?.release();
+      return false;
+    }
+    let released = false;
+    publication.triggerDom = snapshotStatsDom(trigger);
+    publication.triggerPlacement = triggerPlacement;
+    publication.contentDom = content ? snapshotStatsDom(content) : null;
+    publication.contentPlacement = contentPlacement;
+    publication.focusDestination = publication.render.open
+      ? publication.render.canEdit
+        ? content?.querySelector<HTMLElement>('[data-testid="goal-mode"]') ??
+          null
+        : content
+      : null;
+    publication.replayRefs = [
+      {
+        role: "trigger",
+        domain: "trigger",
+        element: trigger,
+        detached: false,
+        reattached: false,
+      },
+      ...(content
+        ? [
+            {
+              role: "content" as const,
+              domain: "portal" as const,
+              element: content,
+              detached: false,
+              reattached: false,
+            },
+          ]
+        : []),
+    ];
+    publication.guard = Object.freeze({
+      isClean: mutationGuard.isClean,
+      deactivate: () => {},
+      release: () => {
+        if (released) return;
+        released = true;
+        mutationGuard.release();
+      },
+    });
+    return true;
+  }
+
+  publish(publication: StatsDisclosurePublication) {
+    const close = this.#closeFocus;
+    const closesPendingDisclosure = Boolean(
+      close &&
+        statsCloseSuccessorMatches(
+          close.publication.render,
+          publication.render,
+        ),
+    );
+    if (
+      close &&
+      !close.expected &&
+      this.closingCallbackMatches(close, publication)
+    ) {
+      close.expected = publication;
+    }
+    if (close && !closesPendingDisclosure) {
+      this.retireCloseFocus(close);
+    }
+    if (!this.canPublish(publication)) {
+      if (
+        closesPendingDisclosure &&
+        close &&
+        close.expected !== publication
+      ) {
+        this.retireCloseFocus(close);
+      }
+      return false;
+    }
+    const poisoned = this.#poisoned;
+    if (poisoned) {
+      if (statsRendersMatch(poisoned.render, publication.render)) {
+        if (!this.baselineMatches(poisoned, publication)) {
+          publication.retired = true;
+          publication.retirement = "mutation";
+          if (closesPendingDisclosure && close) {
+            this.retireCloseFocus(close);
+          }
+          return false;
+        }
+      }
+      poisoned.guard?.release();
+      this.#poisoned = null;
+    }
+
+    const replay = this.#replay;
+    if (replay) {
+      const sameGeneration = statsRendersMatch(
+        replay.source.render,
+        publication.render,
+      );
+      const exact =
+        sameGeneration &&
+        this.#successorOf === replay.source &&
+        replay.source.retired &&
+        !replay.source.consumed &&
+        this.replayDomMatches(replay) &&
+        publication.elements.trigger === replay.triggerDom.node &&
+        publication.elements.content ===
+          (replay.contentDom?.node ?? null);
+      this.#replay = null;
+      replay.release();
+      if (this.#successorOf === replay.source) {
+        this.#successorOf = null;
+      }
+      if (sameGeneration && !exact) {
+        publication.retired = true;
+        publication.retirement = "other";
+        if (closesPendingDisclosure && close) {
+          this.retireCloseFocus(close);
+        }
+        this.requestSuccessor(publication);
+        return false;
+      }
+    }
+
+    const previous = this.#current;
+    if (previous && previous !== publication) {
+      this.retire(previous, "other");
+    }
+    if (!this.initialize(publication)) {
+      publication.retired = true;
+      publication.retirement = "other";
+      if (closesPendingDisclosure && close) {
+        this.retireCloseFocus(close);
+      }
+      return false;
+    }
+    publication.established = true;
+    this.#current = publication;
+    this.#successorOf = null;
+    if (closesPendingDisclosure && close && this.#closeFocus === close) {
+      if (!close.expected) {
+        close.expected = publication;
+      } else if (
+        !statsClosedSuccessorsMatch(
+          close.expected.render,
+          publication.render,
+        )
+      ) {
+        this.retireCloseFocus(close);
+      }
+    }
+    return true;
+  }
+
+  establish(
+    publication: StatsDisclosurePublication,
+    domain: StatsLayoutDomain,
+  ) {
+    publication.layoutEstablished.add(domain);
+    if (publication.retired) {
+      this.stageReplay(publication, domain);
+      return;
+    }
+    const required: StatsLayoutDomain[] = publication.render.open
+      ? ["trigger", "portal"]
+      : ["trigger"];
+    if (
+      required.every((value) =>
+        publication.layoutEstablished.has(value),
+      )
+    ) {
+      this.publish(publication);
+    }
+  }
+
+  forgetProvenance(event: Event) {
+    const provenance = this.#nativeProvenance.get(event);
+    if (!provenance) return;
+    provenance.ownerWindow.clearTimeout(provenance.timeoutId);
+    this.#nativeProvenance.delete(event);
+    this.#provenanceRecords.delete(provenance);
+    if (this.#pointerProvenance === provenance) {
+      this.#pointerProvenance = null;
+    }
+  }
+
+  authorityForTransition(
+    publication: StatsDisclosurePublication,
+    nextOpen: boolean,
+  ) {
+    const { render } = publication;
+    if (nextOpen) {
+      if (
+        render.open ||
+        render.authority ||
+        publication.current.authority()
+      ) {
+        return null;
+      }
+      const authority: StatsDisclosureAuthority = {
+        identity: Symbol("stats-disclosure"),
+        visit: render.visit,
+        claimedEvents: new WeakSet<object>(),
+        retired: false,
+      };
+      return publication.current.canPublishAuthority(authority)
+        ? authority
+        : null;
+    }
+    return render.open &&
+      render.authority &&
+      publication.current.ownsAuthority(render.authority)
+      ? render.authority
+      : null;
+  }
+
+  claimTransition(
+    publication: StatsDisclosurePublication,
+    authority: StatsDisclosureAuthority,
+    event: object,
+    nativeEvent: Event,
+    relatedEvent?: Event,
+  ) {
+    if (
+      publication.consumed ||
+      this.#claimedEvents.has(event) ||
+      this.#claimedEvents.has(nativeEvent) ||
+      (relatedEvent !== undefined &&
+        this.#claimedEvents.has(relatedEvent)) ||
+      publication.render.visit.claimedEvents.has(nativeEvent) ||
+      (relatedEvent !== undefined &&
+        publication.render.visit.claimedEvents.has(relatedEvent)) ||
+      authority.claimedEvents.has(nativeEvent) ||
+      (relatedEvent !== undefined &&
+        authority.claimedEvents.has(relatedEvent)) ||
+      !this.matches(publication)
+    ) {
+      return false;
+    }
+    publication.consumed = true;
+    this.#claimedEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    publication.render.visit.claimedEvents.add(nativeEvent);
+    authority.claimedEvents.add(nativeEvent);
+    if (relatedEvent !== undefined) {
+      this.#claimedEvents.add(relatedEvent);
+      publication.render.visit.claimedEvents.add(relatedEvent);
+      authority.claimedEvents.add(relatedEvent);
+    }
+    this.forgetProvenance(nativeEvent);
+    return true;
+  }
+
+  publishProof(
+    publication: StatsDisclosurePublication,
+    authority: StatsDisclosureAuthority,
+    nextOpen: boolean,
+    source: StatsDisclosureProof["source"],
+    event: object,
+    nativeEvent: Event,
+  ) {
+    this.clearProof();
+    const ownerWindow =
+      publication.elements.trigger?.ownerDocument.defaultView;
+    if (!ownerWindow) return;
+    const proof: StatsDisclosureProof = {
+      publication,
+      authority,
+      nextOpen,
+      source,
+      event,
+      nativeEvent,
+      ownerWindow,
+      timeoutId: 0,
+    };
+    this.#proof = proof;
+    proof.timeoutId = ownerWindow.setTimeout(() => {
+      if (this.#proof !== proof) return;
+      this.#proof = null;
+      this.requestSuccessor(publication);
+    }, 0);
+  }
+
+  commitTransition(proof: StatsDisclosureProof) {
+    const { publication, authority, nextOpen, source } = proof;
+    const { render } = publication;
+    const trigger = publication.elements.trigger;
+    if (!trigger || !this.matches(publication, true)) return false;
+    if (nextOpen) {
+      if (!publication.current.publishAuthority(authority)) return false;
+      this.#openFocus = { visit: render.visit, authority };
+      this.retireCloseFocus();
+    } else {
+      if (!publication.current.ownsAuthority(authority)) return false;
+      this.retireCloseFocus();
+      this.#closeFocus = {
+        publication,
+        visit: render.visit,
+        authority,
+        source,
+        trigger,
+        expected: null,
+        claimed: false,
+      };
+      this.#openFocus = null;
+      if (!publication.current.retireAuthority(authority)) return false;
+    }
+    const nextState = Object.freeze({
+      visit: render.visit,
+      authority: nextOpen ? authority : null,
+      open: nextOpen,
+    });
+    render.commitState(render.state, nextState);
+    return true;
+  }
+
+  consumeProof(
+    publication: StatsDisclosurePublication,
+    nextOpen: boolean,
+  ) {
+    const proof = this.#proof;
+    if (
+      !proof ||
+      proof.publication !== publication ||
+      proof.nextOpen !== nextOpen ||
+      proof.authority.visit !== publication.render.visit ||
+      proof.authority.retired
+    ) {
+      return false;
+    }
+    this.clearProof(proof);
+    return this.commitTransition(proof);
+  }
+
+  mintTrigger(
+    publication: StatsDisclosurePublication,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) {
+    const trigger = publication.elements.trigger;
+    const document = trigger?.ownerDocument;
+    const ownerWindow = document?.defaultView;
+    const nativeEvent = event?.nativeEvent;
+    const target = event?.target;
+    const provenance =
+      ownerWindow && nativeEvent instanceof ownerWindow.Event
+        ? this.#nativeProvenance.get(nativeEvent)
+        : null;
+    if (
+      !trigger ||
+      !document ||
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      provenance?.publication !== publication ||
+      provenance.kind !== "click" ||
+      provenance.document !== document ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      !nativeEvent.bubbles ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      !event.bubbles ||
+      event.currentTarget !== trigger ||
+      nativeEvent.target !== target ||
+      !statsNodeFromDocument(target, document) ||
+      !target.isConnected ||
+      !trigger.contains(target) ||
+      !nativeEvent.composedPath().includes(trigger) ||
+      !nativeEvent.composedPath().includes(document) ||
+      event.defaultPrevented ||
+      nativeEvent.defaultPrevented
+    ) {
+      return;
+    }
+    const nextOpen = !publication.render.open;
+    const authority = this.authorityForTransition(
+      publication,
+      nextOpen,
+    );
+    if (
+      !authority ||
+      !this.claimTransition(
+        publication,
+        authority,
+        event,
+        nativeEvent,
+      )
+    ) {
+      return;
+    }
+    this.publishProof(
+      publication,
+      authority,
+      nextOpen,
+      "trigger",
+      event,
+      nativeEvent,
+    );
+  }
+
+  consumeShortcut(
+    publication: StatsDisclosurePublication,
+    event: KeyboardEvent,
+  ) {
+    const trigger = publication.elements.trigger;
+    const document = trigger?.ownerDocument;
+    const ownerWindow = document?.defaultView;
+    const provenance = this.#nativeProvenance.get(event);
+    const target = event.target;
+    if (
+      !trigger ||
+      !document ||
+      !ownerWindow ||
+      !(event instanceof ownerWindow.KeyboardEvent) ||
+      provenance?.publication !== publication ||
+      provenance.kind !== "keydown" ||
+      provenance.document !== document ||
+      !statsOwnerWindowTarget(event.currentTarget, document, ownerWindow) ||
+      event.type !== "keydown" ||
+      event.eventPhase === ownerWindow.Event.NONE ||
+      event.code !== "KeyC" ||
+      !(event.ctrlKey || event.metaKey) ||
+      !event.shiftKey ||
+      event.altKey ||
+      event.repeat ||
+      event.isComposing ||
+      !event.bubbles ||
+      !statsNodeFromDocument(target, document) ||
+      !target.isConnected ||
+      !event.composedPath().includes(document) ||
+      event.defaultPrevented
+    ) {
+      return;
+    }
+    const nextOpen = !publication.render.open;
+    const authority = this.authorityForTransition(
+      publication,
+      nextOpen,
+    );
+    if (
+      !authority ||
+      !this.claimTransition(
+        publication,
+        authority,
+        event,
+        event,
+      )
+    ) {
+      return;
+    }
+    const proof: StatsDisclosureProof = {
+      publication,
+      authority,
+      nextOpen,
+      source: "shortcut",
+      event,
+      nativeEvent: event,
+      ownerWindow,
+      timeoutId: 0,
+    };
+    event.preventDefault();
+    if (!this.commitTransition(proof)) {
+      this.requestSuccessor(publication);
+    }
+  }
+
+  mintEscape(
+    publication: StatsDisclosurePublication,
+    event: KeyboardEvent,
+  ) {
+    const { content } = publication.elements;
+    const document = content?.ownerDocument;
+    const ownerWindow = document?.defaultView;
+    const provenance = this.#nativeProvenance.get(event);
+    const target = event.target;
+    if (
+      !content ||
+      !document ||
+      !ownerWindow ||
+      !(event instanceof ownerWindow.KeyboardEvent) ||
+      provenance?.publication !== publication ||
+      provenance.kind !== "keydown" ||
+      provenance.document !== document ||
+      event.type !== "keydown" ||
+      event.key !== "Escape" ||
+      event.eventPhase === ownerWindow.Event.NONE ||
+      event.currentTarget !== document ||
+      event.defaultPrevented ||
+      !statsNodeFromDocument(target, document) ||
+      !target.isConnected ||
+      !content.contains(target) ||
+      !event.composedPath().includes(content) ||
+      !event.composedPath().includes(document)
+    ) {
+      return;
+    }
+    const authority = this.authorityForTransition(publication, false);
+    if (
+      !authority ||
+      !this.claimTransition(
+        publication,
+        authority,
+        event,
+        event,
+      )
+    ) {
+      return;
+    }
+    this.publishProof(
+      publication,
+      authority,
+      false,
+      "escape",
+      event,
+      event,
+    );
+  }
+
+  mintOutside(
+    publication: StatsDisclosurePublication,
+    event: CustomEvent<{ originalEvent: Event }>,
+    source: "pointer" | "focus",
+  ) {
+    const { trigger, content } = publication.elements;
+    const document = content?.ownerDocument;
+    const ownerWindow = document?.defaultView;
+    const originalEvent = event.detail?.originalEvent;
+    const provenance = originalEvent
+      ? this.#nativeProvenance.get(originalEvent)
+      : null;
+    const pointerProvenance =
+      provenance?.kind === "pointerdown"
+        ? (provenance as StatsPointerProvenance)
+        : null;
+    const target = originalEvent?.target ?? null;
+    const expectedOriginal =
+      source === "pointer" ? "pointerdown" : "focusin";
+    const expectedCustom =
+      source === "pointer"
+        ? "dismissableLayer.pointerDownOutside"
+        : "dismissableLayer.focusOutside";
+    if (
+      !trigger ||
+      !content ||
+      !document ||
+      !ownerWindow ||
+      !originalEvent ||
+      !(originalEvent instanceof ownerWindow.Event) ||
+      !(event instanceof ownerWindow.CustomEvent) ||
+      provenance?.publication !== publication ||
+      provenance.kind !== expectedOriginal ||
+      provenance.document !== document ||
+      originalEvent.type !== expectedOriginal ||
+      (source === "focus" &&
+        !(originalEvent instanceof ownerWindow.FocusEvent)) ||
+      (source === "focus" &&
+        originalEvent.eventPhase === ownerWindow.Event.NONE) ||
+      event.type !== expectedCustom ||
+      event.eventPhase === ownerWindow.Event.NONE ||
+      event.defaultPrevented ||
+      originalEvent.defaultPrevented ||
+      event.target !== target ||
+      event.currentTarget !== target ||
+      !statsNodeFromDocument(target, document) ||
+      !target.isConnected ||
+      content.contains(target) ||
+      trigger.contains(target) ||
+      (source === "focus" &&
+        !originalEvent.composedPath().includes(document)) ||
+      !event.composedPath().includes(target) ||
+      !event.composedPath().includes(document) ||
+      (source === "pointer" &&
+        (!pointerProvenance?.pointerUp ||
+          !pointerProvenance.click ||
+          ownerWindow.performance.now() >=
+            pointerProvenance.expiresAt ||
+          pointerProvenance.pointerDown.target !== target ||
+          pointerProvenance.pointerDown.phase !==
+            ownerWindow.Event.CAPTURING_PHASE ||
+          pointerProvenance.pointerDown.isPrimary !== true ||
+          pointerProvenance.click.target !== target ||
+          !pointerProvenance.click.path.includes(document)))
+    ) {
+      return;
+    }
+    if (
+      source === "pointer" &&
+      typeof Reflect.get(originalEvent, "button") === "number" &&
+      Reflect.get(originalEvent, "button") !== 0
+    ) {
+      return;
+    }
+    const authority = this.authorityForTransition(publication, false);
+    if (
+      !authority ||
+      !this.claimTransition(
+        publication,
+        authority,
+        event,
+        originalEvent,
+        source === "pointer"
+          ? pointerProvenance?.click?.event
+          : undefined,
+      )
+    ) {
+      return;
+    }
+    this.publishProof(
+      publication,
+      authority,
+      false,
+      source,
+      event,
+      originalEvent,
+    );
+  }
+
+  openAutoFocus(
+    publication: StatsDisclosurePublication,
+    event: Event,
+  ) {
+    const { content } = publication.elements;
+    const destination = publication.focusDestination;
+    const ownerWindow = content?.ownerDocument.defaultView;
+    const focus = this.#openFocus;
+    if (
+      !content ||
+      !destination ||
+      !ownerWindow ||
+      !focus ||
+      focus.visit !== publication.render.visit ||
+      focus.authority !== publication.render.authority ||
+      !publication.current.ownsAuthority(focus.authority) ||
+      !(event instanceof ownerWindow.Event) ||
+      event.eventPhase === ownerWindow.Event.NONE ||
+      event.currentTarget !== content ||
+      event.target !== content ||
+      !content.contains(destination) ||
+      !destination.isConnected ||
+      this.#claimedEvents.has(event) ||
+      !this.matches(publication)
+    ) {
+      return;
+    }
+    this.#claimedEvents.add(event);
+    publication.render.visit.claimedEvents.add(event);
+    focus.authority.claimedEvents.add(event);
+    this.#openFocus = null;
+    event.preventDefault();
+    destination.focus({ preventScroll: true });
+  }
+
+  closeAutoFocus(
+    publication: StatsDisclosurePublication,
+    event: Event,
+  ) {
+    const active = this.#closeFocus;
+    const close =
+      active?.expected === publication
+        ? active
+        : this.#retiredCloseFocus.get(publication);
+    if (!close) return;
+    const closingPublication = close.publication;
+    const content = closingPublication?.contentDom?.node;
+    const ownerWindow =
+      closingPublication?.triggerPlacement?.document.defaultView;
+    const current = this.#current;
+    if (
+      close.claimed ||
+      !ownerWindow ||
+      content !== event.currentTarget ||
+      !(event instanceof ownerWindow.Event) ||
+      event.eventPhase === ownerWindow.Event.NONE ||
+      this.#claimedEvents.has(event)
+    ) {
+      this.clearCloseFocus(close);
+      return;
+    }
+    const exact = Boolean(
+      active === close &&
+        close.authority.retired &&
+        closingPublication.current.ownsVisit(close.visit) &&
+        current &&
+        current.render.visit === close.visit &&
+        !current.render.open &&
+        current.elements.trigger === close.trigger &&
+        statsCloseSuccessorMatches(
+          closingPublication.render,
+          publication.render,
+        ) &&
+        statsClosedSuccessorsMatch(
+          publication.render,
+          current.render,
+        ) &&
+        this.matches(current),
+    );
+    close.claimed = true;
+    this.#claimedEvents.add(event);
+    close.visit.claimedEvents.add(event);
+    close.authority.claimedEvents.add(event);
+    this.clearCloseFocus(close);
+    event.preventDefault();
+    if (
+      exact &&
+      close.source !== "pointer" &&
+      close.source !== "focus"
+    ) {
+      close.trigger.focus({ preventScroll: true });
+    }
+  }
+}
+
+function isGoalMode(value: string): value is GoalMode {
+  return value === "min" || value === "max";
+}
+
+function isGoalKind(value: string): value is GoalKind {
+  return value === "words" || value === "minutes";
+}
+
+function goalElementSlot<T extends HTMLElement>(): GoalElementSlot<T> {
+  return { expected: null, connection: null };
+}
+
+const claimedGoalNativeEvents = new WeakSet<Event>();
+
+function goalSelectValueIsExact(
+  select: HTMLSelectElement,
+  value: string,
+  selected: HTMLOptionElement,
+  other: HTMLOptionElement,
+): boolean {
+  return (
+    select.value === value &&
+    select.selectedIndex === selected.index &&
+    select.selectedOptions.length === 1 &&
+    select.selectedOptions.item(0) === selected &&
+    selected.selected &&
+    !other.selected
+  );
+}
+
+function goalPublicationDomIsExact(
+  publication: GoalPublication,
+  mutable: "modeSelect" | "valueInput" | "kindSelect" | null,
+): boolean {
+  const {
+    presentation,
+    form,
+    modeSelect,
+    modeMinOption,
+    modeMaxOption,
+    valueInput,
+    kindSelect,
+    kindWordsOption,
+    kindMinutesOption,
+    actions,
+    setButton,
+    clearButton,
+  } = publication;
+  const document = form.ownerDocument;
+  const ownerWindow = document.defaultView;
+  const nodes = [
+    form,
+    modeSelect,
+    modeMinOption,
+    modeMaxOption,
+    valueInput,
+    kindSelect,
+    kindWordsOption,
+    kindMinutesOption,
+    actions,
+    setButton,
+    ...(clearButton ? [clearButton] : []),
+  ];
+  if (
+    !ownerWindow ||
+    nodes.some((node) => node.ownerDocument !== document || !node.isConnected) ||
+    form.children.length !== 4 ||
+    form.children.item(0) !== modeSelect ||
+    form.children.item(1) !== valueInput ||
+    form.children.item(2) !== kindSelect ||
+    form.children.item(3) !== actions ||
+    modeSelect.form !== form ||
+    valueInput.form !== form ||
+    kindSelect.form !== form ||
+    setButton.form !== form ||
+    modeSelect.children.length !== 2 ||
+    modeSelect.children.item(0) !== modeMinOption ||
+    modeSelect.children.item(1) !== modeMaxOption ||
+    modeSelect.options.length !== 2 ||
+    modeSelect.options.item(0) !== modeMinOption ||
+    modeSelect.options.item(1) !== modeMaxOption ||
+    kindSelect.children.length !== 2 ||
+    kindSelect.children.item(0) !== kindWordsOption ||
+    kindSelect.children.item(1) !== kindMinutesOption ||
+    kindSelect.options.length !== 2 ||
+    kindSelect.options.item(0) !== kindWordsOption ||
+    kindSelect.options.item(1) !== kindMinutesOption ||
+    actions.parentElement !== form ||
+    actions.children.length !== (clearButton ? 2 : 1) ||
+    actions.children.item(0) !== setButton ||
+    (clearButton ? actions.children.item(1) !== clearButton || clearButton.form !== form : actions.children.item(1) !== null) ||
+    modeMinOption.value !== "min" ||
+    modeMinOption.textContent !== "At least" ||
+    modeMinOption.disabled ||
+    modeMaxOption.value !== "max" ||
+    modeMaxOption.textContent !== "At most" ||
+    modeMaxOption.disabled ||
+    kindWordsOption.value !== "words" ||
+    kindWordsOption.textContent !== "words" ||
+    kindWordsOption.disabled ||
+    kindMinutesOption.value !== "minutes" ||
+    kindMinutesOption.textContent !== "min read" ||
+    kindMinutesOption.disabled ||
+    modeSelect.disabled ||
+    valueInput.disabled ||
+    kindSelect.disabled ||
+    valueInput.type !== "number" ||
+    valueInput.min !== "1" ||
+    valueInput.step !== "1" ||
+    valueInput.inputMode !== "numeric" ||
+    valueInput.placeholder !== (presentation.kind === "words" ? "500" : "5") ||
+    setButton.type !== "submit" ||
+    setButton.disabled !== presentation.setDisabled ||
+    (clearButton ? clearButton.type !== "button" || clearButton.disabled : presentation.sharedGoal.goal !== null) ||
+    Boolean(clearButton) !== Boolean(presentation.sharedGoal.goal)
+  ) {
+    return false;
+  }
+  const expectedModeOption = presentation.mode === "min" ? modeMinOption : modeMaxOption;
+  const otherModeOption = presentation.mode === "min" ? modeMaxOption : modeMinOption;
+  const expectedKindOption = presentation.kind === "words" ? kindWordsOption : kindMinutesOption;
+  const otherKindOption = presentation.kind === "words" ? kindMinutesOption : kindWordsOption;
+  return (
+    (mutable === "modeSelect" || goalSelectValueIsExact(modeSelect, presentation.mode, expectedModeOption, otherModeOption)) &&
+    (mutable === "valueInput" || valueInput.value === presentation.value) &&
+    (mutable === "kindSelect" || goalSelectValueIsExact(kindSelect, presentation.kind, expectedKindOption, otherKindOption))
+  );
+}
+
+function createStatsPublication(
+  render: StatsDisclosureRender,
+  current: StatsDisclosureCurrent,
+  requestSuccessor: (replaceVisit: boolean) => void,
+): StatsDisclosurePublication {
+  return {
+    identity: Symbol("stats-publication"),
+    render,
+    elements: { trigger: null, content: null },
+    connections: { trigger: null, content: null },
+    established: false,
+    retired: false,
+    retirement: null,
+    consumed: false,
+    successorRequested: false,
+    visitSuccessorRequested: false,
+    layoutEstablished: new Set<StatsLayoutDomain>(),
+    layoutRetired: new Set<StatsLayoutDomain>(),
+    invalidReplay: new Set<StatsLayoutDomain>(),
+    replayRefs: [],
+    triggerDom: null,
+    triggerPlacement: null,
+    contentDom: null,
+    contentPlacement: null,
+    focusDestination: null,
+    guard: null,
+    requestSuccessor,
+    current,
+  };
+}
+
+function StatsDisclosurePortalLayout({
+  coordinator,
+  publication,
+  children,
+}: {
+  coordinator: StatsDisclosureCoordinator;
+  publication: StatsDisclosurePublication;
+  children: ReactNode;
+}) {
+  useLayoutEffect(() => {
+    coordinator.establish(publication, "portal");
+    return () => coordinator.retireLayout(publication, "portal");
+  }, [coordinator, publication]);
+  useEffect(
+    () => () =>
+      coordinator.releaseCloseFocusAfterPortal(publication),
+    [coordinator, publication],
+  );
+  return children;
+}
+
 /**
  * Word count button in the status bar with the statistics popover (Mod-Shift-C): whole-document
  * and selection counts, and the per-document writing goal shared through the Y meta map.
  */
-export function StatsPopover({ session, source, selection, hydrated }: StatsPopoverProps) {
-  const [open, setOpen] = useState(false);
-  const stats = computeStats(source);
-  const selStats = selection ? computeSelectionStats(source, selection.from, selection.to) : null;
+export function StatsPopover({
+  session,
+  source,
+  selection,
+  hydrated,
+}: StatsPopoverProps) {
+  const [mount] = useState<StatsDisclosureMount>(() =>
+    Object.freeze({ identity: Symbol("stats-mount") }),
+  );
+  const [current] = useState(() => new StatsDisclosureCurrent());
+  const [coordinator] = useState(
+    () => new StatsDisclosureCoordinator(),
+  );
+  const [visitRevision, setVisitRevision] = useState(0);
+  const [, setPublicationRevision] = useState(0);
+  const visit = useMemo<StatsDisclosureVisit>(
+    () => ({
+      identity: Symbol("stats-visit"),
+      revision: visitRevision,
+      mount,
+      session,
+      docId: session.docId,
+      ydoc: session.ydoc,
+      ytext: session.ytext,
+      role: session.role,
+      claimedEvents: new WeakSet<object>(),
+      retired: false,
+    }),
+    [mount, session, visitRevision],
+  );
+  const [disclosure, setDisclosure] =
+    useState<StatsDisclosureState>(() =>
+      Object.freeze({ visit, authority: null, open: false }),
+    );
+  const ownsDisclosure =
+    disclosure.visit === visit &&
+    (!disclosure.authority ||
+      disclosure.authority.visit === visit);
+  const authority = ownsDisclosure ? disclosure.authority : null;
+  const open = ownsDisclosure && disclosure.open && authority !== null;
+  const stats = useMemo(() => computeStats(source), [source]);
+  const selStats = useMemo(
+    () =>
+      selection
+        ? computeSelectionStats(
+            source,
+            selection.from,
+            selection.to,
+          )
+        : null,
+    [selection, source],
+  );
   const goal = useSessionValue(session, getGoal, jsonEqual);
-  const canEdit = useSessionValue(session, (s) => s.canEdit);
-  const progress = goal ? goalProgress(stats, goal) : null;
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyC") {
-        e.preventDefault();
-        setOpen((o) => !o);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+  const canEdit = useSessionValue(session, (value) => value.canEdit);
+  const progress = useMemo(
+    () => (goal ? goalProgress(stats, goal) : null),
+    [goal, stats],
+  );
+  const [storedDraft, setDraft] = useState(() =>
+    goalDraft(session, goal),
+  );
+  let draft = storedDraft;
+  if (draft.session !== session || draft.sharedGoal !== goal) {
+    draft = goalDraft(session, goal);
+    setDraft(draft);
+  }
+  const goalPresentation: GoalPresentation = Object.freeze({
+    session,
+    sharedGoal: goalSnapshot(goal),
+    progress: progressSnapshot(progress),
+    canEdit,
+    draft,
+    kind: draft.kind,
+    mode: draft.mode,
+    value: draft.value,
+    setBy: session.user.login ?? null,
+    setDisabled: !(Number(draft.value) > 0),
+  });
+  const shortcutLabel = shortcut("Mod-Shift-C");
+  const triggerLabel = hydrated
+    ? `${formatNumber(stats.words)} words`
+    : "— words";
+  const selectionLabel =
+    hydrated && selStats
+      ? `${formatNumber(selStats.words)} of ${formatNumber(stats.words)} selected`
+      : null;
+  const triggerTitle =
+    goal && progress
+      ? describeGoal(goal, progress)
+      : `Document statistics (${shortcutLabel})`;
+  const commitState = useCallback(
+    (
+      expected: StatsDisclosureState,
+      next: StatsDisclosureState,
+    ) => {
+      setDisclosure((value) => (value === expected ? next : value));
+    },
+    [],
+  );
+  const requestSuccessor = useCallback((replaceVisit: boolean) => {
+    if (replaceVisit) {
+      setVisitRevision((revision) => revision + 1);
+    } else {
+      setPublicationRevision((revision) => revision + 1);
+    }
   }, []);
+  const disclosureRender: StatsDisclosureRender = Object.freeze({
+    visit,
+    state: disclosure,
+    authority,
+    session,
+    source,
+    selection,
+    selectionFrom: selection?.from ?? null,
+    selectionTo: selection?.to ?? null,
+    hydrated,
+    stats: statsSnapshot(stats),
+    selectionStats: selStats ? statsSnapshot(selStats) : null,
+    goal: goalSnapshot(goal),
+    canEdit,
+    mode: session.mode,
+    progress: progressSnapshot(progress),
+    open,
+    shortcutLabel,
+    triggerTitle,
+    triggerLabel,
+    selectionLabel,
+    goalPresentation,
+    commitState,
+  });
+  const publication = createStatsPublication(
+    disclosureRender,
+    current,
+    requestSuccessor,
+  );
 
-  const label = hydrated ? `${formatNumber(stats.words)} words` : "— words";
-  const selectionLabel = hydrated && selStats ? `${formatNumber(selStats.words)} of ${formatNumber(stats.words)} selected` : null;
+  useLayoutEffect(() => {
+    const lease = coordinator.beginLease();
+    return () => coordinator.endLease(lease);
+  }, [coordinator]);
+
+  useLayoutEffect(() => {
+    if (!current.publishVisit(visit)) return;
+    setDisclosure((value) =>
+      value.visit === visit
+        ? value
+        : Object.freeze({
+            visit,
+            authority: null,
+            open: false,
+          }),
+    );
+    return () => current.retireVisit(visit);
+  }, [current, visit]);
+
+  useLayoutEffect(() => {
+    coordinator.establish(publication, "trigger");
+    return () =>
+      coordinator.retireLayout(publication, "trigger");
+  }, [coordinator, publication]);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) =>
+        coordinator.consumeProof(publication, nextOpen)
+      }
+    >
       <PopoverTrigger asChild>
         <button
+          ref={(element) =>
+            coordinator.bindElement(
+              publication,
+              "trigger",
+              element,
+            )
+          }
           type="button"
           className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink"
-          title={goal && progress ? describeGoal(goal, progress) : `Document statistics (${shortcut("Mod-Shift-C")})`}
+          title={triggerTitle}
+          onClick={(event) =>
+            coordinator.mintTrigger(publication, event)
+          }
           data-testid="stats-button"
         >
-          {goal && progress && hydrated ? <GoalRing progress={progress} /> : null}
-          <span data-testid="word-count">{label}</span>
+          {goal && progress && hydrated ? (
+            <GoalRing progress={progress} />
+          ) : null}
+          <span data-testid="word-count">{triggerLabel}</span>
           {selectionLabel && (
-            <span className="text-ink-4" data-testid="selection-count">
+            <span
+              className="text-ink-4"
+              data-testid="selection-count"
+            >
               · {selectionLabel}
             </span>
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[24rem] p-0" data-testid="stats-popover">
-        <div className="flex items-center justify-between border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">
-          <span>Document statistics</span>
-          <span className="font-normal normal-case tracking-normal text-ink-4">{shortcut("Mod-Shift-C")}</span>
-        </div>
-        <table className="w-full text-[13px]" data-testid="stats-table">
-          {selStats && (
-            <thead>
-              <tr className="text-xs text-ink-4">
-                <th className="px-3 pt-2 text-left font-normal" />
-                <th className="px-3 pt-2 text-right font-normal">Selection</th>
-                <th className="px-3 pt-2 text-right font-normal">Document</th>
-              </tr>
-            </thead>
-          )}
-          <tbody>
-            {ROWS.map((row) => {
-              const fmt = row.format ?? formatNumber;
-              return (
-                <tr key={row.key} data-stat={row.key}>
-                  <td className="px-3 py-1 text-ink-2">{row.label}</td>
-                  {selStats && <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(selStats[row.key])}</td>}
-                  <td className="px-3 py-1 text-right tabular-nums text-ink">{fmt(stats[row.key])}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <p className="px-3 pb-2 text-[11px] text-ink-4">Prose only: code blocks and front matter are not counted. Reading at 200 wpm, speaking at 130 wpm.</p>
-        <GoalEditor session={session} goal={goal} progress={progress} canEdit={canEdit} />
-      </PopoverContent>
+      {ownsDisclosure && (
+        <PopoverContent
+          align="start"
+          className="w-[24rem] p-0"
+          onPointerDownOutside={(event) =>
+            coordinator.mintOutside(
+              publication,
+              event,
+              "pointer",
+            )
+          }
+          onFocusOutside={(event) =>
+            coordinator.mintOutside(
+              publication,
+              event,
+              "focus",
+            )
+          }
+          onEscapeKeyDown={(event) =>
+            coordinator.mintEscape(publication, event)
+          }
+          onOpenAutoFocus={(event) =>
+            coordinator.openAutoFocus(publication, event)
+          }
+          onCloseAutoFocus={(event) =>
+            coordinator.closeAutoFocus(publication, event)
+          }
+          data-testid="stats-popover"
+        >
+          <StatsDisclosurePortalLayout
+            coordinator={coordinator}
+            publication={publication}
+          >
+            <div
+              ref={(element) => {
+                if (!element) {
+                  return coordinator.bindElement(
+                    publication,
+                    "content",
+                    null,
+                  );
+                }
+                const content = element.parentElement;
+                return coordinator.bindElement(
+                  publication,
+                  "content",
+                  content instanceof HTMLDivElement ? content : null,
+                );
+              }}
+              className="flex items-center justify-between border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3"
+            >
+              <span>Document statistics</span>
+              <span className="font-normal normal-case tracking-normal text-ink-4">
+                {shortcutLabel}
+              </span>
+            </div>
+            <table
+              className="w-full text-[13px]"
+              data-testid="stats-table"
+            >
+              {selStats && (
+                <thead>
+                  <tr className="text-xs text-ink-4">
+                    <th className="px-3 pt-2 text-left font-normal" />
+                    <th className="px-3 pt-2 text-right font-normal">
+                      Selection
+                    </th>
+                    <th className="px-3 pt-2 text-right font-normal">
+                      Document
+                    </th>
+                  </tr>
+                </thead>
+              )}
+              <tbody>
+                {ROWS.map((row) => {
+                  const format = row.format ?? formatNumber;
+                  return (
+                    <tr key={row.key} data-stat={row.key}>
+                      <td className="px-3 py-1 text-ink-2">
+                        {row.label}
+                      </td>
+                      {selStats && (
+                        <td className="px-3 py-1 text-right tabular-nums text-ink">
+                          {format(selStats[row.key])}
+                        </td>
+                      )}
+                      <td className="px-3 py-1 text-right tabular-nums text-ink">
+                        {format(stats[row.key])}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="px-3 pb-2 text-[11px] text-ink-4">
+              Prose only: code blocks and front matter are not
+              counted. Reading at 200 wpm, speaking at 130 wpm.
+            </p>
+            <GoalEditor
+              presentation={goalPresentation}
+              setDraft={setDraft}
+            />
+          </StatsDisclosurePortalLayout>
+        </PopoverContent>
+      )}
     </Popover>
   );
 }
 
-function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSession; goal: WritingGoal | null; progress: GoalProgress | null; canEdit: boolean }) {
-  const [kind, setKind] = useState<GoalKind>(goal?.kind ?? "words");
-  const [mode, setMode] = useState<GoalMode>(goal?.mode ?? "min");
-  const [value, setValue] = useState<string>(goal ? String(goal.value) : "");
+function goalDraft(session: CollabSession, goal: WritingGoal | null): GoalDraft {
+  return {
+    session,
+    sharedGoal: goal,
+    kind: goal?.kind ?? "words",
+    mode: goal?.mode ?? "min",
+    value: goal ? String(goal.value) : "",
+  };
+}
 
-  // Follow the shared goal when a collaborator changes it.
-  useEffect(() => {
-    if (!goal) return;
-    setKind(goal.kind);
-    setMode(goal.mode);
-    setValue(String(goal.value));
-  }, [goal]);
-
-  const submit = useCallback(
-    (e?: React.FormEvent) => {
-      e?.preventDefault();
-      const n = Math.round(Number(value));
-      if (!canEdit || !Number.isFinite(n) || n <= 0) return;
-      setGoal(session, { kind, mode, value: n, setBy: session.user.login ?? null, setAt: Date.now() });
-    },
-    [canEdit, kind, mode, session, value],
+function GoalEditor({
+  presentation,
+  setDraft,
+}: {
+  presentation: GoalPresentation;
+  setDraft: Dispatch<SetStateAction<GoalDraft>>;
+}) {
+  const generation = useMemo<GoalGeneration>(
+    () => ({
+      presentation,
+      form: goalElementSlot(),
+      modeSelect: goalElementSlot(),
+      valueInput: goalElementSlot(),
+      kindSelect: goalElementSlot(),
+      setButton: goalElementSlot(),
+      clearButton: goalElementSlot(),
+    }),
+    [presentation],
   );
-  const clear = useCallback(() => {
-    if (!canEdit) return;
-    setGoal(session, null);
-    setValue("");
-  }, [canEdit, session]);
+  const activeGenerationRef = useRef<GoalGeneration | null>(null);
+  const claimedGenerationRef = useRef<GoalGeneration | null>(null);
+  const activePublicationRef = useRef<GoalPublication | null>(null);
+  const { canEdit, kind, mode, value } = presentation;
+  const goal = presentation.sharedGoal.goal;
+  const progress = presentation.progress.progress;
+
+  function retirePublication(publication: GoalPublication | null) {
+    if (!publication || publication.retired) return;
+    publication.retired = true;
+    if (activePublicationRef.current === publication) activePublicationRef.current = null;
+  }
+
+  function retireGenerationPublication(exactGeneration: GoalGeneration) {
+    const publication = activePublicationRef.current;
+    if (publication?.generation === exactGeneration) retirePublication(publication);
+  }
+
+  function publicationForGeneration(exactGeneration: GoalGeneration): GoalPublication | null {
+    const form = exactGeneration.form.connection?.element;
+    const modeSelect = exactGeneration.modeSelect.connection?.element;
+    const valueInput = exactGeneration.valueInput.connection?.element;
+    const kindSelect = exactGeneration.kindSelect.connection?.element;
+    const setButton = exactGeneration.setButton.connection?.element;
+    const clearButton = exactGeneration.clearButton.connection?.element ?? null;
+    const ownerWindow = form?.ownerDocument.defaultView;
+    const modeMinOption = modeSelect?.children.item(0);
+    const modeMaxOption = modeSelect?.children.item(1);
+    const kindWordsOption = kindSelect?.children.item(0);
+    const kindMinutesOption = kindSelect?.children.item(1);
+    const actions = setButton?.parentElement;
+    if (
+      !canEdit ||
+      !form ||
+      !modeSelect ||
+      !valueInput ||
+      !kindSelect ||
+      !setButton ||
+      (goal ? !clearButton : clearButton !== null) ||
+      !ownerWindow ||
+      !(modeMinOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(modeMaxOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(kindWordsOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(kindMinutesOption instanceof ownerWindow.HTMLOptionElement) ||
+      !(actions instanceof ownerWindow.HTMLSpanElement)
+    ) {
+      return null;
+    }
+    const publication: GoalPublication = {
+      generation: exactGeneration,
+      presentation,
+      form,
+      modeSelect,
+      modeMinOption,
+      modeMaxOption,
+      valueInput,
+      kindSelect,
+      kindWordsOption,
+      kindMinutesOption,
+      actions,
+      setButton,
+      clearButton,
+      claimed: false,
+      retired: false,
+    };
+    return goalPublicationDomIsExact(publication, null) ? publication : null;
+  }
+
+  function publishGeneration(exactGeneration: GoalGeneration) {
+    if (
+      claimedGenerationRef.current === exactGeneration ||
+      activeGenerationRef.current !== exactGeneration
+    ) {
+      return;
+    }
+    const next = publicationForGeneration(exactGeneration);
+    if (!next) return;
+    const current = activePublicationRef.current;
+    if (
+      current &&
+      !current.retired &&
+      current.generation === exactGeneration &&
+      current.form === next.form &&
+      current.modeSelect === next.modeSelect &&
+      current.valueInput === next.valueInput &&
+      current.kindSelect === next.kindSelect &&
+      current.setButton === next.setButton &&
+      current.clearButton === next.clearButton
+    ) {
+      return;
+    }
+    retirePublication(current);
+    activePublicationRef.current = next;
+  }
+
+  function bindElement<T extends HTMLElement>(
+    exactGeneration: GoalGeneration,
+    slot: GoalElementSlot<T>,
+    element: T | null,
+  ) {
+    if (!element) {
+      if (!slot.connection) return;
+      slot.connection = null;
+      retireGenerationPublication(exactGeneration);
+      return;
+    }
+    if (slot.expected && slot.expected !== element) return;
+    slot.expected ??= element;
+    const connection = { element };
+    slot.connection = connection;
+    retireGenerationPublication(exactGeneration);
+    publishGeneration(exactGeneration);
+    return () => {
+      if (slot.connection !== connection) return;
+      slot.connection = null;
+      retireGenerationPublication(exactGeneration);
+    };
+  }
+
+  useLayoutEffect(() => {
+    activeGenerationRef.current = generation;
+    publishGeneration(generation);
+    return () => {
+      if (activeGenerationRef.current === generation) activeGenerationRef.current = null;
+      retireGenerationPublication(generation);
+    };
+  });
+
+  function currentPublication(mutable: "modeSelect" | "valueInput" | "kindSelect" | null) {
+    const publication = activePublicationRef.current;
+    if (
+      !publication ||
+      publication.retired ||
+      publication.claimed ||
+      publication.generation !== generation ||
+      publication.presentation !== presentation ||
+      activeGenerationRef.current !== generation ||
+      claimedGenerationRef.current === generation ||
+      !goalPresentationIsExact(presentation) ||
+      !canEdit ||
+      generation.form.connection?.element !== publication.form ||
+      generation.modeSelect.connection?.element !== publication.modeSelect ||
+      generation.valueInput.connection?.element !== publication.valueInput ||
+      generation.kindSelect.connection?.element !== publication.kindSelect ||
+      generation.setButton.connection?.element !== publication.setButton ||
+      (publication.clearButton
+        ? generation.clearButton.connection?.element !== publication.clearButton
+        : generation.clearButton.connection !== null) ||
+      !goalPublicationDomIsExact(publication, mutable)
+    ) {
+      return null;
+    }
+    return publication;
+  }
+
+  function claimEvent(publication: GoalPublication, nativeEvent: Event) {
+    if (
+      activePublicationRef.current !== publication ||
+      publication.retired ||
+      publication.claimed ||
+      claimedGenerationRef.current === publication.generation ||
+      claimedGoalNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    publication.claimed = true;
+    claimedGenerationRef.current = publication.generation;
+    claimedGoalNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  function exactChangeEvent<T extends HTMLSelectElement | HTMLInputElement>(
+    event: React.ChangeEvent<T>,
+    control: T,
+    type: "change" | "input",
+  ): Event | null {
+    const nativeEvent = event.nativeEvent;
+    const ownerWindow = control.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      event.currentTarget !== control ||
+      event.target !== control ||
+      event.defaultPrevented ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      nativeEvent.type !== type ||
+      nativeEvent.target !== control ||
+      nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    return nativeEvent;
+  }
+
+  function changeMode(event: React.ChangeEvent<HTMLSelectElement>) {
+    const publication = currentPublication("modeSelect");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.modeSelect, "change");
+    const next = publication.modeSelect.value;
+    const selected = next === "min" ? publication.modeMinOption : publication.modeMaxOption;
+    const other = next === "min" ? publication.modeMaxOption : publication.modeMinOption;
+    if (
+      !nativeEvent ||
+      !isGoalMode(next) ||
+      !goalSelectValueIsExact(publication.modeSelect, next, selected, other) ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
+    setDraft({ ...presentation.draft, mode: next });
+  }
+
+  function changeValue(event: React.ChangeEvent<HTMLInputElement>) {
+    const publication = currentPublication("valueInput");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.valueInput, "input");
+    if (!nativeEvent || !claimEvent(publication, nativeEvent)) return;
+    const next = publication.valueInput.value;
+    setDraft({ ...presentation.draft, value: next });
+  }
+
+  function changeKind(event: React.ChangeEvent<HTMLSelectElement>) {
+    const publication = currentPublication("kindSelect");
+    if (!publication) return;
+    const nativeEvent = exactChangeEvent(event, publication.kindSelect, "change");
+    const next = publication.kindSelect.value;
+    const selected = next === "words" ? publication.kindWordsOption : publication.kindMinutesOption;
+    const other = next === "words" ? publication.kindMinutesOption : publication.kindWordsOption;
+    if (
+      !nativeEvent ||
+      !isGoalKind(next) ||
+      !goalSelectValueIsExact(publication.kindSelect, next, selected, other) ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
+    setDraft({ ...presentation.draft, kind: next });
+  }
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    const publication = currentPublication(null);
+    if (!publication) return;
+    const nativeEvent = event.nativeEvent;
+    const ownerWindow = publication.form.ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      event.currentTarget !== publication.form ||
+      event.target !== publication.form ||
+      event.defaultPrevented ||
+      !(nativeEvent instanceof ownerWindow.SubmitEvent) ||
+      nativeEvent.type !== "submit" ||
+      nativeEvent.target !== publication.form ||
+      nativeEvent.defaultPrevented ||
+      !nativeEvent.bubbles ||
+      !nativeEvent.cancelable ||
+      (nativeEvent.submitter !== null && nativeEvent.submitter !== publication.setButton) ||
+      publication.setButton.disabled ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
+    const exactSession = presentation.session;
+    const exactKind = presentation.kind;
+    const exactMode = presentation.mode;
+    const exactValue = presentation.value;
+    const exactSetBy = presentation.setBy;
+    event.preventDefault();
+    const parsed = Math.round(Number(exactValue));
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    setGoal(exactSession, {
+      kind: exactKind,
+      mode: exactMode,
+      value: parsed,
+      setBy: exactSetBy,
+      setAt: Date.now(),
+    });
+  }
+
+  function clear(event: React.MouseEvent<HTMLButtonElement>) {
+    const publication = currentPublication(null);
+    const clearButton = publication?.clearButton;
+    if (!publication || !clearButton) return;
+    const nativeEvent = event.nativeEvent;
+    const ownerWindow = clearButton.ownerDocument.defaultView;
+    const target = event.target;
+    if (
+      !presentation.sharedGoal.goal ||
+      !ownerWindow ||
+      event.currentTarget !== clearButton ||
+      event.defaultPrevented ||
+      !(target instanceof ownerWindow.Node) ||
+      !clearButton.contains(target) ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.target !== target ||
+      nativeEvent.defaultPrevented ||
+      !nativeEvent.bubbles ||
+      !nativeEvent.cancelable ||
+      clearButton.disabled ||
+      !claimEvent(publication, nativeEvent)
+    ) {
+      return;
+    }
+    setGoal(presentation.session, null);
+  }
 
   const summary =
     goal && progress ? (
@@ -234,12 +3546,20 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
       {summary}
       {goal?.setBy && <div className="mt-0.5 text-[11px] text-ink-4">Set by @{goal.setBy}; shared with everyone on this document.</div>}
       {canEdit && (
-        <form className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
-          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={mode} onChange={(e) => setMode(e.target.value as GoalMode)} aria-label="Goal mode" data-testid="goal-mode">
+        <form ref={(element) => bindElement(generation, generation.form, element)} className="mt-2 flex flex-wrap items-center gap-1.5" onSubmit={submit}>
+          <select
+            ref={(element) => bindElement(generation, generation.modeSelect, element)}
+            className="select h-8 shrink-0 px-1.5 text-[13px]"
+            value={mode}
+            onChange={changeMode}
+            aria-label="Goal mode"
+            data-testid="goal-mode"
+          >
             <option value="min">At least</option>
             <option value="max">At most</option>
           </select>
           <input
+            ref={(element) => bindElement(generation, generation.valueInput, element)}
             className="input h-8 w-18 shrink-0 px-2 text-[13px] tabular-nums"
             type="number"
             min={1}
@@ -247,20 +3567,27 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
             inputMode="numeric"
             placeholder={kind === "words" ? "500" : "5"}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={changeValue}
             aria-label="Goal value"
             data-testid="goal-value"
           />
-          <select className="select h-8 shrink-0 px-1.5 text-[13px]" value={kind} onChange={(e) => setKind(e.target.value as GoalKind)} aria-label="Goal type" data-testid="goal-kind">
+          <select
+            ref={(element) => bindElement(generation, generation.kindSelect, element)}
+            className="select h-8 shrink-0 px-1.5 text-[13px]"
+            value={kind}
+            onChange={changeKind}
+            aria-label="Goal type"
+            data-testid="goal-kind"
+          >
             <option value="words">words</option>
             <option value="minutes">min read</option>
           </select>
           <span className="ml-auto inline-flex gap-1.5">
-            <button type="submit" className="btn btn-primary btn-sm h-8" disabled={!(Number(value) > 0)} data-testid="goal-set">
+            <button ref={(element) => bindElement(generation, generation.setButton, element)} type="submit" className="btn btn-primary btn-sm h-8" disabled={presentation.setDisabled} data-testid="goal-set">
               Set
             </button>
             {goal && (
-              <button type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
+              <button ref={(element) => bindElement(generation, generation.clearButton, element)} type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
                 Clear
               </button>
             )}

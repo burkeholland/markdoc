@@ -70,6 +70,47 @@ function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit 
   Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining))
 }
 
+function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
+  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
+  if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
+  $timeoutSeconds = [math]::Min($Limit, $remaining)
+  $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+  $start = [Diagnostics.ProcessStartInfo]::new($executable)
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  $start.WorkingDirectory = $sourceRoot
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
+  $start.Environment['GIT_TERMINAL_PROMPT'] = '0'
+  $process = [Diagnostics.Process]::new()
+  $process.StartInfo = $start
+  $buffer = [IO.MemoryStream]::new()
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.BaseStream.CopyToAsync($buffer)
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+      $process.Kill($true)
+      Stop-VmRelease 'Local command deadline exceeded; remote work may still be running. Do not retry the release.' 124
+    }
+    $drainMs = [math]::Max(0, $timeoutSeconds * 1000 - [int]$clock.ElapsedMilliseconds)
+    if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), $drainMs)) {
+      Stop-VmRelease 'Native output did not close within the deadline; remote work may still be running.' 124
+    }
+    [void]$stdout.GetAwaiter().GetResult()
+    [void]$stderr.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) {
+      Stop-VmRelease "Native command failed (exit $($process.ExitCode)); raw output withheld." $process.ExitCode
+    }
+    return ,$buffer.ToArray()
+  } finally {
+    $buffer.Dispose()
+    $process.Dispose()
+  }
+}
+
 function Invoke-ReleaseAz([string[]]$Arguments, [int]$Limit = 30) {
   Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) $Limit
 }
@@ -89,6 +130,69 @@ function Assert-ReleaseSource([string]$Commit) {
   if ($head -cne $Commit) { Stop-VmRelease 'Wrong HEAD: checked-out source does not match the expected full commit.' }
   $dirty = Invoke-ReleaseStep 'git' @('status', '--porcelain=v1', '--untracked-files=all')
   if ($dirty) { Stop-VmRelease 'Dirty checkout: commit or remove source changes before releasing.' }
+}
+
+function Get-ReleaseSha256([byte[]]$Bytes) {
+  [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant()
+}
+
+function Assert-ReleaseWorkingLock([string]$ExpectedSha256) {
+  $workingLock = [IO.File]::ReadAllBytes((Join-Path $sourceRoot 'package-lock.json'))
+  if ((Get-ReleaseSha256 $workingLock) -cne $ExpectedSha256) {
+    Stop-VmRelease 'Dependency lock does not match the selected commit.'
+  }
+}
+
+function Get-ReleaseCommittedLockIdentity([string]$Commit) {
+  [byte[]]$committedLock = Invoke-ReleaseStepBytes 'git' @('cat-file', 'blob', "$Commit`:package-lock.json")
+  if ($committedLock.Length -eq 0) { Stop-VmRelease 'Selected commit has an empty dependency lock.' }
+  $identity = Get-ReleaseSha256 $committedLock
+  Assert-ReleaseWorkingLock $identity
+  return $identity
+}
+
+function Test-ReleaseExactKeys($Value, [string[]]$Expected) {
+  if ($Value -isnot [System.Collections.IDictionary] -or $Value.Count -ne $Expected.Count) { return $false }
+  $actual = @($Value.Keys)
+  foreach ($key in $Expected) {
+    if ($actual -cnotcontains $key) { return $false }
+  }
+  return $true
+}
+
+function Assert-ReleaseDependencyReport($Report) {
+  $countFields = @('blocked', 'info', 'low', 'moderate', 'high', 'critical', 'vulnerabilities', 'reported', 'omitted')
+  if (-not (Test-ReleaseExactKeys $Report @('status', 'counts', 'packages')) -or
+      $Report['status'] -isnot [string] -or $Report['status'] -cne 'pass' -or
+      -not (Test-ReleaseExactKeys $Report['counts'] $countFields) -or
+      $Report['packages'] -isnot [array] -or $Report['packages'].Count -ne 0) {
+    Stop-VmRelease 'Dependency preflight did not return the required pass report.'
+  }
+  foreach ($field in $countFields) {
+    $count = $Report['counts'][$field]
+    if (($count -isnot [int] -and $count -isnot [long]) -or $count -ne 0) {
+      Stop-VmRelease 'Dependency preflight did not return the required pass report.'
+    }
+  }
+}
+
+function Assert-ReleaseDependencyPreflight([string]$Commit) {
+  try {
+    $lockIdentity = Get-ReleaseCommittedLockIdentity $Commit
+    $output = Invoke-ReleaseStep 'npm' @(
+      'run', '--silent', 'dependency:preflight', '--',
+      '--lock-sha256', $lockIdentity, '--run-audit'
+    ) 300
+    if ([Text.Encoding]::UTF8.GetByteCount($output) -gt 8192) {
+      Stop-VmRelease 'Dependency preflight output exceeded its release bound.'
+    }
+    Assert-ReleaseDependencyReport (ConvertFrom-ReleaseJson $output)
+    Assert-ReleaseWorkingLock $lockIdentity
+  } catch {
+    $code = 1
+    if ($_.Exception.Data.Contains('ReleaseExitCode')) { $code = $_.Exception.Data['ReleaseExitCode'] }
+    Stop-VmRelease 'Dependency preflight failed; raw output withheld.' $code
+  }
 }
 
 function Assert-ReleaseHealth($Health, [string]$Commit, [string]$Location) {
@@ -131,6 +235,10 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     if ($Commit -cnotmatch '^[0-9a-fA-F]{40}$') { Stop-VmRelease 'ExpectedCommit or RELEASE_SHA must be a full 40-hex Git commit.' }
     $Commit = $Commit.ToLowerInvariant()
     if ($env:RELEASE_SHA -and $env:RELEASE_SHA -ine $Commit) { Stop-VmRelease 'ExpectedCommit conflicts with RELEASE_SHA.' }
+    Assert-ReleaseSource $Commit
+
+    $releaseStage = 'dependency preflight'
+    Assert-ReleaseDependencyPreflight $Commit
     Assert-ReleaseSource $Commit
 
     $releaseStage = 'Azure context and target validation'
