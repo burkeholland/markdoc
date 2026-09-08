@@ -235,8 +235,9 @@ interface ManualSaveClickAdmission {
   readonly target: Node;
   readonly root: HTMLSpanElement;
   readonly button: HTMLButtonElement;
-  readonly reachedButtonThroughDispatcher: () => boolean;
-  readonly releaseCurrentTarget: () => void;
+  readonly deliverButton: (event: object) => boolean;
+  readonly rejectAdditional: (event: object) => void;
+  readonly isExact: () => boolean;
 }
 
 interface ManualSaveCells {
@@ -668,48 +669,35 @@ function manualSaveReactMouseWrapperIsExact(
   ) === false;
 }
 
-function createManualSaveDispatcherAdmission(
+function createManualSaveClickAdmission(
+  publication: ManualSavePublication,
+  nativeEvent: MouseEvent,
   event: React.MouseEvent<HTMLSpanElement>,
+  target: Node,
   root: HTMLSpanElement,
   button: HTMLButtonElement,
-): Pick<
-  ManualSaveClickAdmission,
-  "reachedButtonThroughDispatcher" | "releaseCurrentTarget"
-> | null {
-  let currentTarget: EventTarget | null = root;
-  let leftRoot = false;
-  let reachedButton = false;
+): ManualSaveClickAdmission {
+  let buttonDelivered = false;
   let invalid = false;
-  try {
-    Object.defineProperty(event, "currentTarget", {
-      configurable: true,
-      enumerable: true,
-      get: () => currentTarget,
-      set: (value: EventTarget | null) => {
-        if (!leftRoot && !reachedButton && currentTarget === root && value === null) {
-          leftRoot = true;
-        } else if (leftRoot && !reachedButton && currentTarget === null && value === button) {
-          reachedButton = true;
-        } else {
-          invalid = true;
-        }
-        currentTarget = value;
-      },
-    });
-  } catch {
-    return null;
-  }
   return Object.freeze({
-    reachedButtonThroughDispatcher: () =>
-      !invalid && leftRoot && reachedButton && currentTarget === button,
-    releaseCurrentTarget: () => {
-      Object.defineProperty(event, "currentTarget", {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: currentTarget,
-      });
+    publication,
+    nativeEvent,
+    reactEvent: event,
+    target,
+    root,
+    button,
+    deliverButton: (candidate: object) => {
+      if (candidate !== event || buttonDelivered) {
+        invalid = true;
+        return false;
+      }
+      buttonDelivered = true;
+      return true;
     },
+    rejectAdditional: (candidate: object) => {
+      if (candidate !== event || buttonDelivered) invalid = true;
+    },
+    isExact: () => !invalid && buttonDelivered && event.currentTarget === null,
   });
 }
 
@@ -886,11 +874,17 @@ function createManualSavePublication(
     let replayHandedOff = false;
     let replayHandoffInvalid = false;
     let expectedSuccessor: object | null = null;
+    let nativeClickListenerAttached = false;
 
     const retire = (reason: Retirement) => {
       if (retired) return false;
       retired = true;
       retirement = reason;
+      const button = buttonOwner.element();
+      if (nativeClickListenerAttached && button) {
+        button.removeEventListener("click", completeNativeClick, true);
+        nativeClickListenerAttached = false;
+      }
       if (cells.active.current === publication) {
         cells.active.current = null;
         cells.successorOf.current = publication;
@@ -955,6 +949,10 @@ function createManualSavePublication(
           if (!element) throw new Error("Cannot publish SaveIndicator without every committed ref");
           return { owner, element, detached: false, reattached: false };
         });
+        const button = buttonOwner.element();
+        if (!button) throw new Error("Cannot publish SaveIndicator without its Save button");
+        button.addEventListener("click", completeNativeClick, true);
+        nativeClickListenerAttached = true;
         cells.active.current = publication;
         cells.successorOf.current = null;
         cells.replay.current = null;
@@ -1111,13 +1109,18 @@ function createManualSavePublication(
   };
 
   const onRootClickCapture = (event: React.MouseEvent<HTMLSpanElement>) => {
+    const nativeEvent = event?.nativeEvent;
+    const existing = cells.clickAdmissions.get(nativeEvent);
+    if (existing) {
+      existing.rejectAdditional(event);
+      return;
+    }
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const root = rootOwner.element();
     const button = buttonOwner.element();
     const ownerDocument = root?.ownerDocument;
     const ownerWindow = ownerDocument?.defaultView;
-    const nativeEvent = event?.nativeEvent;
     const target = event?.target;
     if (
       !runtime
@@ -1141,7 +1144,6 @@ function createManualSavePublication(
       || render.buttonDisabled
       || !render.canEdit
       || !publication.isExact()
-      || cells.clickAdmissions.has(nativeEvent)
     ) {
       return;
     }
@@ -1156,31 +1158,30 @@ function createManualSavePublication(
     ) {
       return;
     }
-    const dispatcherAdmission = createManualSaveDispatcherAdmission(
-      event,
-      root,
-      button,
-    );
-    if (!dispatcherAdmission) return;
-    cells.clickAdmissions.set(nativeEvent, Object.freeze({
-      publication,
+    cells.clickAdmissions.set(
       nativeEvent,
-      reactEvent: event,
-      target,
-      root,
-      button,
-      ...dispatcherAdmission,
-    }));
+      createManualSaveClickAdmission(
+        publication,
+        nativeEvent,
+        event,
+        target,
+        root,
+        button,
+      ),
+    );
   };
 
   const onButtonClickCapture = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const nativeEvent = event?.nativeEvent;
+    const admission = cells.clickAdmissions.get(nativeEvent);
+    admission?.rejectAdditional(event);
+    if (admission && admission.reactEvent !== event) return;
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const root = rootOwner.element();
     const button = buttonOwner.element();
     const ownerDocument = button?.ownerDocument;
     const ownerWindow = ownerDocument?.defaultView;
-    const nativeEvent = event?.nativeEvent;
     const target = event?.target;
     const wrapperIsExact = (
       ownerWindow
@@ -1196,9 +1197,6 @@ function createManualSavePublication(
           ownerWindow.Event.CAPTURING_PHASE,
         )
       : null;
-    const admission = ownerWindow && nativeEvent instanceof ownerWindow.Event
-      ? cells.clickAdmissions.get(nativeEvent)
-      : undefined;
     if (
       !runtime
       || !publication
@@ -1222,12 +1220,61 @@ function createManualSavePublication(
       || admission.target !== target
       || admission.root !== root
       || admission.button !== button
-      || !admission.reachedButtonThroughDispatcher()
+      || cells.active.current !== publication
+      || publication.render !== render
+      || publication.render.identity !== render.identity
+      || !publication.isExact()
+      || render.buttonDisabled
+      || !render.canEdit
+      || !admission.deliverButton(event)
+    ) {
+      return;
+    }
+  };
+
+  const completeNativeClick = (event: Event) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const root = rootOwner.element();
+    const button = buttonOwner.element();
+    const ownerDocument = button?.ownerDocument;
+    const ownerWindow = ownerDocument?.defaultView;
+    if (
+      !runtime
+      || !publication
+      || !root
+      || !button
+      || !ownerDocument
+      || !ownerWindow
+      || !(event instanceof ownerWindow.MouseEvent)
+    ) {
+      return;
+    }
+    const admission = cells.clickAdmissions.get(event);
+    cells.clickAdmissions.delete(event);
+    const target = event.target;
+    if (
+      !admission
+      || admission.publication !== publication
+      || admission.nativeEvent !== event
+      || admission.root !== root
+      || admission.button !== button
+      || admission.target !== target
+      || !admission.isExact()
+      || event.type !== "click"
+      || event.button !== 0
+      || event.currentTarget !== button
+      || event.eventPhase === ownerWindow.Event.NONE
+      || !(target instanceof ownerWindow.Node)
+      || target.ownerDocument !== ownerDocument
+      || !button.contains(target)
+      || !event.composedPath().includes(root)
+      || !event.composedPath().includes(button)
       || cells.requestOwner.current !== null
       || cells.claimedPublications.has(publication)
       || cells.claimedActions.has(render.action)
-      || cells.claimedReactEvents.has(event)
-      || cells.claimedNativeEvents.has(nativeEvent)
+      || cells.claimedReactEvents.has(admission.reactEvent)
+      || cells.claimedNativeEvents.has(event)
       || cells.active.current !== publication
       || publication.render !== render
       || publication.render.identity !== render.identity
@@ -1239,8 +1286,6 @@ function createManualSavePublication(
       return;
     }
 
-    admission.releaseCurrentTarget();
-    cells.clickAdmissions.delete(nativeEvent);
     const operation: ManualSaveOperation = Object.freeze({
       mount: render.mount,
       session: render.session,
@@ -1253,8 +1298,8 @@ function createManualSavePublication(
     cells.nextOperation.current = operation.serial;
     cells.claimedPublications.add(publication);
     cells.claimedActions.add(render.action);
-    cells.claimedReactEvents.add(event);
-    cells.claimedNativeEvents.add(nativeEvent);
+    cells.claimedReactEvents.add(admission.reactEvent);
+    cells.claimedNativeEvents.add(event);
     cells.requestOwner.current = operation;
     setManualSave(Object.freeze({ owner: operation, status: "pending" }));
 

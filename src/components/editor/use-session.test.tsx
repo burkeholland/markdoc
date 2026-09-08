@@ -777,14 +777,13 @@ describe("SaveIndicator", () => {
     document.body.append(host);
     let current: SaveControl | null = null;
     const intercept = (nativeEvent: Event) => {
-      nativeEvent.stopImmediatePropagation();
       const control = current;
       if (!control || !(nativeEvent instanceof MouseEvent)) return;
-      let currentTarget: EventTarget = control.root;
       function ForgedSyntheticEvent() {}
       const customPrototype = ForgedSyntheticEvent.prototype;
       const wrapper = Object.assign(Object.create(customPrototype), {
         type: "click",
+        currentTarget: control.root as EventTarget | null,
         target: control.button,
         nativeEvent,
         button: nativeEvent.button,
@@ -810,13 +809,14 @@ describe("SaveIndicator", () => {
       });
       expect(customPrototype.constructor).toBe(ForgedSyntheticEvent);
       expect(ForgedSyntheticEvent.prototype).toBe(customPrototype);
-      Object.defineProperty(wrapper, "currentTarget", {
-        configurable: true,
-        get: () => currentTarget,
-      });
       control.rootClick(wrapper as ReactMouseEvent<HTMLSpanElement>);
-      currentTarget = control.button;
+      wrapper.currentTarget = null;
+      wrapper.currentTarget = control.button;
       control.click(wrapper as ReactMouseEvent<HTMLButtonElement>);
+      session.canEdit = false;
+      control.root.addEventListener("click", () => {
+        session.canEdit = true;
+      }, { capture: true, once: true });
     };
     host.addEventListener("click", intercept, { capture: true, once: true });
     const root = createRoot(host);
