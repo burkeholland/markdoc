@@ -895,6 +895,11 @@ interface ImageSubmitCaptureProof {
   readonly delivery: ImageSubmitTerminalDelivery;
 }
 
+interface ImageSubmitFinalization {
+  readonly proof: ImageSubmitCaptureProof;
+  readonly applicationEligible: boolean;
+}
+
 type ImageSubmitTerminalDelivery = (proof: ImageSubmitCaptureProof) => void;
 
 interface ImageNativeRelationSnapshot {
@@ -907,6 +912,14 @@ interface ImageNativeRelationSnapshot {
 
 interface ImageNativeSubmitDomIntrinsics {
   readonly surfaceIsCanonical: () => boolean;
+  readonly addFormSubmitListener: (
+    listener: (event: Event) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  readonly removeFormSubmitListener: (
+    listener: (event: Event) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
   readonly nodeIsConnected: (node: Node) => boolean;
   readonly formIsConnected: () => boolean;
   readonly formOwnerDocument: () => Document | null;
@@ -933,11 +946,26 @@ interface ImageNativeSubmitOwnerRealm {
   readonly documentPrototype: object;
   readonly formPrototype: object;
   readonly insertPrototype: object;
+  readonly eventTargetPrototype: object;
   readonly relationProperties: readonly ImageNativePropertySnapshot[];
   readonly documentSurface: readonly ImageNativeRelationSnapshot[];
   readonly defaultViewProperty: ImageNativePropertySnapshot;
   readonly insertFormProperty: ImageNativePropertySnapshot;
+  readonly addEventListenerProperty: ImageNativePropertySnapshot;
+  readonly removeEventListenerProperty: ImageNativePropertySnapshot;
   readonly nativeEvent: ImageNativeSubmitIntrinsics;
+  readonly addEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  readonly removeEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
   readonly isConnected: (node: Node) => boolean;
   readonly ownerDocumentOf: (node: Node) => Document | null;
   readonly parentElement: (node: Node) => Element | null;
@@ -1289,6 +1317,14 @@ class ImageDismissalListener {
   #submitProvenance: ImageSubmitProvenance | null = null;
   #submitDelivery: ImageSubmitTerminalDelivery | null = null;
   #submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
+  #submitFinalizations = new WeakMap<
+    ImageSubmitCaptureProof,
+    ImageSubmitFinalization
+  >();
+  #submitFinalizers = new WeakMap<
+    ImageSubmitCaptureProof,
+    (event: Event) => void
+  >();
   #pendingSubmitProofs = new Set<ImageSubmitCaptureProof>();
 
   constructor(private readonly coordinator: ImagePublicationCoordinator) {}
@@ -1374,9 +1410,11 @@ class ImageDismissalListener {
     delivery: ImageSubmitTerminalDelivery,
   ) {
     const form = provenance.form;
-    this.#submitProvenance = provenance;
-    this.#submitDelivery = delivery;
-    if (this.#submitForm === form && this.#submitListener) return;
+    if (this.#submitForm === form && this.#submitListener) {
+      this.#submitProvenance = provenance;
+      this.#submitDelivery = delivery;
+      return;
+    }
     this.releaseSubmit();
     this.#submitProvenance = provenance;
     this.#submitDelivery = delivery;
@@ -1403,12 +1441,21 @@ class ImageDismissalListener {
       IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitProofs, [event]);
       IMAGE_APPLY(IMAGE_SET_DELETE, this.#pendingSubmitProofs, [proof]);
       const intrinsics = proof.provenance.nativeEvent;
+      const finalization = IMAGE_APPLY(
+        IMAGE_WEAK_MAP_GET,
+        this.#submitFinalizations,
+        [proof],
+      ) as ImageSubmitFinalization | undefined;
+      if (!intrinsics.defaultPrevented(event)) intrinsics.preventDefault(event);
       const propagationWasStopped = intrinsics.propagationStopped(event);
       intrinsics.stopImmediatePropagation(event);
+      this.releaseSubmitFinalizer(proof);
       const current = this.#submitProvenance;
       const currentDelivery = this.#submitDelivery;
       try {
         if (
+          finalization?.proof !== proof ||
+          !finalization.applicationEligible ||
           propagationWasStopped ||
           current !== proof.provenance ||
           currentDelivery !== proof.delivery ||
@@ -1419,7 +1466,7 @@ class ImageDismissalListener {
         }
         proof.delivery(proof);
       } finally {
-        intrinsics.releasePublicSurface(event);
+        this.releaseSubmitProof(proof);
       }
     };
     form.addEventListener("submit", listener);
@@ -1436,10 +1483,31 @@ class ImageDismissalListener {
     ) {
       return false;
     }
+    const intrinsics = proof.provenance.nativeEvent;
+    const finalizer = (event: Event) => {
+      if (event !== proof.nativeEvent) return;
+      const applicationEligible =
+        !intrinsics.defaultPrevented(event) &&
+        proof.publication !== null;
+      intrinsics.preventDefault(event);
+      IMAGE_APPLY(IMAGE_WEAK_MAP_SET, this.#submitFinalizations, [
+        proof,
+        Object.freeze({ proof, applicationEligible }),
+      ]);
+    };
+    try {
+      proof.provenance.nativeDom.addFormSubmitListener(finalizer, {
+        capture: true,
+      });
+    } catch {
+      return false;
+    }
+    IMAGE_APPLY(IMAGE_WEAK_MAP_SET, this.#submitFinalizers, [proof, finalizer]);
     const previous = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, this.#submitProofs, [
       proof.nativeEvent,
     ]) as ImageSubmitCaptureProof | undefined;
     if (previous) {
+      this.releaseSubmitProof(previous);
       IMAGE_APPLY(IMAGE_SET_DELETE, this.#pendingSubmitProofs, [previous]);
     }
     IMAGE_APPLY(IMAGE_WEAK_MAP_SET, this.#submitProofs, [
@@ -1456,7 +1524,7 @@ class ImageDismissalListener {
         proof.nativeEvent,
       ]);
       IMAGE_APPLY(IMAGE_SET_DELETE, this.#pendingSubmitProofs, [proof]);
-      proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
+      this.releaseSubmitProof(proof);
     });
     return true;
   }
@@ -1490,22 +1558,51 @@ class ImageDismissalListener {
   private clearSubmitProofs() {
     IMAGE_APPLY(IMAGE_SET_FOR_EACH, this.#pendingSubmitProofs, [
       (proof: ImageSubmitCaptureProof) => {
-        proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
+        this.releaseSubmitProof(proof);
       },
     ]);
     this.#submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
+    this.#submitFinalizations = new WeakMap<
+      ImageSubmitCaptureProof,
+      ImageSubmitFinalization
+    >();
+    this.#submitFinalizers = new WeakMap<
+      ImageSubmitCaptureProof,
+      (event: Event) => void
+    >();
     this.#pendingSubmitProofs = new Set<ImageSubmitCaptureProof>();
+  }
+
+  private releaseSubmitFinalizer(proof: ImageSubmitCaptureProof) {
+    const finalizer = IMAGE_APPLY(
+      IMAGE_WEAK_MAP_GET,
+      this.#submitFinalizers,
+      [proof],
+    ) as ((event: Event) => void) | undefined;
+    if (finalizer) {
+      proof.provenance.nativeDom.removeFormSubmitListener(finalizer, true);
+    }
+    IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitFinalizers, [proof]);
+  }
+
+  private releaseSubmitProof(proof: ImageSubmitCaptureProof) {
+    this.releaseSubmitFinalizer(proof);
+    IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitFinalizations, [proof]);
+    proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
   }
 
   private releaseSubmit() {
     const form = this.#submitForm;
     const listener = this.#submitListener;
+    const nativeDom = this.#submitProvenance?.nativeDom ?? null;
     this.#submitForm = null;
     this.#submitListener = null;
     this.#submitProvenance = null;
     this.#submitDelivery = null;
     this.clearSubmitProofs();
-    if (form && listener) form.removeEventListener("submit", listener);
+    if (form && listener && nativeDom) {
+      nativeDom.removeFormSubmitListener(listener);
+    }
   }
 
   private release() {
@@ -2490,6 +2587,7 @@ function captureImageNativeSubmitOwnerRealm(
   }
   const formPrototype = ownerWindow.HTMLFormElement.prototype;
   const insertPrototype = ownerWindow.HTMLButtonElement.prototype;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
   const documentSurface: ImageNativeRelationSnapshot[] = [];
   current = ownerDocument;
   while (current && documentSurface.length < 16) {
@@ -2528,12 +2626,22 @@ function captureImageNativeSubmitOwnerRealm(
     insertPrototype,
     "form",
   );
+  const addEventListenerProperty = captureImageNativeRelationProperty(
+    eventTargetPrototype,
+    "addEventListener",
+  );
+  const removeEventListenerProperty = captureImageNativeRelationProperty(
+    eventTargetPrototype,
+    "removeEventListener",
+  );
   const nativeEvent = captureImageNativeSubmitIntrinsics(ownerWindow);
   const isConnectedGetter = isConnected?.get;
   const ownerDocumentIntrinsic = ownerDocumentProperty?.get;
   const parentElementGetter = parentElement?.get;
   const containsMethod = contains?.value;
   const insertFormGetter = insertFormProperty?.get;
+  const addEventListenerMethod = addEventListenerProperty?.value;
+  const removeEventListenerMethod = removeEventListenerProperty?.value;
   if (
     !isConnected ||
     typeof isConnectedGetter !== "function" ||
@@ -2547,6 +2655,10 @@ function captureImageNativeSubmitOwnerRealm(
     typeof defaultViewProperty.get !== "function" ||
     !insertFormProperty ||
     typeof insertFormGetter !== "function" ||
+    !addEventListenerProperty ||
+    typeof addEventListenerMethod !== "function" ||
+    !removeEventListenerProperty ||
+    typeof removeEventListenerMethod !== "function" ||
     !nativeEvent
   ) {
     return null;
@@ -2558,6 +2670,7 @@ function captureImageNativeSubmitOwnerRealm(
     documentPrototype,
     formPrototype,
     insertPrototype,
+    eventTargetPrototype,
     relationProperties: Object.freeze([
       isConnected,
       ownerDocumentProperty,
@@ -2567,7 +2680,33 @@ function captureImageNativeSubmitOwnerRealm(
     documentSurface: Object.freeze(documentSurface),
     defaultViewProperty,
     insertFormProperty,
+    addEventListenerProperty,
+    removeEventListenerProperty,
     nativeEvent,
+    addEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ) => {
+      IMAGE_APPLY(addEventListenerMethod, target, [
+        type,
+        listener,
+        options,
+      ]);
+    },
+    removeEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ) => {
+      IMAGE_APPLY(removeEventListenerMethod, target, [
+        type,
+        listener,
+        options,
+      ]);
+    },
     isConnected: (target: Node) =>
       IMAGE_APPLY(isConnectedGetter, target, []) as boolean,
     ownerDocumentOf: (target: Node) =>
@@ -2728,6 +2867,7 @@ function captureImageNativeSubmitDomIntrinsics(
       ownerWindow.Document.prototype !== realm.documentPrototype ||
       ownerWindow.HTMLFormElement.prototype !== formPrototype ||
       ownerWindow.HTMLButtonElement.prototype !== insertPrototype ||
+      ownerWindow.EventTarget.prototype !== realm.eventTargetPrototype ||
       !surfaceMatches(
         realm.ownerDocument,
         documentKeys,
@@ -2740,6 +2880,14 @@ function captureImageNativeSubmitDomIntrinsics(
       !imageNativeRelationPropertyMatches(
         insertPrototype,
         realm.insertFormProperty,
+      ) ||
+      !imageNativeRelationPropertyMatches(
+        realm.eventTargetPrototype,
+        realm.addEventListenerProperty,
+      ) ||
+      !imageNativeRelationPropertyMatches(
+        realm.eventTargetPrototype,
+        realm.removeEventListenerProperty,
       )
     ) {
       return false;
@@ -2778,6 +2926,18 @@ function captureImageNativeSubmitDomIntrinsics(
       propertiesAreAbsent(insert, insertKeys) &&
       surfaceMatches(formPrototype, formKeys, canonicalFormSurface) &&
       surfaceMatches(insertPrototype, insertKeys, canonicalInsertSurface),
+    addFormSubmitListener: (
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ) => {
+      realm.addEventListener(form, "submit", listener, options);
+    },
+    removeFormSubmitListener: (
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ) => {
+      realm.removeEventListener(form, "submit", listener, options);
+    },
     nodeIsConnected: (node: Node) =>
       node === form ? realm.isConnected(node) : node.isConnected,
     formIsConnected: () => realm.isConnected(form),
@@ -4545,9 +4705,7 @@ function createImagePresentation(
     const wasAlreadyPrevented = nativeEvent
       ? provenance.nativeEvent.defaultPrevented(nativeEvent)
       : false;
-    if (!nativeEvent || !provenance.nativeEvent.preventDefault(nativeEvent)) {
-      return;
-    }
+    if (!nativeEvent) return;
     let proofPublication: ImagePublication | null = null;
     const runtime = lastRuntime;
     if (runtime) {
@@ -4567,6 +4725,7 @@ function createImagePresentation(
       }
     }
     if (!provenance.nativeEvent.capturePublicSurface(nativeEvent)) {
+      provenance.nativeEvent.preventDefault(nativeEvent);
       provenance.nativeEvent.stopImmediatePropagation(nativeEvent);
       return;
     }
@@ -4579,6 +4738,7 @@ function createImagePresentation(
     });
     if (!dismissalListener.stageSubmit(proof)) {
       provenance.nativeEvent.releasePublicSurface(nativeEvent);
+      provenance.nativeEvent.preventDefault(nativeEvent);
       provenance.nativeEvent.stopImmediatePropagation(nativeEvent);
     }
   };

@@ -2427,6 +2427,158 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(staleSubmit).not.toHaveBeenCalled();
   });
 
+  it.each(["public", "captured intrinsic"] as const)(
+    "rejects a %s form-capture cancellation after root staging",
+    async (kind) => {
+      const staleClose = vi.fn();
+      const staleSubmit = vi.fn();
+      const currentClose = vi.fn();
+      const currentSubmit = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={staleSubmit}
+        />,
+      );
+      fireEvent.change(screen.getByTestId("image-url"), {
+        target: { value: "https://example.com/form-veto.png" },
+      });
+      await act(async () => {});
+      const form = imageForm();
+      const intrinsicPreventDefault = Object.getOwnPropertyDescriptor(
+        Event.prototype,
+        "preventDefault",
+      )?.value;
+      if (typeof intrinsicPreventDefault !== "function") {
+        throw new Error("Event.preventDefault intrinsic is unavailable");
+      }
+      const veto = vi.fn((event: Event) => {
+        if (kind === "public") event.preventDefault();
+        else Reflect.apply(intrinsicPreventDefault, event, []);
+      });
+      const later = vi.fn();
+      form.addEventListener("submit", veto, { capture: true, once: true });
+      form.addEventListener("submit", later, { once: true });
+      const submit = submitEvent();
+      let dispatched = true;
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+
+      expect(veto).toHaveBeenCalledOnce();
+      expect(dispatched).toBe(false);
+      expect(submit.defaultPrevented).toBe(true);
+      expect(later).not.toHaveBeenCalled();
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+
+      await submitCleanSuccess(
+        view,
+        currentClose,
+        currentSubmit,
+        `https://example.com/${kind.replace(" ", "-")}-recovery.png`,
+      );
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects form-capture propagation stop without losing cancellation", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/form-stop.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const stop = vi.fn((event: Event) => event.stopPropagation());
+    const later = vi.fn();
+    form.addEventListener("submit", stop, { capture: true, once: true });
+    form.addEventListener("submit", later, { once: true });
+    const submit = submitEvent();
+    let dispatched = true;
+    act(() => {
+      dispatched = form.dispatchEvent(submit);
+    });
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/form-stop-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps an outer finalizer through a nested canceled submit", async () => {
+    const onOpenChange = vi.fn();
+    const onSubmit = vi.fn();
+    function ControlledDialog() {
+      const [open, setOpen] = useState(true);
+      const close = useCallback((nextOpen: boolean) => {
+        onOpenChange(nextOpen);
+        setOpen(nextOpen);
+      }, []);
+      return (
+        <ImageDialog
+          open={open}
+          onOpenChange={close}
+          onSubmit={onSubmit}
+        />
+      );
+    }
+    await renderStrictRoot(<ControlledDialog />);
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/outer-submit.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const nested = submitEvent();
+    nested.preventDefault();
+    const dispatchNested = vi.fn(() => {
+      form.dispatchEvent(nested);
+    });
+    form.addEventListener("submit", dispatchNested, {
+      capture: true,
+      once: true,
+    });
+    const outer = submitEvent();
+    let dispatched = true;
+    act(() => {
+      dispatched = form.dispatchEvent(outer);
+    });
+
+    expect(dispatchNested).toHaveBeenCalledOnce();
+    expect(nested.defaultPrevented).toBe(true);
+    expect(dispatched).toBe(false);
+    expect(outer.defaultPrevented).toBe(true);
+    expect(onOpenChange).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      "https://example.com/outer-submit.png",
+      "",
+    );
+  });
+
   it.each([
     ["parentElement", "throwing"],
     ["parentElement", "deceptive"],
