@@ -2128,15 +2128,17 @@ describe("one-time lifecycle and setup", () => {
     await openCreate();
     fireEvent.click(screen.getByTestId("token-restrict"));
     await act(async () => oldInitial.resolve(response({ documents: [{ id: "old", title: "Old document" }] })));
-    const oldButton = await screen.findByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
-    const oldHandler = captureReactCallback<TokenClickHandler>(oldButton, "onClick");
-    const preSealEvent = tokenClickEvent(oldButton);
-    act(() => oldHandler(preSealEvent));
+    const preSealButton = await screen.findByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
+    const preSealHandler = captureReactCallback<TokenClickHandler>(preSealButton, "onClick");
+    const preSealEvent = tokenClickEvent(preSealButton);
+    act(() => preSealHandler(preSealEvent));
     expect(documentListCount()).toBe(1);
     expect(preSealEvent.preventDefault).not.toHaveBeenCalled();
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByTestId("token-document-old")).toBeVisible();
     await settleDocumentChooserCommit();
+    const oldButton = screen.getByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
+    const oldHandler = captureReactCallback<TokenClickHandler>(oldButton, "onClick");
     fireEvent.click(oldButton);
     expect(documentListCount()).toBe(2);
 
@@ -2150,8 +2152,9 @@ describe("one-time lifecycle and setup", () => {
     fireEvent.click(screen.getByTestId("token-restrict"));
     expect(documentListCount()).toBe(3);
     await act(async () => currentInitial.resolve(response({ documents: [{ id: "current", title: "Current document" }] })));
-    const currentButton = await screen.findByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
+    await screen.findByRole("button", { name: "Refresh documents" });
     await settleDocumentChooserCommit();
+    const currentButton = screen.getByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
     const staleEvent = tokenClickEvent(currentButton);
     act(() => oldHandler(staleEvent));
     expect(documentListCount()).toBe(3);
