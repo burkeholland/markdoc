@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode, useEffect, useLayoutEffect, type RefCallback } from "react";
+import { flushSync } from "react-dom";
 import type { DocumentDto } from "@/server/dto";
 
 const collaborators = vi.fn();
@@ -102,6 +103,7 @@ const precedes = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b
 
 interface DirectReactEvent<T extends HTMLElement> {
   type: string;
+  button: number;
   currentTarget: T;
   target: EventTarget;
   nativeEvent: unknown;
@@ -134,6 +136,19 @@ function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
   return fiber.ref as RefCallback<T>;
 }
 
+function reactAlternateRef<T extends HTMLElement>(element: T): RefCallback<T> {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<
+    string,
+    { ref?: unknown; alternate?: { ref?: unknown } | null } | undefined
+  >)[fiberKey];
+  if (typeof fiber?.alternate?.ref !== "function") {
+    throw new Error(`An alternate callback ref was not attached to ${element.tagName}`);
+  }
+  return fiber.alternate.ref as RefCallback<T>;
+}
+
 function captureClick(element: HTMLButtonElement): CapturedControl<HTMLButtonElement> {
   return { element, handler: reactProp<DirectHandler<HTMLButtonElement>>(element, "onClick") };
 }
@@ -151,6 +166,22 @@ function nativeMouse(target: HTMLElement, type = "click"): MouseEvent {
   if (!Constructor) throw new Error("Control has no owner-document MouseEvent");
   const event = new Constructor(type, { bubbles: true, cancelable: true });
   Object.defineProperty(event, "target", { configurable: true, value: target });
+  return event;
+}
+
+function traversedNativeMouse(target: HTMLElement, type = "click"): MouseEvent {
+  const event = nativeMouse(target, type);
+  const path: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    path.push(current);
+    current = current.parentNode;
+  }
+  path.push(target.ownerDocument.defaultView!);
+  Object.defineProperty(event, "composedPath", {
+    configurable: true,
+    value: () => path,
+  });
   return event;
 }
 
@@ -203,6 +234,7 @@ function directInvoke<T extends HTMLElement>(
         : currentTarget instanceof HTMLFormElement
           ? "submit"
           : "click"),
+    button: 0,
     currentTarget,
     target: overrides.target ?? currentTarget,
     nativeEvent,
@@ -388,6 +420,468 @@ afterEach(() => {
 });
 
 describe("ShareDialog exact control publications", () => {
+  it("owns one exact Copy link activation after direct-root Strict Mode replay and reentrant clicks", async () => {
+    const attempt = deferred<boolean>();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const button = screen.getByTestId("copy-link") as HTMLButtonElement;
+    const copy = captureClick(button);
+    copyText.mockImplementationOnce(() => {
+      fireEvent.click(button);
+      return attempt.promise;
+    });
+
+    directInvoke(copy, button, { nativeEvent: traversedNativeMouse(button) });
+    directInvoke(copy, button, { nativeEvent: traversedNativeMouse(button) });
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+
+    await act(async () => {
+      attempt.resolve(true);
+      await attempt.promise;
+    });
+    expect(button).toHaveTextContent("Copied");
+  });
+
+  it("clears prior feedback while a newly claimed current copy is pending", async () => {
+    const pending = deferred<boolean>();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const copy = screen.getByTestId("copy-link");
+
+    fireEvent.click(copy);
+    await waitFor(() => expect(copy).toHaveTextContent("Copied"));
+    copyText.mockReturnValueOnce(pending.promise);
+    fireEvent.click(copy);
+
+    expect(copy).toHaveTextContent("Copy link");
+    expect(copyText).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      pending.resolve(true);
+      await pending.promise;
+    });
+    expect(copy).toHaveTextContent("Copied");
+  });
+
+  it("keeps the selected fallback after its transient label expires until success or close", async () => {
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn((nextOpen: boolean) => {
+      view.rerender(
+        <StrictMode>
+          <ShareDialog open={nextOpen} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+        </StrictMode>,
+      );
+    });
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const value = `${window.location.origin}/d/${DOC_ID}`;
+
+    vi.useFakeTimers();
+    try {
+      copyText.mockResolvedValueOnce(false);
+      fireEvent.click(screen.getByTestId("copy-link"));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const fallback = screen.getByTestId("copy-link-fallback") as HTMLInputElement;
+      expect(fallback).toHaveValue(value);
+      expect(fallback).toHaveFocus();
+      expect(fallback.selectionStart).toBe(0);
+      expect(fallback.selectionEnd).toBe(value.length);
+
+      act(() => vi.advanceTimersByTime(2100));
+      expect(screen.getByTestId("copy-link-fallback")).toBe(fallback);
+      expect(fallback).toHaveValue(value);
+      expect(fallback).toHaveFocus();
+      expect(fallback.selectionStart).toBe(0);
+      expect(fallback.selectionEnd).toBe(value.length);
+      expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+
+      copyText.mockResolvedValueOnce(true);
+      fireEvent.click(screen.getByTestId("copy-link"));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a persistent fallback when the current Share visit closes", async () => {
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn((nextOpen: boolean) => {
+      view.rerender(
+        <StrictMode>
+          <ShareDialog open={nextOpen} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+        </StrictMode>,
+      );
+    });
+    const view = render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    copyText.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await screen.findByTestId("copy-link-fallback");
+
+    view.rerender(
+      <StrictMode>
+        <ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />
+      </StrictMode>,
+    );
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+  });
+
+  it("carries one pending success through a same-URL login rerender", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "same-url" } });
+    expect(screen.getByTestId("share-login")).toHaveValue("same-url");
+
+    act(() => {
+      settle?.(true);
+      settle?.(false);
+    });
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+  });
+
+  it("carries one pending failure through a same-URL collaborator completion", async () => {
+    const permission = deferred<{ ok: boolean }>();
+    addCollaborator.mockReturnValueOnce(permission.promise);
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+
+    const role = within(collaboratorRow("bob")).getByRole("combobox");
+    fireEvent.change(role, { target: { value: "viewer" } });
+    expect(role).toBeDisabled();
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+    await act(async () => {
+      permission.resolve({ ok: true });
+      await permission.promise;
+    });
+    await waitFor(() => expect(role).toHaveValue("viewer"));
+
+    act(() => {
+      settle?.(false);
+      settle?.(true);
+    });
+    const fallback = await screen.findByTestId("copy-link-fallback");
+    expect(fallback).toHaveValue(`${window.location.origin}/d/${DOC_ID}`);
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Select & press Ctrl+C");
+  });
+
+  it("retires a pending copy across a failed intermediate publication and recovers fresh", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const input = screen.getByTestId("share-login");
+    const done = screen.getByRole("button", { name: "Done" }) as HTMLButtonElement;
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    done.disabled = true;
+    fireEvent.change(input, { target: { value: "invalid-publication" } });
+
+    act(() => settle?.(true));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+
+    done.disabled = false;
+    fireEvent.change(input, { target: { value: "restored-publication" } });
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${DOC_ID}`);
+  });
+
+  it("retires a pending copy when its same-generation Strict replay fails", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settle = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const linkValue = screen.getByTestId("editor-link").querySelector("code")!;
+    const copy = screen.getByTestId("copy-link") as HTMLButtonElement;
+    const card = screen.getByTestId("share-agent-card");
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    const panel = toggle.nextElementSibling as HTMLDivElement;
+    const replay = [
+      { ref: reactAlternateRef(copy) as RefCallback<HTMLElement>, element: copy },
+      { ref: reactAlternateRef(linkValue) as RefCallback<HTMLElement>, element: linkValue },
+      { ref: reactAlternateRef(card), element: card },
+      { ref: reactAlternateRef(toggle) as RefCallback<HTMLElement>, element: toggle },
+      { ref: reactAlternateRef(panel) as RefCallback<HTMLElement>, element: panel },
+    ];
+
+    fireEvent.click(copy);
+    expect(copyText).toHaveBeenCalledTimes(1);
+    act(() => {
+      for (const { ref } of replay) ref(null);
+      for (const { ref, element } of replay) ref(element);
+    });
+    await act(async () => Promise.resolve());
+
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "after-failed-replay" } });
+    act(() => settle?.(true));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+
+    copyText.mockClear();
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/d/${DOC_ID}`);
+  });
+
+  it("spends a pending copy's handoff after one valid successor", async () => {
+    let settleOld: ((value: unknown) => void) | null = null;
+    copyText.mockImplementationOnce(() => ({
+      then(onFulfilled: (value: unknown) => void) {
+        settleOld = onFulfilled;
+      },
+    }));
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const input = screen.getByTestId("share-login");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: "successor-b" } });
+    expect(input).toHaveValue("successor-b");
+    fireEvent.change(input, { target: { value: "successor-c" } });
+    expect(input).toHaveValue("successor-c");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${DOC_ID}`);
+
+    act(() => settleOld?.(false));
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied");
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+  });
+
+  it("owns each setup expand and collapse transition after direct-root Strict Mode replay", async () => {
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    const collapsed = captureClick(toggle);
+
+    directInvoke(collapsed, toggle, { nativeEvent: traversedNativeMouse(toggle) });
+    directInvoke(collapsed, toggle, { nativeEvent: traversedNativeMouse(toggle) });
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+
+    const expanded = captureClick(toggle);
+    directInvoke(collapsed, toggle, { nativeEvent: traversedNativeMouse(toggle) });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    directInvoke(expanded, toggle, { nativeEvent: traversedNativeMouse(toggle) });
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+  });
+
+  it("copies every currently displayed setup command once under direct-root Strict Mode", async () => {
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    expect(copyText).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("share-agent-toggle"));
+    await waitFor(() => expect(screen.getByTestId("token-add")).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Connect an MCP client" }));
+
+    const copyBlock = async (testId: string, accessibleName: string) => {
+      const value = screen.getByTestId(testId).textContent;
+      const button = screen.getByRole("button", { name: accessibleName });
+      fireEvent.click(button);
+      await waitFor(() => expect(copyText).toHaveBeenLastCalledWith(value));
+    };
+
+    await copyBlock("agent-connect-config", "Copy MCP configuration");
+    fireEvent.click(screen.getByText("Client without HTTP support? Run the server from a checkout (stdio)"));
+    await copyBlock("agent-connect-config-stdio", "Copy stdio MCP configuration");
+    fireEvent.click(screen.getByText("Optional Copilot CLI permissions"));
+    const allowLine = screen.getByTestId("agent-connect-allow-line").textContent;
+    fireEvent.click(screen.getByTestId("agent-connect-allow-copy"));
+    await waitFor(() => expect(copyText).toHaveBeenLastCalledWith(allowLine));
+    fireEvent.click(screen.getByTestId("agent-connect-tab-copilot-app"));
+    await copyBlock("agent-connect-app-install", "Copy Copilot app install command");
+
+    expect(copyText).toHaveBeenCalledTimes(4);
+  });
+
+  it("contains synchronous, asynchronous, then-getter, and then-call copy failures", async () => {
+    const failures: Array<() => unknown> = [
+      () => {
+        throw new Error("synchronous clipboard failure");
+      },
+      () => Promise.reject(new Error("asynchronous clipboard failure")),
+      () => Object.defineProperty({}, "then", {
+        get() {
+          throw new Error("then getter failure");
+        },
+      }),
+      () => ({
+        then() {
+          throw new Error("then call failure");
+        },
+      }),
+    ];
+    const view = render(<StrictMode><ShareDialog key={0} open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} /></StrictMode>);
+
+    for (let index = 0; index < failures.length; index++) {
+      if (index > 0) {
+        view.rerender(
+          <StrictMode>
+            <ShareDialog key={index} open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+          </StrictMode>,
+        );
+      }
+      await screen.findByText("@bob");
+      copyText.mockImplementationOnce(failures[index]!);
+      fireEvent.click(screen.getByTestId("copy-link"));
+      const fallback = await screen.findByTestId("copy-link-fallback");
+      expect(fallback).toHaveValue(`${window.location.origin}/d/${DOC_ID}`);
+      expect(fallback).toHaveFocus();
+    }
+    expect(copyText).toHaveBeenCalledTimes(failures.length);
+  });
+
+  it("retires removed copies, ignores late settlement, and recovers fresh", async () => {
+    const oldAttempt = deferred<boolean>();
+    const currentAttempt = deferred<boolean>();
+    const nextDoc = { ...doc, id: "doc-920", title: "Current share" };
+    const view = render(
+      <StrictMode>
+        <ShareDialog key="a" open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    copyText.mockReturnValueOnce(oldAttempt.promise);
+    fireEvent.click(screen.getByTestId("copy-link"));
+
+    view.rerender(
+      <StrictMode>
+        <ShareDialog key="b" open onOpenChange={vi.fn()} doc={nextDoc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByRole("heading", { name: "Share “Current share”" });
+    await act(async () => {
+      oldAttempt.resolve(false);
+      await oldAttempt.promise;
+    });
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+
+    copyText.mockReturnValueOnce(currentAttempt.promise);
+    fireEvent.click(screen.getByTestId("copy-link"));
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${nextDoc.id}`);
+    await act(async () => {
+      currentAttempt.resolve(true);
+      await currentAttempt.promise;
+    });
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied");
+  });
+
+  it("makes a successor published by a hostile then getter fresh and usable", async () => {
+    const nextDoc = { ...doc, id: "doc-921", title: "Getter successor" };
+    let thenCalls = 0;
+    const view = render(
+      <StrictMode>
+        <ShareDialog key="getter-a" open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    copyText.mockImplementationOnce(() => Object.defineProperty({}, "then", {
+      get() {
+        flushSync(() => {
+          view.rerender(
+            <StrictMode>
+              <ShareDialog key="getter-b" open onOpenChange={vi.fn()} doc={nextDoc} isOwner onDocChange={vi.fn()} />
+            </StrictMode>,
+          );
+        });
+        return () => {
+          thenCalls += 1;
+        };
+      },
+    }));
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await screen.findByRole("heading", { name: "Share “Getter successor”" });
+    expect(thenCalls).toBe(0);
+    expect(screen.queryByTestId("copy-link-fallback")).toBeNull();
+    expect(screen.getByTestId("copy-link")).toHaveTextContent("Copy link");
+
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenLastCalledWith(`${window.location.origin}/d/${nextDoc.id}`);
+  });
+
   it("publishes a fresh exact successor for direct-root Strict Mode replay", async () => {
     let done: CapturedControl<HTMLButtonElement> | null = null;
     const onClose = vi.fn(() => {
