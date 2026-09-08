@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { StrictMode, useEffect, useLayoutEffect, type ComponentProps } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CollabSession } from "@/editor/collab/session";
 import type { ActivityItemDto, ActivityPageDto } from "@/lib/api";
@@ -95,6 +101,17 @@ function ActivityMount({
 }) {
   useEffect(() => onPassiveCleanup, [onPassiveCleanup]);
   return <ActivityPanel session={session} onClose={onClose} />;
+}
+
+function StrictReplayBoundary({
+  children,
+  onLayoutCleanup,
+}: {
+  children: ReactNode;
+  onLayoutCleanup: () => void;
+}) {
+  useLayoutEffect(() => onLayoutCleanup, [onLayoutCleanup]);
+  return children;
 }
 
 interface CapturedMouseEvent {
@@ -908,16 +925,15 @@ describe("ActivityPanel exact action publications", () => {
     expect(retiredClose).not.toHaveBeenCalled();
     expect(currentClose).not.toHaveBeenCalled();
 
-    const closeEvent = capturedMouseEvent(currentCloseControl);
-    const retryEvent = capturedMouseEvent(currentRetryControl);
-    const loadEvent = capturedMouseEvent(currentLoadControl);
     act(() => {
-      currentCloseControl.click(closeEvent);
-      currentCloseControl.click(closeEvent);
-      currentRetryControl.click(retryEvent);
-      currentRetryControl.click(retryEvent);
-      currentLoadControl.click(loadEvent);
-      currentLoadControl.click(loadEvent);
+      currentCloseControl.element.querySelector("svg")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+      currentCloseControl.element.click();
+      currentRetryControl.element.click();
+      currentRetryControl.element.click();
+      currentLoadControl.element.click();
+      currentLoadControl.element.click();
     });
 
     expect(retiredClose).not.toHaveBeenCalled();
@@ -931,6 +947,171 @@ describe("ActivityPanel exact action publications", () => {
       limit: 50,
     });
   });
+
+  it.each(["stale-first", "current-first"] as const)(
+    "gives the exact fresh Strict Mode visit sole cadence and request authority, %s",
+    async (settlementOrder) => {
+      const intervalCallbacks: Array<() => void> = [];
+      const intervalHandles = [
+        301 as unknown as ReturnType<typeof setInterval>,
+        302 as unknown as ReturnType<typeof setInterval>,
+      ];
+      vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+        intervalCallbacks.push(handler as () => void);
+        const handle = intervalHandles[intervalCallbacks.length - 1];
+        if (!handle) throw new Error("Unexpected Activity cadence");
+        return handle;
+      });
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, "clearInterval")
+        .mockImplementation(() => {});
+      const staleRequest = deferred<ActivityPageDto>();
+      const currentRequest = deferred<ActivityPageDto>();
+      const cadenceRequest = deferred<ActivityPageDto>();
+      activity
+        .mockReturnValueOnce(staleRequest.promise)
+        .mockReturnValueOnce(currentRequest.promise)
+        .mockReturnValueOnce(cadenceRequest.promise);
+      const stableSession = session(`strict-cadence-${settlementOrder}`);
+      const onClose = vi.fn();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      directRoots.add(root);
+
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ActivityPanel session={stableSession} onClose={onClose} />
+          </StrictMode>,
+        );
+      });
+
+      expect(activity).toHaveBeenCalledTimes(2);
+      expect(intervalCallbacks).toHaveLength(2);
+      expect(clearIntervalSpy).toHaveBeenCalledOnce();
+      expect(clearIntervalSpy).toHaveBeenCalledWith(intervalHandles[0]);
+      act(() => {
+        intervalCallbacks[0]?.();
+        intervalCallbacks[1]?.();
+        intervalCallbacks[1]?.();
+      });
+      expect(activity).toHaveBeenCalledTimes(2);
+
+      const settleStale = async () => {
+        staleRequest.resolve({
+          items: [row("strict-stale", "Stale editor")],
+          nextBefore: null,
+        });
+        await staleRequest.promise;
+      };
+      const settleCurrent = async () => {
+        currentRequest.resolve({
+          items: [row("strict-current", "Current editor")],
+          nextBefore: null,
+        });
+        await currentRequest.promise;
+      };
+
+      if (settlementOrder === "stale-first") {
+        await act(settleStale);
+        expect(screen.queryByText("Stale editor")).toBeNull();
+        await act(settleCurrent);
+      } else {
+        await act(settleCurrent);
+        await act(settleStale);
+      }
+      expect(screen.getByText("Current editor")).toBeInTheDocument();
+      expect(screen.queryByText("Stale editor")).toBeNull();
+
+      act(() => {
+        intervalCallbacks[0]?.();
+        intervalCallbacks[1]?.();
+        intervalCallbacks[1]?.();
+      });
+      expect(activity).toHaveBeenCalledTimes(3);
+      expect(activity).toHaveBeenLastCalledWith(stableSession.docId, {
+        limit: 50,
+      });
+
+      cadenceRequest.resolve({
+        items: [row("strict-cadence", "Cadence editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.getByText("Cadence editor")).toBeInTheDocument();
+      expect(screen.queryByText("Current editor")).toBeNull();
+      expect(clearIntervalSpy).toHaveBeenCalledOnce();
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["restored mutation", "detach and reinsert"] as const)(
+    "rejects a Strict Mode successor after queued root history records a %s",
+    async (change) => {
+      const intervalCallbacks: Array<() => void> = [];
+      vi.spyOn(globalThis, "setInterval").mockImplementation((handler) => {
+        intervalCallbacks.push(handler as () => void);
+        return 401 as unknown as ReturnType<typeof setInterval>;
+      });
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, "clearInterval")
+        .mockImplementation(() => {});
+      const staleRequest = deferred<ActivityPageDto>();
+      activity.mockReturnValue(staleRequest.promise);
+      const onClose = vi.fn();
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      directRoots.add(root);
+      const onLayoutCleanup = () => {
+        const panel = screen.getByTestId("activity-panel");
+        if (change === "restored mutation") {
+          panel.setAttribute("data-replay-change", "temporary");
+          panel.removeAttribute("data-replay-change");
+          return;
+        }
+        const parent = panel.parentNode;
+        const next = panel.nextSibling;
+        if (!parent) throw new Error("Activity panel has no parent");
+        parent.removeChild(panel);
+        parent.insertBefore(panel, next);
+      };
+
+      act(() => {
+        root.render(
+          <StrictMode>
+            <StrictReplayBoundary onLayoutCleanup={onLayoutCleanup}>
+              <ActivityPanel
+                session={session(`strict-history-${change}`)}
+                onClose={onClose}
+              />
+            </StrictReplayBoundary>
+          </StrictMode>,
+        );
+      });
+
+      expect(activity).toHaveBeenCalledOnce();
+      expect(intervalCallbacks).toHaveLength(1);
+      expect(clearIntervalSpy).toHaveBeenCalledOnce();
+      act(() => {
+        intervalCallbacks[0]?.();
+        screen.getByRole("button", { name: "Close activity" }).click();
+      });
+      expect(activity).toHaveBeenCalledOnce();
+      expect(onClose).not.toHaveBeenCalled();
+
+      staleRequest.resolve({
+        items: [row("strict-history-stale", "History stale editor")],
+        nextBefore: null,
+      });
+      await act(async () => {});
+      expect(screen.queryByText("History stale editor")).toBeNull();
+      expect(
+        screen.getByTestId("activity-panel").querySelector(".animate-spin"),
+      ).not.toBeNull();
+    },
+  );
 
   it("rejects foreign, detached, disabled, replaced, wrong-action, and fabricated sources before exact controls claim once", async () => {
     const retryRequest = deferred<ActivityPageDto>();
@@ -1077,9 +1258,8 @@ describe("ActivityPanel exact action publications", () => {
       loadControl.click(loadEvent);
       loadControl.click(loadEvent);
     });
-    expect(activity).toHaveBeenCalledTimes(4);
-    expect(activity).toHaveBeenNthCalledWith(3, "exact-retry", { limit: 50 });
-    expect(activity).toHaveBeenNthCalledWith(4, "exact-page", {
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(activity).toHaveBeenNthCalledWith(3, "exact-page", {
       before: "page-cursor",
       limit: 50,
     });
@@ -1098,9 +1278,9 @@ describe("ActivityPanel exact action publications", () => {
       invoke(currentPageClose);
       invoke(currentPageClose);
     });
-    expect(retryClose).toHaveBeenCalledOnce();
+    expect(retryClose).not.toHaveBeenCalled();
     expect(pageClose).toHaveBeenCalledOnce();
-    expect(activity).toHaveBeenCalledTimes(4);
+    expect(activity).toHaveBeenCalledTimes(3);
     sibling.remove();
   });
 
@@ -1216,7 +1396,7 @@ describe("ActivityPanel exact action publications", () => {
     },
   );
 
-  it("rejects every replaced publication region and recovers only with the exact restored DOM", async () => {
+  it("keeps restored publication regions retired until React commits a fresh publication", async () => {
     const page = deferred<ActivityPageDto>();
     activity
       .mockResolvedValueOnce({
@@ -1224,7 +1404,11 @@ describe("ActivityPanel exact action publications", () => {
         nextBefore: "dom-cursor",
       })
       .mockReturnValueOnce(page.promise);
-    render(<ActivityPanel session={session("dom-replacement")} onClose={vi.fn()} />);
+    const stableSession = session("dom-replacement");
+    const onClose = vi.fn();
+    const rendered = render(
+      <ActivityPanel session={stableSession} onClose={onClose} />,
+    );
     await act(async () => {});
     const panel = screen.getByTestId("activity-panel");
     const header = panel.firstElementChild;
@@ -1263,6 +1447,19 @@ describe("ActivityPanel exact action publications", () => {
     act(() => {
       invoke(load);
       invoke(load);
+    });
+    expect(activity).toHaveBeenCalledOnce();
+
+    rendered.rerender(
+      <ActivityPanel session={stableSession} onClose={onClose} />,
+    );
+    const currentLoad = captureControl(
+      screen.getByRole("button", { name: "Load more" }),
+    );
+    act(() => {
+      invoke(load, currentLoad.element);
+      invoke(currentLoad);
+      invoke(currentLoad);
     });
     expect(activity).toHaveBeenCalledTimes(2);
     expect(activity).toHaveBeenLastCalledWith("dom-replacement", {
