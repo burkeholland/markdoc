@@ -400,17 +400,28 @@ function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
   const implementation = (
     event as unknown as Record<symbol, { isTrusted: boolean; view: Window }>
   )[implementationSymbol];
-  implementation.isTrusted = true;
   implementation.view = ownerWindow;
+  const descriptor = Object.getOwnPropertyDescriptor(
+    implementation,
+    "isTrusted",
+  );
+  if (!descriptor?.writable) {
+    throw new Error("Keyboard event trust slot was not writable");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
   expect(event.isTrusted).toBe(true);
   expect(event.view).toBe(ownerWindow);
 }
 
-function dispatchVersionDiffKey(
+function createVersionDiffKey(
   target: HTMLElement,
   key: "Home" | "End",
   init: KeyboardEventInit = {},
-  focus = true,
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Version diff owner window was unavailable");
@@ -421,6 +432,16 @@ function dispatchVersionDiffKey(
     ...init,
   });
   trustKeyboardEvent(event, ownerWindow);
+  return event;
+}
+
+function dispatchVersionDiffKey(
+  target: HTMLElement,
+  key: "Home" | "End",
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  const event = createVersionDiffKey(target, key, init);
   let allowed = true;
   act(() => {
     if (focus) target.focus();
@@ -805,7 +826,9 @@ describe("VersionDiffView · direct-root Strict Mode Home/End authority", () => 
     const controls = within(fixture.host);
     const iframe = document.createElement("iframe");
     document.body.append(iframe);
-    const foreignWindow = iframe.contentWindow;
+    const foreignWindow = iframe.contentWindow as
+      | (Window & typeof globalThis)
+      | null;
     if (!foreignWindow) throw new Error("Foreign keyboard realm was unavailable");
     root.focus();
     preventDefault.mockClear();
@@ -906,7 +929,7 @@ describe("VersionDiffView · direct-root Strict Mode Home/End authority", () => 
       const first = within(host).getByTestId("diff-hunk-1");
       const replacement = first.cloneNode(true);
       first.replaceWith(replacement);
-      replacement.replaceWith(first);
+      replacement.parentNode?.replaceChild(first, replacement);
     }],
   ] as const)(
     "keeps restored %s history inert and accepts a fresh keyed successor",
@@ -1083,12 +1106,7 @@ describe("VersionDiffView · direct-root Strict Mode Home/End authority", () => 
         target: root,
         key: "End",
         preventDefault,
-        nativeEvent: new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          key: "End",
-          view: window,
-        }),
+        nativeEvent: createVersionDiffKey(root, "End"),
       } as unknown as ReactKeyboardEvent<HTMLDivElement>);
       expect(preventDefault).not.toHaveBeenCalled();
       expect(scrollIntoView).not.toHaveBeenCalled();

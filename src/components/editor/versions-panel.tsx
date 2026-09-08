@@ -3889,7 +3889,7 @@ function captureVersionDiffKeyboardIntrinsics(
         return null;
       }
     },
-    defaultWasPrevented: (event) => {
+    defaultWasPrevented: (event: globalThis.Event) => {
       if (!descriptorsAreCurrent()) return false;
       try {
         return eventDefaultPrevented!.read(event);
@@ -3905,7 +3905,7 @@ function captureVersionDiffKeyboardIntrinsics(
         return undefined;
       }
     },
-    preventDefault: (event) => {
+    preventDefault: (event: globalThis.Event) => {
       if (!descriptorsAreCurrent()) return false;
       try {
         preventDefault!.invoke(event);
@@ -3914,7 +3914,7 @@ function captureVersionDiffKeyboardIntrinsics(
         return false;
       }
     },
-    reveal: (element) => {
+    reveal: (element: Element) => {
       if (!descriptorsAreCurrent()) return false;
       try {
         scrollIntoView!.invoke(element, { block: "center" });
@@ -3939,6 +3939,23 @@ function captureVersionDiffEventPath(
   }
   if (path[path.length - 1] !== ownerDocument) return null;
   return Object.freeze(path);
+}
+
+function versionDiffPathEndsAtOwnerWindow(
+  path: readonly EventTarget[],
+  ownerDocument: Document,
+) {
+  const expected = ownerDocument.defaultView;
+  const terminal = path[path.length - 1];
+  return (
+    terminal === expected ||
+    (typeof terminal === "object" &&
+      terminal !== null &&
+      "document" in terminal &&
+      terminal.document === ownerDocument &&
+      "window" in terminal &&
+      terminal.window === terminal)
+  );
 }
 
 function createVersionDiffPublication(
@@ -4130,9 +4147,9 @@ function createVersionDiffPublication(
       );
     const runtime: VersionDiffPublicationRuntime = Object.freeze({
       publication,
-      publish: (owners) => {
+      publish: (owners: readonly VersionDiffElementOwnerView[]) => {
         established = true;
-        replayRefs = owners.map((owner) => {
+        replayRefs = owners.map((owner: VersionDiffElementOwnerView) => {
           const element = owner.element();
           if (!element) {
             throw new Error(
@@ -4154,7 +4171,11 @@ function createVersionDiffPublication(
         layoutRetired = true;
         retire("layout");
       },
-      noteRef: (owner, element, previous) => {
+      noteRef: (
+        owner: VersionDiffElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
         if (!established) return;
         const proof = replayRefs.find((entry) => entry.owner === owner);
         if (!proof) {
@@ -4247,6 +4268,7 @@ function createVersionDiffPublication(
     } = nativeFacts;
     if (key !== "Home" && key !== "End") return null;
     if (
+      nativeFacts.view !== publication.ownerWindow ||
       nativeFacts.type !== "keydown" ||
       nativeFacts.phase === publication.ownerWindow.Event.NONE ||
       !nativeFacts.bubbles ||
@@ -4254,7 +4276,6 @@ function createVersionDiffPublication(
       nativeFacts.defaultPrevented ||
       nativeFacts.cancelBubble ||
       nativeFacts.isTrusted !== true ||
-      nativeFacts.view !== publication.ownerWindow ||
       ctrlKey ||
       altKey ||
       metaKey ||
@@ -4264,7 +4285,7 @@ function createVersionDiffPublication(
       target !== publication.root ||
       path.length !== publication.rootPath.length + 1 ||
       publication.rootPath.some((entry, index) => entry !== path[index]) ||
-      path[path.length - 1] !== publication.ownerWindow ||
+      !versionDiffPathEndsAtOwnerWindow(path, publication.ownerDocument) ||
       event.type !== "keydown" ||
       !event.bubbles ||
       !event.cancelable ||
