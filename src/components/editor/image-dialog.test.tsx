@@ -417,7 +417,7 @@ describe("ImageDialog upload lifecycle", () => {
         type: "image/png",
       });
       choose(retryFile);
-      expect(onUpload).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(onUpload).toHaveBeenCalledTimes(2));
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
       await act(async () => {
         retry.resolve({ url: "/api/assets/retry" });
@@ -2174,6 +2174,417 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       currentClose,
       currentSubmit,
       "https://example.com/rehomed-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("suppresses requestSubmit after the owned form leaves its content", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/rehomed-form.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const parent = form.parentNode;
+    const next = form.nextSibling;
+    if (!parent) throw new Error("Form parent was not rendered");
+    let nativeSubmit: Event | null = null;
+    const observeSubmit = (event: Event) => {
+      nativeSubmit = event;
+    };
+    const later = vi.fn();
+    form.addEventListener("submit", observeSubmit, {
+      capture: true,
+      once: true,
+    });
+    form.addEventListener("submit", later, { once: true });
+    document.body.append(form);
+    try {
+      act(() => form.requestSubmit());
+    } finally {
+      parent.insertBefore(form, next);
+    }
+
+    expect(nativeSubmit).not.toBeNull();
+    expect((nativeSubmit as Event | null)?.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/rehomed-form-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it("natively suppresses an owned form outside React delegation", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const rejectedClose = vi.fn();
+    const rejectedSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/proofless-form.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const parent = form.parentNode;
+    const next = form.nextSibling;
+    if (!parent) throw new Error("Form parent was not rendered");
+    const later = vi.fn();
+    form.addEventListener("submit", later, { once: true });
+    document.documentElement.append(form);
+    const submit = submitEvent();
+    const afterRender = submitEvent();
+    let dispatched = true;
+    let dispatchedAfterRender = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={rejectedClose}
+          onSubmit={rejectedSubmit}
+        />,
+      );
+      act(() => {
+        dispatchedAfterRender = form.dispatchEvent(afterRender);
+      });
+    } finally {
+      parent.insertBefore(form, next);
+    }
+
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(dispatchedAfterRender).toBe(false);
+    expect(afterRender.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+    expect(rejectedClose).not.toHaveBeenCalled();
+    expect(rejectedSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/proofless-form-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+    expect(rejectedClose).not.toHaveBeenCalled();
+    expect(rejectedSubmit).not.toHaveBeenCalled();
+  });
+
+  it("natively suppresses an owned form adopted by another document", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const rejectedClose = vi.fn();
+    const rejectedSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/adopted-form.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const parent = form.parentNode;
+    const next = form.nextSibling;
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignBody = frame.contentDocument?.body;
+    if (!parent || !foreignBody) {
+      throw new Error("Cross-document form target was unavailable");
+    }
+    const later = vi.fn();
+    form.addEventListener("submit", later, { once: true });
+    foreignBody.append(form);
+    const submit = submitEvent();
+    const afterRender = submitEvent();
+    let dispatched = true;
+    let dispatchedAfterRender = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={rejectedClose}
+          onSubmit={rejectedSubmit}
+        />,
+      );
+      act(() => {
+        dispatchedAfterRender = form.dispatchEvent(afterRender);
+      });
+    } finally {
+      parent.insertBefore(form, next);
+      frame.remove();
+    }
+
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(dispatchedAfterRender).toBe(false);
+    expect(afterRender.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+    expect(rejectedClose).not.toHaveBeenCalled();
+    expect(rejectedSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/adopted-form-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+    expect(rejectedClose).not.toHaveBeenCalled();
+    expect(rejectedSubmit).not.toHaveBeenCalled();
+  });
+
+  it("terminally stops a submit canceled at document capture without applying it", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/pre-canceled.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const preCancel = vi.fn((event: Event) => event.preventDefault());
+    const later = vi.fn();
+    document.addEventListener("submit", preCancel, {
+      capture: true,
+      once: true,
+    });
+    form.addEventListener("submit", later, { once: true });
+    const submit = submitEvent();
+    let dispatched = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+    } finally {
+      document.removeEventListener("submit", preCancel, true);
+    }
+
+    expect(preCancel).toHaveBeenCalledOnce();
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/pre-canceled-recovery.png",
+    );
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["parentElement", "throwing"],
+    ["parentElement", "deceptive"],
+    ["ownerDocument", "throwing"],
+    ["ownerDocument", "deceptive"],
+    ["isConnected", "throwing"],
+    ["isConnected", "deceptive"],
+    ["contains", "throwing"],
+    ["contains", "deceptive"],
+  ] as const)(
+    "does not invoke a %s own %s relation while establishing provenance",
+    async (relation, kind) => {
+      const staleClose = vi.fn();
+      const staleSubmit = vi.fn();
+      const rejectedClose = vi.fn();
+      const rejectedSubmit = vi.fn();
+      const currentClose = vi.fn();
+      const currentSubmit = vi.fn();
+      const view = await renderStrictRoot(
+        <ImageDialog
+          open
+          onOpenChange={staleClose}
+          onSubmit={staleSubmit}
+        />,
+      );
+      fireEvent.change(screen.getByTestId("image-url"), {
+        target: { value: "https://example.com/instrumented-provenance.png" },
+      });
+      await act(async () => {});
+      const form = imageForm();
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      const deceptiveValue =
+        relation === "parentElement"
+          ? form.parentElement
+          : relation === "ownerDocument"
+            ? document
+            : relation === "isConnected"
+              ? true
+              : Node.prototype.contains;
+      const readRelation = vi.fn(() => {
+        if (kind === "throwing") {
+          throw new Error(`Instrumented ${relation} must not run`);
+        }
+        return deceptiveValue;
+      });
+      Object.defineProperty(form, relation, {
+        configurable: true,
+        get: readRelation,
+      });
+      let submit: Event | null = null;
+      let dispatched = true;
+      const later = vi.fn();
+      try {
+        await view.render(
+          <ImageDialog
+            open
+            onOpenChange={rejectedClose}
+            onSubmit={rejectedSubmit}
+          />,
+        );
+        form.addEventListener("submit", later, { once: true });
+        const stagedSubmit = submitEvent();
+        submit = stagedSubmit;
+        act(() => {
+          dispatched = form.dispatchEvent(stagedSubmit);
+        });
+        fireEvent.click(cancel);
+      } finally {
+        Reflect.deleteProperty(form, relation);
+      }
+
+      expect(readRelation).not.toHaveBeenCalled();
+      expect(dispatched).toBe(false);
+      expect(submit?.defaultPrevented).toBe(true);
+      expect(later).not.toHaveBeenCalled();
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+      expect(rejectedClose).not.toHaveBeenCalled();
+      expect(rejectedSubmit).not.toHaveBeenCalled();
+
+      await submitCleanSuccess(
+        view,
+        currentClose,
+        currentSubmit,
+        `https://example.com/${relation}-${kind}-recovery.png`,
+      );
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleSubmit).not.toHaveBeenCalled();
+      expect(rejectedClose).not.toHaveBeenCalled();
+      expect(rejectedSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a document defaultView shadow installed after root capture", async () => {
+    const staleClose = vi.fn();
+    const staleSubmit = vi.fn();
+    const currentClose = vi.fn();
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={staleSubmit}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("image-url"), {
+      target: { value: "https://example.com/shadowed-document.png" },
+    });
+    await act(async () => {});
+    const form = imageForm();
+    const defaultViewDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "defaultView",
+    );
+    const readDefaultView = vi.fn(() => window);
+    const instrument = vi.fn(() => {
+      Object.defineProperty(document, "defaultView", {
+        configurable: true,
+        get: readDefaultView,
+      });
+    });
+    const later = vi.fn();
+    form.addEventListener("submit", instrument, {
+      capture: true,
+      once: true,
+    });
+    form.addEventListener("submit", later, { once: true });
+    const submit = submitEvent();
+    let dispatched = true;
+    try {
+      act(() => {
+        dispatched = form.dispatchEvent(submit);
+      });
+    } finally {
+      if (defaultViewDescriptor) {
+        Object.defineProperty(
+          document,
+          "defaultView",
+          defaultViewDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(document, "defaultView");
+      }
+    }
+
+    expect(instrument).toHaveBeenCalledOnce();
+    expect(readDefaultView).not.toHaveBeenCalled();
+    expect(dispatched).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
+    expect(later).not.toHaveBeenCalled();
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleSubmit).not.toHaveBeenCalled();
+
+    await submitCleanSuccess(
+      view,
+      currentClose,
+      currentSubmit,
+      "https://example.com/shadowed-document-recovery.png",
     );
     expect(staleClose).not.toHaveBeenCalled();
     expect(staleSubmit).not.toHaveBeenCalled();

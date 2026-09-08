@@ -907,6 +907,7 @@ interface ImageNativeRelationSnapshot {
 
 interface ImageNativeSubmitDomIntrinsics {
   readonly surfaceIsCanonical: () => boolean;
+  readonly nodeIsConnected: (node: Node) => boolean;
   readonly formIsConnected: () => boolean;
   readonly formOwnerDocument: () => Document | null;
   readonly formParentElement: () => Element | null;
@@ -923,6 +924,25 @@ interface ImageNativePropertySnapshot {
   readonly writable: boolean;
   readonly get: PropertyDescriptor["get"];
   readonly set: PropertyDescriptor["set"];
+}
+
+interface ImageNativeSubmitOwnerRealm {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly nodePrototype: object;
+  readonly documentPrototype: object;
+  readonly formPrototype: object;
+  readonly insertPrototype: object;
+  readonly relationProperties: readonly ImageNativePropertySnapshot[];
+  readonly documentSurface: readonly ImageNativeRelationSnapshot[];
+  readonly defaultViewProperty: ImageNativePropertySnapshot;
+  readonly insertFormProperty: ImageNativePropertySnapshot;
+  readonly nativeEvent: ImageNativeSubmitIntrinsics;
+  readonly isConnected: (node: Node) => boolean;
+  readonly ownerDocumentOf: (node: Node) => Document | null;
+  readonly parentElement: (node: Node) => Element | null;
+  readonly contains: (node: Node, other: Node) => boolean;
+  readonly insertForm: (insert: HTMLButtonElement) => HTMLFormElement | null;
 }
 
 interface ImageNativePrototypeSnapshot {
@@ -1261,6 +1281,8 @@ class ImagePublicationCoordinator {
 class ImageDismissalListener {
   #bridge: HTMLDivElement | null = null;
   #document: Document | null = null;
+  #submitOwnerRealms = new Set<ImageNativeSubmitOwnerRealm>();
+  #submitFormOwnerRealm: ImageNativeSubmitOwnerRealm | null = null;
   #listener: ((event: Event) => void) | null = null;
   #submitForm: HTMLFormElement | null = null;
   #submitListener: ((event: Event) => void) | null = null;
@@ -1272,7 +1294,15 @@ class ImageDismissalListener {
   constructor(private readonly coordinator: ImagePublicationCoordinator) {}
 
   attach(bridge: HTMLDivElement) {
-    const ownerDocument = bridge.ownerDocument;
+    const ownerRealm =
+      this.findSubmitOwnerRealm(bridge) ??
+      captureImageNativeSubmitOwnerRealm(bridge);
+    if (!ownerRealm) {
+      this.release();
+      return;
+    }
+    IMAGE_APPLY(IMAGE_SET_ADD, this.#submitOwnerRealms, [ownerRealm]);
+    const ownerDocument = ownerRealm.ownerDocument;
     this.#bridge = bridge;
     if (this.#document === ownerDocument && this.#listener) return;
     this.release();
@@ -1299,6 +1329,46 @@ class ImageDismissalListener {
     ownerDocument.addEventListener("click", listener, true);
   }
 
+  submitOwnerRealm(node: Node) {
+    try {
+      const current = this.#submitFormOwnerRealm;
+      if (current) {
+        return current.ownerDocumentOf(node) === current.ownerDocument
+          ? current
+          : null;
+      }
+      const ownerRealm =
+        this.findSubmitOwnerRealm(node) ??
+        captureImageNativeSubmitOwnerRealm(node);
+      if (ownerRealm) {
+        IMAGE_APPLY(IMAGE_SET_ADD, this.#submitOwnerRealms, [ownerRealm]);
+        this.#submitFormOwnerRealm = ownerRealm;
+      }
+      return ownerRealm;
+    } catch {
+      return null;
+    }
+  }
+
+  private findSubmitOwnerRealm(
+    node: Node,
+  ): ImageNativeSubmitOwnerRealm | null {
+    let matched: ImageNativeSubmitOwnerRealm | null = null;
+    IMAGE_APPLY(IMAGE_SET_FOR_EACH, this.#submitOwnerRealms, [
+      (realm: ImageNativeSubmitOwnerRealm) => {
+        if (matched) return;
+        try {
+          if (realm.ownerDocumentOf(node) === realm.ownerDocument) {
+            matched = realm;
+          }
+        } catch {
+          return;
+        }
+      },
+    ]);
+    return matched;
+  }
+
   attachSubmit(
     provenance: ImageSubmitProvenance,
     delivery: ImageSubmitTerminalDelivery,
@@ -1314,7 +1384,22 @@ class ImageDismissalListener {
       const proof = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, this.#submitProofs, [
         event,
       ]) as ImageSubmitCaptureProof | undefined;
-      if (!proof) return;
+      if (!proof) {
+        const current = this.#submitProvenance;
+        if (!current || current.form !== form) return;
+        try {
+          if (
+            imageExactNativeOwnedFormSubmitEvent(event, current, null) ===
+              event &&
+            current.nativeEvent.preventDefault(event)
+          ) {
+            current.nativeEvent.stopImmediatePropagation(event);
+          }
+        } catch {
+          return;
+        }
+        return;
+      }
       IMAGE_APPLY(IMAGE_WEAK_MAP_DELETE, this.#submitProofs, [event]);
       IMAGE_APPLY(IMAGE_SET_DELETE, this.#pendingSubmitProofs, [proof]);
       const intrinsics = proof.provenance.nativeEvent;
@@ -1337,9 +1422,9 @@ class ImageDismissalListener {
         intrinsics.releasePublicSurface(event);
       }
     };
+    form.addEventListener("submit", listener);
     this.#submitForm = form;
     this.#submitListener = listener;
-    form.addEventListener("submit", listener);
   }
 
   stageSubmit(proof: ImageSubmitCaptureProof) {
@@ -1378,8 +1463,38 @@ class ImageDismissalListener {
 
   releaseWhenDetached(bridge: HTMLDivElement) {
     queueMicrotask(() => {
-      if (this.#bridge === bridge && !bridge.isConnected) this.release();
+      if (this.#bridge !== bridge) return;
+      const ownerRealm = this.findSubmitOwnerRealm(bridge);
+      if (!ownerRealm || !ownerRealm.isConnected(bridge)) this.release();
     });
+  }
+
+  clearSubmit() {
+    this.releaseSubmit();
+  }
+
+  retainSubmitSuppression(form: HTMLFormElement | null) {
+    if (
+      !this.#submitForm ||
+      (form !== null && this.#submitForm !== form) ||
+      this.#submitProvenance?.form !== this.#submitForm ||
+      !this.#submitListener
+    ) {
+      return false;
+    }
+    this.#submitDelivery = null;
+    this.clearSubmitProofs();
+    return true;
+  }
+
+  private clearSubmitProofs() {
+    IMAGE_APPLY(IMAGE_SET_FOR_EACH, this.#pendingSubmitProofs, [
+      (proof: ImageSubmitCaptureProof) => {
+        proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
+      },
+    ]);
+    this.#submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
+    this.#pendingSubmitProofs = new Set<ImageSubmitCaptureProof>();
   }
 
   private releaseSubmit() {
@@ -1389,13 +1504,7 @@ class ImageDismissalListener {
     this.#submitListener = null;
     this.#submitProvenance = null;
     this.#submitDelivery = null;
-    IMAGE_APPLY(IMAGE_SET_FOR_EACH, this.#pendingSubmitProofs, [
-      (proof: ImageSubmitCaptureProof) => {
-        proof.provenance.nativeEvent.releasePublicSurface(proof.nativeEvent);
-      },
-    ]);
-    this.#submitProofs = new WeakMap<Event, ImageSubmitCaptureProof>();
-    this.#pendingSubmitProofs = new Set<ImageSubmitCaptureProof>();
+    this.clearSubmitProofs();
     if (form && listener) form.removeEventListener("submit", listener);
   }
 
@@ -2274,11 +2383,210 @@ function resolveImageDom(
   };
 }
 
+function captureImageNativeRelationProperty(
+  target: object,
+  key: PropertyKey,
+): ImageNativePropertySnapshot | null {
+  const descriptor = IMAGE_APPLY(
+    IMAGE_GET_OWN_PROPERTY_DESCRIPTOR,
+    null,
+    [target, key],
+  ) as PropertyDescriptor | undefined;
+  if (!descriptor) return null;
+  const data =
+    IMAGE_APPLY(IMAGE_HAS_OWN, descriptor, ["value"]) ||
+    IMAGE_APPLY(IMAGE_HAS_OWN, descriptor, ["writable"]);
+  return Object.freeze({
+    key,
+    kind: data ? "data" : "accessor",
+    configurable: descriptor.configurable === true,
+    enumerable: descriptor.enumerable === true,
+    value: data ? descriptor.value : undefined,
+    writable: data && descriptor.writable === true,
+    get: data ? undefined : descriptor.get,
+    set: data ? undefined : descriptor.set,
+  });
+}
+
+function imageNativeRelationPropertyMatches(
+  target: object,
+  expected: ImageNativePropertySnapshot,
+) {
+  const actual = captureImageNativeRelationProperty(target, expected.key);
+  return Boolean(
+    actual &&
+      actual.kind === expected.kind &&
+      actual.configurable === expected.configurable &&
+      actual.enumerable === expected.enumerable &&
+      actual.value === expected.value &&
+      actual.writable === expected.writable &&
+      actual.get === expected.get &&
+      actual.set === expected.set,
+  );
+}
+
+function captureImageNativeSubmitOwnerRealm(
+  node: Node,
+): ImageNativeSubmitOwnerRealm | null {
+  const getDescriptor = (target: object, key: PropertyKey) =>
+    IMAGE_APPLY(IMAGE_GET_OWN_PROPERTY_DESCRIPTOR, null, [
+      target,
+      key,
+    ]) as PropertyDescriptor | undefined;
+  const getPrototype = (target: object) =>
+    IMAGE_APPLY(IMAGE_GET_PROTOTYPE_OF, null, [target]) as object | null;
+  let nodePrototype: object | null = null;
+  let ownerDocumentGetter: PropertyDescriptor["get"];
+  let current: object | null = node;
+  for (let depth = 0; current && depth < 16; depth += 1) {
+    const parent = getPrototype(current);
+    const isConnected = getDescriptor(current, "isConnected")?.get;
+    const ownerDocument = getDescriptor(current, "ownerDocument")?.get;
+    const parentElement = getDescriptor(current, "parentElement")?.get;
+    const contains = getDescriptor(current, "contains")?.value;
+    if (
+      parent &&
+      typeof isConnected === "function" &&
+      typeof ownerDocument === "function" &&
+      typeof parentElement === "function" &&
+      typeof contains === "function" &&
+      typeof getDescriptor(parent, "addEventListener")?.value === "function" &&
+      typeof getDescriptor(parent, "removeEventListener")?.value ===
+        "function" &&
+      typeof getDescriptor(parent, "dispatchEvent")?.value === "function"
+    ) {
+      nodePrototype = current;
+      ownerDocumentGetter = ownerDocument;
+    }
+    current = parent;
+  }
+  if (!nodePrototype || !ownerDocumentGetter) return null;
+  const ownerDocument = IMAGE_APPLY(ownerDocumentGetter, node, []) as
+    | Document
+    | null;
+  if (!ownerDocument || typeof ownerDocument !== "object") return null;
+  let documentPrototype: object | null = null;
+  let defaultViewGetter: PropertyDescriptor["get"];
+  current = ownerDocument;
+  for (let depth = 0; current && depth < 16; depth += 1) {
+    const parent = getPrototype(current);
+    const defaultView = getDescriptor(current, "defaultView")?.get;
+    if (parent === nodePrototype && typeof defaultView === "function") {
+      documentPrototype = current;
+      defaultViewGetter = defaultView;
+    }
+    current = parent;
+  }
+  if (!documentPrototype || !defaultViewGetter) return null;
+  const ownerWindow = IMAGE_APPLY(defaultViewGetter, ownerDocument, []) as
+    | (Window & typeof globalThis)
+    | null;
+  if (
+    !ownerWindow ||
+    ownerWindow.Node.prototype !== nodePrototype ||
+    ownerWindow.Document.prototype !== documentPrototype
+  ) {
+    return null;
+  }
+  const formPrototype = ownerWindow.HTMLFormElement.prototype;
+  const insertPrototype = ownerWindow.HTMLButtonElement.prototype;
+  const documentSurface: ImageNativeRelationSnapshot[] = [];
+  current = ownerDocument;
+  while (current && documentSurface.length < 16) {
+    documentSurface.push(
+      Object.freeze({
+        target: current,
+        properties: Object.freeze([
+          captureImageNativeRelationProperty(current, "defaultView"),
+        ]),
+      }),
+    );
+    current = getPrototype(current);
+  }
+  if (current !== null) return null;
+  const isConnected = captureImageNativeRelationProperty(
+    nodePrototype,
+    "isConnected",
+  );
+  const ownerDocumentProperty = captureImageNativeRelationProperty(
+    nodePrototype,
+    "ownerDocument",
+  );
+  const parentElement = captureImageNativeRelationProperty(
+    nodePrototype,
+    "parentElement",
+  );
+  const contains = captureImageNativeRelationProperty(
+    nodePrototype,
+    "contains",
+  );
+  const defaultViewProperty = captureImageNativeRelationProperty(
+    documentPrototype,
+    "defaultView",
+  );
+  const insertFormProperty = captureImageNativeRelationProperty(
+    insertPrototype,
+    "form",
+  );
+  const nativeEvent = captureImageNativeSubmitIntrinsics(ownerWindow);
+  const isConnectedGetter = isConnected?.get;
+  const ownerDocumentIntrinsic = ownerDocumentProperty?.get;
+  const parentElementGetter = parentElement?.get;
+  const containsMethod = contains?.value;
+  const insertFormGetter = insertFormProperty?.get;
+  if (
+    !isConnected ||
+    typeof isConnectedGetter !== "function" ||
+    !ownerDocumentProperty ||
+    typeof ownerDocumentIntrinsic !== "function" ||
+    !parentElement ||
+    typeof parentElementGetter !== "function" ||
+    !contains ||
+    typeof containsMethod !== "function" ||
+    !defaultViewProperty ||
+    typeof defaultViewProperty.get !== "function" ||
+    !insertFormProperty ||
+    typeof insertFormGetter !== "function" ||
+    !nativeEvent
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    nodePrototype,
+    documentPrototype,
+    formPrototype,
+    insertPrototype,
+    relationProperties: Object.freeze([
+      isConnected,
+      ownerDocumentProperty,
+      parentElement,
+      contains,
+    ]),
+    documentSurface: Object.freeze(documentSurface),
+    defaultViewProperty,
+    insertFormProperty,
+    nativeEvent,
+    isConnected: (target: Node) =>
+      IMAGE_APPLY(isConnectedGetter, target, []) as boolean,
+    ownerDocumentOf: (target: Node) =>
+      IMAGE_APPLY(ownerDocumentIntrinsic, target, []) as Document | null,
+    parentElement: (target: Node) =>
+      IMAGE_APPLY(parentElementGetter, target, []) as Element | null,
+    contains: (target: Node, other: Node) =>
+      IMAGE_APPLY(containsMethod, target, [other]) as boolean,
+    insertForm: (target: HTMLButtonElement) =>
+      IMAGE_APPLY(insertFormGetter, target, []) as HTMLFormElement | null,
+  });
+}
+
 function captureImageNativeSubmitDomIntrinsics(
-  ownerWindow: Window & typeof globalThis,
+  realm: ImageNativeSubmitOwnerRealm,
   form: HTMLFormElement,
   insert: HTMLButtonElement,
 ): ImageNativeSubmitDomIntrinsics | null {
+  const { ownerWindow } = realm;
   const getDescriptor = (target: object, key: PropertyKey) =>
     IMAGE_APPLY(IMAGE_GET_OWN_PROPERTY_DESCRIPTOR, null, [
       target,
@@ -2376,52 +2684,107 @@ function captureImageNativeSubmitDomIntrinsics(
     "contains",
   ]);
   const insertKeys = Object.freeze(["form"]);
-  const formSurface = captureSurface(form, formKeys);
-  const insertSurface = captureSurface(insert, insertKeys);
-  const isConnected = getDescriptor(
-    ownerWindow.Node.prototype,
-    "isConnected",
-  )?.get;
-  const ownerDocument = getDescriptor(
-    ownerWindow.Node.prototype,
-    "ownerDocument",
-  )?.get;
-  const parentElement = getDescriptor(
-    ownerWindow.Node.prototype,
-    "parentElement",
-  )?.get;
-  const contains = getDescriptor(
-    ownerWindow.Node.prototype,
-    "contains",
-  )?.value;
-  const insertForm = getDescriptor(
-    ownerWindow.HTMLButtonElement.prototype,
-    "form",
-  )?.get;
+  const documentKeys = Object.freeze(["defaultView"]);
+  const formPrototype = realm.formPrototype;
+  const insertPrototype = realm.insertPrototype;
+  const nodePrototype = realm.nodePrototype;
+  const chainIncludes = (target: object, expected: object) => {
+    let current: object | null = target;
+    for (let depth = 0; current && depth < 16; depth += 1) {
+      if (current === expected) return true;
+      current = getPrototype(current);
+    }
+    return false;
+  };
   if (
-    !formSurface ||
-    !insertSurface ||
-    typeof isConnected !== "function" ||
-    typeof ownerDocument !== "function" ||
-    typeof parentElement !== "function" ||
-    typeof contains !== "function" ||
-    typeof insertForm !== "function"
+    !chainIncludes(form, formPrototype) ||
+    !chainIncludes(insert, insertPrototype)
+  ) {
+    return null;
+  }
+  const propertiesAreAbsent = (
+    target: object,
+    keys: readonly PropertyKey[],
+  ) => {
+    for (let index = 0; index < keys.length; index += 1) {
+      if (getDescriptor(target, keys[index])) return false;
+    }
+    return true;
+  };
+  let relationPrototype: object | null = formPrototype;
+  let canonicalRelationSlots = true;
+  while (relationPrototype && relationPrototype !== nodePrototype) {
+    if (!propertiesAreAbsent(relationPrototype, formKeys)) {
+      canonicalRelationSlots = false;
+    }
+    relationPrototype = getPrototype(relationPrototype);
+  }
+  if (relationPrototype !== nodePrototype) return null;
+  const canonicalFormSurface = captureSurface(formPrototype, formKeys);
+  const canonicalInsertSurface = captureSurface(insertPrototype, insertKeys);
+  const realmIsCanonical = () => {
+    if (
+      ownerWindow.Node.prototype !== nodePrototype ||
+      ownerWindow.Document.prototype !== realm.documentPrototype ||
+      ownerWindow.HTMLFormElement.prototype !== formPrototype ||
+      ownerWindow.HTMLButtonElement.prototype !== insertPrototype ||
+      !surfaceMatches(
+        realm.ownerDocument,
+        documentKeys,
+        realm.documentSurface,
+      ) ||
+      !imageNativeRelationPropertyMatches(
+        realm.documentPrototype,
+        realm.defaultViewProperty,
+      ) ||
+      !imageNativeRelationPropertyMatches(
+        insertPrototype,
+        realm.insertFormProperty,
+      )
+    ) {
+      return false;
+    }
+    for (
+      let index = 0;
+      index < realm.relationProperties.length;
+      index += 1
+    ) {
+      if (
+        !imageNativeRelationPropertyMatches(
+          nodePrototype,
+          realm.relationProperties[index],
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (
+    !canonicalFormSurface ||
+    !canonicalInsertSurface ||
+    !surfaceMatches(formPrototype, formKeys, canonicalFormSurface) ||
+    !surfaceMatches(insertPrototype, insertKeys, canonicalInsertSurface)
   ) {
     return null;
   }
   return Object.freeze({
     surfaceIsCanonical: () =>
-      surfaceMatches(form, formKeys, formSurface) &&
-      surfaceMatches(insert, insertKeys, insertSurface),
-    formIsConnected: () => IMAGE_APPLY(isConnected, form, []) as boolean,
-    formOwnerDocument: () =>
-      IMAGE_APPLY(ownerDocument, form, []) as Document | null,
-    formParentElement: () =>
-      IMAGE_APPLY(parentElement, form, []) as Element | null,
-    formContains: (node: Node) =>
-      IMAGE_APPLY(contains, form, [node]) as boolean,
-    insertForm: () =>
-      IMAGE_APPLY(insertForm, insert, []) as HTMLFormElement | null,
+      realmIsCanonical() &&
+      canonicalRelationSlots &&
+      getPrototype(form) === formPrototype &&
+      getPrototype(insert) === insertPrototype &&
+      propertiesAreAbsent(form, formKeys) &&
+      propertiesAreAbsent(insert, insertKeys) &&
+      surfaceMatches(formPrototype, formKeys, canonicalFormSurface) &&
+      surfaceMatches(insertPrototype, insertKeys, canonicalInsertSurface),
+    nodeIsConnected: (node: Node) =>
+      node === form ? realm.isConnected(node) : node.isConnected,
+    formIsConnected: () => realm.isConnected(form),
+    formOwnerDocument: () => realm.ownerDocumentOf(form),
+    formParentElement: () => realm.parentElement(form),
+    formContains: (node: Node) => realm.contains(form, node),
+    insertForm: () => realm.insertForm(insert),
   });
 }
 
@@ -2795,23 +3158,24 @@ function imageExactNativeError(
 function imageExactNativeOwnedFormSubmitEvent(
   nativeEvent: Event,
   provenance: ImageSubmitProvenance,
-  expectedDefaultPrevented: boolean,
+  expectedDefaultPrevented: boolean | null,
 ) {
-  const { form, content } = provenance;
+  const { form, nativeDom } = provenance;
   const intrinsics = provenance.nativeEvent;
   if (!intrinsics.isEvent(nativeEvent)) return null;
   const path = intrinsics.composedPath(nativeEvent);
+  const currentOwnerDocument = nativeDom.formOwnerDocument();
   if (
+    !currentOwnerDocument ||
     intrinsics.eventPhase(nativeEvent) === 0 ||
     intrinsics.type(nativeEvent) !== "submit" ||
-    intrinsics.defaultPrevented(nativeEvent) !== expectedDefaultPrevented ||
+    (expectedDefaultPrevented !== null &&
+      intrinsics.defaultPrevented(nativeEvent) !== expectedDefaultPrevented) ||
     !intrinsics.bubbles(nativeEvent) ||
     !intrinsics.cancelable(nativeEvent) ||
     intrinsics.target(nativeEvent) !== form ||
     !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [form]) ||
-    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [content]) ||
-    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [provenance.ownerDocument]) ||
-    !imageSnapshotContains(provenance.contentTree, form)
+    !IMAGE_APPLY(IMAGE_ARRAY_INCLUDES, path, [currentOwnerDocument])
   ) {
     return null;
   }
@@ -2854,7 +3218,7 @@ function imageExactNativeSubmitEvent(
 function imageExactNativeSubmit(
   event: React.FormEvent<HTMLFormElement>,
   provenance: ImageSubmitProvenance,
-  expectedDefaultPrevented: boolean,
+  expectedDefaultPrevented: boolean | null,
 ) {
   const nativeEvent = event.nativeEvent;
   const wrapper = event as React.FormEvent<HTMLFormElement> & {
@@ -2881,45 +3245,54 @@ function imageSubmitProvenance(
   authority: ImageAuthority,
   controls: ImageControls,
   revision: number,
+  dismissalListener: ImageDismissalListener,
 ): ImageSubmitProvenance | null {
   const form = controls.form.owner.element();
   const insert = controls.insert.owner.element();
-  const content = form?.parentElement;
-  const ownerWindow = content?.ownerDocument.defaultView;
-  const nativeEvent = ownerWindow
-    ? captureImageNativeSubmitIntrinsics(ownerWindow)
-    : null;
-  const nativeDom =
-    ownerWindow &&
-    form instanceof ownerWindow.HTMLFormElement &&
-    insert instanceof ownerWindow.HTMLButtonElement
-      ? captureImageNativeSubmitDomIntrinsics(ownerWindow, form, insert)
-      : null;
-  if (
-    !authority.open ||
-    !ownerWindow ||
-    !nativeEvent ||
-    !nativeDom ||
-    !(form instanceof ownerWindow.HTMLFormElement) ||
-    !(insert instanceof ownerWindow.HTMLButtonElement) ||
-    !(content instanceof ownerWindow.HTMLDivElement) ||
-    !form.isConnected ||
-    form.parentElement !== content ||
-    !form.contains(insert)
-  ) {
+  if (!authority.open || !form || !insert) {
     return null;
   }
-  return Object.freeze({
-    authority,
-    ownerDocument: content.ownerDocument,
-    form,
-    insert,
-    content,
-    contentTree: imageSnapshotDom(content),
-    revision,
-    nativeEvent,
-    nativeDom,
-  });
+  try {
+    const ownerRealm = dismissalListener.submitOwnerRealm(form);
+    if (!ownerRealm) return null;
+    const { ownerDocument, ownerWindow } = ownerRealm;
+    const nativeDom = captureImageNativeSubmitDomIntrinsics(
+      ownerRealm,
+      form,
+      insert,
+    );
+    if (!nativeDom) return null;
+    const content = nativeDom.formParentElement();
+    const contentIsExact = (
+      value: Element | null,
+    ): value is HTMLDivElement =>
+      value !== null &&
+      IMAGE_APPLY(IMAGE_GET_PROTOTYPE_OF, null, [value]) ===
+        ownerWindow.HTMLDivElement.prototype;
+    if (
+      nativeDom.formOwnerDocument() !== ownerDocument ||
+      !contentIsExact(content) ||
+      !nativeDom.formIsConnected() ||
+      nativeDom.formParentElement() !== content ||
+      nativeDom.insertForm() !== form ||
+      !nativeDom.formContains(insert)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      authority,
+      ownerDocument,
+      form,
+      insert,
+      content,
+      contentTree: imageSnapshotDom(content),
+      revision,
+      nativeEvent: ownerRealm.nativeEvent,
+      nativeDom,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function imageExactNativeDismissal(
@@ -3005,6 +3378,7 @@ function createImagePublicationRuntime(
   coordinator: ImagePublicationCoordinator,
   dom: ImageDom,
   controls: ImageControls,
+  submitDom: ImageNativeSubmitDomIntrinsics,
   authorityIsCurrent: () => boolean,
   authorizeDismissal: (
     publication: ImagePublication,
@@ -3041,12 +3415,13 @@ function createImagePublicationRuntime(
     replayRefs.every(
       (entry) =>
         entry.owner.element() === entry.element &&
-        (!includeConnectivity || entry.element.isConnected),
+        (!includeConnectivity || submitDom.nodeIsConnected(entry.element)),
     );
   const currentShapeMatches = (
     changing: "url" | "alt" | "file" | null = null,
   ) => {
     if (
+      !submitDom.surfaceIsCanonical() ||
       !guard?.isClean(changing) ||
       !refsAreCurrent(true) ||
       !committedDomMatches(changing) ||
@@ -3071,6 +3446,7 @@ function createImagePublicationRuntime(
   const committedDomMatches = (
     changing: "url" | "alt" | "file" | null = null,
   ) =>
+    submitDom.surfaceIsCanonical() &&
     dom.content === contentTree.node &&
     dom.overlay === overlayTree.node &&
     imagePlacementMatches(dom.bridge, dom.overlay, dom.content, placement) &&
@@ -3114,6 +3490,7 @@ function createImagePublicationRuntime(
     },
   });
   const refsHaveExactReplay = () =>
+    submitDom.surfaceIsCanonical() &&
     !invalidReplay &&
     replayRefs.length > 0 &&
     replayRefs.every(
@@ -3121,9 +3498,10 @@ function createImagePublicationRuntime(
         entry.detached &&
         entry.reattached &&
         entry.owner.element() === entry.element &&
-        entry.element.isConnected,
+        submitDom.nodeIsConnected(entry.element),
     );
   const partialReplayIsCurrent = () =>
+    submitDom.surfaceIsCanonical() &&
     retired &&
     retirement === "element" &&
     established &&
@@ -3133,7 +3511,7 @@ function createImagePublicationRuntime(
     replayRefs.every(
       (entry) =>
         entry.owner.element() === entry.element &&
-        entry.element.isConnected,
+        submitDom.nodeIsConnected(entry.element),
     ) &&
     currentDomMatches();
   return Object.freeze({
@@ -3191,12 +3569,17 @@ function createImagePublicationRuntime(
       previous: Element | null,
     ) => {
       if (!established) return;
+      if (!submitDom.surfaceIsCanonical()) {
+        invalidReplay = true;
+        return;
+      }
       const proof = replayRefs.find((entry) => entry.owner === owner);
       if (!proof) return;
+      const proofIsConnected = submitDom.nodeIsConnected(proof.element);
       if (
         element === null &&
         previous === proof.element &&
-        proof.element.isConnected
+        proofIsConnected
       ) {
         proof.detached = true;
         proof.reattached = false;
@@ -3204,7 +3587,7 @@ function createImagePublicationRuntime(
         element === proof.element &&
         previous === null &&
         proof.detached &&
-        proof.element.isConnected
+        proofIsConnected
       ) {
         proof.reattached = true;
       } else if (element !== previous) {
@@ -3678,6 +4061,7 @@ function createImagePresentation(
       authority,
       controls,
       submitRevision,
+      dismissalListener,
     );
     if (nextSubmitProvenance) {
       submitProvenance = nextSubmitProvenance;
@@ -3685,7 +4069,16 @@ function createImagePresentation(
         nextSubmitProvenance,
         deliverFormSubmit,
       );
+    } else {
+      submitProvenance = null;
+      if (
+        !dismissalListener.retainSubmitSuppression(form.owner.element())
+      ) {
+        dismissalListener.clearSubmit();
+      }
+      return undefined;
     }
+    if (!nextSubmitProvenance.nativeDom.surfaceIsCanonical()) return undefined;
     if (!coordinator.acceptsAuthority(authority)) return undefined;
     const dom = exactDom();
     if (!factsAreCurrent() || !dom || replayRejected) {
@@ -3707,6 +4100,7 @@ function createImagePresentation(
       coordinator,
       dom,
       controls,
+      nextSubmitProvenance.nativeDom,
       factsAreCurrent,
       authorizeNativeDismissal,
       expectedOwners(),
@@ -3724,6 +4118,7 @@ function createImagePresentation(
       authority,
       controls,
       submitRevision,
+      dismissalListener,
     );
     if (replacementSubmitProvenance) {
       submitProvenance = replacementSubmitProvenance;
@@ -3731,6 +4126,25 @@ function createImagePresentation(
         replacementSubmitProvenance,
         deliverFormSubmit,
       );
+    } else {
+      submitProvenance = null;
+      if (
+        !dismissalListener.retainSubmitSuppression(form.owner.element())
+      ) {
+        dismissalListener.clearSubmit();
+      }
+      replayValidation.reject();
+      runtime.retireForElement();
+      replayRejected = true;
+      abandonDeferredUpload();
+      return undefined;
+    }
+    if (!replacementSubmitProvenance.nativeDom.surfaceIsCanonical()) {
+      replayValidation.reject();
+      runtime.retireForElement();
+      replayRejected = true;
+      abandonDeferredUpload();
+      return undefined;
     }
     if (!replayValidation.complete()) {
       runtime.retireForElement();
@@ -4127,7 +4541,10 @@ function createImagePresentation(
     ) {
       return;
     }
-    const nativeEvent = imageExactNativeSubmit(event, provenance, false);
+    const nativeEvent = imageExactNativeSubmit(event, provenance, null);
+    const wasAlreadyPrevented = nativeEvent
+      ? provenance.nativeEvent.defaultPrevented(nativeEvent)
+      : false;
     if (!nativeEvent || !provenance.nativeEvent.preventDefault(nativeEvent)) {
       return;
     }
@@ -4139,6 +4556,7 @@ function createImagePresentation(
         const current = coordinator.active();
         if (
           settlementIsClean &&
+          !wasAlreadyPrevented &&
           current === runtime.publication &&
           coordinator.isCurrent(current)
         ) {
