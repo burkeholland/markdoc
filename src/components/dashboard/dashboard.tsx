@@ -1369,10 +1369,7 @@ function createTemplateGridPublication(
             true,
           );
           terminalClickBarriers.delete(barrier);
-          if (
-            nativeClick === capturedNative &&
-            reactBubbleClick === proof
-          ) {
+          if (nativeClick === capturedNative) {
             deliver(terminal);
           }
           if (nativeClick === capturedNative) {

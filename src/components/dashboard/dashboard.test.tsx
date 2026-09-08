@@ -570,7 +570,11 @@ function dispatchTemplateClick(
     original: CapturedReactClick,
     event: unknown,
   ) => void,
-) {
+): {
+  handler: CapturedReactClick;
+  reactEvent: unknown;
+  nativeEvent: MouseEvent;
+} {
   let handler: CapturedReactClick | null = null;
   let reactEvent: unknown = null;
   const restore = interceptTemplateActivation(button, (original, event) => {
@@ -1852,6 +1856,84 @@ describe("TemplateGrid publication ownership", () => {
           freshDispatched = secondButton.dispatchEvent(freshSameStackEvent);
         });
         expect(freshDispatched).toBe(false);
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(first);
+
+        await act(async () => {
+          root.render(renderGrid("recovery"));
+        });
+        await act(async () => {
+          const recoveryButton =
+            ownerDocument.querySelector<HTMLButtonElement>(
+              `[data-testid="template-${second.id}"]`,
+            );
+          if (!recoveryButton) {
+            throw new Error("The recovery button was not rendered");
+          }
+          recoveryButton.click();
+        });
+        expect(onPick).toHaveBeenCalledTimes(2);
+        expect(onPick).toHaveBeenLastCalledWith(second);
+      } finally {
+        await act(async () => root.unmount());
+        frame.remove();
+      }
+    },
+  );
+
+  it.each(["container", "document"] as const)(
+    "preserves a completed %s-root attempt when its button handler is replayed before finalization",
+    async (rootKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const first = PICKER_TEMPLATES[0];
+      const second = PICKER_TEMPLATES[1];
+      const renderGrid = (key: string) =>
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid key={key} onPick={onPick} busy={null} />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid key={key} onPick={onPick} busy={null} />
+          </StrictMode>
+        );
+
+      try {
+        await act(async () => {
+          root.render(renderGrid("replay"));
+        });
+        const button = ownerDocument.querySelector<HTMLButtonElement>(
+          `[data-testid="template-${first.id}"]`,
+        );
+        if (!button) {
+          throw new Error("The handler-replay button was not rendered");
+        }
+        act(() => {
+          const completed = dispatchTemplateClick(button);
+          completed.handler(completed.reactEvent);
+        });
+        await act(async () => {});
         expect(onPick).toHaveBeenCalledTimes(1);
         expect(onPick).toHaveBeenLastCalledWith(first);
 
