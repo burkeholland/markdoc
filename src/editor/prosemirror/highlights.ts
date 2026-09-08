@@ -237,7 +237,7 @@ function richHighlightIsCurrent(view: EditorView, target: PositionedHighlightTar
     .some((decoration) => decoration.from <= target.from && target.to <= decoration.to);
 }
 
-function isExactPointerSelectionUpdate(
+function isPointerSelectionUpdateInsideTarget(
   currentView: EditorView,
   previousState: EditorView["state"],
   target: PositionedHighlightTarget,
@@ -249,8 +249,11 @@ function isExactPointerSelectionUpdate(
     !!current &&
     current.selectionVersion === previous.selectionVersion + 1 &&
     current.pointerSelectionVersion === previous.pointerSelectionVersion + 1 &&
+    selection.ranges.length === 1 &&
     selection.empty &&
-    selection.from === target.editorPosition;
+    selection.from >= target.from &&
+    selection.from < target.to &&
+    richHighlightIsCurrent(currentView, target);
 }
 
 function installRichHighlightActivation(
@@ -425,7 +428,7 @@ function installRichHighlightActivation(
         press?.released &&
         pending.target === press.target &&
         !pending.selection.eq(currentView.state.selection) &&
-        isExactPointerSelectionUpdate(currentView, previousState, pending.target)
+        isPointerSelectionUpdateInsideTarget(currentView, previousState, pending.target)
       ) {
         pending.selection = currentView.state.selection;
       }
