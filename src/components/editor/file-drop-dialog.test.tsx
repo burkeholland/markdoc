@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { useEffect, useLayoutEffect, type ReactNode, type RefCallback } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -48,6 +55,25 @@ class ControlledFileReader {
   reject(error: Error) {
     this.error = error;
     this.onerror?.();
+  }
+}
+
+interface ControlledPointerEventInit extends MouseEventInit {
+  pointerId?: number;
+  pointerType?: string;
+  isPrimary?: boolean;
+}
+
+class ControlledPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: ControlledPointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
   }
 }
 
@@ -105,7 +131,7 @@ interface DirectView {
   root: Root;
 }
 
-type OptionHandler = (event: { currentTarget: HTMLButtonElement }) => void;
+type OptionHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 
 interface CapturedOption {
   element: HTMLButtonElement;
@@ -116,6 +142,86 @@ interface CapturedOption {
 const directViews: DirectView[] = [];
 const mutationObservers: MutationObserver[] = [];
 
+interface DocumentListenerRecord {
+  readonly type: string;
+  readonly listener: EventListenerOrEventListenerObject;
+  readonly capture: boolean;
+  active: boolean;
+}
+
+function captureDocumentDismissalListeners() {
+  const records: DocumentListenerRecord[] = [];
+  const nativeAdd = document.addEventListener.bind(document);
+  const nativeRemove = document.removeEventListener.bind(document);
+  vi.spyOn(document, "addEventListener").mockImplementation(
+    (type, listener, options) => {
+      records.push({
+        type,
+        listener,
+        capture:
+          typeof options === "boolean"
+            ? options
+            : Boolean(options?.capture),
+        active: true,
+      });
+      nativeAdd(type, listener, options);
+    },
+  );
+  vi.spyOn(document, "removeEventListener").mockImplementation(
+    (type, listener, options) => {
+      const capture =
+        typeof options === "boolean" ? options : Boolean(options?.capture);
+      const record = records.findLast(
+        (candidate) =>
+          candidate.active &&
+          candidate.type === type &&
+          candidate.listener === listener &&
+          candidate.capture === capture,
+      );
+      if (record) record.active = false;
+      nativeRemove(type, listener, options);
+    },
+  );
+  const active = (type: string) =>
+    records.filter((record) => record.active && record.type === type);
+  return {
+    componentCapture() {
+      const pointerListeners = active("pointerdown");
+      const clickListeners = active("click");
+      const record = active("keydown").find(
+        ({ listener }) =>
+          pointerListeners.some(
+            (candidate) => candidate.listener === listener,
+          ) &&
+          clickListeners.some(
+            (candidate) => candidate.listener === listener,
+          ),
+      );
+      if (!record) {
+        throw new Error(
+          "Dropped-file document dismissal listener was not registered",
+        );
+      }
+      return record.listener;
+    },
+    suspend(...types: string[]) {
+      for (const record of records) {
+        if (!record.active || !types.includes(record.type)) continue;
+        nativeRemove(record.type, record.listener, record.capture);
+        record.active = false;
+      }
+    },
+  };
+}
+
+function invokeEventListener(
+  listener: EventListenerOrEventListenerObject,
+  event: Event,
+) {
+  if (typeof listener === "function") listener.call(document, event);
+  else listener.handleEvent(event);
+}
+
 function renderDirect(node: ReactNode): DirectView {
   const host = document.createElement("div");
   document.body.append(host);
@@ -123,6 +229,14 @@ function renderDirect(node: ReactNode): DirectView {
   directViews.push(view);
   act(() => view.root.render(node));
   return view;
+}
+
+function renderStrict(props: FileDropDialogProps) {
+  return renderDirect(
+    <StrictMode>
+      <FileDropDialog {...props} />
+    </StrictMode>,
+  );
 }
 
 function observeMutations(target: Node = document.body): MutationObserver {
@@ -141,6 +255,32 @@ function reactProp<T>(element: HTMLElement, name: string): T {
   return value as T;
 }
 
+function setReactProp<T>(element: HTMLElement, name: string, value: T) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const attached = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const props = attached[propsKey];
+  if (!props) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  attached[propsKey] = { ...props, [name]: value };
+}
+
+function cloneSyntheticClick(
+  event: ReactMouseEvent<HTMLButtonElement>,
+  overrides: Partial<ReactMouseEvent<HTMLButtonElement>> = {},
+  syntheticConstructor?: new () => object,
+) {
+  const prototype = syntheticConstructor
+    ? Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: syntheticConstructor },
+      })
+    : Object.getPrototypeOf(event);
+  return Object.assign(
+    Object.create(prototype) as ReactMouseEvent<HTMLButtonElement>,
+    event,
+    overrides,
+  );
+}
+
 function captureOption(action: "replace" | "insert" | "new"): CapturedOption {
   const element = screen.getByTestId(`file-drop-${action}`) as HTMLButtonElement;
   return {
@@ -157,7 +297,15 @@ function captureOpenChange() {
 }
 
 function invoke(option: CapturedOption, currentTarget = option.element) {
-  option.onClick({ currentTarget });
+  option.onClick({ currentTarget } as ReactMouseEvent<HTMLButtonElement>);
+}
+
+function activate(option: CapturedOption) {
+  fireEvent.click(option.element);
+}
+
+function closeButton() {
+  return screen.getByRole("button", { name: "Close" });
 }
 
 function InitialDialog(props: FileDropDialogProps) {
@@ -200,6 +348,7 @@ function resetMock(mock: Mock) {
 beforeEach(() => {
   ControlledFileReader.reads = [];
   vi.stubGlobal("FileReader", ControlledFileReader);
+  vi.stubGlobal("PointerEvent", ControlledPointerEvent);
   navigation.router = { push };
   resetMock(push);
   dialogOpenChanges.length = 0;
@@ -423,7 +572,6 @@ describe("FileDropDialog action ownership", () => {
       const selected = options[action];
       const competitors = Object.values(options).filter((option) => option !== selected);
       const foreign = document.createElement("button");
-      document.body.append(foreign);
 
       act(() => {
         for (const option of competitors) invoke(selected, option.element);
@@ -433,8 +581,8 @@ describe("FileDropDialog action ownership", () => {
       expect(uploadImportFiles).not.toHaveBeenCalled();
 
       act(() => {
-        invoke(selected);
-        invoke(selected);
+        activate(selected);
+        activate(selected);
         for (const option of competitors) invoke(option);
       });
       if (action === "new") {
@@ -461,7 +609,6 @@ describe("FileDropDialog action ownership", () => {
       }
       expect(handlers.onClose).toHaveBeenCalledOnce();
       expect(handlers.onError).not.toHaveBeenCalled();
-      foreign.remove();
     },
   );
 
@@ -484,7 +631,7 @@ describe("FileDropDialog action ownership", () => {
     expect(ControlledFileReader.reads).toHaveLength(0);
     expect(uploadImportFiles).not.toHaveBeenCalled();
 
-    act(() => invoke(open));
+    act(() => activate(open));
     expect(uploadImportFiles).toHaveBeenCalledExactlyOnceWith([pending.file]);
     await act(async () => upload.resolve([{ id: "readonly-new", title: "Readonly", warnings: [] }]));
     expect(push).toHaveBeenCalledExactlyOnceWith("/d/readonly-new");
@@ -574,7 +721,7 @@ describe("FileDropDialog action ownership", () => {
       expect(observer.takeRecords()).toHaveLength(0);
       expect(focus).not.toHaveBeenCalled();
 
-      act(() => invoke(current));
+      act(() => activate(current));
       expect(uploadImportFiles).toHaveBeenCalledExactlyOnceWith([currentPending.file]);
       await act(async () => upload.resolve([{ id: `current-${replacement}`, title: "Current", warnings: [] }]));
       expect(currentPush).toHaveBeenCalledExactlyOnceWith(`/d/current-${replacement}`);
@@ -589,12 +736,12 @@ describe("FileDropDialog action ownership", () => {
     const secondHandlers = callbacks();
     const view = renderDirect(<FileDropDialog {...propsFor(pending, firstHandlers)} />);
     const staleReplace = captureOption("replace");
-    act(() => invoke(staleReplace));
+    act(() => activate(staleReplace));
     expect(ControlledFileReader.reads).toHaveLength(1);
 
     act(() => view.root.render(<FileDropDialog {...propsFor(pending, secondHandlers)} />));
     const currentInsert = captureOption("insert");
-    act(() => invoke(currentInsert));
+    act(() => activate(currentInsert));
     expect(ControlledFileReader.reads).toHaveLength(2);
 
     await resolveRead(0, "Retired success");
@@ -618,11 +765,11 @@ describe("FileDropDialog action ownership", () => {
     const firstHandlers = callbacks();
     const secondHandlers = callbacks();
     const view = renderDirect(<FileDropDialog {...propsFor(pending, firstHandlers)} />);
-    act(() => invoke(captureOption("replace")));
+    act(() => activate(captureOption("replace")));
 
     act(() => view.root.render(<FileDropDialog {...propsFor(pending, secondHandlers)} />));
     const current = captureOption("insert");
-    act(() => invoke(current));
+    act(() => activate(current));
     await rejectRead(0, new Error("Retired failure"));
     expect(firstHandlers.onError).not.toHaveBeenCalled();
     expect(secondHandlers.onError).not.toHaveBeenCalled();
@@ -647,13 +794,13 @@ describe("FileDropDialog action ownership", () => {
       uploadImportFiles.mockReturnValueOnce(firstUpload.promise).mockReturnValueOnce(secondUpload.promise);
       const view = renderDirect(<FileDropDialog {...propsFor(pending, handlers)} />);
       const stale = captureOption("new");
-      act(() => invoke(stale));
+      act(() => activate(stale));
 
       const secondPush = methodKind === "reused method" ? firstPush : vi.fn();
       navigation.router = { push: secondPush };
       act(() => view.root.render(<FileDropDialog {...propsFor(pending, handlers, false)} />));
       const current = captureOption("new");
-      act(() => invoke(current));
+      act(() => activate(current));
       expect(uploadImportFiles).toHaveBeenCalledTimes(2);
 
       await act(async () => firstUpload.resolve([{ id: "retired-router", title: "Retired", warnings: [] }]));
@@ -714,9 +861,9 @@ describe("FileDropDialog action ownership", () => {
       act(() => {
         if (order === "stale-before-current") {
           invokeStale();
-          invoke(current);
+          activate(current);
         } else {
-          invoke(current);
+          activate(current);
           invokeStale();
         }
       });
@@ -737,7 +884,7 @@ describe("FileDropDialog action ownership", () => {
     const staleOption = captureOption("replace");
     const staleClose = captureOpenChange();
     act(() => {
-      invoke(staleOption);
+      activate(staleOption);
       staleClose(false);
     });
     expect(firstHandlers.onClose).not.toHaveBeenCalled();
@@ -748,7 +895,8 @@ describe("FileDropDialog action ownership", () => {
     act(() => {
       staleClose(false);
       currentClose(false);
-      currentClose(false);
+      fireEvent.click(closeButton());
+      fireEvent.click(closeButton());
       invoke(staleOption, currentOption.element);
       invoke(currentOption);
     });
@@ -780,7 +928,7 @@ describe("FileDropDialog action ownership", () => {
       );
       const stale = captureOption(kind === "read" ? "replace" : "new");
       const staleClose = captureOpenChange();
-      act(() => invoke(stale));
+      act(() => activate(stale));
       expect(kind === "read" ? ControlledFileReader.reads.length : uploadImportFiles.mock.calls.length).toBe(1);
       const observer = observeMutations();
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -807,6 +955,7 @@ describe("FileDropDialog action ownership", () => {
           />,
         );
       });
+
       await act(async () => {});
 
       expect(passiveCleanups).toBe(1);
@@ -828,6 +977,527 @@ describe("FileDropDialog action ownership", () => {
       expect(uploadImportFiles).toHaveBeenCalledTimes(kind === "import" ? 1 : 0);
       expect(observer.takeRecords()).toHaveLength(0);
       expect(focus).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("FileDropDialog Strict Mode publication ownership", () => {
+  it.each(["replace", "insert", "new"] as const)(
+    "publishes one permanent successor for %s",
+    async (action) => {
+      const pending = dropped(`strict-${action}.md`, 37);
+      const handlers = callbacks();
+      const upload =
+        deferred<Array<{ id: string; title: string; warnings: string[] }>>();
+      uploadImportFiles.mockReturnValue(upload.promise);
+      renderStrict(propsFor(pending, handlers));
+
+      const staleClose = dialogOpenChanges[0];
+      staleClose?.(false);
+      activateBeforeCommit(
+        `file-drop-${action}`,
+        `file-drop-${action}`,
+        `file-drop-${action === "replace" ? "insert" : "replace"}`,
+      );
+
+      if (action === "new") {
+        expect(uploadImportFiles).toHaveBeenCalledExactlyOnceWith([
+          pending.file,
+        ]);
+        await act(async () =>
+          upload.resolve([
+            { id: "strict-new", title: "Strict", warnings: [] },
+          ]),
+        );
+        expect(push).toHaveBeenCalledExactlyOnceWith("/d/strict-new");
+      } else {
+        expect(ControlledFileReader.reads).toHaveLength(1);
+        await resolveRead(0, `Strict ${action}`);
+      }
+
+      if (action === "replace") {
+        expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+          "Strict replace",
+        );
+        expect(handlers.onInsert).not.toHaveBeenCalled();
+      } else if (action === "insert") {
+        expect(handlers.onInsert).toHaveBeenCalledExactlyOnceWith(
+          "Strict insert",
+          37,
+        );
+        expect(handlers.onReplace).not.toHaveBeenCalled();
+      } else {
+        expect(handlers.onReplace).not.toHaveBeenCalled();
+        expect(handlers.onInsert).not.toHaveBeenCalled();
+      }
+      expect(handlers.onClose).toHaveBeenCalledOnce();
+      expect(handlers.onError).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts an exact synthetic click after its constructor name is production-mangled", async () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-minified-click.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    const mangledConstructor = class a {};
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      const syntheticClick = cloneSyntheticClick(
+        event,
+        {},
+        mangledConstructor,
+      );
+      expect(Object.getPrototypeOf(syntheticClick).constructor.name).toBe("a");
+      option.onClick(syntheticClick);
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Production click");
+    expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+      "Production click",
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a synthetic-looking click without the complete React event structure", () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-fabricated-structure.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      option.onClick(
+        cloneSyntheticClick(event, {
+          persist: undefined,
+        }),
+      );
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+    expect(handlers.onClose).not.toHaveBeenCalled();
+  });
+
+  it("rejects a synthetic-looking click without the exact dispatched native event", () => {
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-fabricated-native.md", 0), handlers),
+    );
+    const option = captureOption("replace");
+    setReactProp<OptionHandler>(option.element, "onClick", (event) => {
+      option.onClick(
+        cloneSyntheticClick(event, {
+          nativeEvent: new MouseEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        }),
+      );
+    });
+
+    activate(option);
+
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+    expect(handlers.onClose).not.toHaveBeenCalled();
+  });
+
+  it.each(["close", "escape", "outside"] as const)(
+    "publishes one permanent successor for %s dismissal",
+    async (dismissal) => {
+      const handlers = callbacks();
+      renderStrict(
+        propsFor(dropped(`strict-${dismissal}.md`, 0), handlers),
+      );
+      const staleClose = dialogOpenChanges[0];
+      staleClose?.(false);
+      await act(
+        () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+      );
+
+      if (dismissal === "close") {
+        fireEvent.click(closeButton());
+        fireEvent.click(closeButton());
+      } else if (dismissal === "escape") {
+        fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+        fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+      } else {
+        const outside = document.querySelector(".dialog-overlay");
+        if (!(outside instanceof HTMLDivElement)) {
+          throw new Error("Dialog overlay was not rendered");
+        }
+        outside.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
+        await act(async () => {});
+        outside.dispatchEvent(
+          new ControlledPointerEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
+        outside.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
+        outside.dispatchEvent(
+          new ControlledPointerEvent("click", {
+            bubbles: true,
+            button: 0,
+          }),
+        );
+      }
+
+      expect(handlers.onClose).toHaveBeenCalledOnce();
+      expect(ControlledFileReader.reads).toHaveLength(0);
+      expect(uploadImportFiles).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps Escape authority through a browser microtask before Radix handles it", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-delayed-escape.md", 0), handlers),
+    );
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("keydown");
+    const content = screen.getByRole("dialog");
+    const openChange = captureOpenChange();
+    content.addEventListener(
+      "keydown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+
+    content.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }),
+    );
+    await Promise.resolve();
+    act(() => openChange(false));
+
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+  });
+
+  it("keeps linked PointerEvent authority through a browser microtask before Radix handles it", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-delayed-outside.md", 0), handlers),
+    );
+    await act(
+      () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+    const overlay = document.querySelector(".dialog-overlay");
+    if (!(overlay instanceof HTMLDivElement)) {
+      throw new Error("Dialog overlay was not rendered");
+    }
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("pointerdown", "click");
+    const openChange = captureOpenChange();
+    overlay.addEventListener(
+      "pointerdown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.addEventListener(
+      "click",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerId: 17,
+        pointerType: "mouse",
+        isPrimary: true,
+      }),
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("click", {
+        bubbles: true,
+        button: 0,
+        pointerId: 17,
+        pointerType: "mouse",
+        isPrimary: true,
+      }),
+    );
+    await Promise.resolve();
+    act(() => openChange(false));
+
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+    expect(ControlledFileReader.reads).toHaveLength(0);
+    expect(uploadImportFiles).not.toHaveBeenCalled();
+  });
+
+  it("leaves the current options usable after unconsumed dismissal authority expires", async () => {
+    const nativeDismissal = captureDocumentDismissalListeners();
+    const handlers = callbacks();
+    renderStrict(
+      propsFor(dropped("strict-failed-dismissal.md", 8), handlers),
+    );
+    const authorize = nativeDismissal.componentCapture();
+    nativeDismissal.suspend("keydown");
+    const content = screen.getByRole("dialog");
+    const openChange = captureOpenChange();
+    content.addEventListener(
+      "keydown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    content.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }),
+    );
+    await act(
+      () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)),
+    );
+
+    act(() => openChange(false));
+    expect(handlers.onClose).not.toHaveBeenCalled();
+
+    const overlay = document.querySelector(".dialog-overlay");
+    if (!(overlay instanceof HTMLDivElement)) {
+      throw new Error("Dialog overlay was not rendered");
+    }
+    nativeDismissal.suspend("pointerdown", "click");
+    overlay.addEventListener(
+      "pointerdown",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.addEventListener(
+      "click",
+      (event) => invokeEventListener(authorize, event),
+      { once: true },
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        pointerId: 31,
+      }),
+    );
+    overlay.dispatchEvent(
+      new ControlledPointerEvent("click", {
+        bubbles: true,
+        button: 0,
+        pointerId: 32,
+      }),
+    );
+    act(() => openChange(false));
+    expect(handlers.onClose).not.toHaveBeenCalled();
+
+    activate(captureOption("replace"));
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Still usable");
+    expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+      "Still usable",
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it.each(["attributes", "detach", "replacement", "reorder"] as const)(
+    "permanently rejects a publication after restored %s mutation",
+    (mutation) => {
+      const handlers = callbacks();
+      renderStrict(
+        propsFor(dropped(`strict-mutated-${mutation}.md`, 11), handlers),
+      );
+      const option = captureOption("replace");
+      const root = screen.getByTestId("file-drop-dialog");
+
+      if (mutation === "attributes") {
+        const className = option.element.className;
+        option.element.className = "mutated";
+        option.element.className = className;
+      } else if (mutation === "detach") {
+        const parent = root.parentNode;
+        if (!parent) throw new Error("Dialog options were not attached");
+        root.remove();
+        parent.append(root);
+      } else if (mutation === "replacement") {
+        const replacement = option.element.cloneNode(true);
+        if (!(replacement instanceof HTMLButtonElement)) {
+          throw new Error("Cloned option was not a button");
+        }
+        option.element.replaceWith(replacement);
+        replacement.replaceWith(option.element);
+      } else {
+        const insert = screen.getByTestId("file-drop-insert");
+        root.insertBefore(insert, option.element);
+        root.insertBefore(option.element, insert);
+      }
+
+      act(() => {
+        invoke(option);
+        activate(option);
+        captureOpenChange()(false);
+      });
+      fireEvent.click(closeButton());
+      expect(ControlledFileReader.reads).toHaveLength(0);
+      expect(uploadImportFiles).not.toHaveBeenCalled();
+      expect(handlers.onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts an exact ref replay only through a fresh successor and ignores late retired refs", async () => {
+    const pending = dropped("strict-ref-replay.md", 19);
+    const handlers = callbacks();
+    renderStrict(propsFor(pending, handlers));
+    const retired = captureOption("replace");
+
+    act(() => {
+      retired.ref(null);
+      retired.ref(retired.element);
+    });
+    const current = captureOption("insert");
+    act(() => {
+      retired.ref(null);
+      retired.ref(current.element);
+      invoke(retired, current.element);
+      activate(current);
+    });
+
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Fresh successor");
+    expect(handlers.onInsert).toHaveBeenCalledExactlyOnceWith(
+      "Fresh successor",
+      19,
+    );
+    expect(handlers.onReplace).not.toHaveBeenCalled();
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("consumes a reused native event and a nested reentry once", async () => {
+    const handlers = callbacks();
+    renderStrict(propsFor(dropped("strict-consumed.md", 0), handlers));
+    const option = captureOption("replace");
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+    });
+    const reentry = new MouseEvent("click", {
+      bubbles: true,
+      button: 0,
+    });
+    let reentered = false;
+    option.element.addEventListener("click", (event) => {
+      if (event !== click || reentered) return;
+      reentered = true;
+      option.element.dispatchEvent(reentry);
+    });
+
+    act(() => {
+      option.element.dispatchEvent(click);
+      option.element.dispatchEvent(reentry);
+    });
+    expect(ControlledFileReader.reads).toHaveLength(1);
+    await resolveRead(0, "Consumed once");
+    expect(handlers.onReplace).toHaveBeenCalledExactlyOnceWith(
+      "Consumed once",
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a fresh actionable successor after a failed operation", async () => {
+    const handlers = callbacks();
+    renderStrict(propsFor(dropped("strict-retry.md", 6), handlers));
+    const retired = captureOption("replace");
+    activate(retired);
+    await rejectRead(0, new Error("Strict read failed"));
+    expect(handlers.onError).toHaveBeenCalledExactlyOnceWith(
+      "Strict read failed",
+    );
+
+    const current = captureOption("insert");
+    act(() => {
+      invoke(retired, current.element);
+      activate(current);
+      activate(current);
+    });
+    expect(ControlledFileReader.reads).toHaveLength(2);
+    await resolveRead(1, "Strict recovery");
+    expect(handlers.onInsert).toHaveBeenCalledExactlyOnceWith(
+      "Strict recovery",
+      6,
+    );
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
+  it.each(["read", "upload"] as const)(
+    "ignores late retired %s settlement without poisoning the current operation",
+    async (kind) => {
+      const first = dropped(`strict-late-first-${kind}.md`, 3);
+      const second = dropped(`strict-late-second-${kind}.md`, 29);
+      const handlers = callbacks();
+      const firstUpload =
+        deferred<Array<{ id: string; title: string; warnings: string[] }>>();
+      const secondUpload =
+        deferred<Array<{ id: string; title: string; warnings: string[] }>>();
+      uploadImportFiles
+        .mockReturnValueOnce(firstUpload.promise)
+        .mockReturnValueOnce(secondUpload.promise);
+      const view = renderStrict(propsFor(first, handlers));
+
+      activate(captureOption(kind === "read" ? "replace" : "new"));
+      act(() =>
+        view.root.render(
+          <StrictMode>
+            <FileDropDialog {...propsFor(second, handlers)} />
+          </StrictMode>,
+        ),
+      );
+      activate(captureOption(kind === "read" ? "insert" : "new"));
+
+      if (kind === "read") {
+        expect(ControlledFileReader.reads).toHaveLength(2);
+        await resolveRead(0, "Retired read");
+        expect(handlers.onReplace).not.toHaveBeenCalled();
+        expect(handlers.onInsert).not.toHaveBeenCalled();
+        await resolveRead(1, "Current read");
+        expect(handlers.onInsert).toHaveBeenCalledExactlyOnceWith(
+          "Current read",
+          29,
+        );
+      } else {
+        expect(uploadImportFiles).toHaveBeenCalledTimes(2);
+        await act(async () =>
+          firstUpload.resolve([
+            { id: "retired-upload", title: "Retired", warnings: [] },
+          ]),
+        );
+        expect(push).not.toHaveBeenCalled();
+        expect(handlers.onClose).not.toHaveBeenCalled();
+        await act(async () =>
+          secondUpload.resolve([
+            { id: "current-upload", title: "Current", warnings: [] },
+          ]),
+        );
+        expect(push).toHaveBeenCalledExactlyOnceWith("/d/current-upload");
+      }
+
+      expect(handlers.onClose).toHaveBeenCalledOnce();
+      expect(handlers.onError).not.toHaveBeenCalled();
     },
   );
 });
