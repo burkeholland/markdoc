@@ -2,7 +2,21 @@
 import { Menu, MenuCheckboxItem, MenuContent, MenuItem, MenuLabel, MenuRadioGroup, MenuRadioItem, MenuSeparator, MenuTrigger, Popover, PopoverContent, PopoverTrigger } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
+import {
+  memo,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type RefObject,
+  type SyntheticEvent,
+} from "react";
 import { AlertTriangle, ArrowUpDown, Check, ChevronDown, CircleHelp, GitBranch, HardDrive, Columns2, Code2, Eye, WrapText, MoreHorizontal } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import type { DocumentDto } from "@/server/dto";
@@ -79,39 +93,150 @@ interface StatusBarAuthority {
   onShortcuts: () => void;
   onStorage: (() => void) | undefined;
   themePreference: ThemePreference;
+  themeValues: readonly ThemePreference[];
   setThemePreference: (next: ThemePreference) => void;
+  menuOpen: boolean;
+  issuesOpen: boolean;
 }
 
-interface StatusBarRootPublication {
+interface StatusBarControlPublication<T extends HTMLElement = HTMLElement> {
   authority: StatusBarAuthority;
-  root: HTMLElement;
-  menuTrigger: HTMLButtonElement;
-  issuesTrigger: HTMLButtonElement | null;
-}
-
-interface StatusBarControlPublication<T extends HTMLElement> {
-  authority: StatusBarAuthority;
+  epoch: number;
+  slot: string;
   root: HTMLElement;
   control: T;
+  enabled: boolean;
   claimed: boolean;
+}
+
+interface StatusBarNativeEventPublication {
+  event: Event;
+  type: string;
+  target: EventTarget | null;
+  path: readonly EventTarget[];
+  bubbles: boolean;
+  cancelable: boolean;
+  composed: boolean;
+  defaultPrevented: boolean;
+  timeStamp: number;
+  phase: number;
+  key: string | undefined;
+  button: number | undefined;
+  ctrlKey: boolean | undefined;
+  altKey: boolean | undefined;
+  metaKey: boolean | undefined;
+  shiftKey: boolean | undefined;
+  claimed: boolean;
+  expired: boolean;
+}
+
+interface StatusBarReactEventPublication {
+  event: SyntheticEvent<HTMLElement, Event>;
+  native: StatusBarNativeEventPublication;
+  type: string;
+  target: EventTarget | null;
+  bubbles: boolean;
+  cancelable: boolean;
+  defaultPrevented: boolean;
+  timeStamp: number;
+  phase: number;
+  claimed: boolean;
+}
+
+interface StatusBarEventIntent {
+  generation: StatusBarGeneration;
+  publication: StatusBarControlPublication;
+  nativeEvents: StatusBarNativeEventPublication[];
+  reactEvents: StatusBarReactEventPublication[];
+  claimedPublication: boolean;
+  claims: Set<string>;
+  pending: (() => void) | null;
+  requiresReact: boolean;
+}
+
+interface StatusBarNodeSeal {
+  node: Node;
+  children: readonly Node[];
+  attributes: readonly (readonly [string, string])[] | null;
+  data: string | null;
+  name: string | null;
+  namespace: string | null;
+}
+
+interface StatusBarRelationSeal {
+  node: Node;
+  parent: Node | null;
+  previous: Node | null;
+  next: Node | null;
+}
+
+interface StatusBarObserverPublication {
+  observer: MutationObserver;
+}
+
+interface StatusBarGeneration {
+  authority: StatusBarAuthority;
+  epoch: number;
+  identity: symbol;
+  root: HTMLElement;
+  ownerDocument: Document;
+  controls: Map<string, StatusBarControlPublication>;
+  actions: Set<string>;
+  nativeEvents: WeakMap<Event, StatusBarNativeEventPublication>;
+  reactEvents: WeakMap<object, StatusBarReactEventPublication>;
+  pendingIntents: Set<StatusBarEventIntent>;
+  nodeSeals: StatusBarNodeSeal[];
+  relationSeals: StatusBarRelationSeal[];
+  observers: StatusBarObserverPublication[];
+  removeEventListeners: (() => void)[];
+  retired: boolean;
+}
+
+interface StatusBarPublicationManager {
+  mount: symbol;
+  epoch: number;
+  candidates: Map<string, StatusBarControlPublication>;
+  active: StatusBarGeneration | null;
 }
 
 interface StatusBarValueIntent<T> {
   authority: StatusBarAuthority;
   value: T;
-  claim: () => boolean;
+  event: StatusBarEventIntent;
 }
 
 interface StatusBarDisclosureIntent {
   authority: StatusBarAuthority;
-  prove: () => boolean;
+  event: StatusBarEventIntent;
 }
 
-type IsCurrentAuthority = (authority: StatusBarAuthority) => boolean;
-type EventWithCurrentTarget = { currentTarget: EventTarget | null };
+type StatusBarReactEvent =
+  | ReactKeyboardEvent<HTMLElement>
+  | ReactMouseEvent<HTMLElement>
+  | ReactPointerEvent<HTMLElement>;
 
-const DESKTOP_LAYOUTS: readonly Layout[] = ["split", "code", "rich"];
-const COMPACT_LAYOUTS: readonly Layout[] = ["code", "rich"];
+const DESKTOP_LAYOUTS: readonly Layout[] = Object.freeze(["split", "code", "rich"]);
+const COMPACT_LAYOUTS: readonly Layout[] = Object.freeze(["code", "rich"]);
+const STATUS_BAR_THEMES: readonly ThemePreference[] = Object.freeze([...THEME_ORDER]);
+const STATUS_BAR_NATIVE_EVENTS = [
+  "click",
+  "keydown",
+  "pointerdown",
+  "focusin",
+  "focusout",
+  "menu.itemSelect",
+  "dismissableLayer.pointerDownOutside",
+  "dismissableLayer.focusOutside",
+] as const;
+
+function createPublicationManager(): StatusBarPublicationManager {
+  return {
+    mount: Symbol("status-bar"),
+    epoch: 0,
+    candidates: new Map(),
+    active: null,
+  };
+}
 
 function documentPublicationIsExact(document: StatusBarDocumentPublication) {
   const current = document.value;
@@ -141,76 +266,626 @@ function issuePublicationIsExact(authority: StatusBarAuthority, row: StatusBarIs
   );
 }
 
+function authorityIsExact(authority: StatusBarAuthority) {
+  const expectedLayouts = authority.compact ? COMPACT_LAYOUTS : DESKTOP_LAYOUTS;
+  if (
+    authority.layoutValues.length !== expectedLayouts.length
+    || authority.layoutValues.some((value, index) => value !== expectedLayouts[index])
+    || authority.themeValues.length !== STATUS_BAR_THEMES.length
+    || authority.themeValues.some((value, index) => value !== STATUS_BAR_THEMES[index])
+    || !documentPublicationIsExact(authority.document)
+    || authority.issueRows.length !== authority.issueSnapshot.length
+  )
+    return false;
+  return authority.issueRows.every((row, index) => row.index === index && issuePublicationIsExact(authority, row));
+}
+
+function expectedStatusBarSlots(authority: StatusBarAuthority) {
+  const slots = ["root", "menu-trigger", "storage"];
+  if (!authority.compact) slots.push("issues-trigger", "desktop-shortcuts");
+  if (authority.menuOpen) {
+    slots.push("menu-content");
+    authority.layoutValues.forEach((value) => slots.push(`layout:${value}`));
+    slots.push("line-wrapping", "sync-scroll");
+    if (authority.compact) {
+      authority.themeValues.forEach((value) => slots.push(`theme:${value}`));
+      slots.push("compact-shortcuts");
+    }
+  }
+  if (authority.issuesOpen && !authority.compact) {
+    slots.push("issues-content");
+    authority.issueRows.forEach((row) => slots.push(`issue:${row.index}`));
+  }
+  return slots;
+}
+
+function stableAttributes(element: Element) {
+  const menuItem = element.getAttribute("role")?.startsWith("menuitem") ?? false;
+  const placed = element.hasAttribute("data-radix-popper-content-wrapper")
+    || element.hasAttribute("data-testid")
+      && ["status-menu-content", "status-issues-content"].includes(element.getAttribute("data-testid") ?? "");
+  return [...element.attributes]
+    .filter((attribute) => {
+      if (menuItem && ["data-highlighted", "tabindex"].includes(attribute.name)) return false;
+      if (placed && ["style", "data-side", "data-align"].includes(attribute.name)) return false;
+      if (["data-radix-popper-side", "data-radix-popper-align"].includes(attribute.name)) return false;
+      return true;
+    })
+    .map((attribute) => [attribute.name, attribute.value] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+function sealSubtree(root: Node, seals: StatusBarNodeSeal[], seen: Set<Node>) {
+  if (seen.has(root)) return;
+  seen.add(root);
+  const element = root instanceof Element ? root : null;
+  const data = root instanceof CharacterData ? root.data : null;
+  seals.push({
+    node: root,
+    children: Object.freeze([...root.childNodes]),
+    attributes: element ? Object.freeze(stableAttributes(element)) : null,
+    data,
+    name: element?.tagName ?? null,
+    namespace: element?.namespaceURI ?? null,
+  });
+  root.childNodes.forEach((child) => sealSubtree(child, seals, seen));
+}
+
+function sealRelations(
+  node: Node,
+  ownerDocument: Document,
+  seals: StatusBarRelationSeal[],
+  seen: Set<Node>,
+) {
+  let current: Node | null = node;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    seals.push({
+      node: current,
+      parent: current.parentNode,
+      previous: current.previousSibling,
+      next: current.nextSibling,
+    });
+    if (current === ownerDocument) return;
+    current = current.parentNode;
+  }
+}
+
+function arraysAreIdentical<T>(left: readonly T[], right: readonly T[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function controlIsEnabled(control: HTMLElement) {
+  return (
+    !("disabled" in control && control.disabled === true)
+    && control.getAttribute("aria-disabled") !== "true"
+    && !control.hasAttribute("data-disabled")
+  );
+}
+
+function validateGeneration(generation: StatusBarGeneration, drain = true): boolean {
+  if (generation.retired) return false;
+  if (!authorityIsExact(generation.authority)) {
+    retireGeneration(generation);
+    return false;
+  }
+  if (drain) {
+    for (const publication of generation.observers) {
+      const records = publication.observer.takeRecords();
+      if (records.some((record) => !mutationIsRadixOwned(record))) {
+        retireGeneration(generation);
+        return false;
+      }
+      if (records.some((record) => record.type === "childList"))
+        refreshRelationSeals(generation);
+    }
+  }
+  if (
+    !generation.root.isConnected
+    || generation.root.ownerDocument !== generation.ownerDocument
+    || !generation.ownerDocument.documentElement.contains(generation.root)
+  ) {
+    retireGeneration(generation);
+    return false;
+  }
+  for (const seal of generation.nodeSeals) {
+    const element = seal.node instanceof Element ? seal.node : null;
+    if (
+      !arraysAreIdentical([...seal.node.childNodes], seal.children)
+      || (seal.attributes && (!element || !arraysAreIdentical(
+        stableAttributes(element).map(([name, value]) => `${name}\u0000${value}`),
+        seal.attributes.map(([name, value]) => `${name}\u0000${value}`),
+      )))
+      || (seal.data !== null && (!(seal.node instanceof CharacterData) || seal.node.data !== seal.data))
+      || (seal.name !== null && element?.tagName !== seal.name)
+      || (seal.namespace !== null && element?.namespaceURI !== seal.namespace)
+    ) {
+      retireGeneration(generation);
+      return false;
+    }
+  }
+  const relationsAreExact = generation.relationSeals.every((seal) => (
+    seal.node.parentNode === seal.parent
+    && seal.node.previousSibling === seal.previous
+    && seal.node.nextSibling === seal.next
+  ));
+  if (!relationsAreExact) retireGeneration(generation);
+  return relationsAreExact;
+}
+
+function mutationIsRadixOwned(record: MutationRecord) {
+  if (record.type === "childList") {
+    const changed = [...record.addedNodes, ...record.removedNodes];
+    return changed.length > 0 && changed.every((node) => (
+      node instanceof HTMLElement
+      && (
+        node.tagName === "SPAN" && node.hasAttribute("data-radix-focus-guard")
+        || node.hasAttribute("data-radix-popper-content-wrapper")
+      )
+    ));
+  }
+  if (record.type !== "attributes" || !(record.target instanceof Element) || !record.attributeName)
+    return false;
+  const role = record.target.getAttribute("role");
+  if (role?.startsWith("menuitem") && ["data-highlighted", "tabindex"].includes(record.attributeName))
+    return true;
+  if (
+    (
+      record.target.hasAttribute("data-radix-popper-content-wrapper")
+      || ["status-menu-content", "status-issues-content"].includes(
+        record.target.getAttribute("data-testid") ?? "",
+      )
+    )
+    && ["style", "data-side", "data-align"].includes(record.attributeName)
+  )
+    return true;
+  if (["data-radix-popper-side", "data-radix-popper-align"].includes(record.attributeName))
+    return true;
+  return false;
+}
+
+function refreshRelationSeals(generation: StatusBarGeneration) {
+  generation.relationSeals.length = 0;
+  const seen = new Set<Node>();
+  sealRelations(
+    generation.root,
+    generation.ownerDocument,
+    generation.relationSeals,
+    seen,
+  );
+  for (const slot of ["menu-content", "issues-content"]) {
+    const content = generation.controls.get(slot)?.control;
+    if (!content) continue;
+    let top: Node = content;
+    while (top.parentNode && top.parentNode !== generation.ownerDocument.body) top = top.parentNode;
+    sealRelations(top, generation.ownerDocument, generation.relationSeals, seen);
+  }
+}
+
+function retireGeneration(generation: StatusBarGeneration) {
+  if (generation.retired) return;
+  generation.retired = true;
+  generation.pendingIntents.forEach((intent) => {
+    intent.pending = null;
+  });
+  generation.pendingIntents.clear();
+  generation.removeEventListeners.forEach((remove) => remove());
+  generation.removeEventListeners.length = 0;
+  generation.observers.forEach(({ observer }) => {
+    observer.takeRecords();
+    observer.disconnect();
+  });
+  generation.observers.length = 0;
+}
+
+function retireManagerGeneration(
+  manager: StatusBarPublicationManager,
+  publication: StatusBarControlPublication,
+) {
+  if (manager.candidates.get(publication.slot) === publication)
+    manager.candidates.delete(publication.slot);
+  if (
+    manager.active?.controls.get(publication.slot) !== publication
+    && manager.candidates.size > 0
+  )
+    return;
+  if (manager.active) retireGeneration(manager.active);
+  manager.active = null;
+  manager.candidates.clear();
+  manager.epoch += 1;
+}
+
+function observeGeneration(generation: StatusBarGeneration) {
+  const observe = (target: Node, options: MutationObserverInit) => {
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => !mutationIsRadixOwned(record))) {
+        retireGeneration(generation);
+      } else if (records.some((record) => record.type === "childList")) {
+        refreshRelationSeals(generation);
+      }
+    });
+    observer.observe(target, options);
+    generation.observers.push({ observer });
+  };
+  const subtreeRoots = [generation.root];
+  for (const slot of ["menu-content", "issues-content"]) {
+    const content = generation.controls.get(slot)?.control;
+    if (!content) continue;
+    let top: Node = content;
+    while (top.parentNode && top.parentNode !== generation.ownerDocument.body) top = top.parentNode;
+    subtreeRoots.push(top as HTMLElement);
+  }
+  [...new Set(subtreeRoots)].forEach((root) => observe(root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  }));
+  const parents = new Set<Node>();
+  generation.relationSeals.forEach((seal) => {
+    if (seal.parent) parents.add(seal.parent);
+  });
+  parents.forEach((parent) => {
+    if (!subtreeRoots.some((root) => root === parent || root.contains(parent)))
+      observe(parent, { childList: true });
+  });
+}
+
+function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
+  if (!validateGeneration(generation)) return;
+  const path = event.composedPath();
+  const publication: StatusBarNativeEventPublication = {
+    event,
+    type: event.type,
+    target: event.target,
+    path: Object.freeze([...path]),
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    composed: event.composed,
+    defaultPrevented: event.defaultPrevented,
+    timeStamp: event.timeStamp,
+    phase: event.eventPhase,
+    key: "key" in event && typeof event.key === "string" ? event.key : undefined,
+    button: "button" in event && typeof event.button === "number" ? event.button : undefined,
+    ctrlKey: "ctrlKey" in event && typeof event.ctrlKey === "boolean" ? event.ctrlKey : undefined,
+    altKey: "altKey" in event && typeof event.altKey === "boolean" ? event.altKey : undefined,
+    metaKey: "metaKey" in event && typeof event.metaKey === "boolean" ? event.metaKey : undefined,
+    shiftKey: "shiftKey" in event && typeof event.shiftKey === "boolean" ? event.shiftKey : undefined,
+    claimed: false,
+    expired: false,
+  };
+  generation.nativeEvents.set(event, publication);
+  queueMicrotask(() => {
+    publication.expired = true;
+  });
+}
+
+function activateGeneration(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+) {
+  if (manager.active || !authorityIsExact(authority)) return;
+  const expected = expectedStatusBarSlots(authority);
+  if (
+    manager.candidates.size !== expected.length
+    || expected.some((slot) => manager.candidates.get(slot)?.authority !== authority)
+  ) {
+    return;
+  }
+  const controls = new Map(manager.candidates);
+  const root = controls.get("root")?.control;
+  if (!(root instanceof HTMLElement) || !root.isConnected) return;
+  const ownerDocument = root.ownerDocument;
+  const portalContents = ["menu-content", "issues-content"]
+    .map((slot) => controls.get(slot)?.control)
+    .filter((control): control is HTMLElement => Boolean(control));
+  if ([...controls.values()].some((publication) => (
+    publication.epoch !== manager.epoch
+    || publication.root !== root
+    || publication.control.ownerDocument !== ownerDocument
+    || !publication.control.isConnected
+    || (
+      publication.control !== root
+      && !root.contains(publication.control)
+      && !portalContents.some((content) => content.contains(publication.control))
+    )
+  )))
+    return;
+  const generation: StatusBarGeneration = {
+    authority,
+    epoch: manager.epoch,
+    identity: Symbol("status-bar-publication"),
+    root,
+    ownerDocument,
+    controls,
+    actions: new Set(),
+    nativeEvents: new WeakMap(),
+    reactEvents: new WeakMap(),
+    pendingIntents: new Set(),
+    nodeSeals: [],
+    relationSeals: [],
+    observers: [],
+    removeEventListeners: [],
+    retired: false,
+  };
+  const seenNodes = new Set<Node>();
+  const relationNodes = new Set<Node>();
+  sealSubtree(root, generation.nodeSeals, seenNodes);
+  sealRelations(root, ownerDocument, generation.relationSeals, relationNodes);
+  portalContents.forEach((content) => {
+    let top: Node = content;
+    while (top.parentNode && top.parentNode !== ownerDocument.body) top = top.parentNode;
+    sealSubtree(top, generation.nodeSeals, seenNodes);
+    sealRelations(top, ownerDocument, generation.relationSeals, relationNodes);
+  });
+  manager.active = generation;
+  STATUS_BAR_NATIVE_EVENTS.forEach((type) => {
+    const listener = (event: Event) => recordNativeEvent(generation, event);
+    ownerDocument.addEventListener(type, listener, true);
+    generation.removeEventListeners.push(() => ownerDocument.removeEventListener(type, listener, true));
+  });
+  observeGeneration(generation);
+}
+
+function registerControl<T extends HTMLElement>(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  slot: string,
+  root: HTMLElement,
+  control: T,
+) {
+  const active = manager.active;
+  if (
+    active
+    || authority.mount !== manager.mount
+    || !expectedStatusBarSlots(authority).includes(slot)
+    || manager.candidates.has(slot)
+    || !root.isConnected
+    || !control.isConnected
+  )
+    return null;
+  const publication: StatusBarControlPublication<T> = {
+    authority,
+    epoch: manager.epoch,
+    slot,
+    root,
+    control,
+    enabled: controlIsEnabled(control),
+    claimed: false,
+  };
+  manager.candidates.set(slot, publication);
+  activateGeneration(manager, authority);
+  return publication;
+}
+
+function nativeEventIsExact(publication: StatusBarNativeEventPublication) {
+  const event = publication.event;
+  return (
+    !publication.expired
+    && !publication.claimed
+    && event.type === publication.type
+    && event.target === publication.target
+    && arraysAreIdentical(event.composedPath(), publication.path)
+    && event.bubbles === publication.bubbles
+    && event.cancelable === publication.cancelable
+    && event.composed === publication.composed
+    && event.defaultPrevented === publication.defaultPrevented
+    && event.timeStamp === publication.timeStamp
+    && publication.phase === Event.CAPTURING_PHASE
+    && (!("key" in event) || event.key === publication.key)
+    && (!("button" in event) || event.button === publication.button)
+    && (!("ctrlKey" in event) || event.ctrlKey === publication.ctrlKey)
+    && (!("altKey" in event) || event.altKey === publication.altKey)
+    && (!("metaKey" in event) || event.metaKey === publication.metaKey)
+    && (!("shiftKey" in event) || event.shiftKey === publication.shiftKey)
+  );
+}
+
+function reactEventIsExact(publication: StatusBarReactEventPublication) {
+  const event = publication.event;
+  return (
+    !publication.claimed
+    && event.nativeEvent === publication.native.event
+    && event.type === publication.type
+    && event.target === publication.target
+    && event.bubbles === publication.bubbles
+    && event.cancelable === publication.cancelable
+    && event.defaultPrevented === publication.defaultPrevented
+    && event.timeStamp === publication.timeStamp
+  );
+}
+
+function rememberReactEvent(
+  manager: StatusBarPublicationManager,
+  event: StatusBarReactEvent,
+) {
+  const generation = manager.active;
+  const native = generation?.nativeEvents.get(event.nativeEvent);
+  if (
+    !generation
+    || !native
+    || !nativeEventIsExact(native)
+    || event.target !== native.target
+    || event.type !== native.type
+  )
+    return;
+  let publication = generation.reactEvents.get(event);
+  if (!publication) {
+    publication = {
+      event,
+      native,
+      type: event.type,
+      target: event.target,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      timeStamp: event.timeStamp,
+      phase: event.eventPhase,
+      claimed: false,
+    };
+    generation.reactEvents.set(event, publication);
+  }
+  for (const intent of generation.pendingIntents) {
+    if (
+      intent.nativeEvents[0] === native
+      && native.target instanceof Node
+      && intent.publication.control.contains(native.target as Node)
+      && intent.reactEvents.length === 0
+    ) {
+      intent.reactEvents.push(publication);
+      intent.requiresReact = false;
+      generation.pendingIntents.delete(intent);
+      const pending = intent.pending;
+      intent.pending = null;
+      pending?.();
+      break;
+    }
+  }
+}
+
 function useStatusBarControl<T extends HTMLElement>(
   authority: StatusBarAuthority,
   rootRef: RefObject<HTMLElement | null>,
-  isCurrentAuthority: IsCurrentAuthority,
+  manager: StatusBarPublicationManager,
+  slot: string,
 ) {
-  // Portal controls attach after their wrapper's first layout pass, so attachment itself must
-  // republish before a Radix callback can prove which concrete element produced the interaction.
-  const [control, setControl] = useState<T | null>(null);
+  const controlRef = useRef<T | null>(null);
   const publicationRef = useRef<StatusBarControlPublication<T> | null>(null);
-
-  useLayoutEffect(() => {
-    const root = rootRef.current;
-    if (!root || !control) {
-      publicationRef.current = null;
-      return;
-    }
-    const publication: StatusBarControlPublication<T> = {
-      authority,
-      root,
-      control,
-      claimed: false,
-    };
-    publicationRef.current = publication;
-    return () => {
-      if (publicationRef.current === publication) publicationRef.current = null;
-    };
-  }, [authority, control, rootRef]);
-
-  const createProof = useCallback((source: EventTarget | null) => {
+  const layoutAttemptedRef = useRef(false);
+  const [refVersion, setRefVersion] = useState(0);
+  const setControl = useCallback((control: T | null) => {
+    if (!control) return;
     const publication = publicationRef.current;
     if (
+      publication
+      && manager.active?.controls.get(publication.slot) === publication
+      && publication.control !== control
+    )
+      return;
+    if (controlRef.current === control) return;
+    controlRef.current = control;
+    if (layoutAttemptedRef.current) setRefVersion((version) => version + 1);
+  }, [manager]);
+
+  useLayoutEffect(() => {
+    layoutAttemptedRef.current = true;
+    const root = rootRef.current;
+    const control = controlRef.current;
+    if (!root || !control) {
+      return () => {
+        layoutAttemptedRef.current = false;
+      };
+    }
+    const publication = registerControl(manager, authority, slot, root, control);
+    if (!publication) {
+      return () => {
+        layoutAttemptedRef.current = false;
+      };
+    }
+    publicationRef.current = publication;
+    return () => {
+      layoutAttemptedRef.current = false;
+      if (publicationRef.current === publication) publicationRef.current = null;
+      retireManagerGeneration(manager, publication);
+    };
+  }, [authority, manager, refVersion, rootRef, slot]);
+
+  const createReactIntent = useCallback((event: StatusBarReactEvent) => {
+    const publication = publicationRef.current;
+    const generation = manager.active;
+    const reactEvent = generation?.reactEvents.get(event);
+    const native = reactEvent?.native;
+    if (
       !publication
-      || publication.authority !== authority
-      || !isCurrentAuthority(authority)
-      || rootRef.current !== publication.root
-      || control !== publication.control
-      || source !== publication.control
-      || !publication.root.isConnected
-      || !publication.control.isConnected
+      || !generation
+      || generation.authority !== authority
+      || generation.controls.get(slot) !== publication
+      || publication.control !== event.currentTarget
+      || !publication.enabled
+      || !controlIsEnabled(publication.control)
+      || !reactEvent
+      || !native
+      || !reactEventIsExact(reactEvent)
+      || !nativeEventIsExact(native)
+      || !native.path.includes(publication.control)
+      || reactEvent.phase !== Event.CAPTURING_PHASE
+      || !validateGeneration(generation)
     )
       return null;
-    return () => (
-      publicationRef.current === publication
-      && publication.authority === authority
-      && isCurrentAuthority(authority)
-      && rootRef.current === publication.root
-      && control === publication.control
-      && source === publication.control
-      && publication.root.isConnected
-      && publication.control.isConnected
-    );
-  }, [authority, control, isCurrentAuthority, rootRef]);
+    return {
+      generation,
+      publication,
+      nativeEvents: [native],
+      reactEvents: [reactEvent],
+      claimedPublication: false,
+      claims: new Set<string>(),
+      pending: null,
+      requiresReact: false,
+    } satisfies StatusBarEventIntent;
+  }, [authority, manager, slot]);
 
-  const createClaim = useCallback((source: EventTarget | null) => {
+  const createSelectIntent = useCallback((
+    activation: StatusBarEventIntent | null,
+    event: Event,
+  ) => {
     const publication = publicationRef.current;
-    const prove = createProof(source);
-    if (!publication || !prove || publication.claimed) return null;
-    return () => {
-      if (publication.claimed || !prove()) return false;
-      publication.claimed = true;
-      return true;
-    };
-  }, [createProof]);
+    const generation = manager.active;
+    const native = generation?.nativeEvents.get(event);
+    if (
+      !activation
+      || !publication
+      || !generation
+      || activation.generation !== generation
+      || activation.publication !== publication
+      || generation.controls.get(slot) !== publication
+      || event.currentTarget !== publication.control
+      || !publication.enabled
+      || !controlIsEnabled(publication.control)
+      || native?.type !== "menu.itemSelect"
+      || native.target !== publication.control
+      || event.eventPhase !== Event.AT_TARGET
+      || !nativeEventIsExact(native)
+      || !validateGeneration(generation)
+    )
+      return null;
+    activation.nativeEvents.push(native);
+    return activation;
+  }, [manager, slot]);
 
-  const claim = useCallback((source: EventTarget | null) => {
-    const claimPublication = createClaim(source);
-    return claimPublication?.() ?? false;
-  }, [createClaim]);
+  return [setControl, createReactIntent, createSelectIntent, publicationRef] as const;
+}
 
-  return [setControl, claim, createClaim, createProof, control] as const;
+function claimIntent(intent: StatusBarEventIntent, action: string) {
+  const { generation, publication } = intent;
+  if (
+    intent.requiresReact
+    || generation.retired
+    || generation.controls.get(publication.slot) !== publication
+    || !validateGeneration(generation)
+    || intent.nativeEvents.some((event) => (
+      intent.claimedPublication ? event.expired || event.event.type !== event.type : !nativeEventIsExact(event)
+    ))
+    || intent.reactEvents.some((event) => (
+      intent.claimedPublication ? event.event.nativeEvent !== event.native.event : !reactEventIsExact(event)
+    ))
+    || intent.claims.has(action)
+    || generation.actions.has(action)
+    || (publication.claimed && !intent.claimedPublication)
+  )
+    return false;
+  if (!intent.claimedPublication) {
+    publication.claimed = true;
+    intent.claimedPublication = true;
+    intent.nativeEvents.forEach((event) => {
+      event.claimed = true;
+    });
+    intent.reactEvents.forEach((event) => {
+      event.claimed = true;
+    });
+  }
+  intent.claims.add(action);
+  generation.actions.add(action);
+  return true;
 }
 
 function useStatusBarIntent<T>(authority: StatusBarAuthority) {
@@ -224,26 +899,13 @@ function useStatusBarIntent<T>(authority: StatusBarAuthority) {
   return intentRef;
 }
 
-function useStatusBarClaim(authority: StatusBarAuthority) {
-  const claimedRef = useRef<StatusBarAuthority | null>(null);
-  useLayoutEffect(() => {
-    if (claimedRef.current !== authority) claimedRef.current = null;
-    return () => {
-      if (claimedRef.current === authority) claimedRef.current = null;
-    };
-  }, [authority]);
-  return useCallback(() => {
-    if (claimedRef.current === authority) return false;
-    claimedRef.current = authority;
-    return true;
-  }, [authority]);
-}
-
 function StatusBarRadioItem({
   authority,
   rootRef,
-  isCurrentAuthority,
+  manager,
   intentRef,
+  disclosureIntentRef,
+  slot,
   value,
   eligible,
   children,
@@ -251,22 +913,41 @@ function StatusBarRadioItem({
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarValueIntent<string> | null>;
+  disclosureIntentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
+  slot: string;
   value: string;
   eligible: boolean;
   children: ReactNode;
   testId?: string;
 }) {
-  const [itemRef, , createClaim] = useStatusBarControl<HTMLDivElement>(authority, rootRef, isCurrentAuthority);
-  const authorize = useCallback((event: EventWithCurrentTarget) => {
+  const [itemRef, createReactIntent, createSelectIntent] = useStatusBarControl<HTMLDivElement>(
+    authority,
+    rootRef,
+    manager,
+    slot,
+  );
+  const activationRef = useRef<StatusBarEventIntent | null>(null);
+  const authorize = useCallback((event: Event) => {
     if (!eligible) return;
-    const claim = createClaim(event.currentTarget);
-    if (claim) intentRef.current = { authority, value, claim };
-  }, [authority, createClaim, eligible, intentRef, value]);
+    const intent = createSelectIntent(activationRef.current, event);
+    if (!intent) return;
+    activationRef.current = null;
+    intentRef.current = { authority, value, event: intent };
+    disclosureIntentRef.current = { authority, event: intent };
+  }, [authority, createSelectIntent, disclosureIntentRef, eligible, intentRef, value]);
 
   return (
-    <MenuRadioItem ref={itemRef} value={value} onSelect={authorize} data-testid={testId}>
+    <MenuRadioItem
+      ref={itemRef}
+      value={value}
+      onClickCapture={(event) => {
+        activationRef.current = createReactIntent(event);
+      }}
+      onSelect={authorize}
+      data-testid={testId}
+    >
       {children}
     </MenuRadioItem>
   );
@@ -275,7 +956,10 @@ function StatusBarRadioItem({
 function StatusBarCheckboxControl({
   authority,
   rootRef,
-  isCurrentAuthority,
+  manager,
+  slot,
+  action,
+  disclosureIntentRef,
   checked,
   children,
   testId,
@@ -283,37 +967,52 @@ function StatusBarCheckboxControl({
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
+  slot: string;
+  action: string;
+  disclosureIntentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
   checked: boolean;
   children: ReactNode;
   testId?: string;
   onChange: (value: boolean) => void;
 }) {
-  const [itemRef, , createClaim] = useStatusBarControl<HTMLDivElement>(authority, rootRef, isCurrentAuthority);
+  const [itemRef, createReactIntent, createSelectIntent] = useStatusBarControl<HTMLDivElement>(
+    authority,
+    rootRef,
+    manager,
+    slot,
+  );
+  const activationRef = useRef<StatusBarEventIntent | null>(null);
   const intentRef = useStatusBarIntent<boolean>(authority);
   const next = !checked;
-  const authorize = useCallback((event: EventWithCurrentTarget) => {
-    const claim = createClaim(event.currentTarget);
-    if (claim) intentRef.current = { authority, value: next, claim };
-  }, [authority, createClaim, intentRef, next]);
+  const authorize = useCallback((event: Event) => {
+    const intent = createSelectIntent(activationRef.current, event);
+    if (!intent) return;
+    activationRef.current = null;
+    intentRef.current = { authority, value: next, event: intent };
+    disclosureIntentRef.current = { authority, event: intent };
+  }, [authority, createSelectIntent, disclosureIntentRef, intentRef, next]);
   const change = useCallback((value: boolean | "indeterminate") => {
     const intent = intentRef.current;
-    if (intent?.authority === authority) intentRef.current = null;
     if (
       typeof value !== "boolean"
       || value !== next
       || intent?.authority !== authority
       || intent.value !== value
-      || !intent.claim()
+      || !claimIntent(intent.event, action)
     )
       return;
+    intentRef.current = null;
     onChange(value);
-  }, [authority, intentRef, next, onChange]);
+  }, [action, authority, intentRef, next, onChange]);
 
   return (
     <MenuCheckboxItem
       ref={itemRef}
       checked={checked}
+      onClickCapture={(event) => {
+        activationRef.current = createReactIntent(event);
+      }}
       onSelect={authorize}
       onCheckedChange={change}
       data-testid={testId}
@@ -326,49 +1025,54 @@ function StatusBarCheckboxControl({
 function StatusBarMenuControls({
   authority,
   rootRef,
-  isCurrentAuthority,
+  manager,
+  disclosureIntentRef,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
+  disclosureIntentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
 }) {
   const layoutIntentRef = useStatusBarIntent<string>(authority);
   const themeIntentRef = useStatusBarIntent<string>(authority);
-  const claimLayout = useStatusBarClaim(authority);
-  const claimTheme = useStatusBarClaim(authority);
-  const [shortcutsRef, claimShortcuts] = useStatusBarControl<HTMLDivElement>(authority, rootRef, isCurrentAuthority);
+  const shortcutsActivationRef = useRef<StatusBarEventIntent | null>(null);
+  const [shortcutsRef, createShortcutsIntent, createShortcutsSelectIntent] =
+    useStatusBarControl<HTMLDivElement>(
+      authority,
+      rootRef,
+      manager,
+      "compact-shortcuts",
+    );
 
   const selectLayout = useCallback((value: string) => {
     const next = authority.layoutValues.find((candidate) => candidate === value);
     const intent = layoutIntentRef.current;
-    if (intent?.authority === authority) layoutIntentRef.current = null;
     if (
       !next
       || next === authority.layout
       || intent?.authority !== authority
       || intent.value !== next
-      || !intent.claim()
-      || !claimLayout()
+      || !claimIntent(intent.event, "layout")
     )
       return;
+    layoutIntentRef.current = null;
     authority.onLayout(next);
-  }, [authority, claimLayout, layoutIntentRef]);
+  }, [authority, layoutIntentRef]);
 
   const selectTheme = useCallback((value: string) => {
     const intent = themeIntentRef.current;
-    if (intent?.authority === authority) themeIntentRef.current = null;
     if (
       !isThemePreference(value)
-      || !THEME_ORDER.includes(value)
+      || !authority.themeValues.includes(value)
       || value === authority.themePreference
       || intent?.authority !== authority
       || intent.value !== value
-      || !intent.claim()
-      || !claimTheme()
+      || !claimIntent(intent.event, "theme")
     )
       return;
+    themeIntentRef.current = null;
     authority.setThemePreference(value);
-  }, [authority, claimTheme, themeIntentRef]);
+  }, [authority, themeIntentRef]);
 
   return (
     <>
@@ -378,8 +1082,10 @@ function StatusBarMenuControls({
           <StatusBarRadioItem
             authority={authority}
             rootRef={rootRef}
-            isCurrentAuthority={isCurrentAuthority}
+            manager={manager}
             intentRef={layoutIntentRef}
+            disclosureIntentRef={disclosureIntentRef}
+            slot="layout:split"
             value="split"
             eligible={authority.layout !== "split"}
           >
@@ -391,8 +1097,10 @@ function StatusBarMenuControls({
         <StatusBarRadioItem
           authority={authority}
           rootRef={rootRef}
-          isCurrentAuthority={isCurrentAuthority}
+          manager={manager}
           intentRef={layoutIntentRef}
+          disclosureIntentRef={disclosureIntentRef}
+          slot="layout:code"
           value="code"
           eligible={authority.layout !== "code"}
         >
@@ -403,8 +1111,10 @@ function StatusBarMenuControls({
         <StatusBarRadioItem
           authority={authority}
           rootRef={rootRef}
-          isCurrentAuthority={isCurrentAuthority}
+          manager={manager}
           intentRef={layoutIntentRef}
+          disclosureIntentRef={disclosureIntentRef}
+          slot="layout:rich"
           value="rich"
           eligible={authority.layout !== "rich"}
         >
@@ -417,7 +1127,10 @@ function StatusBarMenuControls({
       <StatusBarCheckboxControl
         authority={authority}
         rootRef={rootRef}
-        isCurrentAuthority={isCurrentAuthority}
+        manager={manager}
+        slot="line-wrapping"
+        action="line-wrapping"
+        disclosureIntentRef={disclosureIntentRef}
         checked={authority.lineWrapping}
         onChange={authority.onLineWrapping}
       >
@@ -428,7 +1141,10 @@ function StatusBarMenuControls({
       <StatusBarCheckboxControl
         authority={authority}
         rootRef={rootRef}
-        isCurrentAuthority={isCurrentAuthority}
+        manager={manager}
+        slot="sync-scroll"
+        action="sync-scroll"
+        disclosureIntentRef={disclosureIntentRef}
         checked={authority.syncScroll}
         onChange={authority.onSyncScroll}
         testId="sync-scroll-toggle"
@@ -442,13 +1158,15 @@ function StatusBarMenuControls({
           <MenuSeparator />
           <MenuLabel>Theme</MenuLabel>
           <MenuRadioGroup value={authority.themePreference} onValueChange={selectTheme}>
-            {THEME_ORDER.map((theme) => (
+            {authority.themeValues.map((theme) => (
               <StatusBarRadioItem
                 key={theme}
                 authority={authority}
                 rootRef={rootRef}
-                isCurrentAuthority={isCurrentAuthority}
+                manager={manager}
                 intentRef={themeIntentRef}
+                disclosureIntentRef={disclosureIntentRef}
+                slot={`theme:${theme}`}
                 value={theme}
                 eligible={authority.themePreference !== theme}
                 testId={`menu-theme-${theme}`}
@@ -461,8 +1179,15 @@ function StatusBarMenuControls({
           <MenuItem
             ref={shortcutsRef}
             icon={<CircleHelp size={15} />}
+            onClickCapture={(event) => {
+              shortcutsActivationRef.current = createShortcutsIntent(event);
+            }}
             onSelect={(event) => {
-              if (claimShortcuts(event.currentTarget)) authority.onShortcuts();
+              const intent = createShortcutsSelectIntent(shortcutsActivationRef.current, event);
+              if (!intent) return;
+              shortcutsActivationRef.current = null;
+              disclosureIntentRef.current = { authority, event: intent };
+              if (claimIntent(intent, "shortcuts")) authority.onShortcuts();
             }}
           >
             Help and shortcuts
@@ -484,21 +1209,38 @@ function StatusBarIssueRow({
   authority,
   row,
   rootRef,
-  isCurrentAuthority,
+  manager,
 }: {
   authority: StatusBarAuthority;
   row: StatusBarIssuePublication;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
 }) {
-  const [buttonRef, claim] = useStatusBarControl<HTMLButtonElement>(authority, rootRef, isCurrentAuthority);
+  const [buttonRef, createReactIntent] = useStatusBarControl<HTMLButtonElement>(
+    authority,
+    rootRef,
+    manager,
+    `issue:${row.index}`,
+  );
+  const intentRef = useRef<StatusBarEventIntent | null>(null);
   return (
     <button
       ref={buttonRef}
       type="button"
       className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-surface-3"
+      onClickCapture={(event) => {
+        intentRef.current = createReactIntent(event);
+      }}
       onClick={(event) => {
-        if (!issuePublicationIsExact(authority, row) || !claim(event.currentTarget)) return;
+        const intent = intentRef.current;
+        if (
+          !intent
+          || !completeReactIntent(intent, event)
+          || !issuePublicationIsExact(authority, row)
+          || !claimIntent(intent, "issue")
+        )
+          return;
+        intentRef.current = null;
         authority.onIssueSelect(row.issue);
       }}
     >
@@ -509,47 +1251,141 @@ function StatusBarIssueRow({
   );
 }
 
+function completeReactIntent(
+  intent: StatusBarEventIntent,
+  event: ReactMouseEvent<HTMLElement>,
+) {
+  const { generation, publication } = intent;
+  if (
+    generation.retired
+    || event.currentTarget !== publication.control
+    || event.nativeEvent !== intent.nativeEvents[0]?.event
+    || event.target !== intent.nativeEvents[0]?.target
+    || !publication.enabled
+    || !controlIsEnabled(publication.control)
+    || (
+      event.eventPhase !== Event.AT_TARGET
+      && event.eventPhase !== Event.BUBBLING_PHASE
+    )
+    || !validateGeneration(generation)
+  )
+    return false;
+  const existing = generation.reactEvents.get(event);
+  if (existing) {
+    if (!intent.reactEvents.includes(existing)) intent.reactEvents.push(existing);
+    return reactEventIsExact(existing);
+  }
+  const reactEvent: StatusBarReactEventPublication = {
+    event,
+    native: intent.nativeEvents[0],
+    type: event.type,
+    target: event.target,
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    defaultPrevented: event.defaultPrevented,
+    timeStamp: event.timeStamp,
+    phase: event.eventPhase,
+    claimed: false,
+  };
+  generation.reactEvents.set(event, reactEvent);
+  intent.reactEvents.push(reactEvent);
+  return reactEventIsExact(reactEvent);
+}
+
+function createContentNativeIntent(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  publicationRef: MutableRefObject<StatusBarControlPublication<HTMLDivElement> | null>,
+  event: Event,
+  mode: "escape" | "outside",
+) {
+  const generation = manager.active;
+  const publication = publicationRef.current;
+  const native = generation?.nativeEvents.get(event);
+  if (
+    !generation
+    || !publication
+    || generation.authority !== authority
+    || generation.controls.get(publication.slot) !== publication
+    || !native
+    || !nativeEventIsExact(native)
+    || !validateGeneration(generation)
+  )
+    return null;
+  const nativeEvents = [native];
+  if (mode === "escape") {
+    if (
+      native.type !== "keydown"
+      || native.key !== "Escape"
+      || !native.path.includes(publication.control)
+      || event.eventPhase !== Event.CAPTURING_PHASE
+      || event.currentTarget !== generation.ownerDocument
+    )
+      return null;
+  } else {
+    const outside = event as CustomEvent<{ originalEvent?: Event }>;
+    const originalEvent = outside.detail?.originalEvent;
+    const original = originalEvent ? generation.nativeEvents.get(originalEvent) : null;
+    if (
+      !["dismissableLayer.pointerDownOutside", "dismissableLayer.focusOutside"].includes(native.type)
+      || !original
+      || !nativeEventIsExact(original)
+      || event.target !== original.target
+      || event.currentTarget !== original.target
+      || event.eventPhase !== Event.AT_TARGET
+      || !(original.target instanceof Node)
+      || publication.control.contains(original.target)
+    )
+      return null;
+    nativeEvents.push(original);
+  }
+  const intent: StatusBarEventIntent = {
+    generation,
+    publication,
+    nativeEvents,
+    reactEvents: [],
+    claimedPublication: false,
+    claims: new Set(),
+    pending: null,
+    requiresReact: false,
+  };
+  return intent;
+}
+
 function StatusBarMenuContent({
   authority,
   rootRef,
-  isCurrentAuthority,
+  manager,
   intentRef,
   children,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
   children: ReactNode;
 }) {
-  const [setContent, , , createProof, content] = useStatusBarControl<HTMLDivElement>(authority, rootRef, isCurrentAuthority);
-  const authorize = useCallback((event: EventWithCurrentTarget) => {
-    const prove = createProof(event.currentTarget);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, createProof, intentRef]);
+  const [setContent, createReactIntent, , publicationRef] = useStatusBarControl<HTMLDivElement>(
+    authority,
+    rootRef,
+    manager,
+    "menu-content",
+  );
+  const authorize = useCallback((event: StatusBarReactEvent) => {
+    rememberReactEvent(manager, event);
+    if ("key" in event && event.key === "Escape") return;
+    const intent = createReactIntent(event);
+    if (intent) intentRef.current = { authority, event: intent };
+  }, [authority, createReactIntent, intentRef, manager]);
   const authorizeOutside = useCallback((event: CustomEvent<{ originalEvent: Event }>) => {
-    const originalTarget = event.detail?.originalEvent?.target;
-    if (
-      !originalTarget
-      || event.target !== originalTarget
-      || event.currentTarget !== originalTarget
-      || !(originalTarget instanceof Node)
-      || content?.contains(originalTarget)
-    )
-      return;
-    const prove = createProof(content);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, content, createProof, intentRef]);
+    const intent = createContentNativeIntent(manager, authority, publicationRef, event, "outside");
+    if (intent) intentRef.current = { authority, event: intent };
+  }, [authority, intentRef, manager, publicationRef]);
   const authorizeEscape = useCallback((event: KeyboardEvent) => {
-    if (
-      event.key !== "Escape"
-      || !content
-      || event.currentTarget instanceof Element
-    )
-      return;
-    const prove = createProof(content);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, content, createProof, intentRef]);
+    const intent = createContentNativeIntent(manager, authority, publicationRef, event, "escape");
+    if (intent && claimIntent(intent, "menu-disclosure"))
+      intentRef.current = { authority, event: intent };
+  }, [authority, intentRef, manager, publicationRef]);
 
   return (
     <MenuContent
@@ -559,6 +1395,7 @@ function StatusBarMenuContent({
       data-testid="status-menu-content"
       onPointerDownCapture={authorize}
       onKeyDownCapture={authorize}
+      onClickCapture={(event) => rememberReactEvent(manager, event)}
       onPointerDownOutside={authorizeOutside}
       onFocusOutside={authorizeOutside}
       onEscapeKeyDown={authorizeEscape}
@@ -571,44 +1408,37 @@ function StatusBarMenuContent({
 function StatusBarIssuesContent({
   authority,
   rootRef,
-  isCurrentAuthority,
+  manager,
   intentRef,
   children,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
-  isCurrentAuthority: IsCurrentAuthority;
+  manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
   children: ReactNode;
 }) {
-  const [setContent, , , createProof, content] = useStatusBarControl<HTMLDivElement>(authority, rootRef, isCurrentAuthority);
-  const authorize = useCallback((event: EventWithCurrentTarget) => {
-    const prove = createProof(event.currentTarget);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, createProof, intentRef]);
+  const [setContent, createReactIntent, , publicationRef] = useStatusBarControl<HTMLDivElement>(
+    authority,
+    rootRef,
+    manager,
+    "issues-content",
+  );
+  const authorize = useCallback((event: StatusBarReactEvent) => {
+    rememberReactEvent(manager, event);
+    if ("key" in event && event.key === "Escape") return;
+    const intent = createReactIntent(event);
+    if (intent) intentRef.current = { authority, event: intent };
+  }, [authority, createReactIntent, intentRef, manager]);
   const authorizeOutside = useCallback((event: CustomEvent<{ originalEvent: Event }>) => {
-    const originalTarget = event.detail?.originalEvent?.target;
-    if (
-      !originalTarget
-      || event.target !== originalTarget
-      || event.currentTarget !== originalTarget
-      || !(originalTarget instanceof Node)
-      || content?.contains(originalTarget)
-    )
-      return;
-    const prove = createProof(content);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, content, createProof, intentRef]);
+    const intent = createContentNativeIntent(manager, authority, publicationRef, event, "outside");
+    if (intent) intentRef.current = { authority, event: intent };
+  }, [authority, intentRef, manager, publicationRef]);
   const authorizeEscape = useCallback((event: KeyboardEvent) => {
-    if (
-      event.key !== "Escape"
-      || !content
-      || event.currentTarget instanceof Element
-    )
-      return;
-    const prove = createProof(content);
-    if (prove) intentRef.current = { authority, prove };
-  }, [authority, content, createProof, intentRef]);
+    const intent = createContentNativeIntent(manager, authority, publicationRef, event, "escape");
+    if (intent && claimIntent(intent, "issues-disclosure"))
+      intentRef.current = { authority, event: intent };
+  }, [authority, intentRef, manager, publicationRef]);
 
   return (
     <PopoverContent
@@ -617,6 +1447,8 @@ function StatusBarIssuesContent({
       className="w-80 p-0"
       data-testid="status-issues-content"
       onKeyDownCapture={authorize}
+      onPointerDownCapture={authorize}
+      onClickCapture={(event) => rememberReactEvent(manager, event)}
       onPointerDownOutside={authorizeOutside}
       onFocusOutside={authorizeOutside}
       onEscapeKeyDown={authorizeEscape}
@@ -638,7 +1470,9 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const errors = issues.filter((i) => i.severity === "error").length;
 
   const [themePreference, setThemePreference] = useTheme();
-  const [mount] = useState(() => Symbol("status-bar"));
+  const [manager] = useState(createPublicationManager);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [issuesOpen, setIssuesOpen] = useState(false);
   const documentValue = doc;
   const documentStorage = doc.storage;
   const documentRepoBranch = doc.repoBranch;
@@ -647,7 +1481,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const documentRepoPath = doc.repoPath;
   const documentGistId = doc.gistId;
   const documentHasUnpublishedChanges = doc.hasUnpublishedChanges;
-  const documentPublication = useMemo<StatusBarDocumentPublication>(() => ({
+  const documentPublication = useMemo<StatusBarDocumentPublication>(() => Object.freeze({
     value: documentValue,
     storage: documentStorage,
     repoBranch: documentRepoBranch,
@@ -666,23 +1500,8 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     documentStorage,
     documentValue,
   ]);
-  const authority = useMemo<StatusBarAuthority>(() => ({
-    mount,
-    session,
-    source,
-    tree,
-    document: documentPublication,
-    layout,
-    layoutValues: compact ? COMPACT_LAYOUTS : DESKTOP_LAYOUTS,
-    onLayout,
-    lineWrapping,
-    onLineWrapping,
-    syncScroll,
-    onSyncScroll,
-    compact,
-    hydrated,
-    issueSnapshot: issues,
-    issueRows: issues.map((issue, index) => ({
+  const authority = useMemo<StatusBarAuthority>(() => {
+    const issueRows = Object.freeze(issues.map((issue, index) => Object.freeze({
       snapshot: issues,
       issue,
       index,
@@ -692,20 +1511,43 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
       message: issue.message,
       rule: issue.rule,
       severity: issue.severity,
-    })),
-    onIssueSelect,
-    onShortcuts,
-    onStorage,
-    themePreference,
-    setThemePreference,
-  }), [
+    })));
+    return Object.freeze({
+      mount: manager.mount,
+      session,
+      source,
+      tree,
+      document: documentPublication,
+      layout,
+      layoutValues: compact ? COMPACT_LAYOUTS : DESKTOP_LAYOUTS,
+      onLayout,
+      lineWrapping,
+      onLineWrapping,
+      syncScroll,
+      onSyncScroll,
+      compact,
+      hydrated,
+      issueSnapshot: issues,
+      issueRows,
+      onIssueSelect,
+      onShortcuts,
+      onStorage,
+      themePreference,
+      themeValues: STATUS_BAR_THEMES,
+      setThemePreference,
+      menuOpen,
+      issuesOpen,
+    });
+  }, [
     compact,
     documentPublication,
     hydrated,
     issues,
+    issuesOpen,
     layout,
     lineWrapping,
-    mount,
+    manager,
+    menuOpen,
     onIssueSelect,
     onLayout,
     onLineWrapping,
@@ -720,128 +1562,136 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     tree,
   ]);
   const rootRef = useRef<HTMLElement>(null);
-  const menuTriggerRef = useRef<HTMLButtonElement>(null);
-  const issuesTriggerRef = useRef<HTMLButtonElement>(null);
-  const rootPublicationRef = useRef<StatusBarRootPublication | null>(null);
   const menuIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
   const issuesIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [issuesOpen, setIssuesOpen] = useState(false);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
-    const menuTrigger = menuTriggerRef.current;
-    const issuesTrigger = compact ? null : issuesTriggerRef.current;
-    if (!root || !menuTrigger || (!compact && !issuesTrigger)) {
-      rootPublicationRef.current = null;
-      return;
-    }
-    const publication = { authority, root, menuTrigger, issuesTrigger };
-    rootPublicationRef.current = publication;
+    if (!root) return;
+    const publication = registerControl(manager, authority, "root", root, root);
+    if (!publication) return;
     if (menuIntentRef.current?.authority !== authority) menuIntentRef.current = null;
     if (issuesIntentRef.current?.authority !== authority) issuesIntentRef.current = null;
     return () => {
-      if (rootPublicationRef.current === publication) rootPublicationRef.current = null;
       if (menuIntentRef.current?.authority === authority) menuIntentRef.current = null;
       if (issuesIntentRef.current?.authority === authority) issuesIntentRef.current = null;
+      retireManagerGeneration(manager, publication);
     };
-  }, [authority, compact]);
+  }, [authority, manager]);
 
-  const isCurrentAuthority = useCallback((candidate: StatusBarAuthority) => {
-    const publication = rootPublicationRef.current;
-    return (
-      publication?.authority === candidate
-      && rootRef.current === publication.root
-      && menuTriggerRef.current === publication.menuTrigger
-      && (candidate.compact
-        ? publication.issuesTrigger === null
-        : issuesTriggerRef.current === publication.issuesTrigger)
-      && documentPublicationIsExact(candidate.document)
+  const [menuTriggerRef, createMenuIntent] = useStatusBarControl<HTMLButtonElement>(
+    authority,
+    rootRef,
+    manager,
+    "menu-trigger",
+  );
+  const [issuesTriggerRef, createIssuesIntent] = useStatusBarControl<HTMLButtonElement>(
+    authority,
+    rootRef,
+    manager,
+    "issues-trigger",
+  );
+  const [storageRef, createStorageIntent] = useStatusBarControl<HTMLButtonElement>(
+    authority,
+    rootRef,
+    manager,
+    "storage",
+  );
+  const [desktopShortcutsRef, createDesktopShortcutsIntent] =
+    useStatusBarControl<HTMLButtonElement>(
+      authority,
+      rootRef,
+      manager,
+      "desktop-shortcuts",
     );
-  }, []);
+  const storageIntentRef = useRef<StatusBarEventIntent | null>(null);
+  const desktopShortcutsIntentRef = useRef<StatusBarEventIntent | null>(null);
 
-  const createRootControlProof = useCallback((
-    source: EventTarget | null,
-    control: HTMLButtonElement | null,
-  ) => {
-    const publication = rootPublicationRef.current;
-    if (
-      publication?.authority !== authority
-      || !control
-      || source !== control
-      || publication.root !== rootRef.current
-      || !publication.root.isConnected
-      || !control.isConnected
-      || !isCurrentAuthority(authority)
-    )
-      return null;
-    return () => (
-      rootPublicationRef.current === publication
-      && publication.authority === authority
-      && publication.root === rootRef.current
-      && source === control
-      && publication.root.isConnected
-      && control.isConnected
-      && isCurrentAuthority(authority)
-    );
-  }, [authority, isCurrentAuthority]);
+  const authorizeMenuChange = useCallback((event: StatusBarReactEvent) => {
+    rememberReactEvent(manager, event);
+    const intent = createMenuIntent(event);
+    if (intent) menuIntentRef.current = { authority, event: intent };
+  }, [authority, createMenuIntent, manager]);
 
-  const authorizeMenuChange = useCallback((event: EventWithCurrentTarget) => {
-    const prove = createRootControlProof(event.currentTarget, menuTriggerRef.current);
-    if (prove) menuIntentRef.current = { authority, prove };
-  }, [authority, createRootControlProof]);
-
-  const authorizeIssuesChange = useCallback((event: EventWithCurrentTarget) => {
-    const prove = createRootControlProof(event.currentTarget, issuesTriggerRef.current);
-    if (prove) issuesIntentRef.current = { authority, prove };
-  }, [authority, createRootControlProof]);
+  const authorizeIssuesChange = useCallback((event: StatusBarReactEvent) => {
+    rememberReactEvent(manager, event);
+    const intent = createIssuesIntent(event);
+    if (intent) issuesIntentRef.current = { authority, event: intent };
+  }, [authority, createIssuesIntent, manager]);
 
   const changeMenuOpen = useCallback((open: boolean) => {
-    const publication = rootPublicationRef.current;
     const intent = menuIntentRef.current;
     if (
-      publication?.authority !== authority
-      || publication.menuTrigger !== menuTriggerRef.current
+      open === authority.menuOpen
       || intent?.authority !== authority
-      || !intent.prove()
-      || !isCurrentAuthority(authority)
+      || intent.event.generation !== manager.active
+    )
+      return;
+    if (intent.event.requiresReact) {
+      intent.event.pending = () => {
+        if (
+          menuIntentRef.current === intent
+          && claimIntent(intent.event, "menu-disclosure")
+        ) {
+          menuIntentRef.current = null;
+          setMenuOpen(open);
+        }
+      };
+      return;
+    }
+    if (
+      !intent.event.claims.has("menu-disclosure")
+      && !claimIntent(intent.event, "menu-disclosure")
     )
       return;
     menuIntentRef.current = null;
-    setMenuOpen((current) => {
-      if (!isCurrentAuthority(authority) || current === open) return current;
-      return open;
-    });
-  }, [authority, isCurrentAuthority]);
+    setMenuOpen(open);
+  }, [authority, manager]);
 
   const changeIssuesOpen = useCallback((open: boolean) => {
-    const publication = rootPublicationRef.current;
     const intent = issuesIntentRef.current;
     if (
-      publication?.authority !== authority
-      || !publication.issuesTrigger
-      || publication.issuesTrigger !== issuesTriggerRef.current
+      open === authority.issuesOpen
       || intent?.authority !== authority
-      || !intent.prove()
-      || !isCurrentAuthority(authority)
+      || intent.event.generation !== manager.active
+    )
+      return;
+    if (intent.event.requiresReact) {
+      intent.event.pending = () => {
+        if (
+          issuesIntentRef.current === intent
+          && claimIntent(intent.event, "issues-disclosure")
+        ) {
+          issuesIntentRef.current = null;
+          setIssuesOpen(open);
+        }
+      };
+      return;
+    }
+    if (
+      !intent.event.claims.has("issues-disclosure")
+      && !claimIntent(intent.event, "issues-disclosure")
     )
       return;
     issuesIntentRef.current = null;
-    setIssuesOpen((current) => {
-      if (!isCurrentAuthority(authority) || current === open) return current;
-      return open;
-    });
-  }, [authority, isCurrentAuthority]);
+    setIssuesOpen(open);
+  }, [authority, manager]);
 
-  const [storageRef, claimStorage] = useStatusBarControl<HTMLButtonElement>(authority, rootRef, isCurrentAuthority);
-  const [desktopShortcutsRef, claimDesktopShortcuts] = useStatusBarControl<HTMLButtonElement>(authority, rootRef, isCurrentAuthority);
   const document = authority.document;
   const storageLabel =
     document.storage === "repo" ? (document.repoBranch ?? "main") : document.storage === "gist" ? "gist" : "local";
   const StorageIcon = document.storage === "repo" ? GitBranch : document.storage === "gist" ? GitHubIcon : HardDrive;
 
   return (
-    <footer ref={rootRef} className={STATUS_BOX} data-testid="status-bar" data-compact={compact || undefined}>
+    <footer
+      ref={rootRef}
+      className={STATUS_BOX}
+      data-testid="status-bar"
+      data-compact={compact || undefined}
+      onPointerDownCapture={(event) => rememberReactEvent(manager, event)}
+      onKeyDownCapture={(event) => rememberReactEvent(manager, event)}
+      onClickCapture={(event) => rememberReactEvent(manager, event)}
+    >
       <StatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
       <div className="flex-1" />
 
@@ -857,8 +1707,6 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             aria-label={compact ? "View options" : undefined}
             onPointerDownCapture={authorizeMenuChange}
             onKeyDownCapture={authorizeMenuChange}
-            onPointerDown={authorizeMenuChange}
-            onKeyDown={authorizeMenuChange}
             data-testid="layout-menu"
           >
             {/* The phone name from the first byte: `compact` (and so `aria-label`) is false until hydration, and the
@@ -877,10 +1725,15 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         <StatusBarMenuContent
           authority={authority}
           rootRef={rootRef}
-          isCurrentAuthority={isCurrentAuthority}
+          manager={manager}
           intentRef={menuIntentRef}
         >
-          <StatusBarMenuControls authority={authority} rootRef={rootRef} isCurrentAuthority={isCurrentAuthority} />
+          <StatusBarMenuControls
+            authority={authority}
+            rootRef={rootRef}
+            manager={manager}
+            disclosureIntentRef={menuIntentRef}
+          />
         </StatusBarMenuContent>
       </Menu>
 
@@ -894,7 +1747,6 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             type="button"
             className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 max-md:hidden", issues.length ? (errors ? "text-danger" : "text-warning") : "text-ink-3 hover:text-ink")}
             onClickCapture={authorizeIssuesChange}
-            onClick={authorizeIssuesChange}
             data-testid="issues-button"
           >
             {issues.length ? <AlertTriangle size={14} /> : <Check size={14} />}
@@ -904,7 +1756,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         <StatusBarIssuesContent
           authority={authority}
           rootRef={rootRef}
-          isCurrentAuthority={isCurrentAuthority}
+          manager={manager}
           intentRef={issuesIntentRef}
         >
           <div className="border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">Markdown issues</div>
@@ -918,7 +1770,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
                     authority={authority}
                     row={row}
                     rootRef={rootRef}
-                    isCurrentAuthority={isCurrentAuthority}
+                    manager={manager}
                   />
                 </li>
               ))}
@@ -933,8 +1785,19 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
         ref={storageRef}
         type="button"
         className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 hover:text-ink md:h-7"
+        onClickCapture={authority.onStorage ? (event) => {
+          storageIntentRef.current = createStorageIntent(event);
+        } : undefined}
         onClick={authority.onStorage ? (event) => {
-          if (claimStorage(event.currentTarget)) authority.onStorage?.();
+          const intent = storageIntentRef.current;
+          if (
+            !intent
+            || !completeReactIntent(intent, event)
+            || !claimIntent(intent, "storage")
+          )
+            return;
+          storageIntentRef.current = null;
+          authority.onStorage?.();
         } : undefined}
         disabled={!authority.onStorage}
         title={document.storage === "repo" ? `${document.repoOwner}/${document.repoName}: ${document.repoPath}` : document.storage === "gist" ? `Gist ${document.gistId}` : "Stored in Markdoc"}
@@ -952,8 +1815,19 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             ref={desktopShortcutsRef}
             type="button"
             className="icon-btn h-7 w-7 max-md:hidden"
+            onClickCapture={(event) => {
+              desktopShortcutsIntentRef.current = createDesktopShortcutsIntent(event);
+            }}
             onClick={(event) => {
-              if (claimDesktopShortcuts(event.currentTarget)) authority.onShortcuts();
+              const intent = desktopShortcutsIntentRef.current;
+              if (
+                !intent
+                || !completeReactIntent(intent, event)
+                || !claimIntent(intent, "shortcuts")
+              )
+                return;
+              desktopShortcutsIntentRef.current = null;
+              authority.onShortcuts();
             }}
             aria-label="Help and shortcuts"
           >
