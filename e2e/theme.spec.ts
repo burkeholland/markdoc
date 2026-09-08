@@ -20,6 +20,35 @@ const isDark = (rgb: [number, number, number] | null) => rgb !== null && rgb[0] 
 const isLight = (rgb: [number, number, number] | null) => rgb !== null && rgb[0] + rgb[1] + rgb[2] > 3 * 200;
 
 test.describe("dark mode", () => {
+  test("theme picker follows trusted keyboard navigation", async ({ browser }) => {
+    const user = await signIn(browser, "theme-keyboard");
+    const { page } = user;
+    await page.goto("/settings");
+    await waitForHydration(page);
+    const system = page.getByTestId("theme-option-system");
+    const light = page.getByTestId("theme-option-light");
+    const dark = page.getByTestId("theme-option-dark");
+    await expect(system).toHaveAttribute("tabindex", "0");
+    await expect(light).toHaveAttribute("tabindex", "-1");
+    await expect(dark).toHaveAttribute("tabindex", "-1");
+    await system.focus();
+    const scroll = await page.evaluate(() => [window.scrollX, window.scrollY]);
+
+    await page.keyboard.press("ArrowLeft");
+
+    await expect(dark).toHaveAttribute("aria-checked", "true");
+    await expect(dark).toHaveAttribute("tabindex", "0");
+    await expect(dark).toBeFocused();
+    expect(await page.evaluate(() => [window.scrollX, window.scrollY])).toEqual(scroll);
+    expect(await page.evaluate(() => localStorage.getItem("markdoc:theme"))).toBe("dark");
+
+    await page.keyboard.press("Tab");
+    await expect(page.locator(":focus")).not.toHaveAttribute("role", "radio");
+    await page.keyboard.press("Shift+Tab");
+    await expect(dark).toBeFocused();
+    await user.context.close();
+  });
+
   test("follows the OS preference by default, toggles without a reload and persists", async ({ browser }) => {
     const context = await browser.newContext({ colorScheme: "dark" });
     const page = await context.newPage();

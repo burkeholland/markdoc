@@ -3,6 +3,7 @@ import {
   StrictMode,
   useEffect,
   useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -11,7 +12,12 @@ import { act } from "@testing-library/react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { THEME_STORAGE_KEY, themeStore, type ThemePreference } from "@/lib/theme";
+import {
+  THEME_STORAGE_KEY,
+  setThemePreference,
+  themeStore,
+  type ThemePreference,
+} from "@/lib/theme";
 import { ThemePicker, ThemeToggle, useTheme } from "./theme-toggle";
 
 type ThemeSetter = (next: ThemePreference) => void;
@@ -41,6 +47,7 @@ interface StaleEvidence extends EffectCounts {
 }
 
 type ThemeClick = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type ThemeKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 type CapturedClickEvent = ReactMouseEvent<HTMLButtonElement> & {
   preventDefault: ReturnType<typeof vi.fn>;
   stopPropagation: ReturnType<typeof vi.fn>;
@@ -80,17 +87,28 @@ function renderDirect(node: ReactNode) {
   return view;
 }
 
-function reactProperty<T>(element: Element, name: string): T | undefined {
+function reactProperties(element: Element): Record<string, unknown> {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the theme control");
   const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  return props?.[name] as T | undefined;
+  if (!props) throw new Error("React props were not available on the theme control");
+  return props;
+}
+
+function reactProperty<T>(element: Element, name: string): T | undefined {
+  return reactProperties(element)[name] as T | undefined;
 }
 
 function captureClick(element: Element): ThemeClick {
   const click = reactProperty<ThemeClick>(element, "onClick");
   if (typeof click !== "function") throw new Error("The theme control did not have an onClick handler");
   return click;
+}
+
+function captureKeyDown(element: Element): ThemeKeyDown {
+  const keyDown = reactProperty<ThemeKeyDown>(element, "onKeyDown");
+  if (typeof keyDown !== "function") throw new Error("The theme control did not have an onKeyDown handler");
+  return keyDown;
 }
 
 function captureRef<T extends Element>(element: T): RefCallback<T> {
@@ -137,6 +155,31 @@ function primaryClickEvent(ownerDocument = document) {
 }
 
 function dispatchClick(target: Element, event = primaryClickEvent(target.ownerDocument)) {
+  target.dispatchEvent(event);
+  return event;
+}
+
+function keyboardEvent(
+  ownerDocument: Document,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const KeyboardEventConstructor = ownerDocument.defaultView?.KeyboardEvent ?? KeyboardEvent;
+  return new KeyboardEventConstructor("keydown", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    key,
+    ...init,
+  });
+}
+
+function dispatchKey(
+  target: Element,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const event = keyboardEvent(target.ownerDocument, key, init);
   target.dispatchEvent(event);
   return event;
 }
@@ -365,7 +408,497 @@ describe("mounted theme controls", () => {
     expect(rows.map((row) => row.textContent?.trim())).toEqual(["System", "Light", "Dark"]);
     expect(rows.map((row) => row.getAttribute("role"))).toEqual(["radio", "radio", "radio"]);
     expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    expect(rows.map((row) => row.tabIndex)).toEqual([0, -1, -1]);
     expect(rows.map((row) => row.querySelector("svg")?.getAttribute("width"))).toEqual(["14", "14", "14"]);
+  });
+
+  it.each([
+    ["ArrowRight", "system", "light"],
+    ["ArrowDown", "light", "dark"],
+    ["ArrowLeft", "dark", "light"],
+    ["ArrowUp", "light", "system"],
+    ["ArrowRight", "dark", "system"],
+    ["ArrowLeft", "system", "dark"],
+    ["Home", "dark", "system"],
+    ["End", "system", "dark"],
+  ] as const)(
+    "moves a direct Strict Mode picker once with %s from %s to %s without scrolling",
+    (key, initial, destination) => {
+      if (initial !== "system") localStorage.setItem(THEME_STORAGE_KEY, initial);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { host } = renderDirect(
+        <StrictMode>
+          <ThemePicker />
+        </StrictMode>,
+      );
+      const storage = vi.spyOn(Storage.prototype, "setItem");
+      const source = option(host, initial);
+      const destinationBeforeKey = option(host, destination);
+      const publicFocus = vi.fn();
+      Object.defineProperty(destinationBeforeKey, "focus", {
+        configurable: true,
+        value: publicFocus,
+      });
+      const beforeScroll = [window.scrollX, window.scrollY];
+      expect(
+        (["system", "light", "dark"] as const).map((value) => option(host, value).tabIndex),
+      ).toEqual(
+        (["system", "light", "dark"] as const).map((value) => value === initial ? 0 : -1),
+      );
+      source.focus();
+      focus.mockClear();
+
+      let event!: KeyboardEvent;
+      act(() => {
+        event = dispatchKey(source, key);
+      });
+
+      const selected = option(host, destination);
+      expect(event.defaultPrevented).toBe(true);
+      expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe(destination);
+      expect(selected).toHaveAttribute("aria-checked", "true");
+      expect(selected).toHaveFocus();
+      expect(
+        (["system", "light", "dark"] as const).map((value) => option(host, value).tabIndex),
+      ).toEqual(
+        (["system", "light", "dark"] as const).map((value) => value === destination ? 0 : -1),
+      );
+      expect(storage.mock.calls.filter(([storageKey]) => storageKey === THEME_STORAGE_KEY))
+        .toEqual([[THEME_STORAGE_KEY, destination]]);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(focus.mock.instances[0]).toBe(selected);
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(publicFocus).not.toHaveBeenCalled();
+      expect([window.scrollX, window.scrollY]).toEqual(beforeScroll);
+    },
+  );
+
+  it("keeps native Picker clicks compatible while moving the single tab stop", () => {
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const light = option(host, "light");
+    const event = primaryClickEvent();
+
+    act(() => dispatchClick(light.querySelector("svg") ?? light, event));
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(
+      (["system", "light", "dark"] as const).map((value) => option(host, value).tabIndex),
+    ).toEqual([-1, 0, -1]);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+  });
+
+  it.each([
+    ["Home", "system"],
+    ["End", "dark"],
+  ] as const)("leaves an already-selected %s destination inert", (key, preference) => {
+    if (preference !== "system") localStorage.setItem(THEME_STORAGE_KEY, preference);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const source = option(host, preference);
+    source.focus();
+    focus.mockClear();
+
+    const event = dispatchKey(source, key);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([storageKey]) => storageKey === THEME_STORAGE_KEY))
+      .toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveAttribute("aria-checked", "true");
+    expect(source.tabIndex).toBe(0);
+  });
+
+  it("uses captured owner-realm key, path, prevention, and focus authorities", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const system = option(host, "system");
+    system.focus();
+    focus.mockClear();
+    const event = keyboardEvent(document, "ArrowRight");
+    const publicPreventDefault = vi.fn();
+    Object.defineProperties(event, {
+      key: { configurable: true, value: "End" },
+      composedPath: { configurable: true, value: vi.fn(() => []) },
+      preventDefault: { configurable: true, value: publicPreventDefault },
+    });
+
+    act(() => {
+      system.dispatchEvent(event);
+    });
+
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(option(host, "light")).toHaveFocus();
+    expect(event.defaultPrevented).toBe(true);
+    expect(publicPreventDefault).not.toHaveBeenCalled();
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["canceled", { canceled: true }],
+    ["Alt-modified", { altKey: true }],
+    ["Control-modified", { ctrlKey: true }],
+    ["Meta-modified", { metaKey: true }],
+    ["Shift-modified", { shiftKey: true }],
+    ["repeating", { repeat: true }],
+    ["composing", { isComposing: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects a %s key before theme or focus work and remains usable", (_name, setup) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const system = option(host, "system");
+    system.focus();
+    focus.mockClear();
+    const { canceled, ...init } = setup as KeyboardEventInit & { canceled?: boolean };
+    const event = keyboardEvent(document, "ArrowRight", init);
+    if (canceled) event.preventDefault();
+
+    act(() => {
+      system.dispatchEvent(event);
+    });
+
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+    if (!canceled) expect(event.defaultPrevented).toBe(false);
+
+    act(() => dispatchKey(system, "ArrowRight"));
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(option(host, "light")).toHaveFocus();
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects forged and foreign-realm key events before accepting one native owner-realm key", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const system = option(host, "system");
+    const handler = captureKeyDown(system);
+    system.focus();
+    focus.mockClear();
+    const nativeEvent = keyboardEvent(document, "ArrowRight");
+    const forged = {
+      type: "keydown",
+      currentTarget: system,
+      target: system,
+      nativeEvent,
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignEvent = keyboardEvent(frame.contentDocument!, "ArrowRight");
+
+    act(() => {
+      handler(forged);
+      system.dispatchEvent(new Event("keydown", { bubbles: true, cancelable: true }));
+      system.dispatchEvent(foreignEvent);
+    });
+
+    expect(nativeEvent.defaultPrevented).toBe(false);
+    expect(foreignEvent.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => dispatchKey(system, "ArrowRight"));
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+    frame.remove();
+  });
+
+  it("claims a Picker publication, action, React event, and native key only once", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { host } = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const system = option(host, "system");
+    system.focus();
+    focus.mockClear();
+    const event = keyboardEvent(document, "ArrowRight");
+
+    act(() => {
+      system.dispatchEvent(event);
+      option(host, "light").dispatchEvent(event);
+    });
+
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unchecked and wrong-picker sources without poisoning the exact checked row", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const crossed = { handler: undefined as ThemeKeyDown | undefined };
+    let intercept = false;
+    const { host } = renderDirect(
+      <StrictMode>
+        <div onKeyDownCapture={(event) => {
+          if (!intercept || !crossed.handler) return;
+          crossed.handler(event as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+          event.stopPropagation();
+        }}>
+          <ThemePicker />
+          <ThemePicker />
+        </div>
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const roots = [...host.querySelectorAll<HTMLDivElement>('[data-testid="theme-picker"]')];
+    const firstSystem = option(roots[0], "system");
+    const firstLight = option(roots[0], "light");
+    const secondSystem = option(roots[1], "system");
+    crossed.handler = captureKeyDown(firstSystem);
+    firstLight.focus();
+    focus.mockClear();
+
+    act(() => {
+      dispatchKey(firstSystem, "ArrowRight");
+      dispatchKey(firstLight, "ArrowRight");
+    });
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    intercept = true;
+    secondSystem.focus();
+    focus.mockClear();
+    act(() => dispatchKey(secondSystem, "ArrowRight"));
+    intercept = false;
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    firstSystem.focus();
+    focus.mockClear();
+    act(() => dispatchKey(firstSystem, "ArrowRight"));
+    expect(option(roots[0], "light")).toHaveAttribute("aria-checked", "true");
+    expect(option(roots[1], "light")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "detached and reinserted",
+    "reordered and restored",
+    "replaced and restored",
+    "attribute changed and restored",
+  ] as const)(
+    "retires a Picker whose DOM was %s and accepts a distinct clean successor",
+    (mutation) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const controls = (visit: string) => (
+        <StrictMode>
+          <section key={visit}>
+            <ThemePicker />
+          </section>
+        </StrictMode>
+      );
+      const view = renderDirect(controls("a"));
+      const storage = vi.spyOn(Storage.prototype, "setItem");
+      const root = picker(view.host);
+      const system = option(root, "system");
+      const light = option(root, "light");
+      const dark = option(root, "dark");
+      if (mutation === "detached and reinserted") {
+        const parent = root.parentNode!;
+        const nextSibling = root.nextSibling;
+        root.remove();
+        parent.insertBefore(root, nextSibling);
+      } else if (mutation === "reordered and restored") {
+        root.insertBefore(dark, system);
+        root.append(dark);
+      } else if (mutation === "replaced and restored") {
+        const replacement = system.cloneNode(true) as HTMLButtonElement;
+        system.replaceWith(replacement);
+        replacement.replaceWith(system);
+      } else {
+        system.setAttribute("aria-checked", "false");
+        system.setAttribute("aria-checked", "true");
+      }
+      system.focus();
+      focus.mockClear();
+      let rejected!: KeyboardEvent;
+
+      act(() => {
+        rejected = dispatchKey(system, "ArrowRight");
+      });
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+      expect(light).toHaveAttribute("aria-checked", "false");
+
+      act(() => view.root.render(controls("b")));
+      const currentSystem = option(view.host, "system");
+      currentSystem.focus();
+      focus.mockClear();
+      act(() => dispatchKey(currentSystem, "ArrowRight"));
+      expect(option(view.host, "light")).toHaveAttribute("aria-checked", "true");
+      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+        .toEqual([[THEME_STORAGE_KEY, "light"]]);
+      expect(focus).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps an incomplete one-row Picker inert and requires a clean successor", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const controls = (visit: string) => (
+      <StrictMode>
+        <section key={visit}>
+          <ThemePicker />
+        </section>
+      </StrictMode>
+    );
+    const view = renderDirect(controls("a"));
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const root = picker(view.host);
+    const system = option(root, "system");
+    const light = option(root, "light");
+    const dark = option(root, "dark");
+    light.remove();
+    dark.remove();
+    system.focus();
+    focus.mockClear();
+
+    const rejected = dispatchKey(system, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+    root.append(light, dark);
+    act(() => view.root.render(controls("b")));
+    const currentSystem = option(view.host, "system");
+    currentSystem.focus();
+    focus.mockClear();
+    act(() => dispatchKey(currentSystem, "ArrowRight"));
+    expect(option(view.host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects store and callback drift before prevention and keeps current authority usable", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const stale = { handler: undefined as ThemeKeyDown | undefined };
+    let intercept = false;
+    const { host } = renderDirect(
+      <StrictMode>
+        <div onKeyDownCapture={(event) => {
+          if (!intercept || !stale.handler) return;
+          stale.handler(event as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+          event.stopPropagation();
+        }}>
+          <ThemePicker />
+        </div>
+      </StrictMode>,
+    );
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const system = option(host, "system");
+    stale.handler = captureKeyDown(system);
+    system.focus();
+    focus.mockClear();
+    localStorage.setItem(THEME_STORAGE_KEY, "dark");
+    storage.mockClear();
+
+    const storeDrift = dispatchKey(system, "ArrowRight");
+    expect(storeDrift.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    localStorage.setItem(THEME_STORAGE_KEY, "system");
+    act(() => setThemePreference("dark"));
+    storage.mockClear();
+    const dark = option(host, "dark");
+    intercept = true;
+    dark.focus();
+    focus.mockClear();
+    const callbackDrift = dispatchKey(dark, "ArrowRight");
+    intercept = false;
+    expect(callbackDrift.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => dispatchKey(dark, "ArrowRight"));
+    expect(option(host, "system")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "system"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires a partial Strict Mode keyboard publication before its clean replay", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directViews.push({ host, root });
+    let retiredHandler: ThemeKeyDown | undefined;
+    let intercept = false;
+    act(() => {
+      root.render(
+        <StrictMode>
+          <div onKeyDownCapture={(event) => {
+            if (!intercept || !retiredHandler) return;
+            retiredHandler(event as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+            event.stopPropagation();
+          }}>
+            <LayoutProbe onLayout={() => {
+              retiredHandler ??= captureKeyDown(option(host, "system"));
+            }}>
+              <ThemePicker />
+            </LayoutProbe>
+          </div>
+        </StrictMode>,
+      );
+    });
+    const storage = vi.spyOn(Storage.prototype, "setItem");
+    const system = option(host, "system");
+    const currentHandler = captureKeyDown(system);
+    expect(retiredHandler).toBeDefined();
+    expect(currentHandler).not.toBe(retiredHandler);
+    intercept = true;
+    system.focus();
+    focus.mockClear();
+
+    const staleEvent = dispatchKey(system, "ArrowRight");
+    expect(staleEvent.defaultPrevented).toBe(false);
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+    expect(focus).not.toHaveBeenCalled();
+
+    intercept = false;
+    act(() => dispatchKey(system, "ArrowRight"));
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+    expect(focus).toHaveBeenCalledTimes(1);
   });
 
   it("cycles one current Toggle activation through every preference exactly once", () => {
