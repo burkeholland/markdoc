@@ -2,6 +2,8 @@ import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
 
+test.use({ screenshot: "off", trace: "off", video: "off" });
+
 /** Pull the notifications store now instead of waiting for the 30 s poll. */
 const refresh = (page: Page) =>
   page.evaluate(() => (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.());
@@ -221,7 +223,6 @@ test.describe("notifications", () => {
 });
 
 test.describe("notification keyboard browsing selector", () => {
-  test.use({ screenshot: "off", trace: "off", video: "off" });
   test.skip(
     process.env.TASK_3472_BROWSER !== "1",
     "Run locally with TASK_3472_BROWSER=1 after acquiring the shared browser slot",
