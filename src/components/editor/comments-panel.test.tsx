@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, createElement, useEffect, useLayoutEffect } from "react";
+import { StrictMode, createElement, useEffect, useLayoutEffect, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
@@ -70,7 +70,7 @@ import { parseSuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { AgentRequestMirror } from "@/server/agent-requests";
 import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
-import { claimerName, requestInstruction, waitForSynced } from "./agent-requests";
+import { claimerName, requestInstruction, waitForSynced, type AgentRequestMode } from "./agent-requests";
 import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps } from "./comments-panel";
 
 /** The mocked provider of the session under test (see the `@hocuspocus/provider` mock above). */
@@ -105,6 +105,64 @@ function deferred<T>() {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+
+type RequestModeKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+
+function markRequestModeEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal request-mode event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The request-mode event trust slot did not update");
+}
+
+function requestModeKeyboardEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The request-mode control has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markRequestModeEventTrusted(event);
+  return event;
+}
+
+function requestModeKey(
+  element: HTMLButtonElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const event = requestModeKeyboardEvent(element, key, init);
+  element.dispatchEvent(event);
+  return event;
+}
+
+function requestModeHandler(element: HTMLButtonElement) {
+  return reactProperty<RequestModeKeyHandler>(element, "onKeyDown");
 }
 
 interface CapturedReviewMouseEvent {
@@ -5039,8 +5097,87 @@ describe("CommentsPanel", () => {
     const setMirrors = (list: AgentRequestMirror[]) => {
       act(() => session!.meta.set("agentRequests", Object.fromEntries(list.map((r) => [r.id, r]))));
     };
+    const directRequestModeViews: {
+      host: HTMLDivElement;
+      root: ReturnType<typeof createRoot>;
+      renderVisit: (visit: string) => void;
+    }[] = [];
+    const directRequestModeTree = (visit: string) => (
+      <StrictMode>
+        <section key={visit} data-request-mode-visit={visit}>
+          <TooltipProvider>
+            <CommentsPanel session={session!} onClose={() => {}} onReveal={() => {}} />
+          </TooltipProvider>
+        </section>
+      </StrictMode>
+    );
+    const mountDirectRequestModes = async (
+      opts: {
+        role?: Role;
+        viewing?: boolean;
+        agents?: ListedAgent[];
+        value?: string;
+      } = {},
+    ) => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session = new CollabSession({
+        docId: "request-mode-direct",
+        user,
+        role: opts.role ?? "owner",
+        getToken: async () => "token",
+        autoConnect: false,
+      });
+      session.keepAlive();
+      session.synced = true;
+      if (opts.viewing) session.setMode("viewing");
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 16, to: 27 });
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: [],
+        agents: opts.agents ?? [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const renderVisit = (visit: string) => {
+        act(() => root.render(directRequestModeTree(visit)));
+      };
+      directRequestModeViews.push({ host, root, renderVisit });
+      renderVisit("A");
+      const box = await waitFor(() => {
+        const element = host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+        if (!element) throw new Error("The direct request-mode composer did not mount");
+        return element;
+      });
+      fireEvent.change(box, {
+        target: { value: opts.value ?? "@alice/Copilot-CLI tighten this" },
+      });
+      await waitFor(() => {
+        if (!host.querySelector('[data-testid="composer-agent-row"]')) {
+          throw new Error("The direct request-mode row did not mount");
+        }
+      });
+      const radio = (mode: AgentRequestMode) => {
+        const element = host.querySelector<HTMLButtonElement>(
+          `[data-testid="composer-mode-${mode}"]`,
+        );
+        if (!element) throw new Error(`The direct ${mode} request mode did not mount`);
+        return element;
+      };
+      const group = () => {
+        const element = host.querySelector<HTMLDivElement>('[role="radiogroup"]');
+        if (!element) throw new Error("The direct request-mode group did not mount");
+        return element;
+      };
+      return { box, group, host, radio, renderVisit, root };
+    };
 
     afterEach(() => {
+      for (const view of directRequestModeViews.splice(0)) {
+        act(() => view.root.unmount());
+        view.host.remove();
+      }
       // Reset, not clear: a rejecting implementation must never outlive the test that set it (#1082).
       vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
       vi.mocked(api.documents.comment).mockClear();
@@ -5080,16 +5217,480 @@ describe("CommentsPanel", () => {
       expect(screen.getByTestId("composer-mode-comment")).toHaveAttribute("aria-checked", "true");
       expect(screen.getByTestId("composer-mode-suggest")).toHaveAttribute("aria-checked", "false");
       screen.getByTestId("composer-mode-comment").focus();
-      await userEvent.setup().keyboard("{ArrowRight}");
+      act(() => requestModeKey(screen.getByTestId("composer-mode-comment") as HTMLButtonElement, "ArrowRight"));
       expect(screen.getByTestId("composer-mode-rewrite")).toHaveFocus();
       expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
-      await userEvent.setup().keyboard("{ArrowRight}");
+      act(() => requestModeKey(screen.getByTestId("composer-mode-rewrite") as HTMLButtonElement, "ArrowRight"));
       expect(screen.getByTestId("composer-mode-suggest")).toHaveAttribute("aria-checked", "true");
-      await userEvent.setup().keyboard("{ArrowLeft}");
+      act(() => requestModeKey(screen.getByTestId("composer-mode-suggest") as HTMLButtonElement, "ArrowLeft"));
       expect(screen.getByTestId("composer-mode-rewrite")).toHaveAttribute("aria-checked", "true");
       fireEvent.click(screen.getByTestId("comment-submit"));
       await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
       expect(vi.mocked(api.documents.createRequest).mock.calls[0][1].mode).toBe("rewrite");
+    });
+
+    describe("request-mode keyboard authority", () => {
+      it.each([
+        ["ArrowRight", "suggest", "comment"],
+        ["ArrowDown", "comment", "rewrite"],
+        ["ArrowLeft", "rewrite", "comment"],
+        ["ArrowUp", "comment", "suggest"],
+        ["ArrowRight", "rewrite", "suggest"],
+        ["ArrowLeft", "suggest", "rewrite"],
+        ["Home", "rewrite", "suggest"],
+        ["End", "suggest", "rewrite"],
+      ] as const)(
+        "moves a direct Strict Mode row once with %s from %s to %s without scrolling",
+        async (key, initial, destination) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+          const view = await mountDirectRequestModes();
+          if (initial !== "suggest") fireEvent.click(view.radio(initial));
+          const source = view.radio(initial);
+          source.focus();
+          focus.mockClear();
+          preventDefault.mockClear();
+          const destinationBeforeKey = view.radio(destination);
+          const publicFocus = vi.fn();
+          Object.defineProperty(destinationBeforeKey, "focus", {
+            configurable: true,
+            value: publicFocus,
+          });
+          const beforeScroll = [window.scrollX, window.scrollY];
+          expect(["suggest", "comment", "rewrite"].map((mode) => view.radio(mode as AgentRequestMode).tabIndex))
+            .toEqual(["suggest", "comment", "rewrite"].map((mode) => mode === initial ? 0 : -1));
+
+          let event!: KeyboardEvent;
+          act(() => {
+            event = requestModeKey(source, key);
+          });
+
+          const selected = view.radio(destination);
+          expect(event.defaultPrevented).toBe(true);
+          expect(selected).toHaveFocus();
+          expect(selected).toHaveAttribute("aria-checked", "true");
+          expect(["suggest", "comment", "rewrite"].map((mode) => view.radio(mode as AgentRequestMode).tabIndex))
+            .toEqual(["suggest", "comment", "rewrite"].map((mode) => mode === destination ? 0 : -1));
+          expect(preventDefault).toHaveBeenCalledTimes(1);
+          expect(focus).toHaveBeenCalledTimes(1);
+          expect(focus.mock.instances[0]).toBe(selected);
+          expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+          expect(publicFocus).not.toHaveBeenCalled();
+          expect([window.scrollX, window.scrollY]).toEqual(beforeScroll);
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          expect(api.documents.createRequest).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each([
+        ["Home", "suggest"],
+        ["End", "rewrite"],
+      ] as const)("leaves an already-focused %s destination inert", async (key, mode) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        if (mode !== "suggest") fireEvent.click(view.radio(mode));
+        const source = view.radio(mode);
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const event = requestModeKey(source, key);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(source).toHaveAttribute("aria-checked", "true");
+      });
+
+      it("focuses restricted destinations without selecting them and keeps one roving tab stop", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const view = await mountDirectRequestModes({ role: "commenter" });
+        const comment = view.radio("comment");
+        const suggest = view.radio("suggest");
+        const rewrite = view.radio("rewrite");
+        comment.focus();
+        focus.mockClear();
+
+        let previous!: KeyboardEvent;
+        act(() => {
+          previous = requestModeKey(comment, "ArrowLeft");
+        });
+
+        expect(previous.defaultPrevented).toBe(true);
+        expect(suggest).toHaveFocus();
+        expect(suggest).toHaveAttribute("aria-disabled", "true");
+        expect(suggest).toHaveAttribute("aria-checked", "false");
+        expect(comment).toHaveAttribute("aria-checked", "true");
+        expect([suggest.tabIndex, comment.tabIndex, rewrite.tabIndex]).toEqual([-1, 0, -1]);
+        expect(focus).toHaveBeenCalledTimes(1);
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+
+        focus.mockClear();
+        let next!: KeyboardEvent;
+        act(() => {
+          next = requestModeKey(suggest, "ArrowRight");
+        });
+        expect(next.defaultPrevented).toBe(true);
+        expect(comment).toHaveFocus();
+        expect(comment).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+
+      it("keeps native pointer selection and request submission unchanged", async () => {
+        const view = await mountDirectRequestModes();
+        const rewrite = view.radio("rewrite");
+
+        fireEvent.click(rewrite);
+
+        expect(rewrite).toHaveAttribute("aria-checked", "true");
+        expect(rewrite.tabIndex).toBe(0);
+        fireEvent.click(view.host.querySelector('[data-testid="comment-submit"]')!);
+        await waitFor(() => expect(api.documents.createRequest).toHaveBeenCalledTimes(1));
+        expect(vi.mocked(api.documents.createRequest).mock.calls[0][1].mode).toBe("rewrite");
+      });
+
+      it("uses captured owner-realm key, prevention and focus intrinsics", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const comment = view.radio("comment");
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = requestModeKeyboardEvent(suggest, "ArrowRight");
+        const publicPreventDefault = vi.fn();
+        const publicFocus = vi.fn();
+        Object.defineProperties(event, {
+          key: { configurable: true, value: "End" },
+          composedPath: { configurable: true, value: vi.fn(() => []) },
+          preventDefault: { configurable: true, value: publicPreventDefault },
+        });
+        Object.defineProperty(comment, "focus", {
+          configurable: true,
+          value: publicFocus,
+        });
+
+        act(() => suggest.dispatchEvent(event));
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(comment).toHaveAttribute("aria-checked", "true");
+        expect(comment).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledTimes(1);
+        expect(focus).toHaveBeenCalledTimes(1);
+        expect(publicPreventDefault).not.toHaveBeenCalled();
+        expect(publicFocus).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["Alt-modified", { altKey: true }],
+        ["Control-modified", { ctrlKey: true }],
+        ["Meta-modified", { metaKey: true }],
+        ["Shift-modified", { shiftKey: true }],
+        ["repeating", { repeat: true }],
+        ["composing", { isComposing: true }],
+        ["non-bubbling", { bubbles: false }],
+        ["non-cancelable", { cancelable: false }],
+      ] as const)("rejects a %s key without prevention, focus or mode work", async (_name, init) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const event = requestModeKey(suggest, "ArrowRight", init);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        act(() => requestModeKey(suggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+      });
+
+      it.each(["prevented", "propagation-stopped"] as const)(
+        "rejects a previously %s key and leaves the clean publication usable",
+        async (state) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+          const view = await mountDirectRequestModes();
+          const suggest = view.radio("suggest");
+          suggest.focus();
+          focus.mockClear();
+          const event = requestModeKeyboardEvent(suggest, "ArrowRight");
+          if (state === "prevented") event.preventDefault();
+          else event.stopPropagation();
+          preventDefault.mockClear();
+
+          act(() => suggest.dispatchEvent(event));
+
+          expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+          expect(focus).not.toHaveBeenCalled();
+          expect(preventDefault).not.toHaveBeenCalled();
+          act(() => requestModeKey(suggest, "ArrowRight"));
+          expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        },
+      );
+
+      it("rejects untrusted, fabricated and foreign-realm events before one owner-realm event", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const handler = requestModeHandler(suggest);
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const untrusted = new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        });
+        const nativeForFabrication = requestModeKeyboardEvent(suggest, "ArrowRight");
+        const fabricated = {
+          type: "keydown",
+          currentTarget: suggest,
+          target: suggest,
+          nativeEvent: nativeForFabrication,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const foreignWindow = frame.contentWindow;
+        if (!foreignWindow) throw new Error("The foreign request-mode realm did not mount");
+        const foreign = new foreignWindow.KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        });
+        markRequestModeEventTrusted(foreign);
+
+        act(() => {
+          suggest.dispatchEvent(untrusted);
+          handler(fabricated);
+          suggest.dispatchEvent(foreign);
+        });
+
+        expect(untrusted.defaultPrevented).toBe(false);
+        expect(nativeForFabrication.defaultPrevented).toBe(false);
+        expect(foreign.defaultPrevented).toBe(false);
+        expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        act(() => requestModeKey(suggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        frame.remove();
+      });
+
+      it("claims the publication, action, React event and native event before replay", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = requestModeKeyboardEvent(suggest, "ArrowRight");
+
+        act(() => {
+          suggest.dispatchEvent(event);
+          view.radio("comment").dispatchEvent(event);
+        });
+
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+        expect(preventDefault).toHaveBeenCalledTimes(1);
+      });
+
+      it("rejects wrong focus and a stale value/mode callback without poisoning current controls", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const staleHandler = requestModeHandler(suggest);
+        view.box.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const wrongFocus = requestModeKey(suggest, "ArrowRight");
+        expect(wrongFocus.defaultPrevented).toBe(false);
+        expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+
+        fireEvent.change(view.box, {
+          target: { value: "@alice/Copilot-CLI changed current value" },
+        });
+        fireEvent.click(view.radio("comment"));
+        const currentSuggest = view.radio("suggest");
+        const propsKey = Object.keys(currentSuggest).find((key) => key.startsWith("__reactProps$"));
+        if (!propsKey) throw new Error("React props were not attached to the current request mode");
+        const record = currentSuggest as unknown as Record<string, Record<string, unknown>>;
+        const props = record[propsKey];
+        record[propsKey] = { ...props, onKeyDown: staleHandler };
+        currentSuggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const staleEvent = requestModeKey(currentSuggest, "ArrowRight");
+        record[propsKey] = props;
+
+        expect(staleEvent.defaultPrevented).toBe(false);
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+
+        currentSuggest.focus();
+        focus.mockClear();
+        act(() => requestModeKey(currentSuggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveFocus();
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+
+      it("rejects stale agent order and permission facts, then accepts the committed successor", async () => {
+        const second = {
+          ...AGENT,
+          name: "Second",
+          login: "alice/Second",
+        };
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes({
+          agents: [AGENT, second],
+          value: "@alice/Copilot-CLI @alice/Second tighten this",
+        });
+        const suggest = view.radio("suggest");
+        const staleHandler = requestModeHandler(suggest);
+        fireEvent.change(view.box, {
+          target: { value: "@alice/Second @alice/Copilot-CLI tighten this" },
+        });
+        act(() => session!.setMode("viewing"));
+        await waitFor(() => expect(view.radio("suggest")).toHaveAttribute("aria-disabled", "true"));
+        const currentSuggest = view.radio("suggest");
+        const propsKey = Object.keys(currentSuggest).find((key) => key.startsWith("__reactProps$"));
+        if (!propsKey) throw new Error("React props were not attached to the permission successor");
+        const record = currentSuggest as unknown as Record<string, Record<string, unknown>>;
+        const props = record[propsKey];
+        record[propsKey] = { ...props, onKeyDown: staleHandler };
+        currentSuggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = requestModeKey(currentSuggest, "ArrowRight");
+        record[propsKey] = props;
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        act(() => requestModeKey(currentSuggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveFocus();
+      });
+
+      it.each([
+        "detached and reinserted group",
+        "reordered and restored radios",
+        "replaced and restored radio",
+        "changed and restored radio",
+      ] as const)("retires %s and lets a distinct clean composer recover", async (mutation) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const group = view.group();
+        const suggest = view.radio("suggest");
+        const rewrite = view.radio("rewrite");
+        if (mutation === "detached and reinserted group") {
+          const parent = group.parentNode!;
+          const next = group.nextSibling;
+          group.remove();
+          parent.insertBefore(group, next);
+        } else if (mutation === "reordered and restored radios") {
+          group.insertBefore(rewrite, suggest);
+          group.append(rewrite);
+        } else if (mutation === "replaced and restored radio") {
+          const replacement = suggest.cloneNode(true);
+          suggest.replaceWith(replacement);
+          replacement.replaceWith(suggest);
+        } else {
+          suggest.setAttribute("aria-checked", "false");
+          suggest.setAttribute("aria-checked", "true");
+        }
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = requestModeKey(suggest, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+
+        view.renderVisit("B");
+        const currentBox = await waitFor(() => {
+          const element = view.host.querySelector<HTMLTextAreaElement>('[data-testid="comment-composer"]');
+          if (!element) throw new Error("The clean successor composer did not mount");
+          return element;
+        });
+        fireEvent.change(currentBox, {
+          target: { value: "@alice/Copilot-CLI clean successor" },
+        });
+        await waitFor(() => expect(view.radio("suggest")).toBeInTheDocument());
+        const currentSuggest = view.radio("suggest");
+        currentSuggest.focus();
+        focus.mockClear();
+        act(() => requestModeKey(currentSuggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+
+      it("does no keyboard work while pending or after cleanup, and a clean composer recovers", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const pending = deferred<string>();
+        const view = await mountDirectRequestModes();
+        vi.spyOn(session!.comments, "add").mockReturnValue(pending.promise as unknown as string);
+        const suggest = view.radio("suggest");
+        const staleHandler = requestModeHandler(suggest);
+        fireEvent.click(view.host.querySelector('[data-testid="comment-submit"]')!);
+        await waitFor(() => expect(view.radio("suggest")).toBeDisabled());
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const pendingEvent = requestModeKey(suggest, "ArrowRight");
+
+        expect(pendingEvent.defaultPrevented).toBe(false);
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        const retiredSession = session!;
+        act(() => view.root.unmount());
+        const trackedView = directRequestModeViews.findIndex((candidate) => candidate.root === view.root);
+        if (trackedView >= 0) directRequestModeViews.splice(trackedView, 1);
+        view.host.remove();
+        const afterCleanup = requestModeKeyboardEvent(suggest, "ArrowRight");
+        const fabricated = {
+          type: "keydown",
+          currentTarget: suggest,
+          target: suggest,
+          nativeEvent: afterCleanup,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+        staleHandler(fabricated);
+        expect(afterCleanup.defaultPrevented).toBe(false);
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        await act(async () => pending.resolve("thread"));
+
+        auxiliarySessions.push(retiredSession);
+        session = null;
+        const clean = await mountDirectRequestModes();
+        const cleanSuggest = clean.radio("suggest");
+        cleanSuggest.focus();
+        focus.mockClear();
+        act(() => requestModeKey(cleanSuggest, "ArrowRight"));
+        expect(clean.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
     });
 
     it("a commenter can only ask for comments: the other modes are disabled with a tooltip and Comment only is preselected", async () => {
