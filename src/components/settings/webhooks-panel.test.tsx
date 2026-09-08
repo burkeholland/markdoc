@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
+  Component,
   StrictMode,
   useLayoutEffect,
   type ChangeEvent,
@@ -15,6 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { WebhooksPanel } from "./webhooks-panel";
 
 const fetchMock = vi.fn<typeof fetch>();
+let foreignRoot: HTMLDivElement;
 
 function response(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -50,6 +52,23 @@ function BoundaryHarness({
 function LayoutProbe({ children, onLayout }: { children: ReactNode; onLayout: () => void }) {
   useLayoutEffect(onLayout, [onLayout]);
   return children;
+}
+
+class TestErrorBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    return this.state.failed
+      ? <div data-testid="strict-replay-error" />
+      : this.props.children;
+  }
 }
 
 function reactProp<T>(element: HTMLElement, name: string): T {
@@ -132,7 +151,7 @@ function invokeRejectedMouseProvenance(
   const foreign = document.createElement("button");
   const unpublished = document.createElement("span");
   const iframe = document.createElement("iframe");
-  document.body.append(foreign, iframe);
+  foreignRoot.append(foreign, iframe);
   const foreignWindow = iframe.contentWindow as (Window & typeof globalThis) | null;
   const foreignMouseEvent = foreignWindow?.MouseEvent;
   if (!foreignMouseEvent) throw new Error("The foreign document has no MouseEvent constructor");
@@ -256,6 +275,8 @@ const otherDisabledWebhook = {
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
+  foreignRoot = document.createElement("div");
+  document.body.append(foreignRoot);
 });
 
 afterEach(() => {
@@ -264,6 +285,7 @@ afterEach(() => {
     act(() => view.root.unmount());
     view.host.remove();
   }
+  foreignRoot.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -1309,6 +1331,113 @@ describe("Settings → Webhooks: exact committed controls", () => {
       expect(fetchMock.mock.calls.filter(([url]) => url === "/api/webhooks/active-hook/test")).toHaveLength(0);
     });
 
+    it.each(["immediate parent", "higher ancestor"] as const)(
+      "rejects a control after its restored %s placement history",
+      async (placement) => {
+        fetchMock.mockImplementation(async () => response({ webhooks: [activeWebhook] }));
+        const view = renderDirect(
+          <StrictMode>
+            <section data-testid="webhook-outer">
+              <div data-testid="webhook-parent">
+                <WebhooksPanel />
+              </div>
+            </section>
+          </StrictMode>,
+        );
+        const test = await within(view.host).findByTestId("webhook-test") as HTMLButtonElement;
+        await settle();
+        const testHandler = reactProp<ClickHandler>(test, "onClick");
+        const outer = within(view.host).getByTestId("webhook-outer");
+        const parent = within(view.host).getByTestId("webhook-parent");
+        const moved = placement === "immediate parent" ? parent : outer;
+        const owner = moved.parentNode;
+        const next = moved.nextSibling;
+        if (!owner) throw new Error("The moved webhook ancestor had no parent");
+        moved.remove();
+        owner.insertBefore(moved, next);
+
+        act(() => testHandler(mouseEvent(test)));
+        expect(fetchMock.mock.calls.filter(([url]) => url === "/api/webhooks/active-hook/test")).toHaveLength(0);
+      },
+    );
+
+    it("ignores nonadjacent subtree activity without poisoning the current control", async () => {
+      const action = deferred<Response>();
+      fetchMock.mockImplementation(async (url) =>
+        url === "/api/webhooks/active-hook/test"
+          ? action.promise
+          : response({ webhooks: [activeWebhook] }));
+      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const test = await within(view.host).findByTestId("webhook-test") as HTMLButtonElement;
+      await settle();
+      const transient = document.createElement("span");
+      foreignRoot.append(transient);
+      transient.remove();
+
+      act(() => reactProp<ClickHandler>(test, "onClick")(mouseEvent(test)));
+      expect(fetchMock.mock.calls.filter(([url]) => url === "/api/webhooks/active-hook/test")).toHaveLength(1);
+    });
+
+    it("disconnects an interrupted replay observer without touching another panel", async () => {
+      const NativeMutationObserver = window.MutationObserver;
+      const instances: TrackingMutationObserver[] = [];
+      class TrackingMutationObserver implements MutationObserver {
+        readonly #observer: MutationObserver;
+        readonly disconnect = vi.fn(() => this.#observer.disconnect());
+
+        constructor(callback: MutationCallback) {
+          this.#observer = new NativeMutationObserver((records) => callback(records, this));
+          instances.push(this);
+        }
+
+        observe(target: Node, options?: MutationObserverInit) {
+          this.#observer.observe(target, options);
+        }
+
+        takeRecords() {
+          return this.#observer.takeRecords();
+        }
+      }
+      vi.stubGlobal("MutationObserver", TrackingMutationObserver);
+      fetchMock.mockImplementation(async () => response({ webhooks: [activeWebhook] }));
+      const firstHost = document.createElement("div");
+      const secondHost = document.createElement("div");
+      document.body.append(firstHost, secondHost);
+      const first = { host: firstHost, root: createRoot(firstHost) };
+      const second = { host: secondHost, root: createRoot(secondHost) };
+      directViews.push(first, second);
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      let layoutCount = 0;
+      const interruptReplay = () => {
+        layoutCount += 1;
+        if (layoutCount === 2) throw new Error("Interrupt webhook replay");
+      };
+      act(() => {
+        first.root.render(
+          <StrictMode>
+            <TestErrorBoundary>
+              <LayoutProbe onLayout={interruptReplay}>
+                <WebhooksPanel />
+              </LayoutProbe>
+            </TestErrorBoundary>
+          </StrictMode>,
+        );
+      });
+      await within(first.host).findByTestId("strict-replay-error");
+      await settle();
+      expect(instances.length).toBeGreaterThan(0);
+      expect(instances.every((instance) => instance.disconnect.mock.calls.length === 1)).toBe(true);
+
+      act(() => second.root.render(<StrictMode><WebhooksPanel /></StrictMode>));
+      const secondTest = await within(second.host).findByTestId("webhook-test") as HTMLButtonElement;
+      await settle();
+      act(() => reactProp<ClickHandler>(secondTest, "onClick")(mouseEvent(secondTest)));
+      expect(fetchMock.mock.calls.filter(([url]) => url === "/api/webhooks/active-hook/test")).toHaveLength(1);
+      act(() => second.root.unmount());
+      await settle();
+      expect(instances.every((instance) => instance.disconnect.mock.calls.length === 1)).toBe(true);
+    });
+
     it("ignores stale controls and pending settlements after a direct Strict Mode unmount", async () => {
       const action = deferred<Response>();
       fetchMock.mockImplementation(async (url) =>
@@ -1437,7 +1566,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
     const addButton = screen.getByTestId("webhook-add") as HTMLButtonElement;
     const submit = reactProp<SubmitHandler>(form, "onSubmit");
     const foreignForm = document.createElement("form");
-    document.body.appendChild(foreignForm);
+    foreignRoot.appendChild(foreignForm);
 
     const wrongCurrent = submitEvent(foreignForm, form, form, createButton);
     const wrongTarget = submitEvent(form, createButton, form, createButton);
@@ -1467,6 +1596,64 @@ describe("Settings → Webhooks: exact committed controls", () => {
     foreignForm.remove();
   });
 
+  it("prevents owned no-choice and retired submits before admitting only the fresh submit", async () => {
+    const create = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [] }))
+      .mockReturnValueOnce(create.promise);
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), {
+      target: { value: "https://receiver.example/safe-submit" },
+    });
+    for (const choice of ["request.created", "mention", "comment.added", "comment.replied"]) {
+      fireEvent.click(screen.getByTestId(`webhook-event-${choice}`));
+    }
+
+    const form = screen.getByTestId("webhook-form") as HTMLFormElement;
+    const createButton = screen.getByTestId("webhook-create") as HTMLButtonElement;
+    const retiredSubmit = reactProp<SubmitHandler>(form, "onSubmit");
+    const noChoiceSubmit = submitEvent(form, form, form, null);
+    act(() => retiredSubmit(noChoiceSubmit.event));
+    expect(noChoiceSubmit.preventDefault).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("webhook-event-request.created"));
+    const retiredEvent = submitEvent(form, form, form, createButton);
+    act(() => retiredSubmit(retiredEvent.event));
+    expect(retiredEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const freshSubmit = reactProp<SubmitHandler>(form, "onSubmit");
+    expect(freshSubmit).not.toBe(retiredSubmit);
+    const freshEvent = submitEvent(form, form, form, createButton);
+    act(() => freshSubmit(freshEvent.event));
+    expect(freshEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("prevents an owned submit after restored DOM mutation without starting app work", async () => {
+    fetchMock.mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-empty");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), {
+      target: { value: "https://receiver.example/mutated-submit" },
+    });
+
+    const form = screen.getByTestId("webhook-form") as HTMLFormElement;
+    const createButton = screen.getByTestId("webhook-create") as HTMLButtonElement;
+    const submit = reactProp<SubmitHandler>(form, "onSubmit");
+    form.setAttribute("data-mutated", "true");
+    form.removeAttribute("data-mutated");
+
+    const mutatedSubmit = submitEvent(form, form, form, createButton);
+    act(() => submit(mutatedSubmit.event));
+    expect(mutatedSubmit.preventDefault).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects sibling, foreign, detached, cross-control, disabled, wrong-row, and reordered row sources", async () => {
     const pending = deferred<Response>();
     fetchMock
@@ -1480,7 +1667,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
     const click = reactProp<ClickHandler>(firstTest, "onClick");
     const detached = firstTest.cloneNode(true) as HTMLButtonElement;
     const foreign = document.createElement("button");
-    document.body.appendChild(foreign);
+    foreignRoot.appendChild(foreign);
 
     act(() => {
       click(mouseEvent(secondTest));
@@ -1696,7 +1883,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
     const clickCancel = reactProp<ClickHandler>(cancel, "onClick");
     const cancelRef = reactProp<RefCallback<HTMLButtonElement>>(cancel, "ref");
     const replacement = cancel.cloneNode(true) as HTMLButtonElement;
-    document.body.appendChild(replacement);
+    foreignRoot.appendChild(replacement);
 
     act(() => {
       cancelRef(replacement);

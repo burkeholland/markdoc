@@ -227,11 +227,16 @@ type PanelDomSnapshot = Readonly<{
   children: readonly PanelDomSnapshot[];
 }>;
 
-type PanelPlacement = Readonly<{
-  document: Document;
+type PanelPlacementLink = Readonly<{
+  node: Node;
   parent: Node;
   previousSibling: Node | null;
   nextSibling: Node | null;
+}>;
+
+type PanelPlacement = Readonly<{
+  document: Document;
+  links: readonly PanelPlacementLink[];
 }>;
 
 type PanelDomGuard = Readonly<{
@@ -257,6 +262,7 @@ class PanelPublicationCoordinator {
   #current: PanelPublication | null = null;
   #successorOf: PanelPublication | null = null;
   #replay: PanelReplay | null = null;
+  #teardownRevision = 0;
   readonly #retired = new WeakSet<PanelPublication>();
   readonly #claimedPublications = new WeakSet<PanelPublication>();
   readonly #claimedRows = new WeakSet<object>();
@@ -266,6 +272,31 @@ class PanelPublicationCoordinator {
 
   constructor(mount: MountGeneration) {
     this.#mount = mount;
+  }
+
+  activate() {
+    this.#teardownRevision += 1;
+  }
+
+  scheduleTeardown() {
+    const revision = ++this.#teardownRevision;
+    queueMicrotask(() => {
+      if (revision !== this.#teardownRevision) return;
+      const replay = this.#replay;
+      this.#replay = null;
+      replay?.release();
+      const publications = new Set([
+        this.#current,
+        this.#successorOf,
+        replay?.source ?? null,
+      ]);
+      for (const publication of publications) {
+        publication?.guard?.release();
+        if (publication) publication.guard = null;
+      }
+      this.#current = null;
+      this.#successorOf = null;
+    });
   }
 
   bind<T extends HTMLElement>(
@@ -745,22 +776,40 @@ function panelDomMatches(snapshot: PanelDomSnapshot): boolean {
 }
 
 function capturePanelPlacement(root: HTMLElement): PanelPlacement | null {
-  const parent = root.parentNode;
-  if (!parent) return null;
+  const document = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const links: PanelPlacementLink[] = [];
+  let node: Node = root;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    links.push(Object.freeze({
+      node,
+      parent,
+      previousSibling: node.previousSibling,
+      nextSibling: node.nextSibling,
+    }));
+    node = parent;
+  }
+  if (links.length === 0) return null;
   return Object.freeze({
-    document: root.ownerDocument,
-    parent,
-    previousSibling: root.previousSibling,
-    nextSibling: root.nextSibling,
+    document,
+    links: Object.freeze(links),
   });
 }
 
 function panelPlacementMatches(root: HTMLElement, placement: PanelPlacement): boolean {
   return (
     root.ownerDocument === placement.document &&
-    root.parentNode === placement.parent &&
-    root.previousSibling === placement.previousSibling &&
-    root.nextSibling === placement.nextSibling
+    root.isConnected &&
+    placement.links[0]?.node === root &&
+    placement.links.every((link) =>
+      link.node.isConnected &&
+      link.node.parentNode === link.parent &&
+      link.node.previousSibling === link.previousSibling &&
+      link.node.nextSibling === link.nextSibling
+    ) &&
+    placement.links.at(-1)?.parent === placement.document
   );
 }
 
@@ -771,6 +820,7 @@ function createPanelDomGuard(
   const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
   if (!MutationObserverConstructor) return null;
   let changed = false;
+  let released = false;
   const pendingRecords: MutationRecord[] = [];
   const takeRecords = () => {
     const records = [...pendingRecords, ...observer.takeRecords()];
@@ -781,14 +831,13 @@ function createPanelDomGuard(
     if (changed) return;
     changed = records.some((record) => {
       if (record.target === root || root.contains(record.target)) return true;
-      if (record.type !== "childList" || record.target !== placement.parent) return false;
-      return (
-        record.previousSibling === root ||
-        record.nextSibling === root ||
-        [...record.addedNodes, ...record.removedNodes].some(
-          (node) =>
-            node === root ||
-            (node.nodeType === 1 && (node as Element).contains(root)),
+      if (record.type !== "childList") return false;
+      return placement.links.some((link) =>
+        record.target === link.parent &&
+        (
+          record.previousSibling === link.node ||
+          record.nextSibling === link.node ||
+          [...record.addedNodes, ...record.removedNodes].includes(link.node)
         )
       );
     });
@@ -803,7 +852,9 @@ function createPanelDomGuard(
     childList: true,
     subtree: true,
   });
-  observer.observe(placement.parent, { childList: true });
+  for (const parent of new Set(placement.links.map((link) => link.parent))) {
+    observer.observe(parent, { childList: true });
+  }
   const exactReactInputRecords = (
     records: readonly MutationRecord[],
     inputs: readonly HTMLInputElement[],
@@ -854,6 +905,8 @@ function createPanelDomGuard(
       return !changed;
     },
     release: () => {
+      if (released) return;
+      released = true;
       recordChanges(takeRecords());
       observer.disconnect();
     },
@@ -1210,8 +1263,10 @@ export function WebhooksPanel() {
 
   useLayoutEffect(() => {
     const owners = rowOwners.current;
+    publicationCoordinator.activate();
     activeMountRef.current = mountGeneration;
     return () => {
+      publicationCoordinator.scheduleTeardown();
       if (activeMountRef.current !== mountGeneration) return;
       activeMountRef.current = null;
       listRequest.current += 1;
@@ -1222,7 +1277,7 @@ export function WebhooksPanel() {
       }
       if (feedbackOwner.current?.generation === mountGeneration) feedbackOwner.current = null;
     };
-  }, [mountGeneration]);
+  }, [mountGeneration, publicationCoordinator]);
 
   const load = useCallback(async (continuationIsCurrent: () => boolean = () => true) => {
     const generation = activeMountRef.current;
@@ -2071,24 +2126,38 @@ export function WebhooksPanel() {
           data-testid="webhook-form"
           aria-busy={presentation.createOperation !== null || undefined}
           onSubmit={(event) => {
-            const form = publication.form.element;
-            const createButton = publication.create.element;
+            const renderedForm = publication.form.element ?? publication.form.last;
+            const renderedCreateButton = publication.create.element ?? publication.create.last;
+            const renderedRoot = publication.card.element ?? publication.card.last;
             const nativeEvent = isNativeReactSubmitEvent(
               event,
-              form,
-              publication.card.element,
+              renderedForm,
+              renderedRoot,
             );
             const submitter = nativeEvent && "submitter" in nativeEvent
               ? nativeEvent.submitter
               : null;
-            if (nativeEvent) publicationCoordinator.prepareControlClaim(publication);
+            if (
+              !renderedForm ||
+              !renderedCreateButton ||
+              !renderedRoot ||
+              !nativeEvent ||
+              !renderedForm.isConnected ||
+              !renderedCreateButton.isConnected ||
+              !renderedRoot.isConnected ||
+              renderedCreateButton.form !== renderedForm ||
+              (submitter !== null && submitter !== renderedCreateButton)
+            ) {
+              return;
+            }
+            event.preventDefault();
+            publicationCoordinator.prepareControlClaim(publication);
+            const form = publication.form.element;
+            const createButton = publication.create.element;
             if (
               !presentation.create ||
               !form ||
               !createButton ||
-              !nativeEvent ||
-              createButton.form !== form ||
-              (submitter !== null && submitter !== createButton) ||
               !ownsPanelAction(publication, presentation.create, createButton, publication.create) ||
               !publicationCoordinator.claim(
                 publication,
@@ -2100,7 +2169,6 @@ export function WebhooksPanel() {
             ) {
               return;
             }
-            event.preventDefault();
             requestPublicationSuccessor();
             startCreate(presentation);
           }}
