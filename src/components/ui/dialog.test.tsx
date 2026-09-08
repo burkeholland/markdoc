@@ -701,6 +701,48 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(outerClosed).not.toHaveBeenCalled();
   });
 
+  it("forgets repeated nested roots and rejects off-state focus-guard removal", async () => {
+    const outerClosed = vi.fn();
+    const innerClosed = vi.fn();
+    function RepeatedNestedHarness() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(false);
+      return (
+        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+          <DialogContent title="Outer retained roots" onClosed={outerClosed}>
+            <button type="button" onClick={() => setInnerOpen(true)}>Open repeated inner</button>
+            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+              <DialogContent title="Repeated inner" onClosed={innerClosed}>
+                <input autoFocus />
+              </DialogContent>
+            </Dialog>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><RepeatedNestedHarness /></StrictMode>);
+    const innerOpener = screen.getByRole("button", { name: "Open repeated inner" });
+
+    for (let visit = 0; visit < 4; visit++) {
+      fireEvent.click(innerOpener);
+      const inner = screen.getByRole("dialog", { name: "Repeated inner" });
+      fireEvent.click(closeButton(inner));
+      await flushTasks();
+      expect(screen.queryByRole("dialog", { name: "Repeated inner" })).toBeNull();
+    }
+    expect(innerClosed).toHaveBeenCalledTimes(4);
+
+    const focusGuard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
+    expect(focusGuard).not.toBeNull();
+    focusGuard!.remove();
+    await act(() => Promise.resolve());
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Outer retained roots" })));
+    await flushTasks();
+
+    expect(screen.getByRole("dialog", { name: "Outer retained roots" })).toBeInTheDocument();
+    expect(outerClosed).not.toHaveBeenCalled();
+  });
+
   it("finishes an authenticated close through fresh controlled callback identities", async () => {
     const onClosed = vi.fn();
     function InlineCallbacksHarness() {
@@ -786,6 +828,52 @@ describe("DialogContent exact Strict Mode publication", () => {
     fireEvent.click(screen.getByRole("link", { name: "Done" }));
     await flushTasks();
 
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { variant: "regular", type: "submit" as const },
+    { variant: "regular", type: "reset" as const },
+    { variant: "asChild", type: "submit" as const },
+    { variant: "asChild", type: "reset" as const },
+  ])("closes once through an exported $variant $type button", async ({ variant, type }) => {
+    const onOpenChange = vi.fn();
+    const onClosed = vi.fn();
+    function ButtonTypeHarness() {
+      const [open, setOpen] = useState(true);
+      const close = variant === "asChild"
+        ? (
+            <DialogClose asChild>
+              <button type={type}>Close {variant} {type}</button>
+            </DialogClose>
+          )
+        : <DialogClose type={type}>Close {variant} {type}</DialogClose>;
+      return (
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            onOpenChange(next);
+            setOpen(next);
+          }}
+        >
+          <DialogContent title={`${variant} ${type}`} onClosed={onClosed}>
+            <form
+              onSubmit={(event) => event.preventDefault()}
+              onReset={(event) => event.preventDefault()}
+            >
+              {close}
+            </form>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><ButtonTypeHarness /></StrictMode>);
+
+    fireEvent.click(screen.getByRole("button", { name: `Close ${variant} ${type}` }));
+    await flushTasks();
+
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(onClosed).toHaveBeenCalledOnce();
   });

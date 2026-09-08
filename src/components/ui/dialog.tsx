@@ -579,17 +579,6 @@ class MutationJournal {
       return true;
     }
     if (
-      added.length + removed.length > 0
-      && [...added, ...removed].every((node) => (
-        !this.#isOwned(node)
-        && !node.contains?.(this.#content)
-        && !(this.#overlay
-          && (this.#overlay.contains(node) || node.contains?.(this.#overlay)))
-      ))
-    ) {
-      return true;
-    }
-    if (
       record.target === this.#portalParent
       && removed.length > 0
       && added.length === 0
@@ -599,13 +588,26 @@ class MutationJournal {
       return true;
     }
     if (
-      (this.#closing || this.#replaying || this.#nestedRoots.size > 0)
-      && record.target === this.#ownerDocument.body
+      record.target === this.#ownerDocument.body
       && removed.length > 0
       && added.length === 0
       && removed.every((node) => this.#focusGuards.has(node))
     ) {
+      if (!this.#closing && !this.#replaying && this.#nestedRoots.size === 0) return false;
       removed.forEach((node) => this.#focusGuards.delete(node));
+      return true;
+    }
+    if (
+      added.length + removed.length > 0
+      && [...added, ...removed].every((node) => (
+        !this.#focusGuards.has(node)
+        && !this.#nestedRoots.has(node)
+        && !this.#isOwned(node)
+        && !node.contains?.(this.#content)
+        && !(this.#overlay
+          && (this.#overlay.contains(node) || node.contains?.(this.#overlay)))
+      ))
+    ) {
       return true;
     }
     if (
@@ -1016,8 +1018,7 @@ function exactNativeOwnedCloseClick(
     && event.button === 0
     && event.bubbles
     && !event.defaultPrevented
-    && (!(close instanceof view.HTMLButtonElement)
-      || (close.type === "button" && !close.disabled))
+    && (!(close instanceof view.HTMLButtonElement) || !close.disabled)
     && publication.elements.content.contains(close)
     && nativeEvent.target === target
     && isNodeFromDocument(target, ownerDocument)
