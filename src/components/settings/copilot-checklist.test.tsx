@@ -133,6 +133,81 @@ describe("Copilot setup checklist polling", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it.each(["immutable", "in-place"] as const)(
+    "retires polling without a new request when %s initial-token facts complete the checklist",
+    async (update) => {
+      const retired = deferred();
+      const unexpected = deferred();
+      fetchMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(unexpected.promise);
+      const initialTokens: ChecklistToken[] = [];
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () =>
+          root.render(
+            <CopilotChecklist hasAgentRequests={false} initialTokens={initialTokens} pollMs={1_000} />,
+          ),
+        );
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(1);
+
+        const completedTokens = update === "immutable" ? [calledToken] : initialTokens;
+        if (update === "in-place") initialTokens.push(calledToken);
+        await act(async () =>
+          root.render(<CopilotChecklist hasAgentRequests={false} initialTokens={completedTokens} pollMs={1_000} />),
+        );
+
+        expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("4 of 4");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+
+        await settle(() => retired.resolve(response([])));
+        await advance(10_000);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("starts one immediate current read when incoming initial-token facts advance without completing", async () => {
+    const retired = deferred();
+    const current = deferred();
+    fetchMock.mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () =>
+        root.render(<CopilotChecklist hasAgentRequests={false} initialTokens={[]} pollMs={1_000} />),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await act(async () =>
+        root.render(<CopilotChecklist hasAgentRequests={false} initialTokens={[seenToken]} pollMs={1_000} />),
+      );
+      expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("2 of 4");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await advance(10_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await settle(() => retired.resolve(response([calledToken])));
+      expect(host.querySelector('[data-testid="copilot-checklist-progress"]')).toHaveTextContent("2 of 4");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("retries a current transient failure on the next interval", async () => {
     const failed = deferred();
     const retried = deferred();

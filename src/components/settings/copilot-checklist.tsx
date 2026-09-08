@@ -101,7 +101,9 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
       done: state.tried,
     },
   ];
-  const allDone = steps.every((s) => s.done);
+  const effectiveState = advanceChecklistState(state, initial, hasAgentRequests);
+  const effectivelyAllDone =
+    effectiveState.hasToken && effectiveState.mcpSeen && effectiveState.mcpCalled && effectiveState.tried;
 
   useLayoutEffect(() => {
     setState((current) =>
@@ -114,7 +116,7 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
   }, [hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen]);
 
   useLayoutEffect(() => {
-    if (allDone || pollMs <= 0) return;
+    if (effectivelyAllDone || pollMs <= 0) return;
     const ownerDocument = section.current?.ownerDocument;
     if (!ownerDocument) return;
 
@@ -171,7 +173,7 @@ export function CopilotChecklist({ hasAgentRequests, initialTokens, pollMs = 500
       if (activeVisit.current === visit) activeVisit.current = null;
       clearInterval(timer);
     };
-  }, [allDone, hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen, mount, pollMs]);
+  }, [effectivelyAllDone, hasAgentRequests, initial.hasToken, initial.mcpCalled, initial.mcpSeen, mount, pollMs]);
 
   const doneCount = steps.filter((s) => s.done).length;
   return (
