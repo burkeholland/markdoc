@@ -159,6 +159,7 @@ interface DialogReplay {
 interface PublicationRuntime {
   readonly publication: DialogPublication;
   readonly publish: () => boolean;
+  readonly authorizePassiveReplay: () => void;
   readonly scheduleOpeningRecovery: () => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
@@ -348,6 +349,15 @@ function isFocusGuard(node: Node): node is HTMLElement {
   );
 }
 
+function subtreeHasFocusGuardMarker(node: Node): boolean {
+  if (node.nodeType !== 1) return false;
+  const element = node as Element;
+  return (
+    element.hasAttribute("data-radix-focus-guard")
+    || element.querySelector("[data-radix-focus-guard]") !== null
+  );
+}
+
 function exactFocusGuards(ownerDocument: Document): FocusGuardPair | null {
   const guards = [...ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
   return (
@@ -406,7 +416,7 @@ class MutationJournal {
   #validatingReplayTeardown = false;
   #focusGuardsInitialized = false;
   #acceptingReplayGuardReplacement = false;
-  #initialReplayGuardLifecycle: object | null = null;
+  #passiveReplayAuthority: object | null = null;
   #registeredFocusGuards: FocusGuardPair | null = null;
   #closing = false;
   #replaying = false;
@@ -753,7 +763,7 @@ class MutationJournal {
       this.#registeredFocusGuards = current;
       this.#focusGuardsInitialized = true;
       this.#acceptingReplayGuardReplacement = false;
-      if (completedReplacement) this.#initialReplayGuardLifecycle = null;
+      if (completedReplacement) this.#passiveReplayAuthority = null;
     }
     return true;
   }
@@ -859,7 +869,7 @@ class MutationJournal {
       && removed.every((node) => this.#focusGuards.has(node))
     ) {
       if (
-        (this.#validatingReplayTeardown || this.#initialReplayGuardLifecycle !== null)
+        (this.#validatingReplayTeardown || this.#passiveReplayAuthority !== null)
         && this.#expectedReplayGuardTeardown.delete(record)
       ) {
         removed.forEach((node) => this.#focusGuards.delete(node));
@@ -884,6 +894,7 @@ class MutationJournal {
       added.length + removed.length > 0
       && [...added, ...removed].every((node) => (
         !this.#focusGuards.has(node)
+        && !subtreeHasFocusGuardMarker(node)
         && !this.#nestedRoots.has(node)
         && !this.#isOwned(node)
         && !node.contains?.(this.#content)
@@ -923,7 +934,8 @@ class MutationJournal {
       return [...record.addedNodes, ...record.removedNodes].some((node) =>
         this.#isOwned(node)
         || node.contains?.(this.#content)
-        || Boolean(this.#overlay && node.contains?.(this.#overlay)));
+        || Boolean(this.#overlay && node.contains?.(this.#overlay))
+        || subtreeHasFocusGuardMarker(node));
     }
     return false;
   }
@@ -935,7 +947,11 @@ class MutationJournal {
       || ((record.attributeName === "tabindex" || record.attributeName === "style")
         && isFocusGuard(record.target))
       || [...record.addedNodes, ...record.removedNodes].some((node) =>
-        this.#focusGuards.has(node) || isFocusGuard(node))
+        this.#focusGuards.has(node)
+        || isFocusGuard(node)
+        || (subtreeHasFocusGuardMarker(node)
+          && !node.contains?.(this.#content)
+          && !(this.#overlay && node.contains?.(this.#overlay))))
     );
   }
 
@@ -965,7 +981,7 @@ class MutationJournal {
     if (this.#released || this.#invalid) return;
     this.#collectRecords();
     if (
-      this.#initialReplayGuardLifecycle !== null
+      this.#passiveReplayAuthority !== null
       && this.#expectedReplayGuardTeardown.size === 0
     ) {
       this.#prepareExpectedReplayGuardTeardown();
@@ -1008,7 +1024,7 @@ class MutationJournal {
     this.#focusGuards.clear();
     this.#expectedReplayGuardTeardown.clear();
     this.#acceptingReplayGuardReplacement = false;
-    this.#initialReplayGuardLifecycle = null;
+    this.#passiveReplayAuthority = null;
     this.#nestedRoots.clear();
     this.#onInvalid();
   }
@@ -1026,30 +1042,52 @@ class MutationJournal {
     if (this.#released || this.#invalid) return false;
     const prepared = this.#replayPreparation !== null;
     this.#replayPreparation = null;
-    const lifecycle = {};
-    this.#initialReplayGuardLifecycle = lifecycle;
-    queueMicrotask(() => {
-      if (this.#initialReplayGuardLifecycle === lifecycle) {
-        this.#initialReplayGuardLifecycle = null;
-        this.#acceptingReplayGuardReplacement = false;
-        this.#expectedReplayGuardTeardown.clear();
-      }
-    });
     this.#collectRecords();
     if (this.#hasPendingCloseTransition()) return false;
     this.#validatingReplayTeardown = prepared;
-    if (prepared) this.#prepareExpectedReplayGuardTeardown();
     try {
       this.#process();
     } finally {
       this.#validatingReplayTeardown = false;
       this.#expectedReplayGuardTeardown.clear();
-      if (this.#initialReplayGuardLifecycle === null) {
+      if (this.#passiveReplayAuthority === null) {
         this.#acceptingReplayGuardReplacement = false;
       }
     }
     if (this.#released || this.#invalid) return false;
     this.#replaying = true;
+    return true;
+  }
+
+  authorizePassiveReplay() {
+    if (
+      this.#released
+      || this.#invalid
+      || this.#closing
+      || (this.#replayPreparation === null && !this.#replaying)
+    ) {
+      return false;
+    }
+    this.#collectRecords();
+    if (this.#hasPendingCloseTransition()) return false;
+    this.#validatingReplayTeardown = this.#replayPreparation !== null;
+    try {
+      this.#process();
+    } finally {
+      this.#validatingReplayTeardown = false;
+      this.#expectedReplayGuardTeardown.clear();
+      this.#acceptingReplayGuardReplacement = false;
+    }
+    if (this.#released || this.#invalid) return false;
+    const authority = {};
+    this.#passiveReplayAuthority = authority;
+    queueMicrotask(() => {
+      if (this.#passiveReplayAuthority === authority) {
+        this.#passiveReplayAuthority = null;
+        this.#acceptingReplayGuardReplacement = false;
+        this.#expectedReplayGuardTeardown.clear();
+      }
+    });
     return true;
   }
 
@@ -1081,7 +1119,7 @@ class MutationJournal {
     this.#focusGuards.clear();
     this.#expectedReplayGuardTeardown.clear();
     this.#acceptingReplayGuardReplacement = false;
-    this.#initialReplayGuardLifecycle = null;
+    this.#passiveReplayAuthority = null;
     this.#nestedRoots.clear();
     this.#released = true;
   }
@@ -1624,6 +1662,7 @@ function exactOutsidePointer(event: PointerDownOutsideEvent, publication: Dialog
 class DialogCoordinator {
   readonly #mount: symbol;
   #root: DialogRootAuthority | null = null;
+  #rootLifecycle: object | null = null;
   #active: DialogPublication | null = null;
   #successorOf: DialogPublication | null = null;
   #replay: DialogReplay | null = null;
@@ -1654,14 +1693,23 @@ class DialogCoordinator {
   }
 
   activateRoot(authority: DialogRootAuthority) {
-    if (authority.mount === this.#mount) this.#root = authority;
+    if (authority.mount !== this.#mount) return;
+    this.#root = authority;
+    this.#rootLifecycle = {};
   }
 
   deactivateRoot(authority: DialogRootAuthority) {
     if (this.#root !== authority) return;
+    const lifecycle = this.#rootLifecycle;
     this.#root = null;
-    queueMicrotask(() => {
-      if (this.#root) return;
+    const ownerWindow = (
+      this.#transition?.source
+      ?? this.#active
+      ?? this.#successorOf
+    )?.ownerDocument.defaultView;
+    const transition = this.#transition;
+    const release = () => {
+      if (this.#root !== null || this.#rootLifecycle !== lifecycle) return;
       const publications = new Set([
         this.#active,
         this.#successorOf,
@@ -1681,7 +1729,30 @@ class DialogCoordinator {
       this.#parentDismissBridge = null;
       this.#focusGuards = null;
       this.#focusGuardIdentityTainted = false;
-    });
+      this.#rootLifecycle = null;
+    };
+    if (
+      !ownerWindow
+      || !transition
+      || transition.claimed
+      || !transition.source.journal.closeHistoryIsValid()
+    ) {
+      queueMicrotask(release);
+      return;
+    }
+    ownerWindow.setTimeout(() => {
+      if (this.#root !== null || this.#rootLifecycle !== lifecycle) return;
+      if (
+        this.#transition === transition
+        && !transition.claimed
+        && transition.source.journal.closeHistoryIsValid()
+      ) {
+        // Radix dispatches close autofocus from its own zero-delay task.
+        ownerWindow.setTimeout(release, 0);
+        return;
+      }
+      release();
+    }, 0);
   }
 
   active() {
@@ -2360,6 +2431,7 @@ interface DialogPresentation {
   readonly captureClose: (element: HTMLButtonElement | null) => void | (() => void);
   readonly captureIcon: (element: SVGSVGElement | null) => void | (() => void);
   readonly establish: () => void | (() => void);
+  readonly authorizePassiveReplay: () => void;
   readonly onOpenAutoFocus: (event: OpenAutoFocusEvent) => void;
   readonly onCloseAutoFocus: (event: CloseAutoFocusEvent) => void;
   readonly onEscapeKeyDown: (event: EscapeKeyEvent) => void;
@@ -2492,6 +2564,16 @@ function createPublicationRuntime(
       publication.listenerAttached = true;
       elements.content.addEventListener("focusout", onFocusOut);
       return true;
+    },
+    authorizePassiveReplay: () => {
+      if (
+        !retired
+        || publication.closed
+        || elements.content.getAttribute("data-state") !== "open"
+      ) {
+        return;
+      }
+      journal.authorizePassiveReplay();
     },
     scheduleOpeningRecovery: () => {
       if (!publication.opening || publication.openingTimer !== null) return;
@@ -2819,6 +2901,9 @@ function createDialogPresentation(
       currentRuntime = null;
     };
   };
+  const authorizePassiveReplay = () => {
+    lastRuntime?.authorizePassiveReplay();
+  };
   const onOpenAutoFocus = (event: OpenAutoFocusEvent) => {
     tryEstablish();
     const active = coordinator.active();
@@ -2946,6 +3031,7 @@ function createDialogPresentation(
     captureClose: owners.close.capture,
     captureIcon: owners.icon.capture,
     establish,
+    authorizePassiveReplay,
     onOpenAutoFocus,
     onCloseAutoFocus,
     onEscapeKeyDown,
@@ -2958,6 +3044,17 @@ function createDialogPresentation(
 function DialogPublicationBoundary({ establish }: { establish: () => void | (() => void) }) {
   React.useLayoutEffect(() => establish());
   return null;
+}
+
+function DialogPassiveReplayBoundary({
+  authorize,
+  children,
+}: {
+  authorize: () => void;
+  children: React.ReactNode;
+}) {
+  React.useEffect(() => authorize, [authorize]);
+  return children;
 }
 
 export function DialogContent({
@@ -3044,6 +3141,7 @@ export function DialogContent({
     captureClose,
     captureIcon,
     establish,
+    authorizePassiveReplay,
     onOpenAutoFocus,
     onCloseAutoFocus,
     onEscapeKeyDown,
@@ -3058,56 +3156,58 @@ export function DialogContent({
         ref={captureOverlay}
         className={OVERLAY_CLASS_NAME}
       />
-      <RadixDialog.Content
-        ref={captureContent}
-        className={contentClassName}
-        onOpenAutoFocus={onOpenAutoFocus}
-        onCloseAutoFocus={onCloseAutoFocus}
-        onEscapeKeyDown={onEscapeKeyDown}
-        onPointerDownOutside={onPointerDownOutside}
-        onFocusOutside={onFocusOutside}
-      >
-        <div
-          ref={captureHeader}
-          className={HEADER_CLASS_NAME}
-          data-focus-skip
+      <DialogPassiveReplayBoundary authorize={authorizePassiveReplay}>
+        <RadixDialog.Content
+          ref={captureContent}
+          className={contentClassName}
+          onOpenAutoFocus={onOpenAutoFocus}
+          onCloseAutoFocus={onCloseAutoFocus}
+          onEscapeKeyDown={onEscapeKeyDown}
+          onPointerDownOutside={onPointerDownOutside}
+          onFocusOutside={onFocusOutside}
         >
-          <div>
-            <RadixDialog.Title
-              ref={captureTitle}
-              className={TITLE_CLASS_NAME}
-            >
-              {title}
-            </RadixDialog.Title>
-            {description !== undefined ? (
-              <RadixDialog.Description
-                ref={captureDescription}
-                className={DESCRIPTION_CLASS_NAME}
-              >
-                {description}
-              </RadixDialog.Description>
-            ) : (
-              <RadixDialog.Description
-                ref={captureDescription}
-                className={HIDDEN_DESCRIPTION_CLASS_NAME}
+          <div
+            ref={captureHeader}
+            className={HEADER_CLASS_NAME}
+            data-focus-skip
+          >
+            <div>
+              <RadixDialog.Title
+                ref={captureTitle}
+                className={TITLE_CLASS_NAME}
               >
                 {title}
-              </RadixDialog.Description>
-            )}
+              </RadixDialog.Title>
+              {description !== undefined ? (
+                <RadixDialog.Description
+                  ref={captureDescription}
+                  className={DESCRIPTION_CLASS_NAME}
+                >
+                  {description}
+                </RadixDialog.Description>
+              ) : (
+                <RadixDialog.Description
+                  ref={captureDescription}
+                  className={HIDDEN_DESCRIPTION_CLASS_NAME}
+                >
+                  {title}
+                </RadixDialog.Description>
+              )}
+            </div>
+            <RadixDialog.Close
+              ref={captureClose}
+              type="button"
+              className={CLOSE_CLASS_NAME}
+              aria-label="Close"
+              onClick={onCloseClick}
+            >
+              <X ref={captureIcon} size={16} />
+            </RadixDialog.Close>
           </div>
-          <RadixDialog.Close
-            ref={captureClose}
-            type="button"
-            className={CLOSE_CLASS_NAME}
-            aria-label="Close"
-            onClick={onCloseClick}
-          >
-            <X ref={captureIcon} size={16} />
-          </RadixDialog.Close>
-        </div>
-        {children}
-        <DialogPublicationBoundary establish={establish} />
-      </RadixDialog.Content>
+          {children}
+          <DialogPublicationBoundary establish={establish} />
+        </RadixDialog.Content>
+      </DialogPassiveReplayBoundary>
     </RadixDialog.Portal>
   );
 }

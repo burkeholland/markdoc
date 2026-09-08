@@ -160,6 +160,24 @@ function RemoveLeadingGuardOnRefReplay() {
   );
 }
 
+function MutateBothGuardsOnRefReplay({ action }: { action: "remove" | "adopt" }) {
+  const mutated = useRef(false);
+  return (
+    <span
+      ref={(element) => {
+        if (!element) return;
+        return () => {
+          if (mutated.current) return;
+          mutated.current = true;
+          const guards = [...document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]")];
+          if (action === "adopt") element.append(...guards);
+          else guards.forEach((guard) => guard.remove());
+        };
+      }}
+    />
+  );
+}
+
 function MutateDescendantOnPassiveReplayCleanup() {
   const element = useRef<HTMLSpanElement>(null);
   useEffect(() => () => {
@@ -293,6 +311,33 @@ describe("DialogContent exact Strict Mode publication", () => {
       expect(onClosed).toHaveBeenCalledOnce();
     },
   );
+
+  it("finishes an authenticated close after the controlled root removes itself", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const onClosed = vi.fn();
+    function ConditionalRootHarness() {
+      const [open, setOpen] = useState(true);
+      return open ? (
+        <Dialog open onOpenChange={setOpen}>
+          <DialogContent title="Conditional root" onClosed={onClosed}>
+            <input data-testid="conditional-root-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      ) : null;
+    }
+    renderDirect(<StrictMode><ConditionalRootHarness /></StrictMode>);
+    expect(screen.getByTestId("conditional-root-input")).toHaveFocus();
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
 
   it("bridges only the current Radix Close chain to its parent authority", () => {
     const staleParent = vi.fn();
@@ -979,6 +1024,68 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(cleanClosed).toHaveBeenCalledOnce();
   });
+
+  it.each(["remove", "adopt"] as const)(
+    "rejects child ref cleanup that tries to %s both guards after replay preparation",
+    async (action) => {
+      const taintedClosed = vi.fn();
+      const cleanClosed = vi.fn();
+      const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
+        <StrictMode>
+          <ControlledDialog key={rootKey} title={`Both guards ${action}`} onClosed={onClosed}>
+            {tainted && <MutateBothGuardsOnRefReplay action={action} />}
+            <input data-testid={`both-guards-${action}`} autoFocus />
+          </ControlledDialog>
+        </StrictMode>
+      );
+      const view = renderDirect(tree("tainted", true, taintedClosed));
+
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Both guards ${action}`);
+      expect(taintedClosed).not.toHaveBeenCalled();
+
+      act(() => view.root.render(tree("clean", false, cleanClosed)));
+      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(cleanClosed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["body", "existing subtree"] as const)(
+    "permanently rejects a nested third guard added and removed through an unrelated %s wrapper",
+    async (location) => {
+      const unrelated = document.createElement("div");
+      if (location === "existing subtree") document.body.append(unrelated);
+      const onClosed = vi.fn();
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog title={`Nested guard ${location}`} onClosed={onClosed} />
+        </StrictMode>,
+      );
+      const wrapper = document.createElement("div");
+      const nested = document.createElement("div");
+      nested.append(createFocusGuard());
+      wrapper.append(nested);
+      const parent = location === "body" ? document.body : unrelated;
+
+      act(() => {
+        parent.append(wrapper);
+        wrapper.remove();
+      });
+      await act(() => Promise.resolve());
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Nested guard ${location}`);
+      expect(onClosed).not.toHaveBeenCalled();
+      unrelated.remove();
+    },
+  );
 
   it("accepts exact replay guard teardown before a later allowed passive cleanup mutation", async () => {
     const onClosed = vi.fn();
