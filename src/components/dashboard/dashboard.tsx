@@ -60,6 +60,12 @@ const TRUSTED_REMOVE_EVENT_LISTENER = Function.prototype.call.bind(
   listener: (event: E) => void,
   options?: boolean | EventListenerOptions,
 ) => void;
+const TRUSTED_PREVENT_DEFAULT = Function.prototype.call.bind(
+  Event.prototype.preventDefault,
+) as (event: Event) => void;
+const TRUSTED_STOP_IMMEDIATE_PROPAGATION = Function.prototype.call.bind(
+  Event.prototype.stopImmediatePropagation,
+) as (event: Event) => void;
 
 type Doc = DocumentSummaryDto;
 type SearchDoc = SearchResultDto;
@@ -359,6 +365,13 @@ interface TemplateGridReactEntryClickProof extends TemplateGridReactClickProof {
   readonly entry: TemplateGridDomPublication;
   readonly action: TemplateGridActionPublication;
   readonly dispatchTarget: Node;
+}
+
+interface TemplateGridTerminalClickProof {
+  readonly react: TemplateGridReactEntryClickProof;
+  readonly native: TemplateGridNativeClickProof;
+  readonly event: MouseEvent;
+  readonly ownerDocument: Document;
 }
 
 interface TemplateGridPublicationRuntime {
@@ -1184,6 +1197,10 @@ function createTemplateGridPublication(
     let reactButtonClick: TemplateGridReactEntryClickProof | null = null;
     let reactBubbleClick: TemplateGridReactEntryClickProof | null = null;
     let nativeBoundaryClick: TemplateGridNativeClickProof | null = null;
+    let terminalClickBarrier: {
+      readonly event: MouseEvent;
+      readonly listener: (event: Event) => void;
+    } | null = null;
 
     const publicationOwnsCurrentDom = () => {
       if (retired || cells.active.current !== publication) return false;
@@ -1259,25 +1276,90 @@ function createTemplateGridPublication(
         : null;
     };
     const onNativeClickCapture = (event: MouseEvent) => {
-      nativeBoundaryClick = null;
-      if (nativeClick?.event !== event) {
-        reactGridClick = null;
-        reactCardClick = null;
-        reactButtonClick = null;
-        reactBubbleClick = null;
-        nativeClick = exactNativeClick(event);
+      if (
+        terminalClickBarrier &&
+        terminalClickBarrier.event !== event
+      ) {
+        TRUSTED_PREVENT_DEFAULT(event);
+        TRUSTED_STOP_IMMEDIATE_PROPAGATION(event);
+        return;
       }
+      const reactNative = reactGridClick?.native;
+      if (
+        reactNative &&
+        nativeClick === reactNative &&
+        reactNative.event === event &&
+        reactNative.target === event.target &&
+        nativeCurrentTarget(event) === ownerDocument &&
+        event.eventPhase === ownerWindow.Event.CAPTURING_PHASE
+      ) {
+        nativeBoundaryClick = null;
+        return;
+      }
+      nativeClick = null;
+      reactGridClick = null;
+      reactCardClick = null;
+      reactButtonClick = null;
+      reactBubbleClick = null;
+      nativeBoundaryClick = null;
+      nativeClick = exactNativeClick(event);
     };
     const onNativeClickBubble = (event: MouseEvent) => {
       const proof = reactBubbleClick;
+      const capturedNative = nativeClick;
       if (
         proof &&
-        nativeClick?.event === event &&
+        capturedNative?.event === event &&
+        cells.delivery.current === null &&
         nativeCurrentTarget(event) === ownerDocument &&
         event.eventPhase === ownerWindow.Event.BUBBLING_PHASE &&
         !nativeWasPrevented(event)
       ) {
-        deliver(proof, event);
+        const terminal = Object.freeze({
+          react: proof,
+          native: capturedNative,
+          event,
+          ownerDocument,
+        });
+        const listener = (nextEvent: Event) => {
+          if (nextEvent === event) return;
+          TRUSTED_PREVENT_DEFAULT(nextEvent);
+          TRUSTED_STOP_IMMEDIATE_PROPAGATION(nextEvent);
+        };
+        const barrier = Object.freeze({ event, listener });
+        terminalClickBarrier = barrier;
+        TRUSTED_ADD_EVENT_LISTENER(
+          ownerDocument,
+          "click",
+          listener,
+          true,
+        );
+        queueMicrotask(() => {
+          TRUSTED_REMOVE_EVENT_LISTENER(
+            ownerDocument,
+            "click",
+            listener,
+            true,
+          );
+          if (terminalClickBarrier === barrier) {
+            terminalClickBarrier = null;
+          }
+          if (
+            nativeClick === capturedNative &&
+            reactBubbleClick === proof
+          ) {
+            deliver(terminal);
+          }
+          if (nativeClick === capturedNative) {
+            nativeClick = null;
+            reactGridClick = null;
+            reactCardClick = null;
+            reactButtonClick = null;
+            reactBubbleClick = null;
+            nativeBoundaryClick = null;
+          }
+        });
+        return;
       }
       if (nativeClick?.event === event) {
         nativeClick = null;
@@ -1348,6 +1430,15 @@ function createTemplateGridPublication(
           listener,
           true,
         );
+      }
+      if (terminalClickBarrier) {
+        TRUSTED_REMOVE_EVENT_LISTENER(
+          ownerDocument,
+          "click",
+          terminalClickBarrier.listener,
+          true,
+        );
+        terminalClickBarrier = null;
       }
     };
     const publishedDomMatches = () =>
@@ -1478,11 +1569,9 @@ function createTemplateGridPublication(
           })
         : null;
     };
-    const deliver = (
-      proof: TemplateGridReactEntryClickProof,
-      event: MouseEvent,
-    ) => {
+    const deliver = (terminal: TemplateGridTerminalClickProof) => {
       if (cells.delivery.current !== null) return false;
+      const { react: proof, native, event } = terminal;
       const { entry, action } = proof;
       if (
         !publicationOwnsCurrentDom() ||
@@ -1493,12 +1582,12 @@ function createTemplateGridPublication(
         action.entryIdentity !== entry.identity ||
         action.index !== entry.entry.index ||
         !templateGridIsEffectivelyEnabled(grid, entry.button) ||
-        proof.native !== nativeClick ||
-        nativeCurrentTarget(event) !== ownerDocument ||
-        event.eventPhase !== ownerWindow.Event.BUBBLING_PHASE ||
-        proof.native.event !== event ||
+        terminal.ownerDocument !== ownerDocument ||
+        native !== nativeClick ||
+        proof.native !== native ||
+        native.event !== event ||
         nativeWasPrevented(event) ||
-        nativeWasPrevented(proof.native.event) ||
+        nativeWasPrevented(native.event) ||
         cells.claimedPublications.has(publication) ||
         cells.claimedEntries.has(entry) ||
         cells.claimedActions.has(action) ||
@@ -1627,11 +1716,16 @@ function createTemplateGridPublication(
         reactCardClick = null;
         reactButtonClick = null;
         reactBubbleClick = null;
+        const nativeEvent = event.nativeEvent;
+        const atOwnerDocument =
+          nativeEvent instanceof ownerWindow.MouseEvent &&
+          nativeCurrentTarget(nativeEvent) === ownerDocument &&
+          nativeEvent.eventPhase === ownerWindow.Event.CAPTURING_PHASE;
         const capturedNative =
-          nativeClick?.event === event.nativeEvent
-            ? nativeClick
-            : event.nativeEvent instanceof ownerWindow.MouseEvent
-              ? exactNativeClick(event.nativeEvent)
+          atOwnerDocument
+            ? exactNativeClick(nativeEvent)
+            : nativeClick?.event === nativeEvent
+              ? nativeClick
               : null;
         if (capturedNative) nativeClick = capturedNative;
         if (

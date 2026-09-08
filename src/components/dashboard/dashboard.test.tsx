@@ -1535,6 +1535,284 @@ describe("TemplateGrid publication ownership", () => {
     },
   );
 
+  it.each(["container", "document"] as const)(
+    "binds native proof to each %s-root dispatch of the same event",
+    async (rootKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test frame has no window");
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const firstPick = vi.fn<(template: Template) => void>();
+      const secondPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      let firstButton: HTMLButtonElement | null = null;
+      let interruptFirstDispatch = true;
+      const interrupt: EventListener = (event) => {
+        if (
+          interruptFirstDispatch &&
+          event.target === firstButton
+        ) {
+          event.stopImmediatePropagation();
+        }
+      };
+      host.addEventListener("click", interrupt);
+      const tree =
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <button type="button" data-testid="unrelated-dispatch">
+                  Unrelated
+                </button>
+                <section data-testid="first-template-grid">
+                  <TemplateGrid onPick={firstPick} busy={null} />
+                </section>
+                <section data-testid="second-template-grid">
+                  <TemplateGrid onPick={secondPick} busy={null} />
+                </section>
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <button type="button" data-testid="unrelated-dispatch">
+              Unrelated
+            </button>
+            <section data-testid="first-template-grid">
+              <TemplateGrid onPick={firstPick} busy={null} />
+            </section>
+            <section data-testid="second-template-grid">
+              <TemplateGrid onPick={secondPick} busy={null} />
+            </section>
+          </StrictMode>
+        );
+
+      try {
+        await act(async () => {
+          root.render(tree);
+        });
+        const firstGrid = ownerDocument.querySelector<HTMLElement>(
+          '[data-testid="first-template-grid"]',
+        );
+        const secondGrid = ownerDocument.querySelector<HTMLElement>(
+          '[data-testid="second-template-grid"]',
+        );
+        const unrelated = ownerDocument.querySelector<HTMLButtonElement>(
+          '[data-testid="unrelated-dispatch"]',
+        );
+        firstButton = firstGrid?.querySelector<HTMLButtonElement>(
+          `[data-testid="template-${template.id}"]`,
+        ) ?? null;
+        const secondButton =
+          secondGrid?.querySelector<HTMLButtonElement>(
+            `[data-testid="template-${template.id}"]`,
+          ) ?? null;
+        if (!firstButton || !secondButton || !unrelated) {
+          throw new Error("The dispatch-attempt controls were not rendered");
+        }
+        const reusedEvent = new ownerWindow.MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          detail: 1,
+        });
+        await act(async () => {
+          firstButton!.dispatchEvent(reusedEvent);
+        });
+        expect(firstPick).not.toHaveBeenCalled();
+        expect(secondPick).not.toHaveBeenCalled();
+
+        interruptFirstDispatch = false;
+        await act(async () => {
+          unrelated.dispatchEvent(reusedEvent);
+        });
+        expect(firstPick).not.toHaveBeenCalled();
+        expect(secondPick).not.toHaveBeenCalled();
+
+        await act(async () => {
+          secondButton.dispatchEvent(reusedEvent);
+        });
+        expect(firstPick).not.toHaveBeenCalled();
+        expect(secondPick).toHaveBeenCalledTimes(1);
+        expect(secondPick).toHaveBeenLastCalledWith(template);
+
+        await act(async () => {
+          firstButton!.dispatchEvent(
+            new ownerWindow.MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+        expect(firstPick).toHaveBeenCalledTimes(1);
+        expect(firstPick).toHaveBeenLastCalledWith(template);
+        expect(secondPick).toHaveBeenCalledTimes(1);
+      } finally {
+        host.removeEventListener("click", interrupt);
+        await act(async () => root.unmount());
+        frame.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["container", "document"],
+    ["container", "window"],
+    ["document", "document"],
+    ["document", "window"],
+  ] as const)(
+    "finalizes %s-root selection after a later %s cancellation",
+    async (rootKind, cancellationKind) => {
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const ownerDocument = frame.contentDocument;
+      if (!ownerDocument) throw new Error("The test frame has no document");
+      ownerDocument.open();
+      ownerDocument.write(
+        "<!doctype html><html><head></head><body></body></html>",
+      );
+      ownerDocument.close();
+      const ownerWindow = ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The test frame has no window");
+      const host =
+        rootKind === "document"
+          ? ownerDocument
+          : ownerDocument.body.appendChild(
+              ownerDocument.createElement("div"),
+            );
+      const root = createRoot(host);
+      const onPick = vi.fn<(template: Template) => void>();
+      const template = PICKER_TEMPLATES[0];
+      const renderGrid = (key: string) =>
+        rootKind === "document" ? (
+          <StrictMode>
+            <html>
+              {createElement("head")}
+              <body>
+                <TemplateGrid
+                  key={key}
+                  onPick={onPick}
+                  busy={null}
+                />
+              </body>
+            </html>
+          </StrictMode>
+        ) : (
+          <StrictMode>
+            <TemplateGrid
+              key={key}
+              onPick={onPick}
+              busy={null}
+            />
+          </StrictMode>
+        );
+      const cancellationTarget: EventTarget =
+        cancellationKind === "document"
+          ? ownerDocument
+          : ownerWindow;
+      const cancel: EventListener = (event) => {
+        event.preventDefault();
+      };
+
+      try {
+        await act(async () => {
+          root.render(renderGrid("cancelled"));
+        });
+        cancellationTarget.addEventListener("click", cancel);
+        let dispatched = true;
+        await act(async () => {
+          const button =
+            ownerDocument.querySelector<HTMLButtonElement>(
+              `[data-testid="template-${template.id}"]`,
+            );
+          if (!button) {
+            throw new Error("The cancelled template button was not rendered");
+          }
+          dispatched = button.dispatchEvent(
+            new ownerWindow.MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+        expect(dispatched).toBe(false);
+        expect(onPick).not.toHaveBeenCalled();
+
+        cancellationTarget.removeEventListener("click", cancel);
+        await act(async () => {
+          const button =
+            ownerDocument.querySelector<HTMLButtonElement>(
+              `[data-testid="template-${template.id}"]`,
+            );
+          if (!button) {
+            throw new Error("The mouse recovery button was not rendered");
+          }
+          button.dispatchEvent(
+            new ownerWindow.MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+        expect(onPick).toHaveBeenCalledTimes(1);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+
+        await act(async () => {
+          root.render(renderGrid("keyboard"));
+        });
+        await act(async () => {
+          const button =
+            ownerDocument.querySelector<HTMLButtonElement>(
+              `[data-testid="template-${template.id}"]`,
+            );
+          if (!button) {
+            throw new Error("The keyboard recovery button was not rendered");
+          }
+          button.dispatchEvent(
+            new ownerWindow.MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              buttons: 0,
+              detail: 0,
+            }),
+          );
+        });
+        expect(onPick).toHaveBeenCalledTimes(2);
+        expect(onPick).toHaveBeenLastCalledWith(template);
+      } finally {
+        cancellationTarget.removeEventListener("click", cancel);
+        await act(async () => root.unmount());
+        frame.remove();
+      }
+    },
+  );
+
   it("uses the trusted native cancellation flag when an own getter reports false", async () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -3112,7 +3390,7 @@ describe("dashboard create ownership", () => {
     expect(screen.getByTestId("template-meeting-notes")).toBeEnabled();
 
     const retryButton = screen.getByTestId("template-meeting-notes");
-    act(() => {
+    await act(async () => {
       retryButton.click();
       screen.getByTestId("new-document").click();
     });
