@@ -521,11 +521,109 @@ function templateButton(host: HTMLElement, id: string): HTMLButtonElement {
 }
 
 type CreateControlTestId = "new-document" | "start-guided-doc";
+type FilterValue = "all" | "mine" | "shared" | "starred" | "trash";
 
 function directCreateButton(host: HTMLElement, testid: CreateControlTestId): HTMLButtonElement {
   const button = host.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`);
   if (!button) throw new Error(`${testid} was not rendered`);
   return button;
+}
+
+function filterGroup(host: ParentNode = document): HTMLDivElement {
+  const group = host.querySelector<HTMLDivElement>(
+    '[role="toolbar"][aria-label="Document filters"]',
+  );
+  if (!group) throw new Error("The document filter toolbar was not rendered");
+  return group;
+}
+
+function directFilterButton(
+  host: ParentNode,
+  filter: FilterValue,
+): HTMLButtonElement {
+  const button = host.querySelector<HTMLButtonElement>(
+    `[data-testid="filter-${filter}"]`,
+  );
+  if (!button) throw new Error(`The ${filter} filter was not rendered`);
+  return button;
+}
+
+function filterRefBindings(host: ParentNode) {
+  const group = filterGroup(host);
+  return [group, ...Array.from(group.children)].map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
+}
+
+function markFilterEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+async function dispatchFilterKey(
+  button: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const KeyboardEventConstructor =
+    button.ownerDocument.defaultView!.KeyboardEvent;
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markFilterEventTrusted(event);
+  await act(async () => {
+    button.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function expectCurrentFilter(
+  host: ParentNode,
+  filter: FilterValue,
+) {
+  const group = filterGroup(host);
+  const buttons = Array.from(
+    group.querySelectorAll<HTMLButtonElement>("button"),
+  );
+  expect(buttons).toHaveLength(5);
+  expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([
+    directFilterButton(host, filter),
+  ]);
+  for (const button of buttons) {
+    expect(button).toHaveAttribute(
+      "aria-pressed",
+      String(button === directFilterButton(host, filter)),
+    );
+  }
 }
 
 function createCardRoot(host: HTMLElement): HTMLDivElement {
@@ -6962,6 +7060,812 @@ describe("TrashView publication ownership", () => {
       act(() => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("dashboard filter keyboard navigation", () => {
+  const navigationCases = [
+    ["ArrowRight", "all", "mine", 0],
+    ["ArrowDown", "all", "mine", 0],
+    ["ArrowLeft", "mine", "all", 0],
+    ["ArrowUp", "mine", "all", 0],
+    ["Home", "starred", "all", 0],
+    ["End", "all", "trash", 1],
+    ["ArrowRight", "trash", "all", 0],
+    ["ArrowLeft", "all", "trash", 1],
+  ] as const;
+
+  it.each(navigationCases)(
+    "selects and focuses exactly once for %s from %s to %s",
+    async (key, initial, destination, trashRequests) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        expect(filterGroup(host)).toHaveAttribute("role", "toolbar");
+        expect(filterGroup(host)).toHaveAccessibleName("Document filters");
+        expectCurrentFilter(host, "all");
+
+        if (initial !== "all") {
+          act(() => directFilterButton(host, initial).click());
+          await act(async () => {});
+        }
+        expectCurrentFilter(host, initial);
+        listDocuments.mockClear();
+
+        const source = directFilterButton(host, initial);
+        source.focus();
+        focus.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const event = await dispatchFilterKey(source, key);
+        const target = directFilterButton(host, destination);
+
+        expect(event.defaultPrevented).toBe(true);
+        expectCurrentFilter(host, destination);
+        expect(target).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(target);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(listDocuments).toHaveBeenCalledTimes(trashRequests);
+        if (trashRequests) {
+          expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
+        }
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps one Trash request on entry and cancels its late result on keyboard exit", async () => {
+    const pending = deferred<ListResponse>();
+    listDocuments.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      await dispatchFilterKey(all, "End");
+      expectCurrentFilter(host, "trash");
+      expect(listDocuments).toHaveBeenCalledExactlyOnceWith({ trash: true });
+      expect(host).toHaveTextContent("Loading trash…");
+
+      await dispatchFilterKey(directFilterButton(host, "trash"), "ArrowLeft");
+      expectCurrentFilter(host, "starred");
+      expect(listDocuments).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({
+          documents: [trashedDoc("late-filter-row", "Late filter row")],
+        });
+        await pending.promise;
+      });
+      expect(host).not.toHaveTextContent("Late filter row");
+      expect(host.querySelector('[data-testid="trash-view"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("preserves native click selection without keyboard prevention or focus work", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      await dispatchFilterKey(all, "ArrowRight");
+      expectCurrentFilter(host, "mine");
+
+      focus.mockClear();
+      const shared = directFilterButton(host, "shared");
+      const click = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => shared.dispatchEvent(click));
+      await act(async () => {});
+
+      expect(click.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "shared");
+      expect(focus).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a directly dispatched untrusted owner-realm key before accepting a trusted successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      focus.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        all.dispatchEvent(untrusted);
+        await Promise.resolve();
+      });
+
+      expect(untrusted.isTrusted).toBe(false);
+      expect(untrusted.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const trusted = await dispatchFilterKey(all, "ArrowRight");
+      expect(trusted.isTrusted).toBe(true);
+      expect(trusted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects replaced active-element authority and React trust wrappers before clean successors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const activeElementDescriptor = Object.getOwnPropertyDescriptor(
+        Document.prototype,
+        "activeElement",
+      );
+      if (!activeElementDescriptor?.get) {
+        throw new Error("Document.activeElement getter was unavailable");
+      }
+      const replacedGetter = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(replacedGetter);
+      all.focus();
+      focus.mockClear();
+      await act(async () => {
+        Object.defineProperty(Document.prototype, "activeElement", {
+          ...activeElementDescriptor,
+          get: () => all,
+        });
+        try {
+          all.dispatchEvent(replacedGetter);
+        } finally {
+          Object.defineProperty(
+            Document.prototype,
+            "activeElement",
+            activeElementDescriptor,
+          );
+        }
+        await Promise.resolve();
+      });
+      expect(replacedGetter.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = directFilterButton(host, "all");
+      const restore = interceptReactHandler(
+        successor,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") return;
+          const descriptors = Object.getOwnPropertyDescriptors(event);
+          descriptors.isTrusted = {
+            configurable: true,
+            enumerable: true,
+            value: false,
+            writable: true,
+          };
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              descriptors,
+            ) as object,
+          );
+        },
+      );
+      successor.focus();
+      focus.mockClear();
+      const replacedWrapper = await dispatchFilterKey(
+        successor,
+        "ArrowRight",
+      );
+      restore();
+      expect(replacedWrapper.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const current = directFilterButton(host, "all");
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchFilterKey(current, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects modified, repeated, composing, canceled, non-bubbling, non-cancelable, and wrong-focus keys with zero work", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const rejected: Array<[string, KeyboardEventInit]> = [
+        ["ArrowRight", { ctrlKey: true }],
+        ["ArrowRight", { metaKey: true }],
+        ["ArrowRight", { altKey: true }],
+        ["ArrowRight", { shiftKey: true }],
+        ["ArrowRight", { repeat: true }],
+        ["ArrowRight", { isComposing: true }],
+        ["Home", {}],
+        ["PageDown", {}],
+        ["ArrowRight", { bubbles: false }],
+        ["ArrowRight", { cancelable: false }],
+      ];
+      for (const [key, init] of rejected) {
+        all.focus();
+        focus.mockClear();
+        const event = await dispatchFilterKey(all, key, init);
+        expect(event.defaultPrevented).toBe(false);
+        expectCurrentFilter(host, "all");
+        expect(focus).not.toHaveBeenCalled();
+      }
+
+      all.focus();
+      focus.mockClear();
+      const canceled = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(canceled);
+      canceled.preventDefault();
+      await act(async () => {
+        all.dispatchEvent(canceled);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      all.focus();
+      focus.mockClear();
+      const canceledDuringDelivery = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(canceledDuringDelivery);
+      all.addEventListener(
+        "keydown",
+        (event) => event.preventDefault(),
+        { once: true },
+      );
+      await act(async () => {
+        all.dispatchEvent(canceledDuringDelivery);
+        await Promise.resolve();
+      });
+      expect(canceledDuringDelivery.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchFilterKey(all, "ArrowRight");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, replayed, and crossed event delivery while a clean successor remains usable", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const handler = captureReactHandler(all, "onKeyDown");
+      const fabricatedNative = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      all.focus();
+      focus.mockClear();
+      act(() => {
+        handler({
+          _reactName: "onKeyDown",
+          type: "keydown",
+          nativeEvent: fabricatedNative,
+          target: all,
+          currentTarget: all,
+          bubbles: true,
+          cancelable: true,
+          defaultPrevented: false,
+          key: "ArrowRight",
+          ctrlKey: false,
+          metaKey: false,
+          altKey: false,
+          shiftKey: false,
+          repeat: false,
+          isComposing: false,
+        });
+      });
+      expectCurrentFilter(host, "all");
+      expect(fabricatedNative.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
+      const ForeignKeyboardEvent = foreignWindow.KeyboardEvent;
+      const foreign = new ForeignKeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(foreign);
+      await act(async () => {
+        all.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "all");
+      expect(foreign.defaultPrevented).toBe(false);
+
+      const first = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(first);
+      await act(async () => {
+        all.dispatchEvent(first);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "mine");
+      focus.mockClear();
+      await act(async () => {
+        directFilterButton(host, "mine").dispatchEvent(first);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "mine");
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => directFilterButton(host, "all").click());
+      await act(async () => {});
+      const crossedSource = directFilterButton(host, "all");
+      crossedSource.focus();
+      focus.mockClear();
+      const outer = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      const inner = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(outer);
+      markFilterEventTrusted(inner);
+      let reentered = false;
+      crossedSource.addEventListener(
+        "keydown",
+        () => {
+          if (reentered) return;
+          reentered = true;
+          crossedSource.dispatchEvent(inner);
+        },
+        { capture: true, once: true },
+      );
+      await act(async () => {
+        crossedSource.dispatchEvent(outer);
+        await Promise.resolve();
+      });
+      expect(outer.defaultPrevented).toBe(false);
+      expect(inner.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = await dispatchFilterKey(
+        directFilterButton(host, "all"),
+        "ArrowRight",
+      );
+      expect(recovered.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it("keeps stale user and filter handlers inert while current exact handlers navigate once", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacementUser = {
+      ...USER,
+      id: "replacement-filter-user",
+      login: "replacement-filter-user",
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <DashboardBoundary
+            user={USER}
+          />,
+        );
+      });
+      const staleUserHandler = captureReactHandler(
+        directFilterButton(host, "all"),
+        "onKeyDown",
+      );
+      await act(async () => {
+        root.render(
+          <DashboardBoundary
+            user={replacementUser}
+            boundary={1}
+          />,
+        );
+      });
+      const currentAll = directFilterButton(host, "all");
+      currentAll.focus();
+      focus.mockClear();
+      const restoreUser = interceptReactHandler(
+        currentAll,
+        "onKeyDown",
+        (original, event) => {
+          staleUserHandler(event);
+          original(event);
+        },
+      );
+      const userEvent = await dispatchFilterKey(currentAll, "ArrowRight");
+      restoreUser();
+      expect(userEvent.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledTimes(1);
+
+      const staleFilterHandler = captureReactHandler(
+        directFilterButton(host, "mine"),
+        "onKeyDown",
+      );
+      act(() => directFilterButton(host, "shared").click());
+      await act(async () => {});
+      const currentShared = directFilterButton(host, "shared");
+      currentShared.focus();
+      focus.mockClear();
+      const restoreFilter = interceptReactHandler(
+        currentShared,
+        "onKeyDown",
+        (original, event) => {
+          staleFilterHandler(event);
+          original(event);
+        },
+      );
+      const filterEvent = await dispatchFilterKey(
+        currentShared,
+        "ArrowRight",
+      );
+      restoreFilter();
+      expect(filterEvent.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "starred");
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "restored attribute",
+    "detached and restored group",
+    "reordered and restored controls",
+    "replaced and restored control",
+  ] as const)(
+    "retires mutation history for a %s and recovers with a fresh exact publication",
+    async (change) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />,
+          );
+        });
+        const group = filterGroup(host);
+        const all = directFilterButton(host, "all");
+        const stale = captureReactHandler(all, "onKeyDown");
+        if (change === "restored attribute") {
+          all.setAttribute("data-filter-tamper", "true");
+          all.removeAttribute("data-filter-tamper");
+        } else if (change === "detached and restored group") {
+          const parent = group.parentNode!;
+          const next = group.nextSibling;
+          group.remove();
+          parent.insertBefore(group, next);
+        } else if (change === "reordered and restored controls") {
+          const original = Array.from(group.children);
+          group.insertBefore(original.at(-1)!, original[0]!);
+          for (const child of original) group.append(child);
+        } else {
+          const clone = all.cloneNode(true);
+          if (!(clone instanceof HTMLButtonElement)) {
+            throw new Error("The cloned filter was not a button");
+          }
+          all.replaceWith(clone);
+          clone.replaceWith(all);
+        }
+        await act(async () => {});
+
+        const current = directFilterButton(host, "all");
+        const currentHandler = captureReactHandler(current, "onKeyDown");
+        expect(currentHandler).not.toBe(stale);
+        current.focus();
+        focus.mockClear();
+        const restore = interceptReactHandler(
+          current,
+          "onKeyDown",
+          (original, event) => {
+            stale(event);
+            original(event);
+          },
+        );
+        const event = await dispatchFilterKey(current, "ArrowRight");
+        restore();
+        expect(event.defaultPrevented).toBe(true);
+        expectCurrentFilter(host, "mine");
+        expect(focus).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects partial ref replay, recovers on a clean render, and mints a successor after complete replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const initial = directFilterButton(host, "all");
+      const stale = captureReactHandler(initial, "onKeyDown");
+      const partial = filterRefBindings(host)[0]!;
+      act(() => {
+        partial.ref(null);
+        partial.ref(partial.element);
+      });
+      await act(async () => {});
+      initial.focus();
+      const rejected = await dispatchFilterKey(initial, "ArrowRight");
+      expect(rejected.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const recovered = directFilterButton(host, "all");
+      const recoveredHandler = captureReactHandler(recovered, "onKeyDown");
+      expect(recoveredHandler).not.toBe(stale);
+
+      const complete = filterRefBindings(host);
+      act(() => {
+        for (const { ref } of complete) ref(null);
+        for (const { element, ref } of complete) ref(element);
+      });
+      await act(async () => {});
+      const successor = directFilterButton(host, "all");
+      expect(captureReactHandler(successor, "onKeyDown")).not.toBe(
+        recoveredHandler,
+      );
+      successor.focus();
+      const accepted = await dispatchFilterKey(successor, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retires captured handlers and pending focus before layout unmount", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <Dashboard
+          user={USER}
+          documents={DOCUMENTS}
+          githubAvailable
+          githubConfigured
+        />,
+      );
+    });
+    const all = directFilterButton(host, "all");
+    const stale = captureReactHandler(all, "onKeyDown");
+    const native = new KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    });
+    all.focus();
+    focus.mockClear();
+    await act(async () => root.unmount());
+    const removedMarkup = host.innerHTML;
+    act(() => {
+      stale({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: native,
+        target: all,
+        currentTarget: all,
+        bubbles: true,
+        cancelable: true,
+        defaultPrevented: false,
+        key: "End",
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        shiftKey: false,
+        repeat: false,
+        isComposing: false,
+      });
+    });
+    await act(async () => {});
+
+    expect(host.innerHTML).toBe(removedMarkup);
+    expect(native.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(listDocuments).not.toHaveBeenCalled();
+    host.remove();
   });
 });
 
