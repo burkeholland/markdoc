@@ -218,6 +218,12 @@ function inputKeyActivation(currentTarget: HTMLInputElement, key: string, shiftK
   };
 }
 
+function keyboardEventView(ownerWindow: Window) {
+  // Vitest proxies jsdom's global; Web IDL initialization needs its branded window.
+  return (ownerWindow as Window & { _globalObject?: Window })._globalObject ??
+    ownerWindow;
+}
+
 function findKey(target: HTMLElement, init: KeyboardEventInit = {}) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The Find control has no owner window");
@@ -225,6 +231,8 @@ function findKey(target: HTMLElement, init: KeyboardEventInit = {}) {
     bubbles: true,
     cancelable: true,
     key: "F3",
+    code: "F3",
+    view: keyboardEventView(ownerWindow),
     ...init,
   });
 }
@@ -1600,6 +1608,132 @@ describe("FindBar F3 navigation", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(stepFind).not.toHaveBeenCalled();
     expect(onReveal).not.toHaveBeenCalled();
+  });
+
+  it("rejects genuine auto-repeat and contradictory-code F3 deliveries", async () => {
+    const s = session("owner", "f3-repeat-facts");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+
+    const repeated = dispatchFindKey(input, { repeat: true });
+    const contradictory = dispatchFindKey(input, { code: "F4" });
+
+    expect(repeated.defaultPrevented).toBe(false);
+    expect(contradictory.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a foreign-realm F3 grafted onto the owner KeyboardEvent prototype", async () => {
+    const s = session("owner", "f3-grafted-realm");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const onReveal = vi.fn();
+    renderStrictBar(s, {
+      onReplaceVisible: vi.fn(),
+      onReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const input = screen.getByTestId("find-input") as HTMLInputElement;
+    const ownerWindow = input.ownerDocument.defaultView;
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow;
+    if (!ownerWindow || !foreignWindow) {
+      throw new Error("The owner and foreign realms are required");
+    }
+    const ForeignKeyboardEvent =
+      (foreignWindow as Window & typeof globalThis).KeyboardEvent;
+    const event = new ForeignKeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "F3",
+      code: "F3",
+      view: keyboardEventView(foreignWindow),
+    });
+    Object.setPrototypeOf(event, ownerWindow.KeyboardEvent.prototype);
+
+    act(() => {
+      input.focus();
+      input.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(onReveal).not.toHaveBeenCalled();
+    frame.remove();
+  });
+
+  it("rejects a key getter altered before publication and trusts only a complete fresh publication", async () => {
+    const ownerWindow = document.defaultView as
+      | (Window & typeof globalThis)
+      | null;
+    const keyDescriptor = ownerWindow &&
+      Object.getOwnPropertyDescriptor(ownerWindow.KeyboardEvent.prototype, "key");
+    if (!ownerWindow || !keyDescriptor || typeof keyDescriptor.get !== "function") {
+      throw new Error("The owner realm key getter is unavailable");
+    }
+    const rejectedSession = session("owner", "f3-poisoned-getter");
+    const rejectedStep = vi.spyOn(rejectedSession, "stepFind");
+    const rejectedReveal = vi.fn();
+    let rejectedRender: ReturnType<typeof renderStrictBar> | null = null;
+    Object.defineProperty(ownerWindow.KeyboardEvent.prototype, "key", {
+      ...keyDescriptor,
+      get: () => "F3",
+    });
+    try {
+      rejectedRender = renderStrictBar(rejectedSession, {
+        onReplaceVisible: vi.fn(),
+        onReveal: rejectedReveal,
+        onClose: vi.fn(),
+      });
+      await act(async () => {});
+      const input = screen.getByTestId("find-input") as HTMLInputElement;
+      const event = findKey(input, { key: "F4", code: "F4" });
+      expect(event.key).toBe("F3");
+
+      act(() => {
+        input.focus();
+        input.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(rejectedStep).not.toHaveBeenCalled();
+      expect(rejectedReveal).not.toHaveBeenCalled();
+    } finally {
+      if (rejectedRender) {
+        act(() => rejectedRender?.root.unmount());
+        directRoots.delete(rejectedRender.root);
+        rejectedRender.host.remove();
+      }
+      Object.defineProperty(
+        ownerWindow.KeyboardEvent.prototype,
+        "key",
+        keyDescriptor,
+      );
+    }
+
+    const freshSession = session("owner", "f3-restored-getter");
+    const freshStep = vi.spyOn(freshSession, "stepFind");
+    const freshReveal = vi.fn();
+    renderStrictBar(freshSession, {
+      onReplaceVisible: vi.fn(),
+      onReveal: freshReveal,
+      onClose: vi.fn(),
+    });
+    await act(async () => {});
+    const fresh = dispatchFindKey(screen.getByTestId("find-input"));
+
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(freshStep).toHaveBeenCalledOnce();
+    expect(freshReveal).toHaveBeenCalledOnce();
   });
 
   it("uses captured keyboard getters and composedPath when public fields throw or deceive", async () => {
