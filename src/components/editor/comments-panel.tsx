@@ -3409,9 +3409,6 @@ function exactRequestModeKey(
     isPropagationStopped?: unknown;
     persist?: unknown;
   };
-  const reactPrototype = Object.getPrototypeOf(event) as {
-    constructor?: { name?: unknown };
-  } | null;
   if (
     !(nativeEvent instanceof keyboard.KeyboardEvent) ||
     Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
@@ -3460,9 +3457,17 @@ function exactRequestModeKey(
       event.currentTarget === source &&
       event.target === target &&
       event.nativeEvent === nativeEvent &&
-      event.bubbles &&
-      event.cancelable &&
-      !event.defaultPrevented &&
+      event.key === key &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === keyboard.eventBubbles.read(nativeEvent) &&
+      event.cancelable === keyboard.eventCancelable.read(nativeEvent) &&
+      event.defaultPrevented === keyboard.eventDefaultPrevented.read(nativeEvent) &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, nativeView) &&
       target === source &&
       target instanceof keyboard.Node &&
       target.ownerDocument === publication.ownerDocument &&
@@ -3470,12 +3475,11 @@ function exactRequestModeKey(
       path.filter((entry) => entry === source).length === 1 &&
       path.includes(publication.root) &&
       keyboard.activeElement.read(publication.ownerDocument) === source &&
-      reactPrototype?.constructor?.name === "SyntheticBaseEvent" &&
       reactEvent._reactName === "onKeyDown" &&
       typeof reactEvent.isDefaultPrevented === "function" &&
-      !reactEvent.isDefaultPrevented() &&
+      reactEvent.isDefaultPrevented() === keyboard.eventDefaultPrevented.read(nativeEvent) &&
       typeof reactEvent.isPropagationStopped === "function" &&
-      !reactEvent.isPropagationStopped() &&
+      reactEvent.isPropagationStopped() === keyboard.eventCancelBubble.read(nativeEvent) &&
       typeof reactEvent.persist === "function"
     )
       ? Object.freeze({ event: nativeEvent, key })
@@ -3554,6 +3558,17 @@ function createRequestModeRuntime(
       (entry) =>
         entry.detached && entry.reattached && entry.owner.element() === entry.element,
     );
+  const refsHaveRecoveredReplay = () => {
+    let replayed = false;
+    const recovered = replayRefs.every((entry) => {
+      if (!entry.detached) {
+        return !entry.reattached && entry.owner.element() === entry.element;
+      }
+      replayed = true;
+      return entry.reattached && entry.owner.element() === entry.element;
+    });
+    return !invalidReplay && replayed && recovered;
+  };
   return Object.freeze({
     publication,
     publish: () => {
@@ -3614,9 +3629,8 @@ function createRequestModeRuntime(
     isExactElementReplay: () =>
       retired &&
       retirement === "element" &&
-      layoutRetired &&
       established &&
-      refsHaveExactReplay() &&
+      refsHaveRecoveredReplay() &&
       publishedDomMatches(),
     isExactLayoutReplay: () =>
       retired &&

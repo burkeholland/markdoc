@@ -5049,8 +5049,23 @@ describe("CommentsPanel", () => {
 
     type Role = "owner" | "editor" | "commenter";
     type ListedAgent = Awaited<ReturnType<typeof api.documents.collaborators>>["agents"][number];
+    let restoreRequestModeScrollIntoView: (() => void) | null = null;
+    const mockRequestModeScrollIntoView = () => {
+      if (restoreRequestModeScrollIntoView) return;
+      const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        writable: true,
+        value: vi.fn(),
+      });
+      restoreRequestModeScrollIntoView = () => {
+        if (descriptor) Object.defineProperty(Element.prototype, "scrollIntoView", descriptor);
+        else delete (Element.prototype as Partial<Element>).scrollIntoView;
+        restoreRequestModeScrollIntoView = null;
+      };
+    };
     const mount = (opts: { role?: Role; viewing?: boolean; me?: { id: string; name: string; login: string }; agents?: ListedAgent[]; onCancelRequest?: (id: string) => void } = {}) => {
-      Element.prototype.scrollIntoView ??= () => {};
+      mockRequestModeScrollIntoView();
       const me = opts.me ?? { id: "alice", name: "Alice", login: "alice" };
       const user = makeCollabUser(me.id, me.name, null, me.login);
       session = new CollabSession({ docId: "doc", user, role: opts.role ?? "owner", getToken: async () => "token", autoConnect: false });
@@ -5119,6 +5134,7 @@ describe("CommentsPanel", () => {
         value?: string;
       } = {},
     ) => {
+      mockRequestModeScrollIntoView();
       const user = makeCollabUser("alice", "Alice", null, "alice");
       session = new CollabSession({
         docId: "request-mode-direct",
@@ -5183,6 +5199,7 @@ describe("CommentsPanel", () => {
       vi.mocked(api.documents.comment).mockClear();
       vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
       vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
+      restoreRequestModeScrollIntoView?.();
     });
 
     it("shows the mode row only while the body mentions an agent the picker knows", async () => {
@@ -5382,6 +5399,45 @@ describe("CommentsPanel", () => {
         expect(focus).toHaveBeenCalledTimes(1);
         expect(publicPreventDefault).not.toHaveBeenCalled();
         expect(publicFocus).not.toHaveBeenCalled();
+      });
+
+      it("rejects a replacement React wrapper predicate before accepting the genuine pair", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const handler = requestModeHandler(suggest);
+        const propsKey = Object.keys(suggest).find((key) => key.startsWith("__reactProps$"));
+        if (!propsKey) throw new Error("React props were not attached to the request mode");
+        const record = suggest as unknown as Record<string, Record<string, unknown>>;
+        const props = record[propsKey];
+        record[propsKey] = {
+          ...props,
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+            handler(
+              new Proxy(event, {
+                get(target, property, receiver) {
+                  if (property === "isDefaultPrevented") return () => true;
+                  return Reflect.get(target, property, receiver);
+                },
+              }),
+            ),
+        };
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const replaced = requestModeKey(suggest, "ArrowRight");
+        record[propsKey] = props;
+
+        expect(replaced.defaultPrevented).toBe(false);
+        expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+
+        act(() => requestModeKey(suggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
       });
 
       it.each([
