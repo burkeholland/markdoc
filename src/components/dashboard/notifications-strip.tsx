@@ -83,32 +83,38 @@ interface NotificationDomGuard {
   readonly release: () => void;
 }
 
+interface NotificationNativeKeyboardFacts {
+  readonly type: string;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+  readonly key: string;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+}
+
 interface NotificationKeyboardIntrinsics {
-  readonly eventType: (event: Event) => string;
-  readonly eventPhase: (event: Event) => number;
-  readonly eventBubbles: (event: Event) => boolean;
-  readonly eventCancelable: (event: Event) => boolean;
-  readonly eventDefaultPrevented: (event: Event) => boolean;
-  readonly eventCancelBubble: (event: Event) => boolean;
-  readonly eventTarget: (event: Event) => EventTarget | null;
-  readonly eventComposedPath: (event: Event) => EventTarget[];
-  readonly preventDefault: (event: Event) => void;
-  readonly key: (event: KeyboardEvent) => string;
-  readonly ctrlKey: (event: KeyboardEvent) => boolean;
-  readonly altKey: (event: KeyboardEvent) => boolean;
-  readonly metaKey: (event: KeyboardEvent) => boolean;
-  readonly shiftKey: (event: KeyboardEvent) => boolean;
-  readonly repeat: (event: KeyboardEvent) => boolean;
-  readonly isComposing: (event: KeyboardEvent) => boolean;
-  readonly activeElement: (document: Document) => Element | null;
-  readonly focus: (element: HTMLElement) => void;
-  readonly isKeyboardEvent: (event: object) => event is KeyboardEvent;
+  readonly read: (event: object) => NotificationNativeKeyboardFacts | null;
+  readonly defaultWasPrevented: (event: Event) => boolean;
+  readonly activeElement: () => Element | null | undefined;
+  readonly preventDefault: (event: Event) => boolean;
+  readonly focus: (element: HTMLElement) => boolean;
 }
 
 interface NotificationFocusCustody {
   readonly controls: readonly HTMLButtonElement[];
-  readonly activeElement: () => Element | null;
-  readonly focus: (element: HTMLButtonElement) => void;
+  readonly activeElement: () => Element | null | undefined;
+  readonly focus: (element: HTMLButtonElement) => boolean;
 }
 
 interface NotificationStripPublication {
@@ -126,7 +132,7 @@ interface NotificationStripPublication {
   readonly dom: NotificationDomSnapshot;
   readonly placement: NotificationPlacement;
   readonly focusCustody: NotificationFocusCustody;
-  readonly keyboard: NotificationKeyboardIntrinsics;
+  readonly keyboard: NotificationKeyboardIntrinsics | null;
 }
 
 interface ElementOwnerView {
@@ -530,155 +536,310 @@ function createNotificationDomGuard(
   });
 }
 
-function capturePrototypeGetter<T>(
-  prototype: object | null,
-  property: PropertyKey,
-): ((value: object) => T) | null {
-  for (let current = prototype; current; current = Object.getPrototypeOf(current)) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
-    if (descriptor?.get) {
-      return Function.prototype.call.bind(descriptor.get) as (
-        value: object,
-      ) => T;
-    }
-  }
-  return null;
+const NOTIFICATION_GET_DESCRIPTOR =
+  Object.getOwnPropertyDescriptor.bind(Object);
+
+interface NotificationStableGetter<T> {
+  readonly prototype: object;
+  readonly property: PropertyKey;
+  readonly getter: () => T;
+  readonly read: (value: object) => T;
+  readonly isCurrent: () => boolean;
 }
 
-function capturePrototypeMethod<T extends (...args: never[]) => unknown>(
+interface NotificationStableMethod<T extends (...args: never[]) => unknown> {
+  readonly prototype: object;
+  readonly property: PropertyKey;
+  readonly method: (...args: never[]) => unknown;
+  readonly invoke: T;
+  readonly isCurrent: () => boolean;
+}
+
+function captureStableGetter<T>(
   prototype: object | null,
   property: PropertyKey,
-): T | null {
-  for (let current = prototype; current; current = Object.getPrototypeOf(current)) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
-    if (descriptor && "value" in descriptor && typeof descriptor.value === "function") {
-      return Function.prototype.call.bind(descriptor.value) as unknown as T;
-    }
-  }
-  return null;
+): NotificationStableGetter<T> | null {
+  if (!prototype) return null;
+  const descriptor = NOTIFICATION_GET_DESCRIPTOR(prototype, property);
+  if (!descriptor?.get) return null;
+  const getter = descriptor.get as () => T;
+  return Object.freeze({
+    prototype,
+    property,
+    getter,
+    read: Function.prototype.call.bind(getter) as (value: object) => T,
+    isCurrent: () =>
+      NOTIFICATION_GET_DESCRIPTOR(prototype, property)?.get === getter,
+  });
 }
+
+function captureStableMethod<T extends (...args: never[]) => unknown>(
+  prototype: object | null,
+  property: PropertyKey,
+): NotificationStableMethod<T> | null {
+  if (!prototype) return null;
+  const descriptor = NOTIFICATION_GET_DESCRIPTOR(prototype, property);
+  if (
+    !descriptor ||
+    !("value" in descriptor) ||
+    typeof descriptor.value !== "function"
+  ) {
+    return null;
+  }
+  const method = descriptor.value as (...args: never[]) => unknown;
+  return Object.freeze({
+    prototype,
+    property,
+    method,
+    invoke: Function.prototype.call.bind(method) as unknown as T,
+    isCurrent: () =>
+      NOTIFICATION_GET_DESCRIPTOR(prototype, property)?.value === method,
+  });
+}
+
+const NOTIFICATION_EVENT_PROTOTYPE =
+  typeof Event === "undefined" ? null : Event.prototype;
+const NOTIFICATION_UI_EVENT_PROTOTYPE =
+  typeof UIEvent === "undefined" ? null : UIEvent.prototype;
+const NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE =
+  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent.prototype;
+const NOTIFICATION_DOCUMENT_PROTOTYPE =
+  typeof Document === "undefined" ? null : Document.prototype;
+const NOTIFICATION_HTML_ELEMENT_PROTOTYPE =
+  typeof HTMLElement === "undefined" ? null : HTMLElement.prototype;
+
+const NOTIFICATION_EVENT_TYPE = captureStableGetter<string>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "type",
+);
+const NOTIFICATION_EVENT_PHASE = captureStableGetter<number>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "eventPhase",
+);
+const NOTIFICATION_EVENT_BUBBLES = captureStableGetter<boolean>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "bubbles",
+);
+const NOTIFICATION_EVENT_CANCELABLE = captureStableGetter<boolean>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "cancelable",
+);
+const NOTIFICATION_EVENT_DEFAULT_PREVENTED = captureStableGetter<boolean>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "defaultPrevented",
+);
+const NOTIFICATION_EVENT_CANCEL_BUBBLE = captureStableGetter<boolean>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "cancelBubble",
+);
+const NOTIFICATION_EVENT_TARGET = captureStableGetter<EventTarget | null>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "target",
+);
+const NOTIFICATION_EVENT_TRUSTED = captureStableGetter<boolean>(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  "isTrusted",
+);
+const NOTIFICATION_EVENT_COMPOSED_PATH = captureStableMethod<
+  (event: Event) => EventTarget[]
+>(NOTIFICATION_EVENT_PROTOTYPE, "composedPath");
+const NOTIFICATION_PREVENT_DEFAULT = captureStableMethod<
+  (event: Event) => void
+>(NOTIFICATION_EVENT_PROTOTYPE, "preventDefault");
+const NOTIFICATION_UI_VIEW = captureStableGetter<Window | null>(
+  NOTIFICATION_UI_EVENT_PROTOTYPE,
+  "view",
+);
+const NOTIFICATION_KEY = captureStableGetter<string>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "key",
+);
+const NOTIFICATION_CTRL = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "ctrlKey",
+);
+const NOTIFICATION_ALT = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "altKey",
+);
+const NOTIFICATION_META = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "metaKey",
+);
+const NOTIFICATION_SHIFT = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "shiftKey",
+);
+const NOTIFICATION_REPEAT = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "repeat",
+);
+const NOTIFICATION_COMPOSING = captureStableGetter<boolean>(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  "isComposing",
+);
+const NOTIFICATION_ACTIVE_ELEMENT = captureStableGetter<Element | null>(
+  NOTIFICATION_DOCUMENT_PROTOTYPE,
+  "activeElement",
+);
+const NOTIFICATION_FOCUS = captureStableMethod<
+  (element: HTMLElement) => void
+>(NOTIFICATION_HTML_ELEMENT_PROTOTYPE, "focus");
+
+const NOTIFICATION_KEYBOARD_GETTERS = Object.freeze([
+  NOTIFICATION_EVENT_TYPE,
+  NOTIFICATION_EVENT_PHASE,
+  NOTIFICATION_EVENT_BUBBLES,
+  NOTIFICATION_EVENT_CANCELABLE,
+  NOTIFICATION_EVENT_DEFAULT_PREVENTED,
+  NOTIFICATION_EVENT_CANCEL_BUBBLE,
+  NOTIFICATION_EVENT_TARGET,
+  NOTIFICATION_EVENT_TRUSTED,
+  NOTIFICATION_UI_VIEW,
+  NOTIFICATION_KEY,
+  NOTIFICATION_CTRL,
+  NOTIFICATION_ALT,
+  NOTIFICATION_META,
+  NOTIFICATION_SHIFT,
+  NOTIFICATION_REPEAT,
+  NOTIFICATION_COMPOSING,
+  NOTIFICATION_ACTIVE_ELEMENT,
+]);
+
+const NOTIFICATION_KEYBOARD_METHODS = Object.freeze([
+  NOTIFICATION_EVENT_COMPOSED_PATH,
+  NOTIFICATION_PREVENT_DEFAULT,
+  NOTIFICATION_FOCUS,
+]);
 
 function captureNotificationKeyboardIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): NotificationKeyboardIntrinsics | null {
-  const eventType = capturePrototypeGetter<string>(
-    ownerWindow.Event.prototype,
-    "type",
-  );
-  const eventPhase = capturePrototypeGetter<number>(
-    ownerWindow.Event.prototype,
-    "eventPhase",
-  );
-  const eventBubbles = capturePrototypeGetter<boolean>(
-    ownerWindow.Event.prototype,
-    "bubbles",
-  );
-  const eventCancelable = capturePrototypeGetter<boolean>(
-    ownerWindow.Event.prototype,
-    "cancelable",
-  );
-  const eventDefaultPrevented = capturePrototypeGetter<boolean>(
-    ownerWindow.Event.prototype,
-    "defaultPrevented",
-  );
-  const eventCancelBubble = capturePrototypeGetter<boolean>(
-    ownerWindow.Event.prototype,
-    "cancelBubble",
-  );
-  const eventTarget = capturePrototypeGetter<EventTarget | null>(
-    ownerWindow.Event.prototype,
-    "target",
-  );
-  const eventComposedPath = capturePrototypeMethod<
-    (event: Event) => EventTarget[]
-  >(ownerWindow.Event.prototype, "composedPath");
-  const preventDefault = capturePrototypeMethod<(event: Event) => void>(
-    ownerWindow.Event.prototype,
-    "preventDefault",
-  );
-  const key = capturePrototypeGetter<string>(
-    ownerWindow.KeyboardEvent.prototype,
-    "key",
-  );
-  const ctrlKey = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "ctrlKey",
-  );
-  const altKey = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "altKey",
-  );
-  const metaKey = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "metaKey",
-  );
-  const shiftKey = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "shiftKey",
-  );
-  const repeat = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "repeat",
-  );
-  const isComposing = capturePrototypeGetter<boolean>(
-    ownerWindow.KeyboardEvent.prototype,
-    "isComposing",
-  );
-  const activeElement = capturePrototypeGetter<Element | null>(
-    ownerWindow.Document.prototype,
-    "activeElement",
-  );
-  const focus = capturePrototypeMethod<(element: HTMLElement) => void>(
-    ownerWindow.HTMLElement.prototype,
-    "focus",
-  );
   if (
-    !eventType ||
-    !eventPhase ||
-    !eventBubbles ||
-    !eventCancelable ||
-    !eventDefaultPrevented ||
-    !eventCancelBubble ||
-    !eventTarget ||
-    !eventComposedPath ||
-    !preventDefault ||
-    !key ||
-    !ctrlKey ||
-    !altKey ||
-    !metaKey ||
-    !shiftKey ||
-    !repeat ||
-    !isComposing ||
-    !activeElement ||
-    !focus
+    NOTIFICATION_EVENT_PROTOTYPE !== ownerWindow.Event.prototype ||
+    NOTIFICATION_UI_EVENT_PROTOTYPE !== ownerWindow.UIEvent.prototype ||
+    NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE !==
+      ownerWindow.KeyboardEvent.prototype ||
+    NOTIFICATION_DOCUMENT_PROTOTYPE !== ownerWindow.Document.prototype ||
+    NOTIFICATION_HTML_ELEMENT_PROTOTYPE !==
+      ownerWindow.HTMLElement.prototype ||
+    NOTIFICATION_KEYBOARD_GETTERS.some(
+      (intrinsic) => !intrinsic || !intrinsic.isCurrent(),
+    ) ||
+    NOTIFICATION_KEYBOARD_METHODS.some(
+      (intrinsic) => !intrinsic || !intrinsic.isCurrent(),
+    ) ||
+    !NOTIFICATION_EVENT_TYPE ||
+    !NOTIFICATION_EVENT_PHASE ||
+    !NOTIFICATION_EVENT_BUBBLES ||
+    !NOTIFICATION_EVENT_CANCELABLE ||
+    !NOTIFICATION_EVENT_DEFAULT_PREVENTED ||
+    !NOTIFICATION_EVENT_CANCEL_BUBBLE ||
+    !NOTIFICATION_EVENT_TARGET ||
+    !NOTIFICATION_EVENT_TRUSTED ||
+    !NOTIFICATION_EVENT_COMPOSED_PATH ||
+    !NOTIFICATION_PREVENT_DEFAULT ||
+    !NOTIFICATION_UI_VIEW ||
+    !NOTIFICATION_KEY ||
+    !NOTIFICATION_CTRL ||
+    !NOTIFICATION_ALT ||
+    !NOTIFICATION_META ||
+    !NOTIFICATION_SHIFT ||
+    !NOTIFICATION_REPEAT ||
+    !NOTIFICATION_COMPOSING ||
+    !NOTIFICATION_ACTIVE_ELEMENT ||
+    !NOTIFICATION_FOCUS
   ) {
     return null;
   }
-  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
-  const isPrototypeOf = Function.prototype.call.bind(
-    Object.prototype.isPrototypeOf,
-  ) as (prototype: object, value: object) => boolean;
+  const ownerRealmIsCurrent = () =>
+    NOTIFICATION_EVENT_PROTOTYPE === ownerWindow.Event.prototype &&
+    NOTIFICATION_UI_EVENT_PROTOTYPE === ownerWindow.UIEvent.prototype &&
+    NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ===
+      ownerWindow.KeyboardEvent.prototype &&
+    NOTIFICATION_DOCUMENT_PROTOTYPE === ownerWindow.Document.prototype &&
+    NOTIFICATION_HTML_ELEMENT_PROTOTYPE ===
+      ownerWindow.HTMLElement.prototype;
+  let trustedHistoryIsClean = true;
+  const descriptorsAreCurrent = () => {
+    if (!trustedHistoryIsClean) return false;
+    trustedHistoryIsClean =
+      ownerRealmIsCurrent() &&
+      NOTIFICATION_KEYBOARD_GETTERS.every(
+        (intrinsic) => intrinsic?.isCurrent() === true,
+      ) &&
+      NOTIFICATION_KEYBOARD_METHODS.every(
+        (intrinsic) => intrinsic?.isCurrent() === true,
+      );
+    return trustedHistoryIsClean;
+  };
   return Object.freeze({
-    eventType,
-    eventPhase,
-    eventBubbles,
-    eventCancelable,
-    eventDefaultPrevented,
-    eventCancelBubble,
-    eventTarget,
-    eventComposedPath,
-    preventDefault,
-    key,
-    ctrlKey,
-    altKey,
-    metaKey,
-    shiftKey,
-    repeat,
-    isComposing,
-    activeElement,
-    focus,
-    isKeyboardEvent: (event: object): event is KeyboardEvent =>
-      isPrototypeOf(keyboardPrototype, event),
+    read: (event: object) => {
+      if (!descriptorsAreCurrent()) return null;
+      try {
+        const isTrusted = NOTIFICATION_EVENT_TRUSTED.read(event);
+        const view = NOTIFICATION_UI_VIEW.read(event);
+        if (isTrusted !== true || view !== ownerWindow) return null;
+        return Object.freeze({
+          type: NOTIFICATION_EVENT_TYPE.read(event),
+          phase: NOTIFICATION_EVENT_PHASE.read(event),
+          bubbles: NOTIFICATION_EVENT_BUBBLES.read(event),
+          cancelable: NOTIFICATION_EVENT_CANCELABLE.read(event),
+          defaultPrevented:
+            NOTIFICATION_EVENT_DEFAULT_PREVENTED.read(event),
+          cancelBubble: NOTIFICATION_EVENT_CANCEL_BUBBLE.read(event),
+          target: NOTIFICATION_EVENT_TARGET.read(event),
+          path: Object.freeze([
+            ...NOTIFICATION_EVENT_COMPOSED_PATH.invoke(event as Event),
+          ]),
+          isTrusted,
+          view,
+          key: NOTIFICATION_KEY.read(event),
+          ctrlKey: NOTIFICATION_CTRL.read(event),
+          altKey: NOTIFICATION_ALT.read(event),
+          metaKey: NOTIFICATION_META.read(event),
+          shiftKey: NOTIFICATION_SHIFT.read(event),
+          repeat: NOTIFICATION_REPEAT.read(event),
+          isComposing: NOTIFICATION_COMPOSING.read(event),
+        });
+      } catch {
+        return null;
+      }
+    },
+    defaultWasPrevented: (event: Event) => {
+      if (!descriptorsAreCurrent()) return false;
+      try {
+        return NOTIFICATION_EVENT_DEFAULT_PREVENTED.read(event);
+      } catch {
+        return false;
+      }
+    },
+    activeElement: () => {
+      if (!descriptorsAreCurrent()) return undefined;
+      try {
+        return NOTIFICATION_ACTIVE_ELEMENT.read(ownerWindow.document);
+      } catch {
+        return undefined;
+      }
+    },
+    preventDefault: (event: Event) => {
+      if (!descriptorsAreCurrent()) return false;
+      try {
+        NOTIFICATION_PREVENT_DEFAULT.invoke(event);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    focus: (element: HTMLElement) => {
+      if (!descriptorsAreCurrent()) return false;
+      try {
+        NOTIFICATION_FOCUS.invoke(element);
+        return true;
+      } catch {
+        return false;
+      }
+    },
   });
 }
 
@@ -963,10 +1124,7 @@ function createNotificationStripPublication(
     if (!ownerWindow || !placement) return null;
     const keyboard = captureNotificationKeyboardIntrinsics(ownerWindow);
     const domGuard = createNotificationDomGuard(section, placement);
-    if (!keyboard || !domGuard) {
-      domGuard?.release();
-      return null;
-    }
+    if (!domGuard) return null;
     const identity = Symbol("notification-strip-publication");
     const action = (
       kind: NotificationActionKind,
@@ -1008,8 +1166,9 @@ function createNotificationStripPublication(
     const openControls = Object.freeze(publishedRows.map((row) => row.open));
     const focusCustody: NotificationFocusCustody = Object.freeze({
       controls: openControls,
-      activeElement: () => keyboard.activeElement(ownerDocument),
-      focus: (element: HTMLButtonElement) => keyboard.focus(element),
+      activeElement: () => keyboard?.activeElement(),
+      focus: (element: HTMLButtonElement) =>
+        keyboard?.focus(element) === true,
     });
     const publication: NotificationStripPublication = Object.freeze({
       identity,
@@ -1314,32 +1473,38 @@ function createNotificationStripPublication(
     } | null;
     const keyboard = publication.keyboard;
     if (
+      !keyboard ||
       !nativeEvent ||
-      typeof nativeEvent !== "object" ||
-      !keyboard.isKeyboardEvent(nativeEvent)
+      typeof nativeEvent !== "object"
     ) {
       return null;
     }
-    const key = keyboard.key(nativeEvent);
+    const nativeFacts = keyboard.read(nativeEvent);
+    if (!nativeFacts) return null;
+    const {
+      key,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+      target,
+      path,
+    } = nativeFacts;
     if (!isNotificationNavigationKey(key)) return null;
-    const ctrlKey = keyboard.ctrlKey(nativeEvent);
-    const altKey = keyboard.altKey(nativeEvent);
-    const metaKey = keyboard.metaKey(nativeEvent);
-    const shiftKey = keyboard.shiftKey(nativeEvent);
-    const repeat = keyboard.repeat(nativeEvent);
-    const isComposing = keyboard.isComposing(nativeEvent);
-    const target = keyboard.eventTarget(nativeEvent);
-    const path = keyboard.eventComposedPath(nativeEvent);
     const reactIsComposing = (
       event as unknown as { isComposing?: unknown }
     ).isComposing;
     if (
-      keyboard.eventType(nativeEvent) !== "keydown" ||
-      keyboard.eventPhase(nativeEvent) === publication.ownerWindow.Event.NONE ||
-      !keyboard.eventBubbles(nativeEvent) ||
-      !keyboard.eventCancelable(nativeEvent) ||
-      keyboard.eventDefaultPrevented(nativeEvent) ||
-      keyboard.eventCancelBubble(nativeEvent) ||
+      nativeFacts.type !== "keydown" ||
+      nativeFacts.phase === publication.ownerWindow.Event.NONE ||
+      !nativeFacts.bubbles ||
+      !nativeFacts.cancelable ||
+      nativeFacts.defaultPrevented ||
+      nativeFacts.cancelBubble ||
+      nativeFacts.isTrusted !== true ||
+      nativeFacts.view !== publication.ownerWindow ||
       ctrlKey ||
       altKey ||
       metaKey ||
@@ -1519,9 +1684,11 @@ function createNotificationStripPublication(
     ) {
       return;
     }
-    publication.keyboard.preventDefault(facts.nativeEvent);
+    const keyboard = publication.keyboard;
     if (
-      !publication.keyboard.eventDefaultPrevented(facts.nativeEvent) ||
+      !keyboard ||
+      !keyboard.preventDefault(facts.nativeEvent) ||
+      !keyboard.defaultWasPrevented(facts.nativeEvent) ||
       runtime.isRetired() ||
       !coordinator.isCurrent(publication) ||
       !factsAreCurrent() ||
