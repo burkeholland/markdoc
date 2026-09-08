@@ -8,6 +8,7 @@ import * as Y from "yjs";
 type PopoverOpenChange = (open: boolean) => void;
 interface StatsContentCallbacks {
   escape?: (event: KeyboardEvent) => void;
+  closeAutoFocus?: (event: Event) => void;
   pointerOutside?: (
     event: CustomEvent<{ originalEvent: PointerEvent }>,
   ) => void;
@@ -52,6 +53,7 @@ vi.mock("@/components/ui/primitives", async (importOriginal) => {
     ) => {
       capturedStatsContentCallbacks.push({
         escape: props.onEscapeKeyDown,
+        closeAutoFocus: props.onCloseAutoFocus,
         pointerOutside: props.onPointerDownOutside,
         focusOutside: props.onFocusOutside,
       });
@@ -1015,6 +1017,7 @@ describe("StatsPopover disclosure visit authority", () => {
   });
 
   it("accepts one genuine Escape dismissal after direct-root Strict Mode replay", async () => {
+    vi.useFakeTimers();
     const mounted = renderStrictStats(makeSession("strict-escape"), () => {});
     try {
       openPopover();
@@ -1048,10 +1051,7 @@ describe("StatsPopover disclosure visit authority", () => {
         screen.getByTestId("stats-popover").dispatchEvent(escape),
       );
       await act(
-        () =>
-          new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 0);
-          }),
+        () => vi.advanceTimersByTimeAsync(0),
       );
 
       expect(screen.queryByTestId("stats-popover")).toBeNull();
@@ -1071,9 +1071,231 @@ describe("StatsPopover disclosure visit authority", () => {
       expect(focusTrigger).toHaveBeenCalledOnce();
     } finally {
       act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
       mounted.host.remove();
     }
   });
+
+  it.each([
+    "source",
+    "statistics",
+    "selection",
+    "goal",
+    "editability",
+    "mode",
+    "callbacks",
+  ] as const)(
+    "retires delayed Escape focus when %s changes before autofocus",
+    async (change) => {
+      vi.useFakeTimers();
+      const session = makeSession(`strict-close-${change}`);
+      const mounted = renderStrictStats(session, () => {});
+      let source = "One two three.";
+      let selection: SourceSelection = null;
+      let mount: "initial" | "replacement" = "initial";
+      const renderCurrent = () =>
+        mounted.root.render(
+          <StrictMode>
+            <StatsBoundary
+              session={session}
+              source={source}
+              selection={selection}
+              mount={mount}
+            />
+          </StrictMode>,
+        );
+
+      try {
+        openPopover();
+        const closingContent = screen.getByTestId(
+          "stats-popover",
+        ) as HTMLDivElement;
+        const closingTrigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        const focusClosingTrigger = vi.spyOn(
+          closingTrigger,
+          "focus",
+        );
+        const staleOpenChange = capturedPopoverOpenChanges.at(-1)!;
+
+        fireEvent.keyDown(closingContent, {
+          bubbles: true,
+          cancelable: true,
+          code: "Escape",
+          key: "Escape",
+        });
+        const staleCloseAutoFocus =
+          capturedStatsContentCallbacks.at(-1)?.closeAutoFocus;
+        expect(staleCloseAutoFocus).toBeTypeOf("function");
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+        expect(focusClosingTrigger).not.toHaveBeenCalled();
+
+        act(() => {
+          if (change === "source") {
+            source = "One two three!";
+          } else if (change === "statistics") {
+            source = "One two three four.";
+          } else if (change === "selection") {
+            selection = { from: 0, to: 3 };
+          } else if (change === "goal") {
+            setGoal(session, goal("words", "min", 250));
+          } else if (change === "editability") {
+            Object.defineProperty(session, "canEdit", {
+              configurable: true,
+              value: false,
+            });
+          } else if (change === "mode") {
+            session.setMode("suggesting");
+          } else {
+            mount = "replacement";
+          }
+          renderCurrent();
+        });
+
+        await act(() => vi.advanceTimersByTimeAsync(0));
+        expect(focusClosingTrigger).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+        const staleFocusEvent = new Event(
+          "stats-close-autofocus",
+          {
+            bubbles: false,
+            cancelable: true,
+          },
+        );
+        closingContent.addEventListener(
+          staleFocusEvent.type,
+          (event) => staleCloseAutoFocus?.(event),
+          { once: true },
+        );
+        closingContent.dispatchEvent(staleFocusEvent);
+        staleOpenChange(true);
+        expect(staleFocusEvent.defaultPrevented).toBe(false);
+        expect(focusClosingTrigger).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+        const currentTrigger = screen.getByTestId(
+          "stats-button",
+        );
+        if (change === "callbacks") {
+          expect(currentTrigger).not.toBe(closingTrigger);
+        }
+        fireEvent.click(currentTrigger);
+        expect(screen.getByTestId("stats-popover")).toBeVisible();
+        if (change === "statistics") {
+          expect(screen.getByTestId("word-count")).toHaveTextContent(
+            "4 words",
+          );
+        } else if (change === "selection") {
+          expect(screen.getByTestId("selection-count")).toHaveTextContent(
+            "1 of 3 selected",
+          );
+        } else if (change === "goal") {
+          expect(getGoal(session)).toEqual(
+            goal("words", "min", 250),
+          );
+        } else if (change === "editability") {
+          expect(screen.queryByTestId("goal-set")).toBeNull();
+        } else if (change === "mode") {
+          expect(session.mode).toBe("suggesting");
+        }
+      } finally {
+        act(() => mounted.root.unmount());
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        mounted.host.remove();
+      }
+    },
+  );
+
+  it.each(["drifted", "equivalent"] as const)(
+    "keeps a fresh close intent after claiming an older %s autofocus callback",
+    async (change) => {
+      vi.useFakeTimers();
+      const session = makeSession(
+        `strict-close-independent-${change}`,
+      );
+      const mounted = renderStrictStats(session, () => {});
+      let source = "One two three.";
+      const renderCurrent = () =>
+        mounted.root.render(
+          <StrictMode>
+            <StatsBoundary session={session} source={source} />
+          </StrictMode>,
+        );
+
+      try {
+        openPopover();
+        const firstContent = screen.getByTestId(
+          "stats-popover",
+        ) as HTMLDivElement;
+        const trigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        const focusTrigger = vi.spyOn(trigger, "focus");
+        const callbackCount = capturedStatsContentCallbacks.length;
+
+        fireEvent.keyDown(firstContent, {
+          bubbles: true,
+          cancelable: true,
+          code: "Escape",
+          key: "Escape",
+        });
+        const firstCloseAutoFocus =
+          capturedStatsContentCallbacks
+            .slice(callbackCount)
+            .find(({ closeAutoFocus }) => closeAutoFocus)
+            ?.closeAutoFocus;
+        expect(firstCloseAutoFocus).toBeTypeOf("function");
+        act(() => {
+          if (change === "drifted") {
+            source = "One two three!";
+          }
+          renderCurrent();
+        });
+        vi.clearAllTimers();
+
+        fireEvent.click(trigger);
+        const secondContent = screen.getByTestId(
+          "stats-popover",
+        ) as HTMLDivElement;
+        fireEvent.keyDown(secondContent, {
+          bubbles: true,
+          cancelable: true,
+          code: "Escape",
+          key: "Escape",
+        });
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+        const firstFocusEvent = new Event(
+          "stats-close-autofocus",
+          {
+            bubbles: false,
+            cancelable: true,
+          },
+        );
+        firstContent.addEventListener(
+          firstFocusEvent.type,
+          (event) => firstCloseAutoFocus?.(event),
+          { once: true },
+        );
+        firstContent.dispatchEvent(firstFocusEvent);
+        expect(firstFocusEvent.defaultPrevented).toBe(true);
+        expect(focusTrigger).not.toHaveBeenCalled();
+
+        await act(() => vi.advanceTimersByTimeAsync(0));
+        expect(focusTrigger).toHaveBeenCalledOnce();
+        expect(document.activeElement).toBe(trigger);
+      } finally {
+        act(() => mounted.root.unmount());
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        mounted.host.remove();
+      }
+    },
+  );
 
   it.each([
     "attribute mutation/restore",
@@ -1134,6 +1356,7 @@ describe("StatsPopover disclosure visit authority", () => {
   });
 
   it("accepts one genuine pointer-outside dismissal after direct-root Strict Mode replay", async () => {
+    vi.useFakeTimers();
     const outside = document.createElement("button");
     document.body.append(outside);
     const mounted = renderStrictStats(
@@ -1168,10 +1391,7 @@ describe("StatsPopover disclosure visit authority", () => {
         [staleOpenChange, currentOpenChange, currentOpenChange],
       );
       await act(
-        () =>
-          new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 0);
-          }),
+        () => vi.advanceTimersByTimeAsync(0),
       );
 
       expect(screen.queryByTestId("stats-popover")).toBeNull();
@@ -1181,12 +1401,15 @@ describe("StatsPopover disclosure visit authority", () => {
       expect(focusTrigger).not.toHaveBeenCalled();
     } finally {
       act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
       mounted.host.remove();
       outside.remove();
     }
   });
 
   it("accepts one genuine focus-outside dismissal after direct-root Strict Mode replay", async () => {
+    vi.useFakeTimers();
     const outside = document.createElement("button");
     document.body.append(outside);
     const mounted = renderStrictStats(
@@ -1221,10 +1444,7 @@ describe("StatsPopover disclosure visit authority", () => {
         [staleOpenChange, currentOpenChange, currentOpenChange],
       );
       await act(
-        () =>
-          new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 0);
-          }),
+        () => vi.advanceTimersByTimeAsync(0),
       );
 
       expect(screen.queryByTestId("stats-popover")).toBeNull();
@@ -1234,6 +1454,8 @@ describe("StatsPopover disclosure visit authority", () => {
       expect(focusTrigger).not.toHaveBeenCalled();
     } finally {
       act(() => mounted.root.unmount());
+      vi.clearAllTimers();
+      vi.useRealTimers();
       mounted.host.remove();
       outside.remove();
     }

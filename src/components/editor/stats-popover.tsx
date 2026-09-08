@@ -416,6 +416,7 @@ interface StatsCloseFocus {
   readonly authority: StatsDisclosureAuthority;
   readonly source: StatsDisclosureProof["source"];
   readonly trigger: HTMLButtonElement;
+  expected: StatsDisclosurePublication | null;
   claimed: boolean;
 }
 
@@ -638,6 +639,23 @@ function statsPlacementMatches(
   );
 }
 
+function statsPlacementStructureMatches(
+  element: HTMLElement,
+  placement: StatsPlacement,
+): boolean {
+  return (
+    element === placement.entries[0]?.node &&
+    element.ownerDocument === placement.document &&
+    element.isConnected &&
+    placement.entries.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        previousStatsSibling(entry.node) === entry.previousSibling &&
+        nextStatsSibling(entry.node) === entry.nextSibling,
+    )
+  );
+}
+
 function mutationTouchesStatsPlacement(
   mutation: MutationRecord,
   roots: readonly HTMLElement[],
@@ -853,7 +871,7 @@ function statsVisitsMatch(
   );
 }
 
-function statsRendersMatch(
+function statsRenderFactsMatch(
   left: StatsDisclosureRender,
   right: StatsDisclosureRender,
 ) {
@@ -872,8 +890,6 @@ function statsRendersMatch(
     goalSnapshotEqual(left.goal, right.goal) &&
     left.canEdit === right.canEdit &&
     progressSnapshotEqual(left.progress, right.progress) &&
-    left.open === right.open &&
-    left.authority === right.authority &&
     left.shortcutLabel === right.shortcutLabel &&
     left.triggerTitle === right.triggerTitle &&
     left.triggerLabel === right.triggerLabel &&
@@ -892,6 +908,51 @@ function statsRendersMatch(
     left.goalPresentation.setBy === right.goalPresentation.setBy &&
     left.goalPresentation.setDisabled === right.goalPresentation.setDisabled &&
     left.commitState === right.commitState
+  );
+}
+
+function statsRendersMatch(
+  left: StatsDisclosureRender,
+  right: StatsDisclosureRender,
+) {
+  return (
+    statsRenderFactsMatch(left, right) &&
+    left.open === right.open &&
+    left.authority === right.authority
+  );
+}
+
+function statsCloseSuccessorMatches(
+  open: StatsDisclosureRender,
+  closed: StatsDisclosureRender,
+) {
+  return (
+    open.visit === closed.visit &&
+    open.open &&
+    open.authority !== null &&
+    open.state.visit === open.visit &&
+    open.state.authority === open.authority &&
+    open.state.open &&
+    !closed.open &&
+    closed.authority === null &&
+    closed.state.visit === open.visit &&
+    closed.state.authority === null &&
+    !closed.state.open &&
+    statsRenderFactsMatch(open, closed)
+  );
+}
+
+function statsClosedSuccessorsMatch(
+  expected: StatsDisclosureRender,
+  current: StatsDisclosureRender,
+) {
+  return (
+    expected.visit === current.visit &&
+    !expected.open &&
+    expected.authority === null &&
+    !current.open &&
+    current.authority === null &&
+    statsRendersMatch(expected, current)
   );
 }
 
@@ -975,6 +1036,10 @@ class StatsDisclosureCoordinator {
   #proof: StatsDisclosureProof | null = null;
   #openFocus: StatsOpenFocus | null = null;
   #closeFocus: StatsCloseFocus | null = null;
+  #retiredCloseFocus = new Map<
+    StatsDisclosurePublication,
+    StatsCloseFocus
+  >();
 
   beginLease() {
     this.#lease += 1;
@@ -997,6 +1062,7 @@ class StatsDisclosureCoordinator {
       this.#poisoned = null;
       this.#openFocus = null;
       this.#closeFocus = null;
+      this.#retiredCloseFocus.clear();
     });
   }
 
@@ -1370,6 +1436,40 @@ class StatsDisclosureCoordinator {
     this.#proof = null;
   }
 
+  clearCloseFocus(expected?: StatsCloseFocus) {
+    if (!expected) {
+      this.#closeFocus = null;
+      return;
+    }
+    if (this.#closeFocus === expected) {
+      this.#closeFocus = null;
+    }
+    const publication = expected?.expected;
+    if (
+      publication &&
+      this.#retiredCloseFocus.get(publication) === expected
+    ) {
+      this.#retiredCloseFocus.delete(publication);
+    }
+  }
+
+  retireCloseFocus(expected?: StatsCloseFocus) {
+    const close = expected ?? this.#closeFocus;
+    if (!close || (expected && this.#closeFocus !== expected)) return;
+    this.#closeFocus = null;
+    const publication = close.expected;
+    if (!publication || close.claimed) return;
+    this.#retiredCloseFocus.set(publication, close);
+    close.publication.triggerPlacement?.document.defaultView?.setTimeout(
+      () => {
+        if (this.#retiredCloseFocus.get(publication) === close) {
+          this.#retiredCloseFocus.delete(publication);
+        }
+      },
+      1,
+    );
+  }
+
   retire(
     publication: StatsDisclosurePublication | null,
     reason: StatsRetirement,
@@ -1561,6 +1661,40 @@ class StatsDisclosureCoordinator {
         !trigger.contains(content) &&
         content.querySelector('[data-testid="stats-table"]') &&
         content.querySelector('[data-testid="goal-section"]'),
+    );
+  }
+
+  closingCallbackMatches(
+    close: StatsCloseFocus,
+    publication: StatsDisclosurePublication,
+  ) {
+    const { trigger, content } = publication.elements;
+    const closingContent = close.publication.contentDom?.node;
+    const ownerWindow = trigger?.ownerDocument.defaultView;
+    return Boolean(
+      closingContent &&
+        ownerWindow &&
+        trigger === close.trigger &&
+        content === closingContent &&
+        trigger instanceof ownerWindow.HTMLButtonElement &&
+        content instanceof ownerWindow.HTMLDivElement &&
+        trigger.isConnected &&
+        content.isConnected &&
+        content.ownerDocument === trigger.ownerDocument &&
+        this.ownsElement(publication, "trigger", trigger) &&
+        this.ownsElement(publication, "content", content) &&
+        trigger.dataset.testid === "stats-button" &&
+        trigger.title === publication.render.triggerTitle &&
+        content.dataset.testid === "stats-popover" &&
+        content.dataset.state === "closed" &&
+        content.querySelector('[data-testid="stats-table"]') &&
+        content.querySelector('[data-testid="goal-section"]') &&
+        close.publication.triggerPlacement &&
+        statsPlacementStructureMatches(
+          trigger,
+          close.publication.triggerPlacement,
+        ) &&
+        this.factsMatch(publication),
     );
   }
 
@@ -1792,13 +1926,44 @@ class StatsDisclosureCoordinator {
   }
 
   publish(publication: StatsDisclosurePublication) {
-    if (!this.canPublish(publication)) return false;
+    const close = this.#closeFocus;
+    const closesPendingDisclosure = Boolean(
+      close &&
+        statsCloseSuccessorMatches(
+          close.publication.render,
+          publication.render,
+        ),
+    );
+    if (
+      close &&
+      closesPendingDisclosure &&
+      !close.expected &&
+      this.closingCallbackMatches(close, publication)
+    ) {
+      close.expected = publication;
+    }
+    if (close && !closesPendingDisclosure) {
+      this.retireCloseFocus(close);
+    }
+    if (!this.canPublish(publication)) {
+      if (
+        closesPendingDisclosure &&
+        close &&
+        close.expected !== publication
+      ) {
+        this.retireCloseFocus(close);
+      }
+      return false;
+    }
     const poisoned = this.#poisoned;
     if (poisoned) {
       if (statsRendersMatch(poisoned.render, publication.render)) {
         if (!this.baselineMatches(poisoned, publication)) {
           publication.retired = true;
           publication.retirement = "mutation";
+          if (closesPendingDisclosure && close) {
+            this.retireCloseFocus(close);
+          }
           return false;
         }
       }
@@ -1829,6 +1994,9 @@ class StatsDisclosureCoordinator {
       if (sameGeneration && !exact) {
         publication.retired = true;
         publication.retirement = "other";
+        if (closesPendingDisclosure && close) {
+          this.retireCloseFocus(close);
+        }
         this.requestSuccessor(publication);
         return false;
       }
@@ -1841,11 +2009,26 @@ class StatsDisclosureCoordinator {
     if (!this.initialize(publication)) {
       publication.retired = true;
       publication.retirement = "other";
+      if (closesPendingDisclosure && close) {
+        this.retireCloseFocus(close);
+      }
       return false;
     }
     publication.established = true;
     this.#current = publication;
     this.#successorOf = null;
+    if (closesPendingDisclosure && close && this.#closeFocus === close) {
+      if (!close.expected) {
+        close.expected = publication;
+      } else if (
+        !statsClosedSuccessorsMatch(
+          close.expected.render,
+          publication.render,
+        )
+      ) {
+        this.retireCloseFocus(close);
+      }
+    }
     return true;
   }
 
@@ -1986,15 +2169,17 @@ class StatsDisclosureCoordinator {
     if (nextOpen) {
       if (!publication.current.publishAuthority(authority)) return false;
       this.#openFocus = { visit: render.visit, authority };
-      this.#closeFocus = null;
+      this.retireCloseFocus();
     } else {
       if (!publication.current.ownsAuthority(authority)) return false;
+      this.retireCloseFocus();
       this.#closeFocus = {
         publication,
         visit: render.visit,
         authority,
         source,
         trigger,
+        expected: null,
         claimed: false,
       };
       this.#openFocus = null;
@@ -2345,40 +2530,60 @@ class StatsDisclosureCoordinator {
   }
 
   closeAutoFocus(
-    _publication: StatsDisclosurePublication,
+    publication: StatsDisclosurePublication,
     event: Event,
   ) {
-    const close = this.#closeFocus;
-    const closingPublication = close?.publication ?? null;
+    const active = this.#closeFocus;
+    const close =
+      active?.expected === publication
+        ? active
+        : this.#retiredCloseFocus.get(publication);
+    if (!close) return;
+    const closingPublication = close.publication;
     const content = closingPublication?.contentDom?.node;
     const ownerWindow =
       closingPublication?.triggerPlacement?.document.defaultView;
     const current = this.#current;
     if (
-      !close ||
       close.claimed ||
       !ownerWindow ||
       content !== event.currentTarget ||
       !(event instanceof ownerWindow.Event) ||
       event.eventPhase === ownerWindow.Event.NONE ||
-      this.#claimedEvents.has(event) ||
-      !close.authority.retired ||
-      !closingPublication.current.ownsVisit(close.visit) ||
-      !current ||
-      current.render.visit !== close.visit ||
-      current.render.open ||
-      current.elements.trigger !== close.trigger ||
-      !this.matches(current)
+      this.#claimedEvents.has(event)
     ) {
+      this.clearCloseFocus(close);
       return;
     }
+    const exact = Boolean(
+      active === close &&
+        close.authority.retired &&
+        closingPublication.current.ownsVisit(close.visit) &&
+        current &&
+        current.render.visit === close.visit &&
+        !current.render.open &&
+        current.elements.trigger === close.trigger &&
+        statsCloseSuccessorMatches(
+          closingPublication.render,
+          publication.render,
+        ) &&
+        statsClosedSuccessorsMatch(
+          publication.render,
+          current.render,
+        ) &&
+        this.matches(current),
+    );
     close.claimed = true;
     this.#claimedEvents.add(event);
     close.visit.claimedEvents.add(event);
     close.authority.claimedEvents.add(event);
-    this.#closeFocus = null;
+    this.clearCloseFocus(close);
     event.preventDefault();
-    if (close.source !== "pointer" && close.source !== "focus") {
+    if (
+      exact &&
+      close.source !== "pointer" &&
+      close.source !== "focus"
+    ) {
       close.trigger.focus({ preventScroll: true });
     }
   }
