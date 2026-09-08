@@ -4040,6 +4040,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     establishRenameEscape(commit, settlingInput);
     return commit;
   };
+  // eslint-disable-next-line react-hooks/refs -- TokenRenameLayoutBoundary invokes this cycle only from its layout effect.
   const renameLayoutCycle = Object.freeze<TokenRenameLayoutCycle>({
     setup: () => recoverRenameLayout(candidate),
     cleanup: () => retireRenameLayout(candidate),
