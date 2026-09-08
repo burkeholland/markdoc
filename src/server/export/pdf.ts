@@ -9,6 +9,8 @@ let browserPromise: Promise<Browser> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
 let inFlight = 0;
 
+export type PdfBrowserCloseOutcome = "closed" | "timed-out" | "failed" | "idle";
+
 /** Thrown when Chromium cannot be launched (not installed, sandbox denied, ...). */
 export class PdfUnavailableError extends Error {
   constructor(cause: unknown) {
@@ -52,7 +54,10 @@ function getBrowser(): Promise<Browser> {
  * "timed-out" means it is still running and is left to finish on its own — `Browser` exposes no process to
  * kill, and Playwright's launcher kills the child on process exit at the latest. Never throws.
  */
-export async function closeWithin(browser: Pick<Browser, "close">, timeoutMs: number): Promise<"closed" | "timed-out" | "failed"> {
+export async function closeWithin(
+  browser: Pick<Browser, "close">,
+  timeoutMs: number,
+): Promise<Exclude<PdfBrowserCloseOutcome, "idle">> {
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<"timed-out">((resolve) => {
     timer = setTimeout(() => resolve("timed-out"), timeoutMs);
@@ -70,10 +75,12 @@ export async function closeWithin(browser: Pick<Browser, "close">, timeoutMs: nu
   }
 }
 
-async function closeBounded(browser: Browser, timeoutMs: number): Promise<void> {
-  if ((await closeWithin(browser, timeoutMs)) === "timed-out") {
+async function closeBounded(browser: Browser, timeoutMs: number): Promise<Exclude<PdfBrowserCloseOutcome, "idle">> {
+  const outcome = await closeWithin(browser, timeoutMs);
+  if (outcome === "timed-out") {
     console.warn(`[pdf] browser close still running after ${timeoutMs} ms; leaving it to process exit`);
   }
+  return outcome;
 }
 
 function scheduleIdleClose() {
@@ -121,12 +128,20 @@ export async function renderPdf(html: string): Promise<Uint8Array> {
 /**
  * Close the shared browser (tests and graceful shutdown), waiting at most `timeoutMs`: on a loaded box
  * Chromium's shutdown has outlived a 30 s test hook, so past the bound the close is left running (one warn
- * line) rather than awaited. A close that fails, or a launch that never succeeded, is silent as before.
+ * line) rather than awaited. Reports the browser close outcome directly so callers do not need to infer it
+ * from elapsed wall time. A close that fails, or a launch that never succeeded, is silent as before.
  */
-export async function closePdfBrowser(timeoutMs = BROWSER_CLOSE_TIMEOUT_MS): Promise<void> {
+export async function closePdfBrowser(timeoutMs = BROWSER_CLOSE_TIMEOUT_MS): Promise<PdfBrowserCloseOutcome> {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = null;
   const p = browserPromise;
   browserPromise = null;
-  if (p) await p.then((b) => closeBounded(b, timeoutMs)).catch(() => {});
+  if (!p) return "idle";
+
+  const launched = await p.then(
+    (browser) => ({ status: "launched", browser }) as const,
+    () => ({ status: "failed" }) as const,
+  );
+  if (launched.status === "failed") return "failed";
+  return closeBounded(launched.browser, timeoutMs);
 }

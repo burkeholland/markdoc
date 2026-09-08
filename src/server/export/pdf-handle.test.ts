@@ -40,7 +40,10 @@ interface FakeBrowser {
  * Just enough of Playwright's `Browser` for `renderPdf`. `close()` waits for `closeGate` (when given) and then
  * fires `disconnected` before resolving — the order Playwright's `Browser.close()` follows.
  */
-function fakeBrowser(name: string, options: { closeGate?: Promise<void> } = {}): FakeBrowser {
+function fakeBrowser(
+  name: string,
+  options: { closeGate?: Promise<void>; closeError?: Error; onClose?: () => void } = {},
+): FakeBrowser {
   const disconnectedListeners: Array<() => void> = [];
   const browser: FakeBrowser = {
     name,
@@ -58,7 +61,9 @@ function fakeBrowser(name: string, options: { closeGate?: Promise<void> } = {}):
       close: async () => {},
     })),
     close: vi.fn(async () => {
+      options.onClose?.();
       await options.closeGate;
+      if (options.closeError) throw options.closeError;
       browser.disconnect();
     }),
     disconnect: () => {
@@ -82,6 +87,95 @@ describe("shared browser handle", () => {
     await pdf.closePdfBrowser();
   });
 
+  it('reports "idle" immediately without warning or timers when the slot is empty', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      await expect(pdf.closePdfBrowser()).resolves.toBe("idle");
+      expect(launch).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports "closed", clears its timer, and empties only the browser slot it owned', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      const A = fakeBrowser("A");
+      launch.mockResolvedValueOnce(A);
+      await pdf.renderPdf("<p>a</p>");
+
+      await expect(pdf.closePdfBrowser()).resolves.toBe("closed");
+      expect(A.close).toHaveBeenCalledTimes(1);
+      await expect(pdf.closePdfBrowser()).resolves.toBe("idle");
+      expect(warn).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports "failed" without throwing or warning when the browser close rejects', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      const A = fakeBrowser("A", { closeError: new Error("gone") });
+      launch.mockResolvedValueOnce(A);
+      await pdf.renderPdf("<p>a</p>");
+
+      await expect(pdf.closePdfBrowser()).resolves.toBe("failed");
+      expect(A.close).toHaveBeenCalledTimes(1);
+      await expect(pdf.closePdfBrowser()).resolves.toBe("idle");
+      expect(warn).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports "timed-out" with one warning and leaves a replacement browser in its slot', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn");
+    try {
+      const closeA = deferred();
+      const closeStarted = deferred();
+      const A = fakeBrowser("A", { closeGate: closeA.promise, onClose: closeStarted.resolve });
+      const B = fakeBrowser("B");
+      launch.mockResolvedValueOnce(A).mockResolvedValueOnce(B);
+      await pdf.renderPdf("<p>a</p>");
+
+      const closing = pdf.closePdfBrowser(50);
+      await closeStarted.promise;
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(closing).resolves.toBe("timed-out");
+      expect(A.close).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith("[pdf] browser close still running after 50 ms; leaving it to process exit");
+      expect(vi.getTimerCount()).toBe(0);
+
+      await pdf.renderPdf("<p>b</p>");
+      closeA.resolve();
+      await closeA.promise;
+      await Promise.resolve();
+      await pdf.renderPdf("<p>c</p>");
+      expect(launch, "A finishing after its timeout must not clear B from the slot").toHaveBeenCalledTimes(2);
+
+      await expect(pdf.closePdfBrowser()).resolves.toBe("closed");
+      expect(B.close).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the replacement browser when the superseded browser's close finishes (regression)", async () => {
     const closeA = deferred();
     const A = fakeBrowser("A", { closeGate: closeA.promise });
@@ -101,12 +195,12 @@ describe("shared browser handle", () => {
 
     // A's process ends now: its `disconnected` fires while B owns the slot.
     closeA.resolve();
-    await closing;
+    await expect(closing).resolves.toBe("closed");
 
     await pdf.renderPdf("<p>c</p>");
     expect(launch, "the render after A's close must reuse B, not launch a third browser").toHaveBeenCalledTimes(2);
 
-    await pdf.closePdfBrowser();
+    await expect(pdf.closePdfBrowser()).resolves.toBe("closed");
     expect(B.close, "B was still the shared browser, so closing the shared browser closes B").toHaveBeenCalledTimes(1);
   });
 
