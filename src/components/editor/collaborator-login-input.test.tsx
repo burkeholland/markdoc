@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
-import { useCallback, useLayoutEffect, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent, type MouseEvent, type RefCallback } from "react";
+import { StrictMode, useCallback, useLayoutEffect, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent, type MouseEvent, type RefCallback } from "react";
 
 type SearchAnswer = {
   users: { login: string; name: string | null; avatarUrl: string }[];
@@ -64,6 +64,26 @@ function Harness({ exclude = [], onPick, onSubmit }: { exclude?: string[]; onPic
 
 function ExactValueHarness({ onChange, onPick }: { onChange: (login: string) => void; onPick: (login: string) => void }) {
   const [login, setLogin] = useState("octocat");
+  const change = useCallback(
+    (next: string) => {
+      onChange(next);
+      setLogin(next);
+    },
+    [onChange],
+  );
+  return <CollaboratorLoginInput value={login} onChange={change} exclude={[]} onPick={onPick} />;
+}
+
+function DirectHarness({
+  initialValue = "",
+  onChange,
+  onPick,
+}: {
+  initialValue?: string;
+  onChange: (login: string) => void;
+  onPick?: (login: string) => void;
+}) {
+  const [login, setLogin] = useState(initialValue);
   const change = useCallback(
     (next: string) => {
       onChange(next);
@@ -159,6 +179,27 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
   return handler as T;
+}
+
+function interceptReactHandler<E>(
+  element: HTMLElement,
+  name: string,
+  invoke: (original: (event: E) => void, event: E) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+  const record = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const props = record[propsKey];
+  const original = props?.[name];
+  if (typeof original !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  const intercepted = {
+    ...props,
+    [name]: (event: E) => invoke(original as (event: E) => void, event),
+  };
+  record[propsKey] = intercepted;
+  return () => {
+    if (record[propsKey] === intercepted) record[propsKey] = props;
+  };
 }
 
 function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
@@ -467,6 +508,29 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
 
+  it("mints a current row publication after the avatar image falls back", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    const onPick = vi.fn();
+    render(<Harness onPick={onPick} />);
+    type("octo");
+    await settle();
+    const retiredRow = screen.getByTestId("share-login-option");
+    const image = retiredRow.querySelector("img");
+    expect(image).not.toBeNull();
+
+    fireEvent.error(image!);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const currentRow = screen.getByTestId("share-login-option");
+    expect(currentRow.querySelector("img")).toHaveAttribute("hidden");
+    expect(within(currentRow).getByText("OC")).toBeInTheDocument();
+
+    fireEvent.click(currentRow);
+    expect(onPick).toHaveBeenCalledOnce();
+    expect(onPick).toHaveBeenCalledWith("octocat");
+  });
+
   it("keeps the same input current after an exact-value pick whose controlled change is a no-op", async () => {
     searchUsers.mockImplementation((q) => answer(q));
     const onChange = vi.fn();
@@ -479,7 +543,7 @@ describe("CollaboratorLoginInput", () => {
     const exactOption = screen.getByTestId("share-login-option");
     const capturedPick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(exactOption, "onClick");
 
-    act(() => capturedPick(mouseSource(exactOption)));
+    fireEvent.click(exactOption);
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenCalledWith("octocat");
     expect(onPick).toHaveBeenCalledOnce();
@@ -504,7 +568,7 @@ describe("CollaboratorLoginInput", () => {
 
     expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octocat", "octodog"]);
     expect(options()).toEqual(["octodog"]);
-    fireEvent.mouseEnter(screen.getByTestId("share-login-option"));
+    fireEvent.mouseOver(screen.getByTestId("share-login-option"));
     expect(screen.getByTestId("share-login-option")).toHaveAttribute("aria-selected", "true");
     expect(onPick).toHaveBeenCalledOnce();
   });
@@ -1099,7 +1163,7 @@ describe("CollaboratorLoginInput", () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog"));
     const onChange = vi.fn();
     const onPick = vi.fn();
-    render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
+    const rendered = render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
     const exactInput = input();
     exactInput.focus();
     await settle();
@@ -1107,7 +1171,7 @@ describe("CollaboratorLoginInput", () => {
     const change = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(exactInput, "onChange");
     const focus = reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onFocus");
     const keydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown");
-    const blur = reactHandler<(event: FocusEvent<HTMLDivElement>) => void>(control, "onBlur");
+    const blur = reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onBlur");
     const sibling = document.createElement("input");
     const foreign = document.createElement("input");
     const detached = document.createElement("input");
@@ -1146,7 +1210,7 @@ describe("CollaboratorLoginInput", () => {
         currentTarget: foreignControl,
         target: foreignControl,
         relatedTarget: null,
-      } as unknown as FocusEvent<HTMLDivElement>);
+      } as unknown as FocusEvent<HTMLInputElement>);
     });
 
     expect(onChange).not.toHaveBeenCalled();
@@ -1168,25 +1232,23 @@ describe("CollaboratorLoginInput", () => {
         preventDefault: exactPrevent,
       } as unknown as KeyboardEvent<HTMLInputElement>);
     });
-    expect(exactPrevent).toHaveBeenCalledOnce();
+    expect(exactPrevent).not.toHaveBeenCalled();
+    expect(listOptions().every((option) => option.getAttribute("aria-selected") === "false")).toBe(true);
+
+    rendered.rerender(
+      <AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />,
+    );
+    expect(input()).toBe(exactInput);
+    expect(fireEvent.keyDown(exactInput, { key: "ArrowDown" })).toBe(false);
     expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
-    const currentKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown");
-    act(() => {
-      currentKeydown({
-        key: "Enter",
-        currentTarget: exactInput,
-        target: exactInput,
-        preventDefault: exactPrevent,
-      } as unknown as KeyboardEvent<HTMLInputElement>);
-    });
-    expect(exactPrevent).toHaveBeenCalledTimes(2);
+    expect(fireEvent.keyDown(exactInput, { key: "Enter" })).toBe(false);
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenCalledWith("octocat");
     expect(onPick).toHaveBeenCalledOnce();
     expect(onPick).toHaveBeenCalledWith("octocat");
   });
 
-  it("binds every pointer handler to its exact ordered row and synchronously claims one competing pick", async () => {
+  it("binds every pointer handler to its exact ordered row and accepts only the exact React-delivered event", async () => {
     const octocat = {
       login: "octocat",
       name: "The Octocat",
@@ -1203,13 +1265,13 @@ describe("CollaboratorLoginInput", () => {
     });
     const onChange = vi.fn();
     const onPick = vi.fn();
-    render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
+    const rendered = render(<AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />);
     input().focus();
     await settle();
     const list = screen.getByTestId("share-login-suggestions");
     const [first, second] = screen.getAllByTestId("share-login-option");
     const down = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onMouseDown");
-    const enter = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onMouseEnter");
+    const enter = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onMouseOver");
     const click = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(first, "onClick");
     const staleListRef = reactRef(list);
     const staleRowRef = reactRef(first);
@@ -1240,13 +1302,19 @@ describe("CollaboratorLoginInput", () => {
       down(mouseSource(first, exactPrevent));
       enter(mouseSource(first));
     });
-    expect(exactPrevent).toHaveBeenCalledOnce();
-    expect(screen.getAllByTestId("share-login-option")[0]).toHaveAttribute("aria-selected", "true");
+    expect(exactPrevent).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("share-login-option")[0]).toHaveAttribute("aria-selected", "false");
 
+    rendered.rerender(
+      <AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />,
+    );
     const [currentFirst, currentSecond] = screen.getAllByTestId("share-login-option");
+    expect(fireEvent.mouseDown(currentFirst)).toBe(false);
+    fireEvent.mouseOver(currentFirst);
+    expect(currentFirst).toHaveAttribute("aria-selected", "true");
+
     expect(currentFirst).toBe(first);
     expect(currentFirst.parentElement).toBe(list);
-    const currentClick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(currentFirst, "onClick");
     const competingClick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(currentSecond, "onClick");
     act(() => {
       staleListRef(null);
@@ -1255,12 +1323,25 @@ describe("CollaboratorLoginInput", () => {
     });
     expect(onChange).not.toHaveBeenCalled();
     expect(onPick).not.toHaveBeenCalled();
-    act(() => {
-      currentClick(mouseSource(currentFirst));
-      competingClick(mouseSource(currentSecond));
-      currentClick(mouseSource(currentFirst));
-      click(mouseSource(first));
-    });
+    const restoreClick = interceptReactHandler<MouseEvent<HTMLLIElement>>(
+      currentFirst,
+      "onClick",
+      (currentClick, event) => {
+        const proxy = new Proxy(event, {});
+        const clone = Object.assign(
+          Object.create(Object.getPrototypeOf(event)),
+          event,
+        ) as MouseEvent<HTMLLIElement>;
+        currentClick(proxy);
+        currentClick(clone);
+        currentClick(event);
+        competingClick(event);
+        currentClick(event);
+      },
+    );
+    fireEvent.click(currentFirst);
+    restoreClick();
+    act(() => click(mouseSource(first)));
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenCalledWith("octocat");
     expect(onPick).toHaveBeenCalledOnce();
@@ -1291,8 +1372,8 @@ describe("CollaboratorLoginInput", () => {
       change: reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(exactInput, "onChange"),
       focus: reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onFocus"),
       keydown: reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(exactInput, "onKeyDown"),
-      blur: reactHandler<(event: FocusEvent<HTMLDivElement>) => void>(control, "onBlur"),
-      enter: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseEnter"),
+      blur: reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(exactInput, "onBlur"),
+      enter: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseOver"),
       down: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onMouseDown"),
       click: reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(retiredOption, "onClick"),
     };
@@ -1332,7 +1413,7 @@ describe("CollaboratorLoginInput", () => {
             currentTarget: control,
             target: control,
             relatedTarget: null,
-          } as unknown as FocusEvent<HTMLDivElement>);
+          } as unknown as FocusEvent<HTMLInputElement>);
           stale.enter(mouseSource(retiredOption));
           stale.down({
             currentTarget: retiredOption,
@@ -1366,7 +1447,7 @@ describe("CollaboratorLoginInput", () => {
     expect(input().parentElement).toBe(control);
 
     const currentOption = screen.getByTestId("share-login-option");
-    fireEvent.mouseEnter(currentOption);
+    fireEvent.mouseOver(currentOption);
     expect(currentOption).toHaveAttribute("aria-selected", "true");
     expect(fireEvent.mouseDown(currentOption)).toBe(false);
     fireEvent.click(currentOption);
@@ -1425,8 +1506,8 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(searchUsers).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("alert")).toHaveTextContent("B failed");
-    const currentRetryButton = screen.getByRole("button", { name: "Retry" });
-    const retryB = reactHandler<(event: MouseEvent<HTMLButtonElement>) => void>(currentRetryButton, "onClick");
+    const mutatedRetryButton = screen.getByRole("button", { name: "Retry" });
+    const retryB = reactHandler<(event: MouseEvent<HTMLButtonElement>) => void>(mutatedRetryButton, "onClick");
     const sibling = document.createElement("button");
     const foreign = document.createElement("button");
     const detached = document.createElement("button");
@@ -1442,10 +1523,21 @@ describe("CollaboratorLoginInput", () => {
     expect(focus).not.toHaveBeenCalled();
     sibling.remove();
     foreign.remove();
-    act(() => {
-      retryB(buttonMouseSource(currentRetryButton));
-      retryB(buttonMouseSource(currentRetryButton));
-    });
+    rendered.rerender(
+      <AuthorityBoundary instance="same" value="octo" onChange={onChangeB} exclude={[]} />,
+    );
+    const currentRetryButton = screen.getByRole("button", { name: "Retry" });
+    expect(currentRetryButton).toBe(mutatedRetryButton);
+    const restoreRetry = interceptReactHandler<MouseEvent<HTMLButtonElement>>(
+      currentRetryButton,
+      "onClick",
+      (currentRetryHandler, event) => {
+        currentRetryHandler(event);
+        currentRetryHandler(event);
+      },
+    );
+    fireEvent.click(currentRetryButton);
+    restoreRetry();
     expect(searchUsers).toHaveBeenCalledTimes(3);
     expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octo", "octo"]);
     expect(focus).toHaveBeenCalledTimes(1);
@@ -1532,6 +1624,278 @@ describe("CollaboratorLoginInput", () => {
       expect(screen.queryByText("@retired-user")).toBeNull();
     } finally {
       await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps genuine input current through direct-root Strict Mode replay and rejects its stale predecessor", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    const onChange = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness onChange={onChange} />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      const staleChange = reactHandler<(event: ChangeEvent<HTMLInputElement>) => void>(
+        exactInput,
+        "onChange",
+      );
+
+      fireEvent.change(exactInput, { target: { value: "o" } });
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("o");
+      act(() => {
+        staleChange({
+          currentTarget: exactInput,
+          target: exactInput,
+        } as ChangeEvent<HTMLInputElement>);
+      });
+      expect(onChange).toHaveBeenCalledTimes(1);
+
+      fireEvent.change(exactInput, { target: { value: "octo" } });
+      expect(onChange).toHaveBeenLastCalledWith("octo");
+      expect(input()).toBe(exactInput);
+      await settle();
+      expect(searchUsers).toHaveBeenCalledOnce();
+      expect(searchUsers).toHaveBeenCalledWith(
+        "octo",
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps keyboard movement and pick exact through direct-root Strict Mode replay", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness initialValue="octo" onChange={onChange} onPick={onPick} />
+          </StrictMode>,
+        );
+      });
+      input().focus();
+      await settle();
+      const exactInput = input();
+      const staleKeydown = reactHandler<(event: KeyboardEvent<HTMLInputElement>) => void>(
+        exactInput,
+        "onKeyDown",
+      );
+
+      expect(fireEvent.keyDown(exactInput, { key: "ArrowDown" })).toBe(false);
+      expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+      act(() => {
+        staleKeydown({
+          key: "ArrowDown",
+          currentTarget: exactInput,
+          target: exactInput,
+          preventDefault: vi.fn(),
+        } as unknown as KeyboardEvent<HTMLInputElement>);
+      });
+      expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+
+      const restoreKeydown = interceptReactHandler<KeyboardEvent<HTMLInputElement>>(
+        exactInput,
+        "onKeyDown",
+        (current, event) => {
+          current(event);
+          current(event);
+        },
+      );
+      expect(fireEvent.keyDown(exactInput, { key: "Enter" })).toBe(false);
+      restoreKeydown();
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("octocat");
+      expect(onPick).toHaveBeenCalledOnce();
+      expect(onPick).toHaveBeenCalledWith("octocat");
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retires restored row mutations before one direct-root Strict Mode row pick", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const view = () => (
+      <StrictMode>
+        <DirectHarness initialValue="octo" onChange={onChange} onPick={onPick} />
+      </StrictMode>
+    );
+
+    try {
+      await act(async () => root.render(view()));
+      input().focus();
+      await settle();
+      const list = screen.getByTestId("share-login-suggestions");
+      const retiredRow = screen.getAllByTestId("share-login-option")[0];
+      const staleClick = reactHandler<(event: MouseEvent<HTMLLIElement>) => void>(
+        retiredRow,
+        "onClick",
+      );
+
+      retiredRow.remove();
+      list.prepend(retiredRow);
+      fireEvent.click(retiredRow);
+      act(() => staleClick(mouseSource(retiredRow)));
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+
+      await act(async () => root.render(view()));
+      const currentRow = screen.getAllByTestId("share-login-option")[0];
+      expect(currentRow).not.toBe(retiredRow);
+      const restoreClick = interceptReactHandler<MouseEvent<HTMLLIElement>>(
+        currentRow,
+        "onClick",
+        (current, event) => {
+          current(event);
+          current(event);
+        },
+      );
+      fireEvent.click(currentRow);
+      restoreClick();
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("octocat");
+      expect(onPick).toHaveBeenCalledOnce();
+      expect(onPick).toHaveBeenCalledWith("octocat");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("binds direct-root Strict Mode Retry to one current genuine click", async () => {
+    const retry = deferred<SearchAnswer>();
+    searchUsers
+      .mockRejectedValueOnce(new ApiError(503, "Try again"))
+      .mockRejectedValueOnce(new ApiError(503, "Still unavailable"))
+      .mockReturnValueOnce(retry.promise);
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness initialValue="octo" onChange={onChangeA} />
+          </StrictMode>,
+        );
+      });
+      input().focus();
+      await settle();
+      const retiredRetry = screen.getByRole("button", { name: "Retry" });
+      const staleRetry = reactHandler<(event: MouseEvent<HTMLButtonElement>) => void>(
+        retiredRetry,
+        "onClick",
+      );
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness initialValue="octo" onChange={onChangeB} />
+          </StrictMode>,
+        );
+      });
+      act(() => staleRetry(buttonMouseSource(retiredRetry)));
+      expect(searchUsers).toHaveBeenCalledTimes(1);
+      await settle();
+      expect(searchUsers).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("alert")).toHaveTextContent("Still unavailable");
+
+      const currentRetry = screen.getByRole("button", { name: "Retry" });
+      const restoreRetry = interceptReactHandler<MouseEvent<HTMLButtonElement>>(
+        currentRetry,
+        "onClick",
+        (current, event) => {
+          current(event);
+          current(event);
+        },
+      );
+      fireEvent.click(currentRetry);
+      restoreRetry();
+      expect(searchUsers).toHaveBeenCalledTimes(3);
+      expect(currentRetry).toBeDisabled();
+
+      await act(async () => {
+        retry.resolve({ users: [user("octodog")], limited: false });
+        await retry.promise;
+      });
+      expect(options()).toEqual(["octodog"]);
+      expect(onChangeA).not.toHaveBeenCalled();
+      expect(onChangeB).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps direct-root Strict Mode dismissal and focus on fresh exact controls", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    const onChange = vi.fn();
+    const outside = document.createElement("button");
+    const host = document.createElement("div");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness initialValue="octo" onChange={onChange} />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      expect(options()).toEqual(["octocat"]);
+      const staleFocus = reactHandler<(event: FocusEvent<HTMLInputElement>) => void>(
+        exactInput,
+        "onFocus",
+      );
+
+      act(() => outside.focus());
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      act(() => {
+        staleFocus({
+          currentTarget: exactInput,
+          target: exactInput,
+        } as FocusEvent<HTMLInputElement>);
+      });
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+
+      act(() => exactInput.focus());
+      expect(options()).toEqual(["octocat"]);
+      expect(searchUsers).toHaveBeenCalledTimes(1);
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      outside.remove();
       host.remove();
     }
   });
