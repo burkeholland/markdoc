@@ -1,13 +1,19 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useEffect, useLayoutEffect } from "react";
-import { createRoot } from "react-dom/client";
+import {
+  StrictMode,
+  useLayoutEffect,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { Dialog, DialogContent } from "./dialog";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Dialog, DialogClose, DialogContent } from "./dialog";
 import { lazyOnFirstUse } from "@/components/editor/lazy-on-first-use";
 
-// What `next/dynamic` is in the browser once its Next-specific wrapping is peeled away: `React.lazy` under a
-// Suspense boundary — a component that suspends on its own first render even when its module is in.
 vi.mock("next/dynamic", async () => {
   const React = await import("react");
   return {
@@ -19,454 +25,752 @@ vi.mock("next/dynamic", async () => {
   };
 });
 
-// A dialog opened from the ⋮ menu with the keyboard (task #1349): the menu item is unmounted in the commit
-// that opens the dialog and Radix's menu FocusScope hands focus back to the trigger in a setTimeout(0). A
-// dialog whose content mounts after that — a lazily loaded chunk — had its `autoFocus` input robbed by that
-// hand-back, and never learned who opened it. Focus is played by hand here: the trigger takes it right
-// after the dialog has mounted, as the menu's timer did.
-describe("DialogContent opening focus", () => {
-  const flushTimers = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
-  let getClientRects: typeof Element.prototype.getClientRects;
+interface DirectView {
+  readonly host: HTMLDivElement;
+  readonly root: Root;
+}
 
-  beforeEach(() => {
-    // jsdom lays nothing out; `firstTabbable` treats a control without client rects as display:none.
-    getClientRects = Element.prototype.getClientRects;
-    Element.prototype.getClientRects = () => [{}] as unknown as DOMRectList;
-  });
-  afterEach(() => {
-    cleanup();
-    Element.prototype.getClientRects = getClientRects;
-  });
+type CloseClick = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 
-  function Harness({ open, children, title = "Name this version" }: { open: boolean; children?: React.ReactNode; title?: string }) {
-    return (
-      <>
-        <button type="button" data-testid="more-menu">
-          ⋮
-        </button>
-        <Dialog open={open}>
-          <DialogContent title={title}>{children}</DialogContent>
-        </Dialog>
-      </>
-    );
-  }
+const directViews: DirectView[] = [];
 
-  it("brings focus back to the autoFocus input when the closing menu focuses its trigger right after the dialog mounted", async () => {
-    render(
-      <Harness open>
-        <input data-testid="version-name" autoFocus />
-      </Harness>,
-    );
-    const input = screen.getByTestId("version-name");
-    expect(input).toHaveFocus();
+function renderDirect(node: ReactNode) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { host, root: createRoot(host) };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
 
-    act(() => screen.getByTestId("more-menu").focus());
-    expect(screen.getByTestId("more-menu")).toHaveFocus();
+function flushTasks() {
+  return act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+}
 
-    await flushTimers();
-    expect(input).toHaveFocus();
-  });
+function reactProperty<T>(element: Element, name: string): T | undefined {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the dialog element");
+  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  return props?.[name] as T | undefined;
+}
 
-  it("hands focus back to whoever took it, the menu trigger, when the dialog closes — it never saw the menu item", async () => {
-    const { rerender } = render(
-      <Harness open>
-        <input data-testid="version-name" autoFocus />
-      </Harness>,
-    );
-    act(() => screen.getByTestId("more-menu").focus());
-    await flushTimers();
-    expect(screen.getByTestId("version-name")).toHaveFocus();
+function captureClick(element: HTMLButtonElement): CloseClick {
+  const click = reactProperty<CloseClick>(element, "onClick");
+  if (typeof click !== "function") throw new Error("The dialog Close did not have an onClick handler");
+  return click;
+}
 
-    rerender(<Harness open={false} />);
-    await flushTimers();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.getByTestId("more-menu")).toHaveFocus();
-  });
+function captureRef<T extends Element>(element: T): RefCallback<T> {
+  const ref = reactProperty<RefCallback<T>>(element, "ref");
+  if (typeof ref !== "function") throw new Error("The dialog element did not have a callback ref");
+  return ref;
+}
 
-  it("keeps focus inside a dialog without an autoFocus control too, and still returns it to the trigger", async () => {
-    const { rerender } = render(
-      <Harness open title="Keyboard shortcuts">
-        <p>Command palette — Mod-Shift-P</p>
-      </Harness>,
-    );
-    const dialog = screen.getByRole("dialog");
-    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+function fabricatedClick(currentTarget: HTMLButtonElement) {
+  const nativeEvent = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: currentTarget });
+  return {
+    type: "click",
+    button: 0,
+    bubbles: true,
+    defaultPrevented: false,
+    currentTarget,
+    target: currentTarget,
+    nativeEvent,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+    isDefaultPrevented: () => false,
+    isPropagationStopped: () => false,
+    persist: vi.fn(),
+  } as unknown as ReactMouseEvent<HTMLButtonElement>;
+}
 
-    act(() => screen.getByTestId("more-menu").focus());
-    await flushTimers();
-    expect(dialog).toContainElement(document.activeElement as HTMLElement);
+function dialog() {
+  return screen.getByRole("dialog") as HTMLDivElement;
+}
 
-    rerender(<Harness open={false} />);
-    await flushTimers();
-    expect(screen.getByTestId("more-menu")).toHaveFocus();
-  });
+function closeButton(root: ParentNode = document) {
+  const close = root.querySelector<HTMLButtonElement>('button[aria-label="Close"]');
+  if (!close) throw new Error("Dialog Close was not rendered");
+  return close;
+}
 
-  it("leaves focus alone when the user has already moved it to another control of the dialog", async () => {
-    render(
-      <Harness open>
-        <input data-testid="version-name" autoFocus />
-        <input data-testid="second" />
-      </Harness>,
-    );
-    act(() => screen.getByTestId("second").focus());
-    await flushTimers();
-    expect(screen.getByTestId("second")).toHaveFocus();
-  });
-});
+function header(root: ParentNode = document) {
+  const element = closeButton(root).parentElement;
+  if (!(element instanceof HTMLDivElement)) throw new Error("Dialog header was not rendered");
+  return element;
+}
 
-function ExactContentBoundary({
-  visit,
-  contentKey = visit,
-  modal = true,
-  open = true,
-  present = true,
-  boundary = 0,
-  onBoundary,
-  onPassiveCleanup,
+function ControlledDialog({
+  title = "Name this version",
+  description,
   onClosed,
+  children = <input data-testid="dialog-input" autoFocus />,
 }: {
-  visit: string;
-  contentKey?: string;
-  modal?: boolean;
-  open?: boolean;
-  present?: boolean;
-  boundary?: number;
-  onBoundary?: () => void;
-  onPassiveCleanup?: () => void;
+  title?: string;
+  description?: string;
   onClosed?: () => void;
+  children?: ReactNode;
 }) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-  useEffect(() => onPassiveCleanup, [contentKey, modal, onPassiveCleanup, open, present, visit]);
-  if (!present) return null;
+  const [open, setOpen] = useState(true);
   return (
-    <Dialog modal={modal} open={open}>
-      <DialogContent key={contentKey} title={`Dialog ${visit}`} onClosed={onClosed}>
-        <input data-testid={`input-${visit}`} autoFocus />
-        <button type="button" data-testid={`action-${visit}`}>
-          Use {visit}
-        </button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent title={title} description={description} onClosed={onClosed}>
+        {children}
       </DialogContent>
     </Dialog>
   );
 }
 
-function trackContentFocusOutListeners() {
-  const additions = vi.spyOn(HTMLElement.prototype, "addEventListener");
-  const removals = vi.spyOn(HTMLElement.prototype, "removeEventListener");
-  const records = () =>
-    additions.mock.calls.flatMap((call, index) => {
-      const content = additions.mock.contexts[index];
-      const listener = call[1];
-      return call[0] === "focusout" &&
-        content instanceof HTMLDivElement &&
-        content.getAttribute("role") === "dialog" &&
-        typeof listener === "function"
-        ? [{ content, listener }]
-        : [];
-    });
-  const wasRemoved = ({ content, listener }: ReturnType<typeof records>[number]) =>
-    removals.mock.calls.some(
-      (call, index) => removals.mock.contexts[index] === content && call[0] === "focusout" && call[1] === listener,
+function LayoutCapture({ capture }: { capture: () => void }) {
+  useLayoutEffect(capture, [capture]);
+  return null;
+}
+
+beforeEach(() => {
+  vi.spyOn(Element.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+});
+
+afterEach(() => {
+  cleanup();
+  while (directViews.length) {
+    const view = directViews.pop()!;
+    act(() => view.root.unmount());
+    view.host.remove();
+  }
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  document.body.replaceChildren();
+});
+
+describe("DialogContent focus lifecycle", () => {
+  function Harness({
+    open,
+    children,
+    title = "Name this version",
+    onClosed,
+  }: {
+    open: boolean;
+    children?: ReactNode;
+    title?: string;
+    onClosed?: () => void;
+  }) {
+    return (
+      <>
+        <button type="button" data-testid="more-menu">
+          More
+        </button>
+        <Dialog open={open}>
+          <DialogContent title={title} onClosed={onClosed}>{children}</DialogContent>
+        </Dialog>
+      </>
     );
-  return { additions, removals, records, wasRemoved };
-}
+  }
 
-function trackTimers() {
-  const scheduled = vi.spyOn(globalThis, "setTimeout");
-  const cleared = vi.spyOn(globalThis, "clearTimeout");
-  const records = () =>
-    scheduled.mock.calls.flatMap((call, index) => {
-      const callback = call[0];
-      const handle = scheduled.mock.results[index]?.value as ReturnType<typeof setTimeout> | undefined;
-      return typeof callback === "function" && handle !== undefined
-        ? [{ callback: () => callback(), handle, name: callback.name, source: callback.toString() }]
-        : [];
-    });
-  const opening = () => records().filter(({ name }) => name === "recoverOpeningFocus");
-  const closing = () => records().filter(({ source }) => source.includes("unmountEvent"));
-  const wasCleared = (handle: ReturnType<typeof setTimeout>) => cleared.mock.calls.some(([candidate]) => candidate === handle);
-  return { scheduled, cleared, opening, closing, wasCleared };
-}
+  it("recovers opening focus from a closing menu and returns it to that exact trigger", async () => {
+    const onClosed = vi.fn();
+    const content = <input data-testid="version-name" autoFocus />;
+    const { rerender } = render(<Harness open onClosed={onClosed}>{content}</Harness>);
+    const input = screen.getByTestId("version-name");
+    expect(input).toHaveFocus();
 
-function invokeFocusOut(
-  record: ReturnType<ReturnType<typeof trackContentFocusOutListeners>["records"]>[number],
-  relatedTarget: HTMLElement,
-) {
-  record.listener.call(record.content, new FocusEvent("focusout", { relatedTarget }));
-}
+    act(() => screen.getByTestId("more-menu").focus());
+    await flushTasks();
+    expect(input).toHaveFocus();
 
-describe("DialogContent exact content ownership", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.spyOn(Element.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    rerender(<Harness open={false} onClosed={onClosed}>{content}</Harness>);
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByTestId("more-menu")).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  afterEach(() => {
-    cleanup();
-    vi.clearAllTimers();
-    vi.restoreAllMocks();
-    vi.useRealTimers();
-    document.body.replaceChildren();
+  it("keeps a body without a tabbable control focused inside and restores its opener", async () => {
+    const content = <p>Command palette - Mod-Shift-P</p>;
+    const { rerender } = render(<Harness open title="Keyboard shortcuts">{content}</Harness>);
+    const currentDialog = dialog();
+    expect(currentDialog).toContainElement(document.activeElement as HTMLElement);
+
+    act(() => screen.getByTestId("more-menu").focus());
+    await flushTasks();
+    expect(currentDialog).toContainElement(document.activeElement as HTMLElement);
+
+    rerender(<Harness open={false} title="Keyboard shortcuts">{content}</Harness>);
+    await flushTasks();
+    expect(screen.getByTestId("more-menu")).toHaveFocus();
   });
 
-  it.each(["stale-before-current", "current-before-stale"] as const)(
-    "binds keyed replacement timers, listeners, return targets, and close callbacks with %s ordering",
-    (order) => {
-      const listeners = trackContentFocusOutListeners();
-      const timers = trackTimers();
-      const host = document.createElement("div");
-      const reusedOpener = document.createElement("button");
-      const staleTarget = document.createElement("button");
-      document.body.append(reusedOpener, staleTarget, host);
-      const root = createRoot(host);
-      const closedA = vi.fn();
-      const closedB = vi.fn();
-      let passiveCleanups = 0;
+  it("does not disturb focus already moved to another body control", async () => {
+    render(
+      <Harness open>
+        <input data-testid="first" autoFocus />
+        <input data-testid="second" />
+      </Harness>,
+    );
+    act(() => screen.getByTestId("second").focus());
+    await flushTasks();
+    expect(screen.getByTestId("second")).toHaveFocus();
+  });
+});
 
-      try {
-        act(() =>
-          root.render(
-            <ExactContentBoundary visit="A" onClosed={closedA} onPassiveCleanup={() => passiveCleanups++} />,
-          ),
-        );
-        const inputA = screen.getByTestId("input-A");
-        const contentA = inputA.closest<HTMLDivElement>('[role="dialog"]')!;
-        const listenerA = listeners.records().find((record) => record.content === contentA)!;
-        const openingA = timers.opening()[0]!;
-        expect(inputA).toHaveFocus();
-        expect(listeners.records().filter((record) => record.content === contentA)).toHaveLength(1);
-        expect(timers.opening()).toHaveLength(1);
+describe("DialogContent exact Strict Mode publication", () => {
+  it.each(["Close", "Escape"] as const)(
+    "closes once through the exact %s action and restores the opener once",
+    async (action) => {
+      const opener = document.createElement("button");
+      document.body.append(opener);
+      opener.focus();
+      const onClosed = vi.fn();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog onClosed={onClosed} />
+        </StrictMode>,
+      );
+      const input = screen.getByTestId("dialog-input");
+      expect(input).toHaveFocus();
+      focus.mockClear();
 
-        invokeFocusOut(listenerA, reusedOpener);
-        act(() => {
-          root.render(
-            <ExactContentBoundary
-              visit="B"
-              onClosed={closedB}
-              boundary={1}
-              onPassiveCleanup={() => passiveCleanups++}
-              onBoundary={() => {
-                expect(passiveCleanups).toBe(0);
-                expect(timers.wasCleared(openingA.handle)).toBe(true);
-                expect(listeners.wasRemoved(listenerA)).toBe(true);
-                expect(timers.opening().filter(({ handle }) => !timers.wasCleared(handle))).toHaveLength(0);
-              }}
-            />,
-          );
-        });
+      if (action === "Close") fireEvent.click(closeButton());
+      else fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+      await flushTasks();
 
-        expect(passiveCleanups).toBe(1);
-        const inputB = screen.getByTestId("input-B");
-        const contentB = inputB.closest<HTMLDivElement>('[role="dialog"]')!;
-        const listenerB = listeners.records().find((record) => record.content === contentB)!;
-        const openingB = timers.opening()[1]!;
-        const closeA = timers.closing()[0]!;
-        expect(listeners.records().filter((record) => record.content === contentB)).toHaveLength(1);
-
-        const clearCallsBeforeStale = timers.cleared.mock.calls.length;
-        const removeCallsBeforeStale = listeners.removals.mock.calls.length;
-        const focus = vi.spyOn(HTMLElement.prototype, "focus");
-        if (order === "stale-before-current") {
-          invokeFocusOut(listenerA, staleTarget);
-          invokeFocusOut(listenerB, reusedOpener);
-        } else {
-          invokeFocusOut(listenerB, reusedOpener);
-          invokeFocusOut(listenerA, staleTarget);
-        }
-        reusedOpener.focus();
-        expect(reusedOpener).toHaveFocus();
-        focus.mockClear();
-        const invokeCurrentTimer = () => openingB.callback();
-        if (order === "stale-before-current") {
-          openingA.callback();
-          invokeCurrentTimer();
-        } else {
-          invokeCurrentTimer();
-          openingA.callback();
-        }
-
-        expect(inputB).toHaveFocus();
-        expect(focus).toHaveBeenCalledOnce();
-        expect(focus.mock.contexts[0]).toBe(inputB);
-        expect(timers.cleared.mock.calls.length).toBe(clearCallsBeforeStale);
-        expect(listeners.removals.mock.calls.length).toBe(removeCallsBeforeStale + 1);
-        expect(listeners.wasRemoved(listenerB)).toBe(true);
-        fireEvent.input(inputB, { target: { value: "still usable" } });
-        expect(inputB).toHaveValue("still usable");
-
-        act(() => {
-          root.render(
-            <ExactContentBoundary
-              visit="B"
-              present={false}
-              onClosed={closedB}
-              boundary={2}
-              onPassiveCleanup={() => passiveCleanups++}
-              onBoundary={() => {
-                expect(listeners.wasRemoved(listenerB)).toBe(true);
-                expect(timers.wasCleared(openingB.handle)).toBe(false);
-              }}
-            />,
-          );
-        });
-        const closeB = timers.closing()[1]!;
-        expect(document.activeElement).toBe(document.body);
-        focus.mockClear();
-
-        const invokeStaleClose = () => closeA.callback();
-        const invokeCurrentClose = () => closeB.callback();
-        if (order === "stale-before-current") {
-          invokeStaleClose();
-          invokeCurrentClose();
-        } else {
-          invokeCurrentClose();
-          invokeStaleClose();
-        }
-
-        expect(reusedOpener).toHaveFocus();
-        expect(focus).toHaveBeenCalledOnce();
-        expect(focus.mock.contexts[0]).toBe(reusedOpener);
-        expect(closedA).not.toHaveBeenCalled();
-        expect(closedB).toHaveBeenCalledOnce();
-      } finally {
-        act(() => root.unmount());
-      }
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(opener).toHaveFocus();
+      expect(focus.mock.contexts.filter((target) => target === opener)).toHaveLength(1);
+      expect(onClosed).toHaveBeenCalledOnce();
     },
   );
 
-  it("rebinds a replaced Radix content DOM behind stable DialogContent refs", () => {
-    const listeners = trackContentFocusOutListeners();
-    const timers = trackTimers();
-    const host = document.createElement("div");
+  it("lets an expanded combobox consume the first Escape before the exact second Escape closes", async () => {
     const opener = document.createElement("button");
-    document.body.append(opener, host);
+    document.body.append(opener);
     opener.focus();
-    const root = createRoot(host);
-    const closed = vi.fn();
-    let passiveCleanups = 0;
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed}>
+          <input
+            role="combobox"
+            aria-controls="combobox-options"
+            aria-expanded="true"
+            data-testid="combobox"
+            autoFocus
+          />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    const combobox = screen.getByTestId("combobox");
 
-    try {
-      act(() =>
-        root.render(
-          <ExactContentBoundary
-            visit="A"
-            contentKey="stable"
-            onClosed={closed}
-            onPassiveCleanup={() => passiveCleanups++}
-          />,
-        ),
+    fireEvent.keyDown(combobox, { key: "Escape", code: "Escape" });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    combobox.setAttribute("aria-expanded", "false");
+    fireEvent.keyDown(combobox, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("uses real Radix outside-event timing without letting delayed replay autofocus steal focus", async () => {
+    const opener = document.createElement("button");
+    const outside = document.createElement("button");
+    document.body.append(opener, outside);
+    opener.focus();
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed} />
+      </StrictMode>,
+    );
+    await flushTasks();
+
+    fireEvent.pointerDown(outside, { button: 0, isPrimary: true });
+    fireEvent.click(outside, { button: 0 });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a distinct exact successor after direct Strict Mode ref and layout replay", async () => {
+    let retiredClick: CloseClick | undefined;
+    let retiredHeaderRef: RefCallback<HTMLDivElement> | undefined;
+    const capture = () => {
+      if (retiredClick) return;
+      retiredClick = captureClick(closeButton());
+      retiredHeaderRef = captureRef(header());
+    };
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed}>
+          <LayoutCapture capture={capture} />
+          <input data-testid="current-input" autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    const currentClose = closeButton();
+    const currentHeader = header();
+    const currentClick = captureClick(currentClose);
+    expect(retiredClick).toBeDefined();
+    expect(currentClick).not.toBe(retiredClick);
+
+    act(() => {
+      retiredClick?.(fabricatedClick(currentClose));
+      retiredHeaderRef?.(currentHeader);
+      retiredHeaderRef?.(null);
+    });
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    fireEvent.click(currentClose);
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("keeps replacement custody exact and neutralizes stale timers, callbacks, and partial refs", async () => {
+    vi.useFakeTimers();
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const closedA = vi.fn();
+    const closedB = vi.fn();
+
+    function ReplacementHarness() {
+      const [visit, setVisit] = useState<"A" | "B">("A");
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent
+              key={visit}
+              title={`Dialog ${visit}`}
+              onClosed={visit === "A" ? closedA : closedB}
+            >
+              <input data-testid={`input-${visit}`} autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
       );
-      const contentA = screen.getByTestId("input-A").closest<HTMLDivElement>('[role="dialog"]')!;
-      const listenerA = listeners.records().find((record) => record.content === contentA)!;
-      const openingA = timers.opening()[0]!;
+    }
 
-      act(() => {
-        root.render(
-          <ExactContentBoundary
-            contentKey="stable"
-            modal={false}
-            visit="B"
-            boundary={1}
-            onClosed={closed}
-            onPassiveCleanup={() => passiveCleanups++}
-            onBoundary={() => {
-              expect(passiveCleanups).toBe(0);
-              expect(timers.wasCleared(openingA.handle)).toBe(true);
-              expect(listeners.wasRemoved(listenerA)).toBe(true);
-              const contentB = screen.getByTestId("input-B").closest<HTMLDivElement>('[role="dialog"]')!;
-              expect(contentB).not.toBe(contentA);
-              expect(listeners.records().filter((record) => record.content === contentB)).toHaveLength(1);
-              expect(timers.opening().filter(({ handle }) => !timers.wasCleared(handle))).toHaveLength(1);
-            }}
-          />,
+    renderDirect(<StrictMode><ReplacementHarness /></StrictMode>);
+    act(() => vi.runOnlyPendingTimers());
+    const staleCloseElement = closeButton();
+    const staleClick = captureClick(staleCloseElement);
+    const staleHeaderRef = captureRef(header());
+    expect(screen.getByTestId("input-A")).toHaveFocus();
+
+    fireEvent.click(screen.getByTestId("replace"));
+    const inputB = screen.getByTestId("input-B");
+    const currentClose = closeButton();
+    expect(inputB).toHaveFocus();
+    act(() => {
+      staleClick(fabricatedClick(currentClose));
+      staleHeaderRef(header());
+      staleHeaderRef(null);
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(inputB).toHaveFocus();
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Dialog B");
+    expect(closedA).not.toHaveBeenCalled();
+    expect(closedB).not.toHaveBeenCalled();
+
+    fireEvent.click(currentClose);
+    act(() => vi.runOnlyPendingTimers());
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(closedA).not.toHaveBeenCalled();
+    expect(closedB).toHaveBeenCalledOnce();
+  });
+
+  it.each(["subtree", "immediate placement", "higher ancestor"] as const)(
+    "permanently rejects %s mutation and restore, then admits a fresh keyed successor",
+    async (kind) => {
+      const onClosed = vi.fn();
+      function MutationHarness() {
+        const [visit, setVisit] = useState<"A" | "B">("A");
+        const [open, setOpen] = useState(true);
+        return (
+          <>
+            <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
+            <Dialog open={open} onOpenChange={setOpen}>
+              <DialogContent key={visit} title={`Dialog ${visit}`} onClosed={onClosed}>
+                <input data-testid={`input-${visit}`} autoFocus />
+              </DialogContent>
+            </Dialog>
+          </>
         );
-      });
-      expect(passiveCleanups).toBe(1);
-      const closeA = timers.closing()[0]!;
+      }
+      renderDirect(<StrictMode><MutationHarness /></StrictMode>);
+      const staleDialog = dialog();
+      const staleClose = closeButton();
 
-      const inputB = screen.getByTestId("input-B");
-      const contentB = inputB.closest<HTMLDivElement>('[role="dialog"]')!;
-      const listenerB = listeners.records().find((record) => record.content === contentB)!;
-      const openingB = timers.opening()[1]!;
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      focus.mockClear();
-      closeA.callback();
-      openingA.callback();
-      invokeFocusOut(listenerA, opener);
-      expect(closed).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-      expect(timers.wasCleared(openingB.handle)).toBe(false);
-      expect(listeners.wasRemoved(listenerB)).toBe(false);
+      if (kind === "subtree") {
+        staleClose.setAttribute("aria-label", "Changed");
+        staleClose.setAttribute("aria-label", "Close");
+      } else if (kind === "immediate placement") {
+        const parent = staleDialog.parentNode!;
+        const next = staleDialog.nextSibling;
+        staleDialog.remove();
+        parent.insertBefore(staleDialog, next);
+      } else {
+        const html = document.documentElement;
+        const currentBody = document.body;
+        currentBody.remove();
+        html.append(currentBody);
+      }
 
-      openingB.callback();
-      expect(inputB).toHaveFocus();
-      expect(focus).not.toHaveBeenCalled();
-      expect(listeners.wasRemoved(listenerB)).toBe(true);
-      fireEvent.click(screen.getByTestId("action-B"));
-      expect(screen.getByTestId("action-B")).toBeEnabled();
+      fireEvent.click(staleClose);
+      await flushTasks();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(onClosed).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByTestId("replace"));
+      expect(screen.getByRole("dialog")).toHaveAccessibleName("Dialog B");
+      fireEvent.click(closeButton());
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onClosed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects crossed title/body/callback drift while the current replacement remains usable", async () => {
+    const closedA = vi.fn();
+    const closedB = vi.fn();
+    function DriftHarness() {
+      const [visit, setVisit] = useState<"A" | "B">("A");
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent
+              title={`Title ${visit}`}
+              description={`Description ${visit}`}
+              className={`visit-${visit}`}
+              onClosed={visit === "A" ? closedA : closedB}
+            >
+              <input key={visit} data-testid={`drift-${visit}`} autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    renderDirect(<StrictMode><DriftHarness /></StrictMode>);
+    const staleClose = closeButton();
+    const staleClick = captureClick(staleClose);
+    const staleHeaderRef = captureRef(staleClose.parentElement as HTMLDivElement);
+
+    fireEvent.click(screen.getByTestId("replace"));
+    const currentClose = closeButton();
+    expect(dialog()).toHaveAccessibleName("Title B");
+    expect(dialog()).toHaveAccessibleDescription("Description B");
+    expect(dialog()).toHaveClass("visit-B");
+    act(() => {
+      staleClick(fabricatedClick(currentClose));
+      staleHeaderRef(currentClose.parentElement as HTMLDivElement);
+      staleHeaderRef(null);
+    });
+    expect(screen.getByTestId("drift-B")).toHaveFocus();
+    expect(closedA).not.toHaveBeenCalled();
+    expect(closedB).not.toHaveBeenCalled();
+
+    fireEvent.click(currentClose);
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(closedA).not.toHaveBeenCalled();
+    expect(closedB).toHaveBeenCalledOnce();
+  });
+
+  it("transfers nested custody without letting the outer publication focus through the inner one", async () => {
+    const outerClosed = vi.fn();
+    const innerClosed = vi.fn();
+    function NestedHarness() {
+      const [outerOpen, setOuterOpen] = useState(true);
+      const [innerOpen, setInnerOpen] = useState(false);
+      return (
+        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+          <DialogContent title="Outer" onClosed={outerClosed}>
+            <button type="button" data-testid="open-inner" onClick={() => setInnerOpen(true)}>
+              Open inner
+            </button>
+            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+              <DialogContent title="Inner" onClosed={innerClosed}>
+                <input data-testid="inner-input" autoFocus />
+              </DialogContent>
+            </Dialog>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><NestedHarness /></StrictMode>);
+    const innerOpener = screen.getByTestId("open-inner");
+    fireEvent.click(innerOpener);
+    expect(screen.getByTestId("inner-input")).toHaveFocus();
+
+    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Inner" })));
+    await flushTasks();
+
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(innerOpener).toHaveFocus();
+    expect(innerClosed).toHaveBeenCalledOnce();
+    expect(outerClosed).not.toHaveBeenCalled();
+  });
+
+  it("finishes an authenticated close through fresh controlled callback identities", async () => {
+    const onClosed = vi.fn();
+    function InlineCallbacksHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={(next) => setOpen(next)}>
+          <DialogContent title="Inline callbacks" onClosed={() => onClosed()}>
+            <input data-testid="inline-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><InlineCallbacksHarness /></StrictMode>);
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the current publication usable across an application theme change", async () => {
+    const previousTheme = document.documentElement.getAttribute("data-theme");
+    const onClosed = vi.fn();
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog onClosed={onClosed}>
+          <input data-testid="theme-input" autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    document.documentElement.setAttribute("data-theme", previousTheme === "dark" ? "light" : "dark");
+    await act(() => Promise.resolve());
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+    if (previousTheme === null) document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", previousTheme);
+  });
+
+  it("publishes again after a controlled owner vetoes an authenticated close", async () => {
+    const onOpenChange = vi.fn();
+    function VetoHarness() {
+      return (
+        <Dialog open onOpenChange={onOpenChange}>
+          <DialogContent title="Vetoed close">
+            <button type="button">Still open</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><VetoHarness /></StrictMode>);
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+    fireEvent.click(closeButton());
+
+    expect(onOpenChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves direct body roots and authenticates exported DialogClose controls", async () => {
+    const onClosed = vi.fn();
+    function OwnedCloseHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Owned Close" onClosed={onClosed}>
+            <form data-testid="direct-body">
+              <DialogClose asChild><a href="#done">Done</a></DialogClose>
+            </form>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><OwnedCloseHarness /></StrictMode>);
+    const currentDialog = dialog();
+    expect(screen.getByTestId("direct-body").parentElement).toBe(currentDialog);
+    expect(currentDialog.children).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("link", { name: "Done" }));
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("owns autofocus and close completion without a modal overlay", async () => {
+    const onClosed = vi.fn();
+    function NonModalHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen} modal={false}>
+          <DialogContent title="Non-modal" onClosed={onClosed}>
+            <input data-testid="non-modal-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><NonModalHarness /></StrictMode>);
+    expect(screen.getByTestId("non-modal-input")).toHaveFocus();
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("authenticates non-modal focus-outside dismissal", async () => {
+    const onClosed = vi.fn();
+    function NonModalFocusHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" data-testid="outside-focus">Outside</button>
+          <Dialog open={open} onOpenChange={setOpen} modal={false}>
+            <DialogContent title="Non-modal focus" onClosed={onClosed}>
+              <input data-testid="non-modal-focus-input" autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    renderDirect(<StrictMode><NonModalFocusHarness /></StrictMode>);
+
+    act(() => screen.getByTestId("outside-focus").focus());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("restores the exact pre-existing body pointer style", async () => {
+    const previousPointerEvents = document.body.style.pointerEvents;
+    document.body.style.pointerEvents = "auto";
+    try {
+      renderDirect(
+        <StrictMode>
+          <ControlledDialog><input autoFocus /></ControlledDialog>
+        </StrictMode>,
+      );
+
+      fireEvent.click(closeButton());
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(document.body.style.pointerEvents).toBe("auto");
     } finally {
-      act(() => root.unmount());
+      document.body.style.pointerEvents = previousPointerEvents;
     }
   });
 
-  it("physically retires a removed content owner before the parent layout effect", () => {
-    const listeners = trackContentFocusOutListeners();
-    const timers = trackTimers();
-    const host = document.createElement("div");
-    const outside = document.createElement("button");
-    document.body.append(outside, host);
-    const root = createRoot(host);
-    let passiveCleanups = 0;
-
-    try {
-      act(() =>
-        root.render(
-          <ExactContentBoundary visit="removed" onPassiveCleanup={() => passiveCleanups++} />,
-        ),
+  it("keeps an authenticated transition through a deferred controlled close", () => {
+    vi.useFakeTimers();
+    const onClosed = vi.fn();
+    function DeferredCloseHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={(next) => setTimeout(() => setOpen(next), 10)}>
+          <DialogContent title="Deferred close" onClosed={onClosed}>
+            <input autoFocus />
+          </DialogContent>
+        </Dialog>
       );
-      const input = screen.getByTestId("input-removed");
-      const content = input.closest<HTMLDivElement>('[role="dialog"]')!;
-      const listener = listeners.records().find((record) => record.content === content)!;
-      const opening = timers.opening()[0]!;
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      focus.mockClear();
-
-      act(() => {
-        root.render(
-          <ExactContentBoundary
-            visit="removed"
-            present={false}
-            boundary={1}
-            onPassiveCleanup={() => passiveCleanups++}
-            onBoundary={() => {
-              expect(passiveCleanups).toBe(0);
-              expect(timers.wasCleared(opening.handle)).toBe(true);
-              expect(listeners.wasRemoved(listener)).toBe(true);
-              expect(timers.opening().filter(({ handle }) => !timers.wasCleared(handle))).toHaveLength(0);
-              const clears = timers.cleared.mock.calls.length;
-              const removals = listeners.removals.mock.calls.length;
-              invokeFocusOut(listener, outside);
-              opening.callback();
-              expect(timers.cleared.mock.calls).toHaveLength(clears);
-              expect(listeners.removals.mock.calls).toHaveLength(removals);
-              expect(focus).not.toHaveBeenCalled();
-            }}
-          />,
-        );
-      });
-
-      expect(passiveCleanups).toBe(1);
-    } finally {
-      act(() => root.unmount());
     }
+    renderDirect(<StrictMode><DeferredCloseHarness /></StrictMode>);
+    act(() => vi.runOnlyPendingTimers());
+
+    fireEvent.click(closeButton());
+    act(() => vi.advanceTimersByTime(10));
+    act(() => vi.runOnlyPendingTimers());
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("disconnects every document observer when an open root finally unmounts", async () => {
+    const documentObservers = new Set<MutationObserver>();
+    const disconnected = new Set<MutationObserver>();
+    const nativeObserve = MutationObserver.prototype.observe;
+    const nativeDisconnect = MutationObserver.prototype.disconnect;
+    vi.spyOn(MutationObserver.prototype, "observe").mockImplementation(function (
+      this: MutationObserver,
+      target,
+      options,
+    ) {
+      if (target === document) documentObservers.add(this);
+      return nativeObserve.call(this, target, options);
+    });
+    vi.spyOn(MutationObserver.prototype, "disconnect").mockImplementation(function (
+      this: MutationObserver,
+    ) {
+      disconnected.add(this);
+      return nativeDisconnect.call(this);
+    });
+    const view = renderDirect(
+      <StrictMode>
+        <ControlledDialog><input autoFocus /></ControlledDialog>
+      </StrictMode>,
+    );
+
+    act(() => view.root.unmount());
+    view.host.remove();
+    directViews.splice(directViews.indexOf(view), 1);
+    await act(() => Promise.resolve());
+
+    expect(documentObservers.size).toBeGreaterThan(0);
+    expect([...documentObservers].every((observer) => disconnected.has(observer))).toBe(true);
+  });
+
+  it("renders a closed dialog tree without a browser document", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+    if (!descriptor) throw new Error("The test environment did not provide document");
+    Reflect.deleteProperty(globalThis, "document");
+    try {
+      expect(() => renderToString(
+        <Dialog open={false}>
+          <DialogContent title="Server-safe"><input /></DialogContent>
+        </Dialog>,
+      )).not.toThrow();
+    } finally {
+      Object.defineProperty(globalThis, "document", descriptor);
+    }
+  });
+
+  it("preserves the exact Close label, classes, body focus order, and conditional description", () => {
+    renderDirect(
+      <StrictMode>
+        <ControlledDialog title="Exact title">
+          <button type="button" data-focus-skip>Skipped</button>
+          <input data-testid="first-body-control" autoFocus />
+        </ControlledDialog>
+      </StrictMode>,
+    );
+    const close = closeButton();
+    expect(close).toHaveAccessibleName("Close");
+    expect(close).toHaveClass("icon-btn", "-mr-2", "-mt-1", "h-8", "w-8", "shrink-0");
+    expect(dialog()).toHaveAccessibleName("Exact title");
+    expect(dialog()).toHaveAccessibleDescription("Exact title");
+    expect(screen.getByTestId("first-body-control")).toHaveFocus();
   });
 });
 
 describe("lazyOnFirstUse", () => {
-  afterEach(cleanup);
-
   it("mounts a component in the same commit once a sibling from its module has loaded it", async () => {
     const mod = {
       Shortcuts: () => <p data-testid="shortcuts">shortcuts</p>,
@@ -478,9 +782,6 @@ describe("lazyOnFirstUse", () => {
 
     render(<Shortcuts />);
     expect(await screen.findByTestId("shortcuts")).toBeInTheDocument();
-
-    // Not the component that loaded the module: the ⋮ menu item that opened it is still mounted and focused
-    // in this commit, and nothing has queued a focus change yet — the same as a static import.
     render(<NameVersion />);
     expect(screen.getByTestId("name-version")).toBeInTheDocument();
   });
