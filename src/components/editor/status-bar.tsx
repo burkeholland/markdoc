@@ -126,6 +126,10 @@ interface StatusBarNativeEventPublication {
   altKey: boolean | undefined;
   metaKey: boolean | undefined;
   shiftKey: boolean | undefined;
+  pointerId: number | undefined;
+  pointerType: string | undefined;
+  isPrimary: boolean | undefined;
+  extended: boolean;
   claimed: boolean;
   expired: boolean;
 }
@@ -174,6 +178,12 @@ interface StatusBarObserverPublication {
   observer: MutationObserver;
 }
 
+interface StatusBarOutsidePointerChain {
+  pointerDown: StatusBarNativeEventPublication;
+  pointerUp: StatusBarNativeEventPublication | null;
+  click: StatusBarNativeEventPublication | null;
+}
+
 interface StatusBarGeneration {
   authority: StatusBarAuthority;
   epoch: number;
@@ -185,6 +195,8 @@ interface StatusBarGeneration {
   nativeEvents: WeakMap<Event, StatusBarNativeEventPublication>;
   reactEvents: WeakMap<object, StatusBarReactEventPublication>;
   pendingIntents: Set<StatusBarEventIntent>;
+  outsidePointerChain: StatusBarOutsidePointerChain | null;
+  delegatedSubtrees: readonly HTMLElement[];
   nodeSeals: StatusBarNodeSeal[];
   relationSeals: StatusBarRelationSeal[];
   observers: StatusBarObserverPublication[];
@@ -222,6 +234,7 @@ const STATUS_BAR_NATIVE_EVENTS = [
   "click",
   "keydown",
   "pointerdown",
+  "pointerup",
   "focusin",
   "focusout",
   "menu.itemSelect",
@@ -315,9 +328,15 @@ function stableAttributes(element: Element) {
     .sort(([left], [right]) => left.localeCompare(right));
 }
 
-function sealSubtree(root: Node, seals: StatusBarNodeSeal[], seen: Set<Node>) {
+function sealSubtree(
+  root: Node,
+  seals: StatusBarNodeSeal[],
+  seen: Set<Node>,
+  delegatedSubtrees: ReadonlySet<Node>,
+) {
   if (seen.has(root)) return;
   seen.add(root);
+  if (delegatedSubtrees.has(root)) return;
   const element = root instanceof Element ? root : null;
   const data = root instanceof CharacterData ? root.data : null;
   seals.push({
@@ -328,7 +347,7 @@ function sealSubtree(root: Node, seals: StatusBarNodeSeal[], seen: Set<Node>) {
     name: element?.tagName ?? null,
     namespace: element?.namespaceURI ?? null,
   });
-  root.childNodes.forEach((child) => sealSubtree(child, seals, seen));
+  root.childNodes.forEach((child) => sealSubtree(child, seals, seen, delegatedSubtrees));
 }
 
 function sealRelations(
@@ -372,7 +391,7 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
-      if (records.some((record) => !mutationIsRadixOwned(record))) {
+      if (records.some((record) => !mutationIsOwned(generation, record))) {
         retireGeneration(generation);
         return false;
       }
@@ -444,6 +463,12 @@ function mutationIsRadixOwned(record: MutationRecord) {
   return false;
 }
 
+function mutationIsOwned(generation: StatusBarGeneration, record: MutationRecord) {
+  return generation.delegatedSubtrees.some((root) => (
+    record.target === root || root.contains(record.target)
+  )) || mutationIsRadixOwned(record);
+}
+
 function refreshRelationSeals(generation: StatusBarGeneration) {
   generation.relationSeals.length = 0;
   const seen = new Set<Node>();
@@ -469,6 +494,7 @@ function retireGeneration(generation: StatusBarGeneration) {
     intent.pending = null;
   });
   generation.pendingIntents.clear();
+  retireOutsidePointerChain(generation);
   generation.removeEventListeners.forEach((remove) => remove());
   generation.removeEventListeners.length = 0;
   generation.observers.forEach(({ observer }) => {
@@ -498,7 +524,7 @@ function retireManagerGeneration(
 function observeGeneration(generation: StatusBarGeneration) {
   const observe = (target: Node, options: MutationObserverInit) => {
     const observer = new MutationObserver((records) => {
-      if (records.some((record) => !mutationIsRadixOwned(record))) {
+      if (records.some((record) => !mutationIsOwned(generation, record))) {
         retireGeneration(generation);
       } else if (records.some((record) => record.type === "childList")) {
         refreshRelationSeals(generation);
@@ -531,6 +557,38 @@ function observeGeneration(generation: StatusBarGeneration) {
   });
 }
 
+function retireOutsidePointerChain(generation: StatusBarGeneration) {
+  const chain = generation.outsidePointerChain;
+  if (!chain) return;
+  chain.pointerDown.expired = true;
+  if (chain.pointerUp) chain.pointerUp.expired = true;
+  if (chain.click) chain.click.expired = true;
+  generation.outsidePointerChain = null;
+}
+
+function pointerChainEventIsExact(
+  pointerDown: StatusBarNativeEventPublication,
+  next: StatusBarNativeEventPublication,
+) {
+  return (
+    next.target === pointerDown.target
+    && arraysAreIdentical(next.path, pointerDown.path)
+    && next.button === pointerDown.button
+    && next.ctrlKey === pointerDown.ctrlKey
+    && next.altKey === pointerDown.altKey
+    && next.metaKey === pointerDown.metaKey
+    && next.shiftKey === pointerDown.shiftKey
+    && (
+      next.type !== "pointerup"
+      || (
+        next.pointerId === pointerDown.pointerId
+        && next.pointerType === pointerDown.pointerType
+        && next.isPrimary === pointerDown.isPrimary
+      )
+    )
+  );
+}
+
 function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
   if (!validateGeneration(generation)) return;
   const path = event.composedPath();
@@ -551,10 +609,59 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
     altKey: "altKey" in event && typeof event.altKey === "boolean" ? event.altKey : undefined,
     metaKey: "metaKey" in event && typeof event.metaKey === "boolean" ? event.metaKey : undefined,
     shiftKey: "shiftKey" in event && typeof event.shiftKey === "boolean" ? event.shiftKey : undefined,
+    pointerId: "pointerId" in event && typeof event.pointerId === "number" ? event.pointerId : undefined,
+    pointerType: "pointerType" in event && typeof event.pointerType === "string" ? event.pointerType : undefined,
+    isPrimary: "isPrimary" in event && typeof event.isPrimary === "boolean" ? event.isPrimary : undefined,
+    extended: false,
     claimed: false,
     expired: false,
   };
   generation.nativeEvents.set(event, publication);
+  let preserveForOutside = false;
+  if (publication.type === "pointerdown" && publication.button === 0) {
+    retireOutsidePointerChain(generation);
+    generation.outsidePointerChain = {
+      pointerDown: publication,
+      pointerUp: null,
+      click: null,
+    };
+    preserveForOutside = true;
+  } else if (publication.type === "pointerup") {
+    const chain = generation.outsidePointerChain;
+    if (
+      chain
+      && !chain.pointerUp
+      && !chain.click
+      && publication.timeStamp >= chain.pointerDown.timeStamp
+      && pointerChainEventIsExact(chain.pointerDown, publication)
+    ) {
+      chain.pointerUp = publication;
+      preserveForOutside = true;
+    } else if (chain) {
+      retireOutsidePointerChain(generation);
+    }
+  } else if (publication.type === "click") {
+    const chain = generation.outsidePointerChain;
+    if (
+      chain?.pointerUp
+      && !chain.click
+      && publication.timeStamp >= chain.pointerUp.timeStamp
+      && pointerChainEventIsExact(chain.pointerDown, publication)
+    ) {
+      chain.click = publication;
+      preserveForOutside = true;
+      queueMicrotask(() => {
+        if (generation.outsidePointerChain?.click === publication)
+          retireOutsidePointerChain(generation);
+      });
+    } else if (chain) {
+      retireOutsidePointerChain(generation);
+    }
+  }
+  if (preserveForOutside) {
+    publication.extended = true;
+    return;
+  }
   queueMicrotask(() => {
     publication.expired = true;
   });
@@ -576,6 +683,16 @@ function activateGeneration(
   const root = controls.get("root")?.control;
   if (!(root instanceof HTMLElement) || !root.isConnected) return;
   const ownerDocument = root.ownerDocument;
+  const statsTriggers = root.querySelectorAll<HTMLElement>('[data-testid="stats-button"]');
+  const statsTrigger = statsTriggers.item(0);
+  if (
+    statsTriggers.length !== 1
+    || !statsTrigger
+    || statsTrigger.tagName !== "BUTTON"
+    || statsTrigger.parentElement !== root
+  )
+    return;
+  const delegatedSubtrees = Object.freeze([statsTrigger]);
   const portalContents = ["menu-content", "issues-content"]
     .map((slot) => controls.get(slot)?.control)
     .filter((control): control is HTMLElement => Boolean(control));
@@ -602,6 +719,8 @@ function activateGeneration(
     nativeEvents: new WeakMap(),
     reactEvents: new WeakMap(),
     pendingIntents: new Set(),
+    outsidePointerChain: null,
+    delegatedSubtrees,
     nodeSeals: [],
     relationSeals: [],
     observers: [],
@@ -609,13 +728,14 @@ function activateGeneration(
     retired: false,
   };
   const seenNodes = new Set<Node>();
+  const delegatedSubtreeSet = new Set<Node>(delegatedSubtrees);
   const relationNodes = new Set<Node>();
-  sealSubtree(root, generation.nodeSeals, seenNodes);
+  sealSubtree(root, generation.nodeSeals, seenNodes, delegatedSubtreeSet);
   sealRelations(root, ownerDocument, generation.relationSeals, relationNodes);
   portalContents.forEach((content) => {
     let top: Node = content;
     while (top.parentNode && top.parentNode !== ownerDocument.body) top = top.parentNode;
-    sealSubtree(top, generation.nodeSeals, seenNodes);
+    sealSubtree(top, generation.nodeSeals, seenNodes, delegatedSubtreeSet);
     sealRelations(top, ownerDocument, generation.relationSeals, relationNodes);
   });
   manager.active = generation;
@@ -660,12 +780,20 @@ function registerControl<T extends HTMLElement>(
 
 function nativeEventIsExact(publication: StatusBarNativeEventPublication) {
   const event = publication.event;
+  const path = event.composedPath();
   return (
     !publication.expired
     && !publication.claimed
     && event.type === publication.type
     && event.target === publication.target
-    && arraysAreIdentical(event.composedPath(), publication.path)
+    && (
+      arraysAreIdentical(path, publication.path)
+      || (
+        publication.extended
+        && event.eventPhase === Event.NONE
+        && path.length === 0
+      )
+    )
     && event.bubbles === publication.bubbles
     && event.cancelable === publication.cancelable
     && event.composed === publication.composed
@@ -678,6 +806,9 @@ function nativeEventIsExact(publication: StatusBarNativeEventPublication) {
     && (!("altKey" in event) || event.altKey === publication.altKey)
     && (!("metaKey" in event) || event.metaKey === publication.metaKey)
     && (!("shiftKey" in event) || event.shiftKey === publication.shiftKey)
+    && (!("pointerId" in event) || event.pointerId === publication.pointerId)
+    && (!("pointerType" in event) || event.pointerType === publication.pointerType)
+    && (!("isPrimary" in event) || event.isPrimary === publication.isPrimary)
   );
 }
 
@@ -885,6 +1016,12 @@ function claimIntent(intent: StatusBarEventIntent, action: string) {
   }
   intent.claims.add(action);
   generation.actions.add(action);
+  const outsidePointerChain = generation.outsidePointerChain;
+  if (
+    outsidePointerChain
+    && intent.nativeEvents.includes(outsidePointerChain.pointerDown)
+  )
+    generation.outsidePointerChain = null;
   return true;
 }
 
@@ -1237,7 +1374,7 @@ function StatusBarIssueRow({
           !intent
           || !completeReactIntent(intent, event)
           || !issuePublicationIsExact(authority, row)
-          || !claimIntent(intent, "issue")
+          || !claimIntent(intent, `issue:${row.index}`)
         )
           return;
         intentRef.current = null;
@@ -1326,6 +1463,7 @@ function createContentNativeIntent(
     const outside = event as CustomEvent<{ originalEvent?: Event }>;
     const originalEvent = outside.detail?.originalEvent;
     const original = originalEvent ? generation.nativeEvents.get(originalEvent) : null;
+    const pointerChain = generation.outsidePointerChain;
     if (
       !["dismissableLayer.pointerDownOutside", "dismissableLayer.focusOutside"].includes(native.type)
       || !original
@@ -1338,6 +1476,18 @@ function createContentNativeIntent(
     )
       return null;
     nativeEvents.push(original);
+    if (native.type === "dismissableLayer.pointerDownOutside" && original.button === 0) {
+      if (
+        original.type !== "pointerdown"
+        || pointerChain?.pointerDown !== original
+        || !pointerChain.pointerUp
+        || !pointerChain.click
+        || !nativeEventIsExact(pointerChain.pointerUp)
+        || !nativeEventIsExact(pointerChain.click)
+      )
+        return null;
+      nativeEvents.push(pointerChain.pointerUp, pointerChain.click);
+    }
   }
   const intent: StatusBarEventIntent = {
     generation,

@@ -8,6 +8,7 @@ import {
 import { act, fireEvent, screen } from "@testing-library/react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
 import type { CollabSession } from "@/editor/collab/session";
 import type { LintIssue } from "@/editor/markdown/lint";
 import type { DocumentDto } from "@/server/dto";
@@ -32,31 +33,16 @@ vi.mock("@/editor/markdown/lint", () => ({
 vi.mock("@/lib/hooks", () => ({
   useHydrated: () => controlled.hydrated,
 }));
-vi.mock("./use-session", () => ({
-  useDebouncedSessionValue: (...args: unknown[]) => {
-    controlled.sessionHook(...args);
-    return controlled.sessionValue;
-  },
-}));
-vi.mock("./stats-popover", () => ({
-  StatsPopover: ({
-    session,
-    source,
-    hydrated,
-  }: {
-    session: CollabSession;
-    source: string;
-    hydrated: boolean;
-  }) => (
-    <output
-      data-testid="stats-popover"
-      data-session={session === null ? "none" : "present"}
-      data-source={source}
-      data-hydrated={hydrated}
-    />
-  ),
-  useLocalSelection: () => null,
-}));
+vi.mock("./use-session", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./use-session")>();
+  return {
+    ...actual,
+    useDebouncedSessionValue: (...args: unknown[]) => {
+      controlled.sessionHook(...args);
+      return controlled.sessionValue;
+    },
+  };
+});
 vi.mock("@/components/ui/theme-toggle", () => ({
   ThemeToggle: ({ className }: { className?: string }) => (
     <button type="button" className={className} data-testid="theme-toggle">
@@ -67,6 +53,7 @@ vi.mock("@/components/ui/theme-toggle", () => ({
 }));
 
 import { StatusBar, type StatusBarProps } from "./status-bar";
+import { setGoal } from "@/editor/collab/meta";
 
 interface StatusCallbacks {
   layout: ReturnType<typeof vi.fn<(layout: Layout) => void>>;
@@ -119,12 +106,80 @@ const ISSUE_OTHER: LintIssue = {
 };
 
 const directViews: DirectView[] = [];
+const fakeSessionDisposals: (() => void)[] = [];
+const fakeSessionSelections = new WeakMap<
+  CollabSession,
+  (from: number, to: number) => void
+>();
 
 function fakeSession(name: string) {
-  return {
+  const ydoc = new Y.Doc();
+  const ytext = ydoc.getText("source");
+  ytext.insert(0, controlled.sessionValue.text);
+  const meta = ydoc.getMap("meta");
+  const subscribers = new Set<() => void>();
+  const awarenessListeners = new Set<() => void>();
+  let localState: { cursor?: { anchor: unknown; head: unknown } } | null = null;
+  let version = 0;
+  const notify = () => {
+    version += 1;
+    [...subscribers].forEach((listener) => listener());
+  };
+  ydoc.on("update", notify);
+  const session = {
     name,
     binding: { getTree: () => controlled.sessionValue.tree },
+    ydoc,
+    ytext,
+    meta,
+    canEdit: true,
+    user: {
+      id: "alice",
+      name: "Alice",
+      login: "alice",
+      image: null,
+    },
+    awareness: {
+      getLocalState: () => localState,
+      on: (event: string, listener: () => void) => {
+        if (event === "change") awarenessListeners.add(listener);
+      },
+      off: (event: string, listener: () => void) => {
+        if (event === "change") awarenessListeners.delete(listener);
+      },
+    },
+    subscribe: (listener: () => void) => {
+      subscribers.add(listener);
+      return () => subscribers.delete(listener);
+    },
+    get version() {
+      return version;
+    },
   } as unknown as CollabSession;
+  fakeSessionSelections.set(session, (from, to) => {
+    localState = {
+      cursor: {
+        anchor: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(ytext, from),
+        ),
+        head: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(ytext, to),
+        ),
+      },
+    };
+    [...awarenessListeners].forEach((listener) => listener());
+  });
+  fakeSessionDisposals.push(() => {
+    ydoc.off("update", notify);
+    ydoc.destroy();
+  });
+  return session;
+}
+
+function setFakeSelection(session: CollabSession, from: number, to: number) {
+  const setSelection = fakeSessionSelections.get(session);
+  if (!setSelection) throw new Error("Unknown fake session");
+  setSelection(from, to);
 }
 
 function documentDto(overrides: Partial<DocumentDto> = {}): DocumentDto {
@@ -265,6 +320,35 @@ function closeIssues() {
   const trigger = screen.getByTestId("issues-button");
   if (trigger.getAttribute("aria-expanded") === "true") fireEvent.click(trigger);
   expect(trigger).toHaveAttribute("aria-expanded", "false");
+}
+
+async function nextTask() {
+  await act(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function outsidePointerClick(
+  pointerDownTarget: HTMLElement,
+  releaseTarget = pointerDownTarget,
+) {
+  fireEvent.pointerDown(pointerDownTarget, {
+    button: 0,
+    pointerId: 7,
+    pointerType: "mouse",
+    isPrimary: true,
+  });
+  await nextTask();
+  fireEvent.pointerUp(releaseTarget, {
+    button: 0,
+    pointerId: 7,
+    pointerType: "mouse",
+    isPrimary: true,
+  });
+  fireEvent.click(releaseTarget, { button: 0 });
+  await act(async () => {
+    await Promise.resolve();
+  });
 }
 
 function fiberFor(element: Element): ReactFiber {
@@ -428,6 +512,7 @@ afterEach(async () => {
     });
     view.host.remove();
   }
+  while (fakeSessionDisposals.length) fakeSessionDisposals.pop()!();
   document.body.replaceChildren();
 });
 
@@ -553,6 +638,59 @@ describe("status bar Strict Mode controls", () => {
     });
     expect(issuesTrigger).toHaveAttribute("aria-expanded", "false");
     expect(issuesTrigger).toHaveFocus();
+  });
+});
+
+describe("status bar nested StatsPopover reconciliation", () => {
+  it("keeps current controls usable after the real statistics disclosure opens and closes", async () => {
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const stats = screen.getByTestId("stats-button");
+
+    expect(screen.getByTestId("word-count")).toHaveTextContent("2 words");
+    fireEvent.click(stats);
+    expect(screen.getByTestId("stats-popover")).toBeInTheDocument();
+    fireEvent.keyDown(window, {
+      code: "KeyC",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("stats-popover")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps current controls usable after real selection-label and goal reconciliation", async () => {
+    const current = callbacks();
+    const props = statusProps(current);
+    await renderStatus(props);
+
+    act(() => setFakeSelection(props.session, 2, 8));
+    expect(screen.getByTestId("selection-count")).toHaveTextContent(
+      "1 of 2 selected",
+    );
+
+    act(() => {
+      setGoal(props.session, {
+        kind: "words",
+        mode: "min",
+        value: 100,
+        setBy: "alice",
+        setAt: 100,
+      });
+    });
+    expect(screen.getByTestId("goal-ring")).toBeInTheDocument();
+    expect(screen.getByTestId("stats-button")).toHaveAttribute(
+      "title",
+      "2 / 100 words",
+    );
+
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
   });
 });
 
@@ -703,7 +841,7 @@ describe("status bar event and replacement claims", () => {
     expect(current.layout).toHaveBeenCalledWith("code");
   });
 
-  it("binds ordered issue rows and rejects crossed row handlers", async () => {
+  it("binds ordered issue rows, rejects crossed handlers, and claims each row once", async () => {
     controlled.issues = [ISSUE_A, ISSUE_OTHER];
     const current = callbacks();
     await renderStatus(statusProps(current));
@@ -717,10 +855,71 @@ describe("status bar event and replacement claims", () => {
     invokeFabricatedClick(first, rows[1], rows[0]);
     expect(current.issue).not.toHaveBeenCalled();
 
+    fireEvent.click(rows[0]);
+    fireEvent.click(rows[0]);
     fireEvent.click(rows[1]);
     fireEvent.click(rows[1]);
-    expect(current.issue).toHaveBeenCalledOnce();
-    expect(current.issue).toHaveBeenCalledWith(ISSUE_OTHER);
+    expect(current.issue).toHaveBeenCalledTimes(2);
+    expect(current.issue.mock.calls).toEqual([[ISSUE_A], [ISSUE_OTHER]]);
+  });
+
+  it("bridges deferred outside pointer timing and rejects stale or crossed chains", async () => {
+    controlled.issues = [ISSUE_A, ISSUE_OTHER];
+    const current = callbacks();
+    const firstOutside = document.createElement("button");
+    const secondOutside = document.createElement("button");
+    document.body.prepend(firstOutside, secondOutside);
+    await renderStatus(statusProps(current));
+
+    openIssues();
+    await nextTask();
+    const staleContent = screen.getByTestId("status-issues-content");
+    const staleAuthorize = nearestHandler<
+      (event: CustomEvent<{ originalEvent: Event }>) => void
+    >(staleContent, "onPointerDownOutside");
+    const staleChange = nearestHandler<(open: boolean) => void>(
+      staleContent,
+      "onOpenChange",
+    );
+    let genuineOutsideEvent: CustomEvent<{ originalEvent: Event }> | null = null;
+    firstOutside.addEventListener(
+      "dismissableLayer.pointerDownOutside",
+      (event) => {
+        genuineOutsideEvent =
+          event as CustomEvent<{ originalEvent: Event }>;
+      },
+    );
+
+    await outsidePointerClick(firstOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(genuineOutsideEvent).not.toBeNull();
+
+    openIssues();
+    await nextTask();
+    act(() => {
+      staleAuthorize(genuineOutsideEvent!);
+      staleChange(false);
+    });
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    await outsidePointerClick(firstOutside, secondOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    await outsidePointerClick(secondOutside);
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(current.issue).not.toHaveBeenCalled();
   });
 
   it("retires callback A before the same DOM publishes callback B", async () => {
