@@ -4469,29 +4469,1256 @@ export interface HeaderProps {
   embed?: boolean;
 }
 
-/** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
-function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: (l: Layout) => void }) {
-  const options: { value: Layout; label: string; icon: React.ReactNode }[] = [
-    { value: "rich", label: "Preview", icon: <Eye size={17} /> },
-    { value: "code", label: "Markdown", icon: <Code2 size={17} /> },
-  ];
+type LayoutSegmentPane = Extract<Layout, "rich" | "code">;
+
+const LAYOUT_SEGMENT_OPTIONS = Object.freeze([
+  Object.freeze({ value: "rich", label: "Preview", iconName: "eye", Icon: Eye }),
+  Object.freeze({ value: "code", label: "Markdown", iconName: "code-xml", Icon: Code2 }),
+] as const);
+const LAYOUT_SEGMENT_CLASS_NAME = "inline-flex h-9 shrink-0 rounded-lg border border-line-2 bg-surface p-0.5 md:hidden";
+const LAYOUT_SEGMENT_ROW_BASE_CLASS_NAME = "inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors";
+const LAYOUT_SEGMENT_ROW_ACTIVE_CLASS_NAME = "bg-accent-soft text-accent";
+const LAYOUT_SEGMENT_ROW_INACTIVE_CLASS_NAME = "text-ink-3 hover:text-ink";
+
+interface LayoutSegmentDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly LayoutSegmentDomSnapshot[];
+}
+
+interface LayoutSegmentPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface LayoutSegmentElementOwnerView {
+  readonly element: () => Element | null;
+}
+
+interface LayoutSegmentRefReplay {
+  readonly owner: LayoutSegmentElementOwnerView;
+  readonly element: Element;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface LayoutSegmentRowAuthority {
+  readonly index: number;
+  readonly value: LayoutSegmentPane;
+  readonly label: string;
+  readonly iconName: string;
+  readonly checked: boolean;
+  readonly tabIndex: 0 | -1;
+  readonly className: string;
+  readonly size: number;
+}
+
+interface LayoutSegmentAuthority {
+  readonly mount: symbol;
+  readonly revision: number;
+  readonly layout: Layout;
+  readonly onLayout: (layout: Layout) => void;
+  readonly rootClassName: string;
+  readonly rows: readonly LayoutSegmentRowAuthority[];
+}
+
+interface LayoutSegmentPublication {
+  readonly authority: LayoutSegmentAuthority;
+  readonly root: HTMLDivElement;
+  readonly ownerDocument: Document;
+  readonly ownerRealm: Window & typeof globalThis;
+  readonly dom: LayoutSegmentDomSnapshot;
+  readonly placement: LayoutSegmentPlacement;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+}
+
+interface LayoutSegmentPublicationReplay {
+  readonly source: LayoutSegmentPublication;
+  readonly dom: LayoutSegmentDomSnapshot;
+  readonly placement: LayoutSegmentPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface LayoutSegmentPublicationRuntime {
+  readonly publication: LayoutSegmentPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: LayoutSegmentElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly replay: () => LayoutSegmentPublicationReplay | null;
+}
+
+interface LayoutSegmentDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+class LayoutSegmentElementOwner<T extends Element> implements LayoutSegmentElementOwnerView {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: LayoutSegmentElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+  readonly capture = (element: T | null) => {
+    if (this.#current === element) return;
+    const previous = this.#current;
+    const last = this.#last;
+    this.#current = element;
+    if (element) this.#last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+class LayoutSegmentPublicationCoordinator {
+  #active: LayoutSegmentPublication | null = null;
+  #successorOf: LayoutSegmentPublication | null = null;
+  #replay: LayoutSegmentPublicationReplay | null = null;
+  #retired = new WeakSet<LayoutSegmentPublication>();
+  #claimedPublications = new WeakSet<LayoutSegmentPublication>();
+  #claimedActions = new WeakSet<object>();
+  #claimedEvents = new WeakSet<object>();
+
+  constructor(private readonly mount: symbol) {}
+
+  active() {
+    return this.#active;
+  }
+
+  replay() {
+    return this.#replay;
+  }
+
+  acceptsSuccessorOf(publication: LayoutSegmentPublication) {
+    return (
+      this.#active === null
+      && this.#successorOf === publication
+      && this.#retired.has(publication)
+      && !this.#claimedPublications.has(publication)
+    );
+  }
+
+  stageReplay(replay: LayoutSegmentPublicationReplay) {
+    if (!this.acceptsSuccessorOf(replay.source)) return false;
+    this.#replay = replay;
+    return true;
+  }
+
+  abandonReplay(publication: LayoutSegmentPublication) {
+    if (this.#replay?.source === publication) this.#replay = null;
+    if (this.#successorOf === publication) this.#successorOf = null;
+  }
+
+  publish(publication: LayoutSegmentPublication) {
+    if (
+      publication.authority.mount !== this.mount
+      || this.#retired.has(publication)
+    ) {
+      return false;
+    }
+    const previous = this.#active;
+    if (previous && previous !== publication) previous.retire();
+    this.#active = publication;
+    this.#successorOf = null;
+    this.#replay = null;
+    return true;
+  }
+
+  retire(publication: LayoutSegmentPublication) {
+    if (this.#retired.has(publication)) return false;
+    this.#retired.add(publication);
+    if (this.#active === publication) {
+      this.#active = null;
+      this.#successorOf = publication;
+    }
+    return true;
+  }
+
+  isCurrent(publication: LayoutSegmentPublication) {
+    return this.#active === publication && !this.#retired.has(publication);
+  }
+
+  hasClaimed(
+    publication: LayoutSegmentPublication,
+    action: object,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    return (
+      this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(action)
+      || this.#claimedEvents.has(event)
+      || this.#claimedEvents.has(nativeEvent)
+    );
+  }
+
+  claim(
+    publication: LayoutSegmentPublication,
+    action: object,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    if (
+      !this.isCurrent(publication)
+      || this.hasClaimed(publication, action, event, nativeEvent)
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(action);
+    this.#claimedEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    return true;
+  }
+}
+
+class LayoutSegmentPresentationCache {
+  #current: {
+    readonly authority: LayoutSegmentAuthority;
+    readonly presentation: LayoutSegmentPresentation;
+    readonly revision: number;
+  } | null = null;
+
+  resolve(
+    authority: LayoutSegmentAuthority,
+    revision: number,
+    create: () => LayoutSegmentPresentation,
+  ) {
+    if (
+      !this.#current
+      || this.#current.revision !== revision
+      || !layoutSegmentAuthoritiesMatch(this.#current.authority, authority)
+    ) {
+      this.#current = Object.freeze({
+        authority,
+        presentation: create(),
+        revision,
+      });
+    }
+    return this.#current.presentation;
+  }
+}
+
+function layoutSegmentSnapshotAttributes(node: Node) {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function layoutSegmentSnapshotDom(node: Node): LayoutSegmentDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: layoutSegmentSnapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(layoutSegmentSnapshotDom)),
+  });
+}
+
+function layoutSegmentDomMatches(snapshot: LayoutSegmentDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = layoutSegmentSnapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length
+    || attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || name !== expected[0] || value !== expected[1];
+    })
+  ) {
+    return false;
+  }
   return (
-    <div className="inline-flex h-9 shrink-0 rounded-lg border border-line-2 bg-surface p-0.5 md:hidden" role="radiogroup" aria-label="Pane" data-testid="layout-segment">
-      {options.map((o) => {
-        const active = layout === o.value;
+    node.childNodes.length === snapshot.children.length
+    && snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && layoutSegmentDomMatches(child))
+  );
+}
+
+function layoutSegmentSnapshotContains(
+  snapshot: LayoutSegmentDomSnapshot,
+  node: Node,
+): boolean {
+  return snapshot.node === node
+    || snapshot.children.some((child) => layoutSegmentSnapshotContains(child, node));
+}
+
+function layoutSegmentPlacement(root: HTMLDivElement): LayoutSegmentPlacement | null {
+  const parent = root.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: root.ownerDocument,
+    parent,
+    previousSibling: root.previousSibling,
+    nextSibling: root.nextSibling,
+  });
+}
+
+function layoutSegmentPlacementMatches(
+  root: HTMLDivElement,
+  placement: LayoutSegmentPlacement,
+) {
+  return (
+    root.ownerDocument === placement.document
+    && root.parentNode === placement.parent
+    && root.previousSibling === placement.previousSibling
+    && root.nextSibling === placement.nextSibling
+  );
+}
+
+function createLayoutSegmentDomGuard(
+  root: HTMLDivElement,
+  placement: LayoutSegmentPlacement,
+): LayoutSegmentDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList" || record.target !== placement.parent) return false;
+      if (record.previousSibling === root || record.nextSibling === root) return true;
+      return [...record.addedNodes, ...record.removedNodes].some((node) =>
+        node === root || (node.nodeType === 1 && (node as Element).contains(root)));
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createLayoutSegmentPublicationRuntime(
+  authority: LayoutSegmentAuthority,
+  coordinator: LayoutSegmentPublicationCoordinator,
+  root: HTMLDivElement,
+  owners: readonly LayoutSegmentElementOwnerView[],
+): LayoutSegmentPublicationRuntime {
+  type Retirement = "element" | "layout" | "other";
+  const placement = layoutSegmentPlacement(root);
+  if (!placement) throw new Error("Cannot publish a pane switch without a committed parent");
+  const ownerRealm = placement.document.defaultView;
+  if (!ownerRealm) throw new Error("Cannot publish a pane switch without an owner realm");
+  const dom = layoutSegmentSnapshotDom(root);
+  let retired = false;
+  let retirement: Retirement | null = null;
+  let established = false;
+  let layoutRetired = false;
+  let invalidReplay = false;
+  let replayRefs: LayoutSegmentRefReplay[] = [];
+  let domGuard: LayoutSegmentDomGuard | null = null;
+  const publishedDomMatches = () =>
+    Boolean(
+      domGuard
+      && domGuard.isClean()
+      && root === dom.node
+      && root.isConnected
+      && layoutSegmentPlacementMatches(root, placement)
+      && layoutSegmentDomMatches(dom)
+    );
+  const retire = (reason: Retirement) => {
+    if (retired) return false;
+    retired = true;
+    retirement = reason;
+    coordinator.retire(publication);
+    queueMicrotask(() => {
+      if (coordinator.replay()?.source !== publication) domGuard?.release();
+    });
+    return true;
+  };
+  const publication: LayoutSegmentPublication = Object.freeze({
+    authority,
+    root,
+    ownerDocument: root.ownerDocument,
+    ownerRealm,
+    dom,
+    placement,
+    retire: () => retire("other"),
+    isRetired: () => retired,
+    publishedDomMatches,
+  });
+  const refsHaveNoReplay = () =>
+    !invalidReplay
+    && replayRefs.every((entry) =>
+      !entry.detached
+      && !entry.reattached
+      && entry.owner.element() === entry.element);
+  const refsHaveExactReplay = () =>
+    !invalidReplay
+    && replayRefs.length > 0
+    && replayRefs.every((entry) =>
+      entry.detached
+      && entry.reattached
+      && entry.owner.element() === entry.element);
+
+  return Object.freeze({
+    publication,
+    publish: () => {
+      established = true;
+      replayRefs = owners.map((owner) => {
+        const element = owner.element();
+        if (!element) throw new Error("Cannot publish a pane switch without every committed ref");
+        return { owner, element, detached: false, reattached: false };
+      });
+      domGuard = createLayoutSegmentDomGuard(root, placement);
+      if (!domGuard || !coordinator.publish(publication)) {
+        domGuard?.release();
+        return false;
+      }
+      return true;
+    },
+    retireForElement: () => {
+      retire("element");
+    },
+    retireForLayout: () => {
+      layoutRetired = true;
+      retire("layout");
+    },
+    noteRef: (
+      owner: LayoutSegmentElementOwnerView,
+      element: Element | null,
+      previous: Element | null,
+    ) => {
+      if (!established) return;
+      const proof = replayRefs.find((entry) => entry.owner === owner);
+      if (!proof) {
+        invalidReplay = true;
+        return;
+      }
+      if (element === null && previous === proof.element) {
+        proof.detached = true;
+        proof.reattached = false;
+      } else if (
+        element === proof.element
+        && previous === null
+        && proof.detached
+      ) {
+        proof.reattached = true;
+      } else if (element !== previous) {
+        invalidReplay = true;
+      }
+      if (
+        !retired
+        && replayRefs.every((entry) => entry.owner.element() === entry.element)
+      ) {
+        for (const entry of replayRefs) {
+          entry.detached = false;
+          entry.reattached = false;
+        }
+        invalidReplay = false;
+      }
+    },
+    isExactElementReplay: () =>
+      retired
+      && retirement === "element"
+      && layoutRetired
+      && established
+      && refsHaveExactReplay()
+      && publishedDomMatches(),
+    isExactLayoutReplay: () =>
+      retired
+      && retirement === "layout"
+      && established
+      && (refsHaveNoReplay() || refsHaveExactReplay())
+      && publishedDomMatches(),
+    replay: () =>
+      domGuard
+        ? Object.freeze({
+            source: publication,
+            dom,
+            placement,
+            historyIsClean: domGuard.isClean,
+            release: domGuard.release,
+          })
+        : null,
+  });
+}
+
+function layoutSegmentReplayAllowsPublication(
+  coordinator: LayoutSegmentPublicationCoordinator,
+  authority: LayoutSegmentAuthority,
+  root: HTMLDivElement,
+) {
+  const replay = coordinator.replay();
+  if (!replay) return true;
+  const sameAuthority = layoutSegmentAuthoritiesMatch(
+    replay.source.authority,
+    authority,
+    false,
+  );
+  const exactReplay = (
+    sameAuthority
+    && coordinator.acceptsSuccessorOf(replay.source)
+    && replay.historyIsClean()
+    && root === replay.dom.node
+    && layoutSegmentPlacementMatches(root, replay.placement)
+    && layoutSegmentDomMatches(replay.dom)
+  );
+  coordinator.abandonReplay(replay.source);
+  replay.release();
+  return !sameAuthority || exactReplay;
+}
+
+function layoutSegmentAuthoritiesMatch(
+  previous: LayoutSegmentAuthority,
+  current: LayoutSegmentAuthority,
+  includeRevision = true,
+) {
+  return (
+    previous.mount === current.mount
+    && (!includeRevision || previous.revision === current.revision)
+    && previous.layout === current.layout
+    && previous.onLayout === current.onLayout
+    && previous.rootClassName === current.rootClassName
+    && previous.rows.length === current.rows.length
+    && previous.rows.every((row, index) => {
+      const candidate = current.rows[index];
+      return Boolean(
+        candidate
+        && row.index === candidate.index
+        && row.value === candidate.value
+        && row.label === candidate.label
+        && row.iconName === candidate.iconName
+        && row.checked === candidate.checked
+        && row.tabIndex === candidate.tabIndex
+        && row.className === candidate.className
+        && row.size === candidate.size
+      );
+    })
+  );
+}
+
+type LayoutSegmentIntrinsicGetter<T> = (target: object) => T;
+type LayoutSegmentIntrinsicMethod<A extends readonly unknown[], R> =
+  (target: object, ...args: A) => R;
+
+function layoutSegmentDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current
+    && current.configurable === expected.configurable
+    && current.enumerable === expected.enumerable
+    && current.get === expected.get
+    && current.set === expected.set
+    && current.value === expected.value
+    && current.writable === expected.writable
+  );
+}
+
+function captureLayoutSegmentIntrinsicGetter<T>(
+  prototype: object,
+  property: string,
+): LayoutSegmentIntrinsicGetter<T> | null {
+  let current: object | null = prototype;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const getter = descriptor.get;
+      return (target) => Reflect.apply(getter, target, []) as T;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return null;
+}
+
+function captureLayoutSegmentIntrinsicMethod<A extends readonly unknown[], R>(
+  prototype: object,
+  property: string,
+): LayoutSegmentIntrinsicMethod<A, R> | null {
+  let current: object | null = prototype;
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    if (descriptor) {
+      if (typeof descriptor.value !== "function") return null;
+      const method = descriptor.value as (...args: A) => R;
+      return (target, ...args) => Reflect.apply(method, target, args) as R;
+    }
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return null;
+}
+
+interface LayoutSegmentTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+function captureLayoutSegmentTrustedAuthority(
+  view: Window & typeof globalThis,
+): LayoutSegmentTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new view.KeyboardEvent("layout-segment-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const apply = view.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor
+    || descriptor.configurable !== false
+    || typeof descriptor.get !== "function"
+    || descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    layoutSegmentDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && view.Reflect.apply === apply
+      && matches(probe),
+  });
+}
+
+interface LayoutSegmentKeyboardAuthority {
+  readonly view: Window & typeof globalThis;
+  readonly trusted: LayoutSegmentTrustedAuthority;
+  readonly eventType: LayoutSegmentIntrinsicGetter<string>;
+  readonly eventTarget: LayoutSegmentIntrinsicGetter<EventTarget | null>;
+  readonly eventPhase: LayoutSegmentIntrinsicGetter<number>;
+  readonly eventBubbles: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventCancelable: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventComposed: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventDefaultPrevented: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventCancelBubble: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventTimeStamp: LayoutSegmentIntrinsicGetter<number>;
+  readonly eventPath: LayoutSegmentIntrinsicMethod<readonly [], EventTarget[]>;
+  readonly preventDefault: LayoutSegmentIntrinsicMethod<readonly [], void>;
+  readonly key: LayoutSegmentIntrinsicGetter<string>;
+  readonly code: LayoutSegmentIntrinsicGetter<string>;
+  readonly location: LayoutSegmentIntrinsicGetter<number>;
+  readonly repeat: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly composing: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly altKey: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly ctrlKey: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly metaKey: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly shiftKey: LayoutSegmentIntrinsicGetter<boolean>;
+  readonly eventView: LayoutSegmentIntrinsicGetter<Window | null>;
+  readonly activeElement: LayoutSegmentIntrinsicGetter<Element | null>;
+  readonly focus: LayoutSegmentIntrinsicMethod<readonly [FocusOptions?], void>;
+}
+
+function captureLayoutSegmentKeyboardAuthority(
+  publication: LayoutSegmentPublication,
+): LayoutSegmentKeyboardAuthority | null {
+  const { ownerDocument, ownerRealm: view } = publication;
+  const eventPrototype = view.Event.prototype;
+  const uiEventPrototype = view.UIEvent.prototype;
+  const keyboardPrototype = view.KeyboardEvent.prototype;
+  const trusted = captureLayoutSegmentTrustedAuthority(view);
+  const eventType = captureLayoutSegmentIntrinsicGetter<string>(eventPrototype, "type");
+  const eventTarget = captureLayoutSegmentIntrinsicGetter<EventTarget | null>(eventPrototype, "target");
+  const eventPhase = captureLayoutSegmentIntrinsicGetter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "cancelable");
+  const eventComposed = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "composed");
+  const eventDefaultPrevented = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "defaultPrevented");
+  const eventCancelBubble = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "cancelBubble");
+  const eventTimeStamp = captureLayoutSegmentIntrinsicGetter<number>(eventPrototype, "timeStamp");
+  const eventPath = captureLayoutSegmentIntrinsicMethod<readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureLayoutSegmentIntrinsicMethod<readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const key = captureLayoutSegmentIntrinsicGetter<string>(keyboardPrototype, "key");
+  const code = captureLayoutSegmentIntrinsicGetter<string>(keyboardPrototype, "code");
+  const location = captureLayoutSegmentIntrinsicGetter<number>(keyboardPrototype, "location");
+  const repeat = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "repeat");
+  const composing = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "isComposing");
+  const altKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "shiftKey");
+  const eventView = captureLayoutSegmentIntrinsicGetter<Window | null>(
+    uiEventPrototype,
+    "view",
+  );
+  const activeElement = captureLayoutSegmentIntrinsicGetter<Element | null>(
+    view.Document.prototype,
+    "activeElement",
+  );
+  const focus = captureLayoutSegmentIntrinsicMethod<readonly [FocusOptions?], void>(
+    view.HTMLElement.prototype,
+    "focus",
+  );
+  if (
+    !trusted
+    || !eventType
+    || !eventTarget
+    || !eventPhase
+    || !eventBubbles
+    || !eventCancelable
+    || !eventComposed
+    || !eventDefaultPrevented
+    || !eventCancelBubble
+    || !eventTimeStamp
+    || !eventPath
+    || !preventDefault
+    || !key
+    || !code
+    || !location
+    || !repeat
+    || !composing
+    || !altKey
+    || !ctrlKey
+    || !metaKey
+    || !shiftKey
+    || !eventView
+    || !activeElement
+    || !focus
+    || ownerDocument.defaultView !== view
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    view,
+    trusted,
+    eventType,
+    eventTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventComposed,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventTimeStamp,
+    eventPath,
+    preventDefault,
+    key,
+    code,
+    location,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    eventView,
+    activeElement,
+    focus,
+  });
+}
+
+function layoutSegmentDestination(
+  key: string,
+  current: number,
+  count: number,
+): number | null {
+  if (count < 2 || current < 0 || current >= count) return null;
+  if (key === "ArrowRight" || key === "ArrowDown") return (current + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (current - 1 + count) % count;
+  if (key === "Home") return current === 0 ? null : 0;
+  if (key === "End") return current === count - 1 ? null : count - 1;
+  return null;
+}
+
+function exactNativeLayoutSegmentKey(
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  publication: LayoutSegmentPublication,
+  control: HTMLButtonElement,
+  authority: LayoutSegmentKeyboardAuthority,
+): { readonly event: KeyboardEvent; readonly key: string } | null {
+  if (!event || typeof event !== "object") return null;
+  const nativeEvent = event.nativeEvent;
+  const reactEvent = event as React.KeyboardEvent<HTMLButtonElement> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  if (
+    publication.ownerRealm !== authority.view
+    || publication.ownerDocument.defaultView !== authority.view
+    || !(nativeEvent instanceof authority.view.KeyboardEvent)
+    || !authority.trusted.isCurrent()
+    || !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  const nativeTarget = authority.eventTarget(nativeEvent);
+  const nativePhase = authority.eventPhase(nativeEvent);
+  const path = authority.eventPath(nativeEvent);
+  const key = authority.key(nativeEvent);
+  const code = authority.code(nativeEvent);
+  const location = authority.location(nativeEvent);
+  const repeat = authority.repeat(nativeEvent);
+  const composing = authority.composing(nativeEvent);
+  const altKey = authority.altKey(nativeEvent);
+  const ctrlKey = authority.ctrlKey(nativeEvent);
+  const metaKey = authority.metaKey(nativeEvent);
+  const shiftKey = authority.shiftKey(nativeEvent);
+  const bubbles = authority.eventBubbles(nativeEvent);
+  const cancelable = authority.eventCancelable(nativeEvent);
+  const composed = authority.eventComposed(nativeEvent);
+  const timeStamp = authority.eventTimeStamp(nativeEvent);
+  const nativeView = authority.eventView(nativeEvent);
+  let trusted = false;
+  try {
+    trusted = authority.trusted.read(nativeEvent);
+  } catch {
+    return null;
+  }
+  return (
+    authority.eventType(nativeEvent) === "keydown"
+    && nativePhase !== authority.view.Event.NONE
+    && bubbles
+    && cancelable
+    && composed
+    && trusted === true
+    && !authority.eventDefaultPrevented(nativeEvent)
+    && !authority.eventCancelBubble(nativeEvent)
+    && !repeat
+    && !composing
+    && !altKey
+    && !ctrlKey
+    && !metaKey
+    && !shiftKey
+    && event.nativeEvent === nativeEvent
+    && event.type === "keydown"
+    && event.currentTarget === control
+    && event.target === nativeTarget
+    && event.eventPhase === nativePhase
+    && event.key === key
+    && event.code === code
+    && event.location === location
+    && event.repeat === repeat
+    && event.altKey === altKey
+    && event.ctrlKey === ctrlKey
+    && event.metaKey === metaKey
+    && event.shiftKey === shiftKey
+    && event.bubbles === bubbles
+    && event.cancelable === cancelable
+    && event.isTrusted === trusted
+    && event.timeStamp === timeStamp
+    && Object.is(event.view, nativeView)
+    && !event.defaultPrevented
+    && nativeTarget instanceof authority.view.Node
+    && nativeTarget.ownerDocument === publication.ownerDocument
+    && control.contains(nativeTarget)
+    && path[0] === nativeTarget
+    && path.includes(control)
+    && path.includes(publication.root)
+    && layoutSegmentSnapshotContains(publication.dom, nativeTarget)
+    && authority.activeElement(publication.ownerDocument) === control
+    && reactEvent._reactName === "onKeyDown"
+    && typeof reactEvent.isDefaultPrevented === "function"
+    && !reactEvent.isDefaultPrevented()
+    && typeof reactEvent.isPropagationStopped === "function"
+    && !reactEvent.isPropagationStopped()
+    && typeof reactEvent.persist === "function"
+  )
+    ? Object.freeze({ event: nativeEvent, key })
+    : null;
+}
+
+interface LayoutSegmentRowPresentation {
+  readonly authority: LayoutSegmentRowAuthority;
+  readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly captureIcon: (element: SVGSVGElement | null) => void;
+  readonly buttonOwner: LayoutSegmentElementOwner<HTMLButtonElement>;
+  readonly iconOwner: LayoutSegmentElementOwner<SVGSVGElement>;
+  readonly onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+}
+
+interface LayoutSegmentPresentation {
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly rows: readonly LayoutSegmentRowPresentation[];
+  readonly establish: () => void | (() => void);
+}
+
+function layoutSegmentIconMatches(
+  icon: SVGSVGElement,
+  parent: HTMLButtonElement,
+  iconName: string,
+  size: number,
+) {
+  return (
+    icon.isConnected
+    && icon.ownerDocument === parent.ownerDocument
+    && icon.parentElement === parent
+    && parent.children.length === 1
+    && parent.firstElementChild === icon
+    && icon.tagName.toLowerCase() === "svg"
+    && icon.classList.contains(`lucide-${iconName}`)
+    && icon.getAttribute("width") === String(size)
+    && icon.getAttribute("height") === String(size)
+    && icon.getAttribute("aria-hidden") === "true"
+  );
+}
+
+function createLayoutSegmentPresentation(
+  authority: LayoutSegmentAuthority,
+  coordinator: LayoutSegmentPublicationCoordinator,
+  requestSuccessor: () => void,
+): LayoutSegmentPresentation {
+  let currentRuntime: LayoutSegmentPublicationRuntime | null = null;
+  let lastRuntime: LayoutSegmentPublicationRuntime | null = null;
+  let keyboardAuthority: LayoutSegmentKeyboardAuthority | null = null;
+  let successorRequested = false;
+  const { mount, revision, layout, onLayout, rootClassName, rows } = authority;
+  const onElementChange = (
+    owner: LayoutSegmentElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      runtime?.isExactElementReplay()
+      && coordinator.acceptsSuccessorOf(runtime.publication)
+    ) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const rootOwner = new LayoutSegmentElementOwner<HTMLDivElement>(onElementChange);
+  const rowPresentations = rows.map((row) => {
+    const buttonOwner = new LayoutSegmentElementOwner<HTMLButtonElement>(onElementChange);
+    const iconOwner = new LayoutSegmentElementOwner<SVGSVGElement>(onElementChange);
+    const keyboardAction = Object.freeze({
+      identity: Symbol(`layout-segment-${row.value}-keyboard-action`),
+    });
+    const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      const publication = coordinator.active();
+      const button = buttonOwner.element();
+      if (
+        !publication
+        || publication.isRetired()
+        || !layoutSegmentAuthoritiesMatch(publication.authority, authority)
+        || !row.checked
+        || row.value !== layout
+        || rows[row.index] !== row
+        || !button
+        || button.tabIndex !== 0
+        || !coordinator.isCurrent(publication)
+        || !factsAreCurrent()
+        || !exactDomIsCurrent()
+        || !publication.publishedDomMatches()
+        || !keyboardAuthority
+      ) {
+        return;
+      }
+      const exactEvent = exactNativeLayoutSegmentKey(
+        event,
+        publication,
+        button,
+        keyboardAuthority,
+      );
+      const destinationIndex = exactEvent
+        ? layoutSegmentDestination(exactEvent.key, row.index, rows.length)
+        : null;
+      const destination = destinationIndex === null
+        ? null
+        : rowPresentations[destinationIndex];
+      const destinationButton = destination?.buttonOwner.element();
+      if (
+        !exactEvent
+        || destinationIndex === null
+        || !destination
+        || destination.authority !== rows[destinationIndex]
+        || destination.authority.checked
+        || destination.authority.value === layout
+        || !destinationButton
+        || destinationButton.ownerDocument !== publication.ownerDocument
+        || destinationButton.parentElement !== publication.root
+        || publication.root.children.item(destinationIndex) !== destinationButton
+        || coordinator.hasClaimed(
+          publication,
+          keyboardAction,
+          event,
+          exactEvent.event,
+        )
+        || !coordinator.claim(
+          publication,
+          keyboardAction,
+          event,
+          exactEvent.event,
+        )
+      ) {
+        return;
+      }
+      keyboardAuthority.preventDefault(exactEvent.event);
+      onLayout(destination.authority.value);
+      keyboardAuthority.focus(destinationButton, { preventScroll: true });
+    };
+    return Object.freeze({
+      authority: row,
+      captureButton: buttonOwner.capture,
+      captureIcon: iconOwner.capture,
+      buttonOwner,
+      iconOwner,
+      onKeyDown,
+    });
+  });
+  const expectedOwners = () => Object.freeze([
+    rootOwner,
+    ...rowPresentations.flatMap(({ buttonOwner, iconOwner }) => [buttonOwner, iconOwner]),
+  ]);
+  const factsAreCurrent = () =>
+    authority.mount === mount
+    && authority.revision === revision
+    && authority.layout === layout
+    && authority.onLayout === onLayout
+    && authority.rootClassName === rootClassName
+    && authority.rows === rows
+    && rootClassName === LAYOUT_SEGMENT_CLASS_NAME
+    && rows.length === LAYOUT_SEGMENT_OPTIONS.length
+    && rows.every((row, index) => {
+      const option = LAYOUT_SEGMENT_OPTIONS[index];
+      return Boolean(
+        option
+        && row.index === index
+        && row.value === option.value
+        && row.label === option.label
+        && row.iconName === option.iconName
+        && row.checked === (row.value === layout)
+        && row.tabIndex === (row.checked ? 0 : -1)
+        && row.className === cn(
+          LAYOUT_SEGMENT_ROW_BASE_CLASS_NAME,
+          row.checked
+            ? LAYOUT_SEGMENT_ROW_ACTIVE_CLASS_NAME
+            : LAYOUT_SEGMENT_ROW_INACTIVE_CLASS_NAME,
+        )
+        && row.size === 17
+      );
+    });
+  const exactDomIsCurrent = () => {
+    const root = rootOwner.element();
+    return (
+      !!root
+      && root.isConnected
+      && root.ownerDocument.defaultView !== null
+      && root.tagName === "DIV"
+      && root.getAttribute("class") === rootClassName
+      && root.getAttribute("role") === "radiogroup"
+      && root.getAttribute("aria-label") === "Pane"
+      && root.dataset.testid === "layout-segment"
+      && root.children.length === LAYOUT_SEGMENT_OPTIONS.length
+      && root.childNodes.length === LAYOUT_SEGMENT_OPTIONS.length
+      && rowPresentations.every((presentation, index) => {
+        const row = presentation.authority;
+        const button = presentation.buttonOwner.element();
+        const icon = presentation.iconOwner.element();
+        return (
+          rows[index] === row
+          && !!button
+          && !!icon
+          && button.isConnected
+          && button.ownerDocument === root.ownerDocument
+          && button.tagName === "BUTTON"
+          && button.parentElement === root
+          && root.children.item(index) === button
+          && root.childNodes.item(index) === button
+          && button.getAttribute("type") === "button"
+          && button.type === "button"
+          && !button.disabled
+          && !button.matches(":disabled")
+          && button.getAttribute("role") === "radio"
+          && button.getAttribute("aria-checked") === String(row.checked)
+          && button.getAttribute("aria-label") === row.label
+          && button.getAttribute("title") === row.label
+          && button.tabIndex === row.tabIndex
+          && button.getAttribute("tabindex") === String(row.tabIndex)
+          && button.getAttribute("class") === row.className
+          && button.dataset.testid === `layout-segment-${row.value}`
+          && button.childNodes.length === 1
+          && layoutSegmentIconMatches(icon, button, row.iconName, row.size)
+        );
+      })
+    );
+  };
+  const requestReplaySuccessor = (runtime: LayoutSegmentPublicationRuntime) => {
+    const replay = runtime.replay();
+    if (
+      successorRequested
+      || !replay
+      || !coordinator.acceptsSuccessorOf(runtime.publication)
+      || !factsAreCurrent()
+      || !exactDomIsCurrent()
+      || !runtime.publication.publishedDomMatches()
+      || !coordinator.stageReplay(replay)
+    ) {
+      return;
+    }
+    successorRequested = true;
+    requestSuccessor();
+  };
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay())
+        && coordinator.acceptsSuccessorOf(lastRuntime.publication)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return undefined;
+    const root = rootOwner.element();
+    if (
+      !root
+      || !layoutSegmentReplayAllowsPublication(coordinator, authority, root)
+    ) {
+      return undefined;
+    }
+    const runtime = createLayoutSegmentPublicationRuntime(
+      authority,
+      coordinator,
+      root,
+      expectedOwners(),
+    );
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    keyboardAuthority = captureLayoutSegmentKeyboardAuthority(runtime.publication);
+    if (!keyboardAuthority || !runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      keyboardAuthority = null;
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  return Object.freeze({
+    captureRoot: rootOwner.capture,
+    rows: Object.freeze(rowPresentations),
+    establish,
+  });
+}
+
+/** Preview | Markdown switch shown in the header below `md`; the status-bar menu covers wider windows. */
+export function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: (l: Layout) => void }) {
+  const [mount] = useState(() => Symbol("layout segment"));
+  const [coordinator] = useState(
+    () => new LayoutSegmentPublicationCoordinator(mount),
+  );
+  const [presentationCache] = useState(
+    () => new LayoutSegmentPresentationCache(),
+  );
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
+  const candidateRows = Object.freeze(
+    LAYOUT_SEGMENT_OPTIONS.map((option, index) => {
+      const checked = option.value === layout;
+      return Object.freeze({
+        index,
+        value: option.value,
+        label: option.label,
+        iconName: option.iconName,
+        checked,
+        tabIndex: checked ? 0 as const : -1 as const,
+        className: cn(
+          LAYOUT_SEGMENT_ROW_BASE_CLASS_NAME,
+          checked
+            ? LAYOUT_SEGMENT_ROW_ACTIVE_CLASS_NAME
+            : LAYOUT_SEGMENT_ROW_INACTIVE_CLASS_NAME,
+        ),
+        size: 17,
+      });
+    }),
+  );
+  const candidate: LayoutSegmentAuthority = Object.freeze({
+    mount,
+    revision: publicationRevision,
+    layout,
+    onLayout,
+    rootClassName: LAYOUT_SEGMENT_CLASS_NAME,
+    rows: candidateRows,
+  });
+  const presentation = presentationCache.resolve(
+    candidate,
+    publicationRevision,
+    () => createLayoutSegmentPresentation(
+      candidate,
+      coordinator,
+      requestPublicationSuccessor,
+    ),
+  );
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  const { captureRoot, rows } = presentation;
+
+  return (
+    <div ref={captureRoot} className={LAYOUT_SEGMENT_CLASS_NAME} role="radiogroup" aria-label="Pane" data-testid="layout-segment">
+      {rows.map((row) => {
+        const option = LAYOUT_SEGMENT_OPTIONS[row.authority.index];
+        if (!option) return null;
         return (
           <button
-            key={o.value}
+            ref={row.captureButton}
+            key={row.authority.value}
             type="button"
             role="radio"
-            aria-checked={active}
-            aria-label={o.label}
-            title={o.label}
-            className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors", active ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
-            onClick={() => onLayout(o.value)}
-            data-testid={`layout-segment-${o.value}`}
+            aria-checked={row.authority.checked}
+            aria-label={row.authority.label}
+            title={row.authority.label}
+            tabIndex={row.authority.tabIndex}
+            className={row.authority.className}
+            onClick={() => onLayout(row.authority.value)}
+            onKeyDown={row.onKeyDown}
+            data-testid={`layout-segment-${row.authority.value}`}
           >
-            {o.icon}
+            <option.Icon ref={row.captureIcon} size={row.authority.size} />
           </button>
         );
       })}
