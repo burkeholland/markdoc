@@ -2799,8 +2799,8 @@ function createImagePresentation(
           !factsAreCurrent()
         ) {
           const successorWasRequested = successorRequested;
-          coordinator.abandonReplay(runtime.publication);
           replay.release();
+          coordinator.rejectReplay(runtime.publication);
           successorRequested = true;
           const abandoned = abandonDeferredUpload();
           if (!abandoned && !successorWasRequested) {

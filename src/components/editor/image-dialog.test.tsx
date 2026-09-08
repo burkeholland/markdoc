@@ -1712,6 +1712,46 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(currentClose).toHaveBeenCalledOnce();
   });
 
+  it("rejects the source authority when dirty history aborts partial recovery", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onSubmit = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={onSubmit}
+      />,
+    );
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+    const originalCancel = screen.getByRole("button", { name: "Cancel" });
+
+    inputRef(null);
+    inputRef(input);
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "mutated-before-partial-recovery";
+    content.className = className;
+    await act(async () => {});
+
+    fireEvent.click(originalCancel);
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={onSubmit}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("suppresses a genuine submit after staged replay rejection and recovers freshly", async () => {
     const staleClose = vi.fn();
     const currentClose = vi.fn();
