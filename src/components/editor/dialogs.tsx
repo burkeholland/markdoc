@@ -2332,7 +2332,8 @@ function createImagePublicationRuntime(
   ) => {
     return (
       Boolean(guard?.isClean(changing)) &&
-      committedDomMatches(changing)
+      committedDomMatches(changing) &&
+      Boolean(guard?.isClean(changing))
     );
   };
   const committedDomMatches = (
@@ -2562,6 +2563,7 @@ function createImagePresentation(
     fallbackAlt: string,
   ) => void,
   resumeUploadSettlement: () => void,
+  abandonDeferredUpload: () => void,
   afterClose: ImageAfterCloseAuthority,
   completeClose: (closer: object) => void,
 ): ImagePresentation {
@@ -2859,6 +2861,7 @@ function createImagePresentation(
     }
     const dom = exactDom();
     if (!factsAreCurrent() || !dom || replayRejected) {
+      if (coordinator.replay()) abandonDeferredUpload();
       return undefined;
     }
     submitProvenance = Object.freeze({
@@ -2869,6 +2872,7 @@ function createImagePresentation(
     });
     if (!imageReplayAllowsPublication(coordinator, authority, dom)) {
       replayRejected = true;
+      abandonDeferredUpload();
       return undefined;
     }
     const runtime = createImagePublicationRuntime(
@@ -2884,6 +2888,7 @@ function createImagePresentation(
     );
     if (!runtime) {
       replayRejected = true;
+      abandonDeferredUpload();
       return undefined;
     }
     currentRuntime = runtime;
@@ -2892,6 +2897,7 @@ function createImagePresentation(
     if (!runtime.publish()) {
       runtime.retireForElement();
       currentRuntime = null;
+      abandonDeferredUpload();
       return undefined;
     }
     resumeUploadSettlement();
@@ -3371,6 +3377,41 @@ export const ImageDialog = memo(function ImageDialog({
   const requestSuccessor = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
   }, []);
+  const abandonUploadOwner = useCallback(
+    (owner: ImageUploadOwner, publication: ImagePublication | null = null) => {
+      const deferred = deferredUploadOutcome.get();
+      if (deferred?.owner === owner) deferredUploadOutcome.set(null);
+      if (activeUpload.get() !== owner) return;
+      activeUpload.set(null);
+      setDraft((current) =>
+        current.visit === owner.visit &&
+        current.upload === owner &&
+        current.open
+          ? nextImageDraft(current, { upload: null })
+          : current,
+      );
+      const currentPublication = coordinator.active();
+      if (
+        currentPublication &&
+        imageUploadMatchesAuthority(owner, currentPublication.authority)
+      ) {
+        currentPublication.retire();
+      } else {
+        publication?.retire();
+      }
+      requestSuccessor();
+    },
+    [
+      activeUpload,
+      coordinator,
+      deferredUploadOutcome,
+      requestSuccessor,
+    ],
+  );
+  const abandonDeferredUpload = useCallback(() => {
+    const deferred = deferredUploadOutcome.get();
+    if (deferred) abandonUploadOwner(deferred.owner);
+  }, [abandonUploadOwner, deferredUploadOutcome]);
   const leaseUpload = useCallback(
     (owner: ImageUploadOwner): ImageUploadLease | null => {
       const publication = coordinator.active();
@@ -3423,20 +3464,9 @@ export const ImageDialog = memo(function ImageDialog({
   );
   const abandonSettledUpload = useCallback(
     (lease: ImageUploadLease) => {
-      const owner = lease.owner;
-      if (activeUpload.get() !== owner) return;
-      activeUpload.set(null);
-      setDraft((current) =>
-        current.visit === owner.visit &&
-        current.upload === owner &&
-        current.open
-          ? nextImageDraft(current, { upload: null })
-          : current,
-      );
-      lease.publication.retire();
-      requestSuccessor();
+      abandonUploadOwner(lease.owner, lease.publication);
     },
-    [activeUpload, requestSuccessor],
+    [abandonUploadOwner],
   );
   const settleUpload = useCallback(
     (
@@ -3461,7 +3491,9 @@ export const ImageDialog = memo(function ImageDialog({
           deferredUploadOutcome.set(
             Object.freeze({ owner, outcome, source: replay.source }),
           );
+          return;
         }
+        abandonUploadOwner(owner);
         return;
       }
       const deferred = deferredUploadOutcome.get();
@@ -3471,7 +3503,10 @@ export const ImageDialog = memo(function ImageDialog({
       let message: string | null = null;
       let succeeded = outcome.kind === "success";
       if (outcome.kind === "success") {
-        if (!uploadLeaseIsCurrent(lease)) return;
+        if (!uploadLeaseIsCurrent(lease)) {
+          abandonSettledUpload(lease);
+          return;
+        }
         try {
           resultUrl = outcome.result.url;
         } catch (error) {
@@ -3503,7 +3538,10 @@ export const ImageDialog = memo(function ImageDialog({
           }
         }
       } else {
-        if (!uploadLeaseIsCurrent(lease)) return;
+        if (!uploadLeaseIsCurrent(lease)) {
+          abandonSettledUpload(lease);
+          return;
+        }
         message = imageUploadErrorText(outcome.error);
         if (!uploadLeaseIsCurrent(lease)) {
           abandonSettledUpload(lease);
@@ -3517,6 +3555,7 @@ export const ImageDialog = memo(function ImageDialog({
         input !== owner.fileInput ||
         !uploadLeaseIsCurrent(lease)
       ) {
+        abandonSettledUpload(lease);
         return;
       }
       let resetFailed = false;
@@ -3569,6 +3608,7 @@ export const ImageDialog = memo(function ImageDialog({
     },
     [
       activeUpload,
+      abandonUploadOwner,
       abandonSettledUpload,
       coordinator,
       deferredUploadOutcome,
@@ -3590,10 +3630,16 @@ export const ImageDialog = memo(function ImageDialog({
         false,
       )
     ) {
+      abandonUploadOwner(deferred.owner);
       return;
     }
     settleUpload(deferred.owner, deferred.outcome);
-  }, [coordinator, deferredUploadOutcome, settleUpload]);
+  }, [
+    abandonUploadOwner,
+    coordinator,
+    deferredUploadOutcome,
+    settleUpload,
+  ]);
   const startUpload = useCallback(
     (
       publication: ImagePublication,
@@ -3719,11 +3765,13 @@ export const ImageDialog = memo(function ImageDialog({
         setDraft,
         startUpload,
         resumeUploadSettlement,
+        abandonDeferredUpload,
         afterClose,
         completeClose,
       ),
     [
       activeUpload,
+      abandonDeferredUpload,
       afterClose,
       authority,
       completeClose,

@@ -89,6 +89,30 @@ function setInputValue(input: HTMLInputElement, value: string) {
   Object.defineProperty(input, "value", { configurable: true, writable: true, value });
 }
 
+function armDirtyFileTypeRead(
+  input: HTMLInputElement,
+  onRead: () => void,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "type",
+  );
+  if (!descriptor?.get || !descriptor.set) {
+    throw new Error("HTMLInputElement.type accessors are unavailable");
+  }
+  Object.defineProperty(input, "type", {
+    configurable: true,
+    get() {
+      Reflect.deleteProperty(input, "type");
+      onRead();
+      return descriptor.get?.call(input);
+    },
+    set(value: string) {
+      descriptor.set?.call(input, value);
+    },
+  });
+}
+
 function reactProp<T>(element: Element, name: string): T {
   const key = Object.getOwnPropertyNames(element).find((candidate) =>
     candidate.startsWith("__reactProps$"),
@@ -440,7 +464,7 @@ describe("ImageDialog upload lifecycle", () => {
   });
 
   it.each(["returns", "throws"] as const)(
-    "rejects an upload outcome when the file reset %s after dirtying the publication and permits retry",
+    "rejects an upload outcome when the file reset %s after arming dirty final validation and permits retry",
     async (behavior) => {
       const failed = deferred<UploadResult>();
       const retry = deferred<UploadResult>();
@@ -463,13 +487,13 @@ describe("ImageDialog upload lifecycle", () => {
         get: () => "failed-selection",
         set() {
           if (behavior === "returns") {
-            dirty();
+            armDirtyFileTypeRead(input, dirty);
             return;
           }
           const error = new Error();
           Object.defineProperty(error, "message", {
             get() {
-              dirty();
+              armDirtyFileTypeRead(input, dirty);
               return "Untrusted reset failure";
             },
           });
@@ -509,6 +533,49 @@ describe("ImageDialog upload lifecycle", () => {
       expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
     },
   );
+
+  it("abandons a current upload invalidated before terminal settlement and permits retry", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "mutated-before-terminal-settlement";
+    content.className = className;
+    await act(async () => {});
+    const readUrl = vi.fn(() => "/api/assets/untrusted");
+    const result = { alt: "Untrusted Alt" } as UploadResult;
+    Object.defineProperty(result, "url", { get: readUrl });
+
+    await act(async () => {
+      failed.resolve(result);
+      await failed.promise;
+    });
+    expect(readUrl).not.toHaveBeenCalled();
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+    expect(screen.getByTestId("image-alt")).toHaveValue("");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
+  });
 
   it("keeps stale success and finalizer work out of a reopened visit with a newer upload", async () => {
     const stale = deferred<UploadResult>();
@@ -825,7 +892,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   );
 
   it.each(["files", "index", "name"] as const)(
-    "rejects a claimed file choice when its %s getter dirties the publication and recovers freshly",
+    "rejects a claimed file choice when its %s getter arms dirty final validation and recovers freshly",
     async (getter) => {
       const pending = deferred<UploadResult>();
       const onUpload = vi.fn(() => pending.promise);
@@ -852,7 +919,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         Object.defineProperty(input, "files", {
           configurable: true,
           get() {
-            dirty();
+            armDirtyFileTypeRead(input, dirty);
             return [selected] as unknown as FileList;
           },
         });
@@ -862,7 +929,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
           {
             get(target, property, receiver) {
               if (property === "0") {
-                dirty();
+                armDirtyFileTypeRead(input, dirty);
                 return selected;
               }
               return Reflect.get(target, property, receiver);
@@ -877,7 +944,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         Object.defineProperty(selected, "name", {
           configurable: true,
           get() {
-            dirty();
+            armDirtyFileTypeRead(input, dirty);
             return "selected.png";
           },
         });
@@ -1725,8 +1792,61 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(screen.getByTestId("image-upload")).toBeEnabled();
   });
 
-  it.each(["url", "alt", "error"] as const)(
-    "clears a deferred upload when its %s getter retires the successor and permits a fresh retry",
+  it("abandons a deferred outcome when staged replay is rejected and permits retry", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const readUrl = vi.fn(() => "/api/assets/untrusted");
+    const result = {} as UploadResult;
+    Object.defineProperty(result, "url", { get: readUrl });
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    const view = await renderStrictRoot(
+      <Harness onUpload={onUpload} onSubmit={vi.fn()} />,
+    );
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    const input = screen.getByTestId("image-url") as HTMLInputElement;
+    const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
+
+    inputRef(null);
+    inputRef(input);
+    await Promise.resolve();
+    failed.resolve(result);
+    await failed.promise;
+    await Promise.resolve();
+    expect(readUrl).not.toHaveBeenCalled();
+    const content = dialogContent();
+    const className = content.className;
+    content.className = "invalidated-deferred-replay";
+    await act(async () => {});
+
+    expect(readUrl).not.toHaveBeenCalled();
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    content.className = className;
+    await view.render(
+      <Harness onUpload={onUpload} onSubmit={vi.fn()} />,
+    );
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
+  });
+
+  it.each(["url", "alt"] as const)(
+    "clears a deferred upload when its %s getter arms dirty final validation and permits a fresh retry",
     async (getter) => {
       const failed = deferred<UploadResult>();
       const retry = deferred<UploadResult>();
@@ -1755,35 +1875,26 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       await act(async () => {
         inputRef(null);
         inputRef(input);
-        if (getter === "error") {
-          const error = new Error();
-          Object.defineProperty(error, "message", {
-            get() {
-              retireSuccessor();
-              return "Untrusted failure";
-            },
-          });
-          failed.reject(error);
-          await failed.promise.catch(() => undefined);
-        } else {
-          const result = {
-            url: "/api/assets/untrusted",
-            alt: "Untrusted Alt",
-          } as UploadResult;
-          Object.defineProperty(result, getter, {
-            get() {
-              retireSuccessor();
-              return getter === "url"
-                ? "/api/assets/untrusted"
-                : "Untrusted Alt";
-            },
-          });
-          failed.resolve(result);
-          await failed.promise;
-        }
+        const result = {
+          url: "/api/assets/untrusted",
+          alt: "Untrusted Alt",
+        } as UploadResult;
+        Object.defineProperty(result, getter, {
+          get() {
+            armDirtyFileTypeRead(
+              screen.getByTestId("image-file") as HTMLInputElement,
+              retireSuccessor,
+            );
+            return getter === "url"
+              ? "/api/assets/untrusted"
+              : "Untrusted Alt";
+          },
+        });
+        failed.resolve(result);
+        await failed.promise;
       });
 
-      expect(retireSuccessor).toHaveBeenCalledOnce();
+      await waitFor(() => expect(retireSuccessor).toHaveBeenCalledOnce());
       await waitFor(() =>
         expect(screen.getByTestId("image-upload")).toBeEnabled(),
       );
@@ -1808,6 +1919,54 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       expect(screen.getByTestId("image-upload")).toBeEnabled();
     },
   );
+
+  it("clears a current upload when error extraction arms dirty final validation and permits retry", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const content = dialogContent();
+    const dirty = vi.fn(() => {
+      const className = content.className;
+      content.className = "mutated-during-error-validation";
+      content.className = className;
+    });
+    const error = new Error();
+    Object.defineProperty(error, "message", {
+      get() {
+        armDirtyFileTypeRead(input, dirty);
+        return "Untrusted failure";
+      },
+    });
+
+    await act(async () => {
+      failed.reject(error);
+      await failed.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(dirty).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
+  });
 
   it("makes a released unstaged guard permanently ineligible for delayed replay", async () => {
     const staleClose = vi.fn();
