@@ -605,6 +605,7 @@ class MutationJournal {
     const target = record.target;
     const name = record.attributeName;
     if (!(target instanceof Element) || !name) return false;
+    if (name === "data-radix-focus-guard") return false;
     const values = this.#expectedAttribute(target, name, record.oldValue);
     const expected = values.get(name);
     const next = this.#nextAttributeValue(index, target, name);

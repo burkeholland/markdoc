@@ -1132,6 +1132,46 @@ describe("DialogContent exact Strict Mode publication", () => {
     },
   );
 
+  it("permanently rejects an owned span that becomes a guard before its topology is restored", async () => {
+    const taintedClosed = vi.fn();
+    const cleanClosed = vi.fn();
+    const tree = (rootKey: string, onClosed: () => void) => (
+      <StrictMode>
+        <ControlledDialog key={rootKey} title="Guard attribute restoration" onClosed={onClosed}>
+          <span data-testid="guard-attribute-host" />
+        </ControlledDialog>
+      </StrictMode>
+    );
+    const view = renderDirect(tree("tainted", taintedClosed));
+    const candidate = screen.getByTestId("guard-attribute-host");
+
+    act(() => {
+      candidate.setAttribute("data-radix-focus-guard", "");
+      candidate.tabIndex = 0;
+      candidate.style.outline = "none";
+      candidate.style.opacity = "0";
+      candidate.style.position = "fixed";
+      candidate.style.pointerEvents = "none";
+      candidate.removeAttribute("data-radix-focus-guard");
+      candidate.remove();
+    });
+    await act(() => Promise.resolve());
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard attribute restoration");
+    expect(taintedClosed).not.toHaveBeenCalled();
+
+    act(() => view.root.render(tree("clean", cleanClosed)));
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(cleanClosed).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+  });
+
   it("accepts exact replay guard teardown before a later allowed passive cleanup mutation", async () => {
     const onClosed = vi.fn();
     renderDirect(
