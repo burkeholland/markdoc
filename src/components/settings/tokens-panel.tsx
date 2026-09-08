@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Loader2, Plus } from "lucide-react";
 import { cn, relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
@@ -665,67 +676,890 @@ function TokenRow({ token: t, documentId, matching, disabled, replacementDisable
   onAction: (action: "rename" | "replace" | "revoke", name?: string) => Promise<boolean>;
   onCollaboratorsChange: () => void; switchError: string | null;
 }) {
-  const [renaming, setRenaming] = useState(false);
-  const [name, setName] = useState(t.name);
-  const renameButton = useRef<HTMLButtonElement>(null);
-  const input = useRef<HTMLInputElement>(null);
-  const row = useRef<HTMLLIElement>(null);
-  const returnToRename = useRef(false);
+  type RenameVisit = Readonly<{ identity: symbol; mount: symbol; tokenId: string }>;
+  type RenameDraft = Readonly<{ visit: RenameVisit; value: string }>;
+  type RowActionKind = "rename" | "replace" | "revoke" | "cancel" | "save";
+  type RowActionFacts = Readonly<{ kind: RowActionKind; eligible: boolean }>;
+  type TokenSnapshot = Readonly<{
+    source: ApiTokenDto;
+    id: string;
+    name: string;
+    prefix: string;
+    scope: ApiTokenDto["scope"];
+    documentIdsSource: string[] | null;
+    documentIds: readonly string[] | null;
+    collaboratorsMayAsk: boolean;
+    createdAt: string;
+    lastUsedAt: string | null;
+    lastMcpSeenAt: string | null;
+    lastMcpCallAt: string | null;
+    expiresAt: string | null;
+    revokedAt: string | null | undefined;
+  }>;
+  type RowFacts = Readonly<{
+    identity: symbol;
+    mount: symbol;
+    token: TokenSnapshot;
+    documentId: string | undefined;
+    matching: boolean;
+    disabled: boolean;
+    replacementDisabled: boolean;
+    onAction: (action: "rename" | "replace" | "revoke", name?: string) => Promise<boolean>;
+    onCollaboratorsChange: () => void;
+    switchError: string | null;
+    renameVisit: RenameVisit | null;
+    draft: string | null;
+    state: "Active" | "Expired" | "Revoked";
+    mismatch: boolean;
+    actionsVisible: boolean;
+    documentCount: string;
+    metadata: string;
+    mismatchText: string | null;
+    expiredText: string | null;
+    prefixDetails: string;
+    timeDetails: string;
+    mcpDetails: string;
+    revokedDetails: string | null;
+    documentDetails: string | null;
+    renameLabel: string;
+    replaceLabel: string;
+    revokeLabel: string;
+    switchLabelId: string;
+    switchHelpId: string;
+    rowClassName: string;
+    rename: RowActionFacts | null;
+    replace: RowActionFacts | null;
+    revoke: RowActionFacts | null;
+    cancel: RowActionFacts | null;
+    save: RowActionFacts | null;
+    inputEligible: boolean;
+  }>;
+  interface ElementSlot<T extends HTMLElement> {
+    element: T | null;
+  }
+  interface RowCandidate {
+    readonly facts: RowFacts;
+    readonly row: ElementSlot<HTMLLIElement>;
+    readonly header: ElementSlot<HTMLDivElement>;
+    readonly metadata: ElementSlot<HTMLParagraphElement>;
+    readonly mismatch: ElementSlot<HTMLParagraphElement>;
+    readonly expired: ElementSlot<HTMLParagraphElement>;
+    readonly actions: ElementSlot<HTMLDivElement>;
+    readonly rename: ElementSlot<HTMLButtonElement>;
+    readonly replace: ElementSlot<HTMLButtonElement>;
+    readonly revoke: ElementSlot<HTMLButtonElement>;
+    readonly form: ElementSlot<HTMLFormElement>;
+    readonly input: ElementSlot<HTMLInputElement>;
+    readonly save: ElementSlot<HTMLButtonElement>;
+    readonly cancel: ElementSlot<HTMLButtonElement>;
+    readonly details: ElementSlot<HTMLDetailsElement>;
+    readonly detailsBody: ElementSlot<HTMLDivElement>;
+    readonly collaborators: ElementSlot<HTMLButtonElement>;
+    readonly switchError: ElementSlot<HTMLParagraphElement>;
+  }
+  type RowCommit = Readonly<{
+    candidate: RowCandidate;
+    facts: RowFacts;
+    ownerDocument: Document;
+    parent: HTMLUListElement;
+    parentChildren: readonly Element[];
+    tree: readonly Node[];
+    row: HTMLLIElement;
+    header: HTMLDivElement;
+    metadata: HTMLParagraphElement;
+    mismatch: HTMLParagraphElement | null;
+    expired: HTMLParagraphElement | null;
+    actions: HTMLDivElement | null;
+    rename: HTMLButtonElement | null;
+    replace: HTMLButtonElement | null;
+    revoke: HTMLButtonElement | null;
+    form: HTMLFormElement | null;
+    input: HTMLInputElement | null;
+    save: HTMLButtonElement | null;
+    cancel: HTMLButtonElement | null;
+    details: HTMLDetailsElement;
+    detailsBody: HTMLDivElement;
+    collaborators: HTMLButtonElement | null;
+    switchError: HTMLParagraphElement | null;
+    renameTargets: readonly Node[] | null;
+    replaceTargets: readonly Node[] | null;
+    revokeTargets: readonly Node[] | null;
+    cancelTargets: readonly Node[] | null;
+  }>;
+  type SaveOwner = Readonly<{
+    mount: symbol;
+    visit: RenameVisit;
+    token: ApiTokenDto;
+    callback: RowFacts["onAction"];
+    name: string;
+    commit: RowCommit;
+  }>;
+  type FocusIntent = Readonly<{ mount: symbol; visit: RenameVisit; tokenId: string }>;
+  type InputOverride = Readonly<{ input: HTMLInputElement; value: string }>;
+
+  const slot = <T extends HTMLElement>(): ElementSlot<T> => ({ element: null });
+  const [mount] = useState(() => Symbol("token-row-mount"));
+  const [renameDraft, setRenameDraft] = useState<RenameDraft | null>(null);
+  const [, setPresentationRevision] = useState(0);
+  const activeMount = useRef<symbol | null>(null);
+  const activeCommit = useRef<RowCommit | null>(null);
+  const committedCandidates = useRef(new WeakSet<RowCandidate>());
+  const detachedCandidates = useRef(new WeakSet<RowCandidate>());
+  const repairRequestedCandidates = useRef(new WeakSet<RowCandidate>());
+  const claimedEvents = useRef(new WeakSet<object>());
+  const consumedCommits = useRef(new WeakSet<RowCommit>());
+  const dispatchingCommits = useRef(new WeakSet<RowCommit>());
+  const saveOwner = useRef<SaveOwner | null>(null);
+  const returnFocus = useRef<FocusIntent | null>(null);
+  const focusedRename = useRef<{ visit: RenameVisit; input: HTMLInputElement } | null>(null);
+  const focusedMatch = useRef<HTMLLIElement | null>(null);
   const state = tokenState(t);
-  const mismatch = documentId && t.documentIds !== null && !t.documentIds.includes(documentId);
-  useEffect(() => {
-    if (renaming) input.current?.focus();
-    else if (returnToRename.current && !disabled) {
-      renameButton.current?.focus();
-      returnToRename.current = false;
+  const mismatch = Boolean(documentId && t.documentIds !== null && !t.documentIds.includes(documentId));
+  const token = Object.freeze<TokenSnapshot>({
+    source: t,
+    id: t.id,
+    name: t.name,
+    prefix: t.prefix,
+    scope: t.scope,
+    documentIdsSource: t.documentIds,
+    documentIds: t.documentIds ? Object.freeze([...t.documentIds]) : null,
+    collaboratorsMayAsk: t.collaboratorsMayAsk,
+    createdAt: t.createdAt,
+    lastUsedAt: t.lastUsedAt,
+    lastMcpSeenAt: t.lastMcpSeenAt,
+    lastMcpCallAt: t.lastMcpCallAt,
+    expiresAt: t.expiresAt,
+    revokedAt: t.revokedAt,
+  });
+  const action = (kind: RowActionKind, eligible: boolean) => Object.freeze<RowActionFacts>({ kind, eligible });
+  const actionsVisible = !t.revokedAt;
+  const facts = Object.freeze<RowFacts>({
+    identity: Symbol("token-row-presentation"),
+    mount,
+    token,
+    documentId,
+    matching,
+    disabled,
+    replacementDisabled,
+    onAction,
+    onCollaboratorsChange,
+    switchError,
+    renameVisit: renameDraft?.visit ?? null,
+    draft: renameDraft?.value ?? null,
+    state,
+    mismatch,
+    actionsVisible,
+    documentCount: t.documentIds?.length
+      ? `${t.documentIds.length} ${t.documentIds.length === 1 ? "document" : "documents"}`
+      : "all documents",
+    metadata: `Created ${relativeTime(t.createdAt)}${t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · no recorded use"}${t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : " · no expiry"}`,
+    mismatchText: mismatch
+      ? "This token is scoped to other documents, not this one. Replacement keeps that restriction. Create a differently named token for this document."
+      : null,
+    expiredText: state === "Expired" ? "Create a new token to choose a new expiry." : null,
+    prefixDetails: `Prefix: ${t.prefix}…`,
+    timeDetails: `Created: ${t.createdAt}. Last used: ${t.lastUsedAt ?? "not recorded"}.`,
+    mcpDetails: `Last MCP discovery: ${t.lastMcpSeenAt ?? "not recorded"}. Last MCP tool call: ${t.lastMcpCallAt ?? "not recorded"}.`,
+    revokedDetails: t.revokedAt ? `Revoked: ${t.revokedAt}` : null,
+    documentDetails: t.documentIds ? `Document IDs: ${t.documentIds.join(", ")}` : null,
+    renameLabel: `Rename ${t.name}`,
+    replaceLabel: `Replace ${t.name}`,
+    revokeLabel: `Revoke ${t.name}`,
+    switchLabelId: `token-${t.id}-may-ask-label`,
+    switchHelpId: `token-${t.id}-may-ask-help`,
+    rowClassName: cn("flex min-w-0 flex-col gap-2 p-3", matching && "ring-2 ring-inset ring-accent"),
+    rename: actionsVisible ? action("rename", !disabled) : null,
+    replace: actionsVisible ? action("replace", !disabled && !replacementDisabled && state === "Active") : null,
+    revoke: actionsVisible ? action("revoke", !disabled) : null,
+    cancel: renameDraft ? action("cancel", !disabled) : null,
+    save: renameDraft ? action("save", !disabled && Boolean(renameDraft.value.trim())) : null,
+    inputEligible: Boolean(renameDraft) && !disabled,
+  });
+  const candidate: RowCandidate = Object.freeze({
+    facts,
+    row: slot<HTMLLIElement>(),
+    header: slot<HTMLDivElement>(),
+    metadata: slot<HTMLParagraphElement>(),
+    mismatch: slot<HTMLParagraphElement>(),
+    expired: slot<HTMLParagraphElement>(),
+    actions: slot<HTMLDivElement>(),
+    rename: slot<HTMLButtonElement>(),
+    replace: slot<HTMLButtonElement>(),
+    revoke: slot<HTMLButtonElement>(),
+    form: slot<HTMLFormElement>(),
+    input: slot<HTMLInputElement>(),
+    save: slot<HTMLButtonElement>(),
+    cancel: slot<HTMLButtonElement>(),
+    details: slot<HTMLDetailsElement>(),
+    detailsBody: slot<HTMLDivElement>(),
+    collaborators: slot<HTMLButtonElement>(),
+    switchError: slot<HTMLParagraphElement>(),
+  });
+
+  const retireCandidate = (value: RowCandidate) => {
+    if (activeCommit.current?.candidate === value) activeCommit.current = null;
+  };
+  const bindElement = <T extends HTMLElement>(owner: ElementSlot<T>, element: T | null) => {
+    if (owner.element !== element) retireCandidate(candidate);
+    owner.element = element;
+    if (!element) {
+      if (committedCandidates.current.has(candidate)) detachedCandidates.current.add(candidate);
+      retireCandidate(candidate);
+      return;
     }
-  }, [renaming, disabled]);
-  useEffect(() => {
-    if (matching) { row.current?.focus(); row.current?.scrollIntoView?.({ block: "nearest" }); }
-  }, [matching]);
-  const closeRename = () => { returnToRename.current = true; setRenaming(false); };
+    if (
+      detachedCandidates.current.has(candidate)
+      && !repairRequestedCandidates.current.has(candidate)
+      && activeMount.current === mount
+      && activeCommit.current === null
+    ) {
+      repairRequestedCandidates.current.add(candidate);
+      setPresentationRevision((current) => current + 1);
+    }
+  };
+  const nodesBelow = (root: Node): readonly Node[] => {
+    const nodes: Node[] = [];
+    const append = (node: Node) => {
+      nodes.push(node);
+      for (const child of node.childNodes) append(child);
+    };
+    append(root);
+    return Object.freeze(nodes);
+  };
+  const arraysMatch = <T,>(current: readonly T[], frozen: readonly T[]) =>
+    current.length === frozen.length && current.every((value, index) => value === frozen[index]);
+  const tokenMatches = (snapshot: TokenSnapshot) =>
+    t === snapshot.source
+    && t.id === snapshot.id
+    && t.name === snapshot.name
+    && t.prefix === snapshot.prefix
+    && t.scope === snapshot.scope
+    && t.documentIds === snapshot.documentIdsSource
+    && (t.documentIds
+      ? snapshot.documentIds !== null && arraysMatch(t.documentIds, snapshot.documentIds)
+      : snapshot.documentIds === null)
+    && t.collaboratorsMayAsk === snapshot.collaboratorsMayAsk
+    && t.createdAt === snapshot.createdAt
+    && t.lastUsedAt === snapshot.lastUsedAt
+    && t.lastMcpSeenAt === snapshot.lastMcpSeenAt
+    && t.lastMcpCallAt === snapshot.lastMcpCallAt
+    && t.expiresAt === snapshot.expiresAt
+    && t.revokedAt === snapshot.revokedAt;
+  const factsAreCurrent = (snapshot: RowFacts) =>
+    activeMount.current === snapshot.mount
+    && snapshot.mount === mount
+    && tokenMatches(snapshot.token)
+    && documentId === snapshot.documentId
+    && matching === snapshot.matching
+    && disabled === snapshot.disabled
+    && replacementDisabled === snapshot.replacementDisabled
+    && onAction === snapshot.onAction
+    && onCollaboratorsChange === snapshot.onCollaboratorsChange
+    && switchError === snapshot.switchError
+    && (renameDraft?.visit ?? null) === snapshot.renameVisit
+    && (renameDraft?.value ?? null) === snapshot.draft
+    && tokenState(t) === snapshot.state
+    && mismatch === snapshot.mismatch;
+  const buttonIsExact = (
+    button: HTMLButtonElement,
+    commit: RowCommit,
+    type: "button" | "submit",
+    label: string,
+    eligible: boolean,
+  ) =>
+    button.ownerDocument === commit.ownerDocument
+    && button.isConnected
+    && button.type === type
+    && button.disabled === !eligible
+    && button.getAttribute("aria-disabled") !== "true"
+    && button.textContent?.trim() === label;
+  const domIsExact = (commit: RowCommit, override?: InputOverride) => {
+    const value = commit.facts;
+    const ownerWindow = commit.ownerDocument.defaultView;
+    if (
+      !ownerWindow
+      || !commit.row.isConnected
+      || commit.row.ownerDocument !== commit.ownerDocument
+      || commit.row.parentElement !== commit.parent
+      || !arraysMatch(Array.from(commit.parent.children), commit.parentChildren)
+      || !arraysMatch(nodesBelow(commit.row), commit.tree)
+      || commit.row.tabIndex !== -1
+      || commit.row.className !== value.rowClassName
+      || commit.row.dataset.testid !== "token-row"
+      || commit.row.getAttribute("data-token-match") !== (value.matching ? "true" : null)
+      || !commit.header.isConnected
+      || commit.header.parentElement !== commit.row
+      || commit.header.className !== "flex min-w-0 flex-wrap items-center gap-2"
+      || commit.header.children.length !== 4
+      || commit.header.children.item(0)?.textContent !== value.token.name
+      || commit.header.children.item(1)?.getAttribute("data-testid") !== "token-scope-chip"
+      || commit.header.children.item(1)?.getAttribute("data-scope") !== value.token.scope
+      || commit.header.children.item(1)?.getAttribute("title") !== `${TOKEN_SCOPE_LABEL[value.token.scope]}: ${TOKEN_SCOPE_SUMMARY[value.token.scope]}`
+      || commit.header.children.item(1)?.textContent?.trim() !== value.token.scope
+      || commit.header.children.item(2)?.textContent !== value.state
+      || commit.header.children.item(3)?.getAttribute("data-testid") !== "token-documents-count"
+      || commit.header.children.item(3)?.textContent !== value.documentCount
+      || !commit.metadata.isConnected
+      || commit.metadata.parentElement !== commit.row
+      || commit.metadata.textContent !== value.metadata
+    ) {
+      return false;
+    }
+
+    const directChildren: Element[] = [commit.header, commit.metadata];
+    if (value.mismatchText) {
+      if (
+        !commit.mismatch?.isConnected
+        || commit.mismatch.parentElement !== commit.row
+        || commit.mismatch.textContent !== value.mismatchText
+      ) {
+        return false;
+      }
+      directChildren.push(commit.mismatch);
+    } else if (commit.mismatch) {
+      return false;
+    }
+    if (value.expiredText) {
+      if (
+        !commit.expired?.isConnected
+        || commit.expired.parentElement !== commit.row
+        || commit.expired.textContent !== value.expiredText
+      ) {
+        return false;
+      }
+      directChildren.push(commit.expired);
+    } else if (commit.expired) {
+      return false;
+    }
+
+    if (value.actionsVisible) {
+      if (
+        !value.rename
+        || !value.replace
+        || !value.revoke
+        || !commit.actions?.isConnected
+        || commit.actions.parentElement !== commit.row
+        || commit.actions.children.length !== 3
+        || commit.actions.children.item(0) !== commit.rename
+        || commit.actions.children.item(1) !== commit.replace
+        || commit.actions.children.item(2) !== commit.revoke
+        || !commit.rename
+        || !commit.replace
+        || !commit.revoke
+        || !buttonIsExact(commit.rename, commit, "button", "Rename", value.rename.eligible)
+        || commit.rename.getAttribute("aria-label") !== value.renameLabel
+        || !buttonIsExact(commit.replace, commit, "button", "Replace", value.replace.eligible)
+        || commit.replace.getAttribute("aria-label") !== value.replaceLabel
+        || !buttonIsExact(commit.revoke, commit, "button", "Revoke", value.revoke.eligible)
+        || commit.revoke.getAttribute("aria-label") !== value.revokeLabel
+        || commit.revoke.dataset.testid !== "token-revoke"
+      ) {
+        return false;
+      }
+      directChildren.push(commit.actions);
+    } else if (commit.actions || commit.rename || commit.replace || commit.revoke) {
+      return false;
+    }
+
+    if (value.renameVisit) {
+      const input = commit.input;
+      const form = commit.form;
+      const save = commit.save;
+      const cancel = commit.cancel;
+      const label = input?.parentElement;
+      const guidance = label?.nextElementSibling;
+      const buttons = guidance?.nextElementSibling;
+      if (
+        value.draft === null
+        || !value.save
+        || !value.cancel
+        || !form?.isConnected
+        || form.parentElement !== commit.row
+        || form.children.length !== 3
+        || form.children.item(0) !== label
+        || form.children.item(1) !== guidance
+        || form.children.item(2) !== buttons
+        || label?.tagName !== "LABEL"
+        || label.children.length !== 1
+        || label.firstElementChild !== input
+        || label.childNodes.item(0)?.textContent !== "Token name"
+        || guidance?.textContent !== "This changes the agent name and @mention, not its secret or permissions."
+        || buttons?.children.length !== 2
+        || buttons.children.item(0) !== save
+        || buttons.children.item(1) !== cancel
+        || !input?.isConnected
+        || input.ownerDocument !== commit.ownerDocument
+        || input.form !== form
+        || input.type !== "text"
+        || input.maxLength !== 80
+        || input.disabled !== !value.inputEligible
+        || input.value !== (override?.input === input ? override.value : value.draft)
+        || !save
+        || !cancel
+        || !buttonIsExact(save, commit, "submit", "Save name", value.save.eligible)
+        || save.form !== form
+        || !buttonIsExact(cancel, commit, "button", "Cancel rename", value.cancel.eligible)
+        || cancel.form !== form
+      ) {
+        return false;
+      }
+      directChildren.push(form);
+    } else if (commit.form || commit.input || commit.save || commit.cancel || value.draft !== null) {
+      return false;
+    }
+
+    const summary = commit.details.firstElementChild;
+    if (
+      !commit.details.isConnected
+      || commit.details.parentElement !== commit.row
+      || commit.details.children.length !== 2
+      || summary?.tagName !== "SUMMARY"
+      || summary.textContent !== "Details & agent requests"
+      || commit.details.lastElementChild !== commit.detailsBody
+      || !commit.detailsBody.isConnected
+      || commit.detailsBody.parentElement !== commit.details
+    ) {
+      return false;
+    }
+    const detailChildren: Element[] = [];
+    const takeDetail = (text: string) => {
+      const element = commit.detailsBody.children.item(detailChildren.length);
+      if (element?.tagName !== "P" || element.textContent !== text) return false;
+      detailChildren.push(element);
+      return true;
+    };
+    if (
+      !takeDetail(value.prefixDetails)
+      || !takeDetail(value.timeDetails)
+      || !takeDetail(value.mcpDetails)
+      || (value.revokedDetails ? !takeDetail(value.revokedDetails) : false)
+      || (value.documentDetails ? !takeDetail(value.documentDetails) : false)
+    ) {
+      return false;
+    }
+    if (value.actionsVisible) {
+      const switchContainer = commit.detailsBody.children.item(detailChildren.length);
+      const copy = switchContainer?.lastElementChild;
+      if (
+        !commit.collaborators?.isConnected
+        || switchContainer?.children.length !== 2
+        || switchContainer.firstElementChild !== commit.collaborators
+        || commit.collaborators.parentElement !== switchContainer
+        || commit.collaborators.type !== "button"
+        || commit.collaborators.getAttribute("role") !== "switch"
+        || commit.collaborators.getAttribute("aria-checked") !== String(value.token.collaboratorsMayAsk)
+        || commit.collaborators.getAttribute("aria-labelledby") !== value.switchLabelId
+        || commit.collaborators.getAttribute("aria-describedby") !== value.switchHelpId
+        || commit.collaborators.disabled !== value.disabled
+        || commit.collaborators.dataset.testid !== "token-collaborators-may-ask"
+        || copy?.children.length !== 2
+        || copy.children.item(0)?.id !== value.switchLabelId
+        || copy.children.item(0)?.textContent !== "Collaborators may ask this agent"
+        || copy.children.item(1)?.id !== value.switchHelpId
+        || copy.children.item(1)?.textContent !== "Off: only you can send requests to it. On: people you share documents with can too."
+      ) {
+        return false;
+      }
+      detailChildren.push(switchContainer);
+    } else if (commit.collaborators) {
+      return false;
+    }
+    if (commit.detailsBody.children.length !== detailChildren.length) return false;
+    directChildren.push(commit.details);
+
+    if (value.switchError) {
+      if (
+        !commit.switchError?.isConnected
+        || commit.switchError.parentElement !== commit.row
+        || commit.switchError.getAttribute("role") !== "alert"
+        || commit.switchError.getAttribute("aria-atomic") !== "true"
+        || commit.switchError.dataset.testid !== "token-collaborators-may-ask-error"
+        || commit.switchError.textContent !== value.switchError
+      ) {
+        return false;
+      }
+      directChildren.push(commit.switchError);
+    } else if (commit.switchError) {
+      return false;
+    }
+    return commit.row.children.length === directChildren.length
+      && directChildren.every((element, index) => commit.row.children.item(index) === element);
+  };
+  const buildCommit = (): RowCommit | null => {
+    const row = candidate.row.element;
+    const header = candidate.header.element;
+    const metadata = candidate.metadata.element;
+    const details = candidate.details.element;
+    const detailsBody = candidate.detailsBody.element;
+    const parent = row?.parentElement;
+    const ownerWindow = row?.ownerDocument.defaultView;
+    if (
+      !row
+      || !header
+      || !metadata
+      || !details
+      || !detailsBody
+      || !ownerWindow?.HTMLUListElement
+      || !(parent instanceof ownerWindow.HTMLUListElement)
+    ) {
+      return null;
+    }
+    const commit = Object.freeze<RowCommit>({
+      candidate,
+      facts,
+      ownerDocument: row.ownerDocument,
+      parent,
+      parentChildren: Object.freeze(Array.from(parent.children)),
+      tree: nodesBelow(row),
+      row,
+      header,
+      metadata,
+      mismatch: candidate.mismatch.element,
+      expired: candidate.expired.element,
+      actions: candidate.actions.element,
+      rename: candidate.rename.element,
+      replace: candidate.replace.element,
+      revoke: candidate.revoke.element,
+      form: candidate.form.element,
+      input: candidate.input.element,
+      save: candidate.save.element,
+      cancel: candidate.cancel.element,
+      details,
+      detailsBody,
+      collaborators: candidate.collaborators.element,
+      switchError: candidate.switchError.element,
+      renameTargets: candidate.rename.element ? nodesBelow(candidate.rename.element) : null,
+      replaceTargets: candidate.replace.element ? nodesBelow(candidate.replace.element) : null,
+      revokeTargets: candidate.revoke.element ? nodesBelow(candidate.revoke.element) : null,
+      cancelTargets: candidate.cancel.element ? nodesBelow(candidate.cancel.element) : null,
+    });
+    return domIsExact(commit) ? commit : null;
+  };
+  const currentCommit = (value: RowCandidate, override?: InputOverride) => {
+    const commit = activeCommit.current;
+    return commit?.candidate === value
+      && commit.facts === value.facts
+      && factsAreCurrent(commit.facts)
+      && domIsExact(commit, override)
+      ? commit
+      : null;
+  };
+  const clickControl = (
+    commit: RowCommit,
+    kind: Exclude<RowActionKind, "save">,
+  ): { button: HTMLButtonElement | null; targets: readonly Node[] | null; action: RowActionFacts | null } => {
+    if (kind === "rename") return { button: commit.rename, targets: commit.renameTargets, action: commit.facts.rename };
+    if (kind === "replace") return { button: commit.replace, targets: commit.replaceTargets, action: commit.facts.replace };
+    if (kind === "revoke") return { button: commit.revoke, targets: commit.revokeTargets, action: commit.facts.revoke };
+    return { button: commit.cancel, targets: commit.cancelTargets, action: commit.facts.cancel };
+  };
+  const claimClick = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    kind: Exclude<RowActionKind, "save">,
+    consume: boolean,
+  ) => {
+    const commit = currentCommit(candidate);
+    if (!commit) return null;
+    const { button, targets, action: expectedAction } = clickControl(commit, kind);
+    const ownerWindow = commit.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !button
+      || !expectedAction?.eligible
+      || !ownerWindow
+      || event.type !== "click"
+      || event.button !== 0
+      || event.currentTarget !== button
+      || event.defaultPrevented
+      || !(nativeEvent instanceof ownerWindow.MouseEvent)
+      || nativeEvent.type !== "click"
+      || nativeEvent.button !== 0
+      || nativeEvent.defaultPrevented
+      || !(target instanceof ownerWindow.Node)
+      || nativeEvent.target !== target
+      || target.ownerDocument !== commit.ownerDocument
+      || !button.contains(target)
+      || targets?.includes(target) !== true
+      || button.disabled
+      || button.getAttribute("aria-disabled") === "true"
+      || claimedEvents.current.has(event)
+      || claimedEvents.current.has(nativeEvent)
+      || consumedCommits.current.has(commit)
+      || dispatchingCommits.current.has(commit)
+    ) {
+      return null;
+    }
+    claimedEvents.current.add(event);
+    claimedEvents.current.add(nativeEvent);
+    if (consume) consumedCommits.current.add(commit);
+    else dispatchingCommits.current.add(commit);
+    return commit;
+  };
+  const claimInput = (event: ChangeEvent<HTMLInputElement>) => {
+    const input = candidate.input.element;
+    const ownerWindow = input?.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const next = event.currentTarget.value;
+    if (
+      !input
+      || !ownerWindow
+      || (event.type !== "input" && event.type !== "change")
+      || event.currentTarget !== input
+      || event.target !== input
+      || event.defaultPrevented
+      || !(nativeEvent instanceof ownerWindow.Event)
+      || (nativeEvent.type !== "input" && nativeEvent.type !== "change")
+      || nativeEvent.target !== input
+      || nativeEvent.defaultPrevented
+      || next !== input.value
+    ) {
+      return null;
+    }
+    const commit = currentCommit(candidate, { input, value: next });
+    if (
+      !commit
+      || commit.input !== input
+      || !commit.facts.inputEligible
+      || next === commit.facts.draft
+      || claimedEvents.current.has(event)
+      || claimedEvents.current.has(nativeEvent)
+      || consumedCommits.current.has(commit)
+      || dispatchingCommits.current.has(commit)
+    ) {
+      return null;
+    }
+    claimedEvents.current.add(event);
+    claimedEvents.current.add(nativeEvent);
+    consumedCommits.current.add(commit);
+    return { commit, next };
+  };
+  const claimSubmit = (event: FormEvent<HTMLFormElement>) => {
+    const form = candidate.form.element;
+    const ownerWindow = form?.ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !form
+      || !ownerWindow?.SubmitEvent
+      || event.type !== "submit"
+      || event.currentTarget !== form
+      || event.target !== form
+      || event.defaultPrevented
+      || !(nativeEvent instanceof ownerWindow.SubmitEvent)
+      || nativeEvent.type !== "submit"
+      || nativeEvent.target !== form
+      || nativeEvent.defaultPrevented
+    ) {
+      return null;
+    }
+    const commit = currentCommit(candidate);
+    const submitter = nativeEvent.submitter;
+    if (
+      !commit
+      || commit.form !== form
+      || !commit.save
+      || !commit.facts.save?.eligible
+      || (submitter !== null && submitter !== commit.save)
+      || commit.save.disabled
+      || commit.save.getAttribute("aria-disabled") === "true"
+      || claimedEvents.current.has(event)
+      || claimedEvents.current.has(nativeEvent)
+      || consumedCommits.current.has(commit)
+      || dispatchingCommits.current.has(commit)
+    ) {
+      return null;
+    }
+    claimedEvents.current.add(event);
+    claimedEvents.current.add(nativeEvent);
+    consumedCommits.current.add(commit);
+    return commit;
+  };
+  const closeRename = (commit: RowCommit) => {
+    const visit = commit.facts.renameVisit;
+    if (!visit) return;
+    returnFocus.current = Object.freeze({ mount, visit, tokenId: commit.facts.token.id });
+    setRenameDraft((current) => current?.visit === visit ? null : current);
+  };
+
+  useLayoutEffect(() => {
+    activeMount.current = mount;
+    return () => {
+      if (activeMount.current === mount) activeMount.current = null;
+      const current = activeCommit.current;
+      if (current?.facts.mount === mount) activeCommit.current = null;
+      if (saveOwner.current?.mount === mount) saveOwner.current = null;
+      if (returnFocus.current?.mount === mount) returnFocus.current = null;
+    };
+  }, [mount]);
+  useLayoutEffect(() => {
+    retireCandidate(candidate);
+    const commit = buildCommit();
+    if (!commit || !factsAreCurrent(facts)) return;
+    committedCandidates.current.add(candidate);
+    activeCommit.current = commit;
+    return () => {
+      if (activeCommit.current === commit) activeCommit.current = null;
+    };
+  });
+  useLayoutEffect(() => {
+    if (!renameDraft) {
+      focusedRename.current = null;
+      return;
+    }
+    const commit = currentCommit(candidate);
+    if (
+      commit?.facts.renameVisit === renameDraft.visit
+      && commit.input?.isConnected
+      && (focusedRename.current?.visit !== renameDraft.visit || focusedRename.current.input !== commit.input)
+    ) {
+      focusedRename.current = { visit: renameDraft.visit, input: commit.input };
+      commit.input.focus();
+    }
+  });
+  useLayoutEffect(() => {
+    if (!matching) {
+      focusedMatch.current = null;
+      return;
+    }
+    const commit = currentCommit(candidate);
+    if (!commit || focusedMatch.current === commit.row) return;
+    focusedMatch.current = commit.row;
+    commit.row.focus();
+    commit.row.scrollIntoView?.({ block: "nearest" });
+  });
+  useLayoutEffect(() => {
+    const intent = returnFocus.current;
+    if (!intent) return;
+    const commit = currentCommit(candidate);
+    if (
+      !commit
+      || commit.facts.renameVisit
+      || commit.facts.mount !== intent.mount
+      || commit.facts.token.id !== intent.tokenId
+      || !commit.rename
+      || !commit.facts.rename?.eligible
+    ) {
+      return;
+    }
+    returnFocus.current = null;
+    commit.rename.focus();
+  });
+
   return (
-    <li ref={row} tabIndex={-1} className={cn("flex min-w-0 flex-col gap-2 p-3", matching && "ring-2 ring-inset ring-accent")}
-      data-testid="token-row" data-token-match={matching || undefined}>
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="min-w-0 break-all text-sm font-semibold text-ink">{t.name}</span>
-        <ScopeChip scope={t.scope} /><span className="text-xs text-ink-3">{state}</span>
-        <span className="text-xs text-ink-3" data-testid="token-documents-count">{t.documentIds?.length ? `${t.documentIds.length} ${t.documentIds.length === 1 ? "document" : "documents"}` : "all documents"}</span>
+    <li ref={(element) => bindElement(candidate.row, element)} tabIndex={-1} className={facts.rowClassName}
+      data-testid="token-row" data-token-match={facts.matching || undefined}>
+      <div ref={(element) => bindElement(candidate.header, element)} className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="min-w-0 break-all text-sm font-semibold text-ink">{facts.token.name}</span>
+        <ScopeChip scope={facts.token.scope} /><span className="text-xs text-ink-3">{facts.state}</span>
+        <span className="text-xs text-ink-3" data-testid="token-documents-count">{facts.documentCount}</span>
       </div>
-      <p className="text-xs text-ink-3">Created {relativeTime(t.createdAt)}{t.lastUsedAt ? ` · used ${relativeTime(t.lastUsedAt)}` : " · no recorded use"}{t.expiresAt ? ` · expires ${relativeTime(t.expiresAt)}` : " · no expiry"}</p>
-      {mismatch && <p className="text-xs text-ink-2">This token is scoped to other documents, not this one. Replacement keeps that restriction. Create a differently named token for this document.</p>}
-      {state === "Expired" && <p className="text-xs text-ink-3">Create a new token to choose a new expiry.</p>}
-      {!t.revokedAt && <div className="flex flex-wrap gap-2">
-        <button ref={renameButton} type="button" className="btn btn-outline btn-sm" disabled={disabled} onClick={() => { setName(t.name); setRenaming(true); }} aria-label={`Rename ${t.name}`}>Rename</button>
-        <button type="button" className="btn btn-outline btn-sm" disabled={disabled || replacementDisabled || state !== "Active"} onClick={() => void onAction("replace")} aria-label={`Replace ${t.name}`}>Replace</button>
-        <button type="button" className="btn btn-outline btn-sm text-danger" disabled={disabled} onClick={() => void onAction("revoke")} aria-label={`Revoke ${t.name}`} data-testid="token-revoke">Revoke</button>
+      <p ref={(element) => bindElement(candidate.metadata, element)} className="text-xs text-ink-3">{facts.metadata}</p>
+      {facts.mismatchText && <p ref={(element) => bindElement(candidate.mismatch, element)} className="text-xs text-ink-2">{facts.mismatchText}</p>}
+      {facts.expiredText && <p ref={(element) => bindElement(candidate.expired, element)} className="text-xs text-ink-3">{facts.expiredText}</p>}
+      {facts.actionsVisible && <div ref={(element) => bindElement(candidate.actions, element)} className="flex flex-wrap gap-2">
+        <button ref={(element) => bindElement(candidate.rename, element)} type="button" className="btn btn-outline btn-sm"
+          disabled={!facts.rename?.eligible} onClick={(event) => {
+            const commit = claimClick(event, "rename", true);
+            if (!commit) return;
+            const visit = Object.freeze<RenameVisit>({
+              identity: Symbol("token-row-rename"),
+              mount,
+              tokenId: commit.facts.token.id,
+            });
+            setRenameDraft(Object.freeze({ visit, value: commit.facts.token.name }));
+          }} aria-label={facts.renameLabel}>Rename</button>
+        <button ref={(element) => bindElement(candidate.replace, element)} type="button" className="btn btn-outline btn-sm"
+          disabled={!facts.replace?.eligible} onClick={(event) => {
+            const commit = claimClick(event, "replace", false);
+            if (!commit) return;
+            try {
+              void commit.facts.onAction("replace");
+            } finally {
+              dispatchingCommits.current.delete(commit);
+            }
+          }} aria-label={facts.replaceLabel}>Replace</button>
+        <button ref={(element) => bindElement(candidate.revoke, element)} type="button" className="btn btn-outline btn-sm text-danger"
+          disabled={!facts.revoke?.eligible} onClick={(event) => {
+            const commit = claimClick(event, "revoke", false);
+            if (!commit) return;
+            try {
+              void commit.facts.onAction("revoke");
+            } finally {
+              dispatchingCommits.current.delete(commit);
+            }
+          }} aria-label={facts.revokeLabel} data-testid="token-revoke">Revoke</button>
       </div>}
-      {renaming && <form className="flex min-w-0 flex-col gap-2" onSubmit={(e) => { e.preventDefault(); void onAction("rename", name).then((ok) => { if (ok) closeRename(); }); }}>
-        <label className="text-xs text-ink-2">Token name<input ref={input} className="input mt-1 w-full min-w-0" value={name} maxLength={80} disabled={disabled} onChange={(e) => setName(e.target.value)} /></label>
+      {facts.renameVisit && <form ref={(element) => bindElement(candidate.form, element)} className="flex min-w-0 flex-col gap-2"
+        onSubmit={(event) => {
+          const commit = claimSubmit(event);
+          const visit = commit?.facts.renameVisit;
+          const name = commit?.facts.draft;
+          if (!commit || !visit || typeof name !== "string" || saveOwner.current) return;
+          const owner = Object.freeze<SaveOwner>({
+            mount,
+            visit,
+            token: commit.facts.token.source,
+            callback: commit.facts.onAction,
+            name,
+            commit,
+          });
+          saveOwner.current = owner;
+          event.preventDefault();
+          const settlement = owner.callback("rename", owner.name);
+          void settlement.then((ok) => {
+            if (saveOwner.current !== owner || activeMount.current !== owner.mount) return;
+            const current = activeCommit.current;
+            if (
+              !current
+              || current.facts.mount !== owner.mount
+              || current.facts.renameVisit !== owner.visit
+              || current.facts.token.id !== owner.token.id
+            ) {
+              saveOwner.current = null;
+              return;
+            }
+            saveOwner.current = null;
+            if (ok) closeRename(current);
+          });
+        }}>
+        <label className="text-xs text-ink-2">Token name<input ref={(element) => bindElement(candidate.input, element)}
+          className="input mt-1 w-full min-w-0" value={facts.draft ?? ""} maxLength={80} disabled={!facts.inputEligible}
+          onChange={(event) => {
+            const claimed = claimInput(event);
+            if (!claimed || !claimed.commit.facts.renameVisit) return;
+            setRenameDraft(Object.freeze({ visit: claimed.commit.facts.renameVisit, value: claimed.next }));
+          }} /></label>
         <p className="text-xs text-ink-3">This changes the agent name and @mention, not its secret or permissions.</p>
         <div className="flex flex-wrap gap-2">
-          <button type="submit" className="btn btn-primary btn-sm" disabled={disabled || !name.trim()}>Save name</button>
-          <button type="button" className="btn btn-ghost btn-sm" disabled={disabled} onClick={closeRename}>Cancel rename</button>
+          <button ref={(element) => bindElement(candidate.save, element)} type="submit" className="btn btn-primary btn-sm" disabled={!facts.save?.eligible}>Save name</button>
+          <button ref={(element) => bindElement(candidate.cancel, element)} type="button" className="btn btn-ghost btn-sm"
+            disabled={!facts.cancel?.eligible} onClick={(event) => {
+              const commit = claimClick(event, "cancel", true);
+              if (commit) closeRename(commit);
+            }}>Cancel rename</button>
         </div>
       </form>}
-      <details className="min-w-0 text-xs text-ink-3">
+      <details ref={(element) => bindElement(candidate.details, element)} className="min-w-0 text-xs text-ink-3">
         <summary className="cursor-pointer">Details &amp; agent requests</summary>
-        <div className="mt-2 flex min-w-0 flex-col gap-2 break-words">
-          <p className="break-all">Prefix: {t.prefix}…</p>
-          <p>Created: {t.createdAt}. Last used: {t.lastUsedAt ?? "not recorded"}.</p>
-          <p>Last MCP discovery: {t.lastMcpSeenAt ?? "not recorded"}. Last MCP tool call: {t.lastMcpCallAt ?? "not recorded"}.</p>
-          {t.revokedAt && <p>Revoked: {t.revokedAt}</p>}
-          {t.documentIds && <p className="break-all">Document IDs: {t.documentIds.join(", ")}</p>}
-          {!t.revokedAt && <div className="flex items-start gap-2">
-            <button type="button" role="switch" aria-checked={t.collaboratorsMayAsk === true} aria-labelledby={`token-${t.id}-may-ask-label`}
-              aria-describedby={`token-${t.id}-may-ask-help`} className="switch mt-px" disabled={disabled} onClick={onCollaboratorsChange} data-testid="token-collaborators-may-ask" />
-            <div><span id={`token-${t.id}-may-ask-label`} className="font-medium text-ink-2">Collaborators may ask this agent</span>
-              <p id={`token-${t.id}-may-ask-help`}>Off: only you can send requests to it. On: people you share documents with can too.</p>
+        <div ref={(element) => bindElement(candidate.detailsBody, element)} className="mt-2 flex min-w-0 flex-col gap-2 break-words">
+          <p className="break-all">{facts.prefixDetails}</p>
+          <p>{facts.timeDetails}</p>
+          <p>{facts.mcpDetails}</p>
+          {facts.revokedDetails && <p>{facts.revokedDetails}</p>}
+          {facts.documentDetails && <p className="break-all">{facts.documentDetails}</p>}
+          {facts.actionsVisible && <div className="flex items-start gap-2">
+            <button ref={(element) => bindElement(candidate.collaborators, element)} type="button" role="switch"
+              aria-checked={facts.token.collaboratorsMayAsk === true} aria-labelledby={facts.switchLabelId}
+              aria-describedby={facts.switchHelpId} className="switch mt-px" disabled={facts.disabled}
+              onClick={facts.onCollaboratorsChange} data-testid="token-collaborators-may-ask" />
+            <div><span id={facts.switchLabelId} className="font-medium text-ink-2">Collaborators may ask this agent</span>
+              <p id={facts.switchHelpId}>Off: only you can send requests to it. On: people you share documents with can too.</p>
             </div>
           </div>}
         </div>
       </details>
-      {switchError && <p className="text-xs text-danger" role="alert" aria-atomic="true" data-testid="token-collaborators-may-ask-error">{switchError}</p>}
+      {facts.switchError && <p ref={(element) => bindElement(candidate.switchError, element)} className="text-xs text-danger"
+        role="alert" aria-atomic="true" data-testid="token-collaborators-may-ask-error">{facts.switchError}</p>}
     </li>
   );
 }
