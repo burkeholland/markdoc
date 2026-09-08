@@ -810,12 +810,12 @@ interface ImagePublicationReplay {
   readonly placement: ImagePlacement;
   readonly historyIsClean: () => boolean;
   readonly proofIsCurrent: () => boolean;
-  readonly release: () => void;
+  readonly release: () => boolean;
 }
 
 interface ImagePublicationRuntime {
   readonly publication: ImagePublication;
-  readonly publish: (beforePublish?: () => void) => boolean;
+  readonly publish: (beforePublish?: () => boolean) => boolean;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly finishCommit: () => void;
@@ -873,7 +873,7 @@ interface ImageSubmitProvenance {
 
 interface ImageReplayValidation {
   readonly complete: () => boolean;
-  readonly release: () => void;
+  readonly release: () => boolean;
   readonly reject: () => void;
 }
 
@@ -1548,7 +1548,7 @@ interface ImageDomGuard {
     changing?: "url" | "alt" | "file" | null,
   ) => boolean;
   readonly finishCommit: () => void;
-  readonly release: () => void;
+  readonly release: () => boolean;
 }
 
 function createImageDomGuard(
@@ -1561,6 +1561,7 @@ function createImageDomGuard(
   const Observer = ownerWindow?.MutationObserver;
   if (!ownerWindow || !Observer) return null;
   let changed = false;
+  let released = false;
   let reactCommitSettling = true;
   const controlledInputs = new Set(
     [dom.url, dom.alt, dom.file].filter(
@@ -1673,6 +1674,11 @@ function createImageDomGuard(
     }
     return false;
   };
+  const markDirty = () => {
+    if (changed) return;
+    changed = true;
+    onDirty();
+  };
   const record = (records: readonly MutationRecord[]) => {
     if (changed || records.length === 0) return changed;
     for (let index = 0; index < records.length; index += 1) {
@@ -1684,10 +1690,9 @@ function createImageDomGuard(
         }
         if (exactRadixMutation(records[index])) continue;
       }
-      changed = true;
+      markDirty();
       break;
     }
-    if (changed) onDirty();
     return changed;
   };
   const observer = new Observer((records) => {
@@ -1724,21 +1729,30 @@ function createImageDomGuard(
     observedParents.add(parent);
     observer.observe(parent, { childList: true });
   }
+  const drain = () => {
+    for (let pass = 0; pass < 32; pass += 1) {
+      const records = observer.takeRecords();
+      if (records.length === 0) return !changed;
+      if (record(records)) return false;
+    }
+    markDirty();
+    return false;
+  };
   return Object.freeze({
-    isClean: () => {
-      record(observer.takeRecords());
-      return !changed;
-    },
+    isClean: drain,
     finishCommit: () => {
       if (!reactCommitSettling) return;
-      record(observer.takeRecords());
+      drain();
       reactCommitSettling = false;
       radixContentSettling.clear();
       radixOverlaySettling.clear();
     },
     release: () => {
-      record(observer.takeRecords());
+      if (released) return !changed;
+      released = true;
+      const clean = drain();
       observer.disconnect();
+      return clean;
     },
   });
 }
@@ -2348,6 +2362,7 @@ function createImagePublicationRuntime(
   coordinator: ImagePublicationCoordinator,
   dom: ImageDom,
   controls: ImageControls,
+  authorityIsCurrent: () => boolean,
   authorizeDismissal: (
     publication: ImagePublication,
     event: Event,
@@ -2379,22 +2394,32 @@ function createImagePublicationRuntime(
   let replayProofReleased = false;
   let replayRefs: ImageRefReplay[] = [];
   let guard: ImageDomGuard | null = null;
-  const currentDomMatches = (
+  const refsAreCurrent = (includeConnectivity: boolean) =>
+    replayRefs.every(
+      (entry) =>
+        entry.owner.element() === entry.element &&
+        (!includeConnectivity || entry.element.isConnected),
+    );
+  const currentShapeMatches = (
     changing: "url" | "alt" | "file" | null = null,
   ) => {
     if (
       !guard?.isClean(changing) ||
+      !refsAreCurrent(true) ||
       !committedDomMatches(changing) ||
+      !refsAreCurrent(true) ||
       !guard.isClean(changing)
     ) {
       return false;
     }
-    const refsAreCurrent = replayRefs.every(
-      (entry) =>
-        entry.owner.element() === entry.element && entry.element.isConnected,
-    );
+    return refsAreCurrent(false);
+  };
+  const currentDomMatches = (
+    changing: "url" | "alt" | "file" | null = null,
+  ) => {
     return (
-      refsAreCurrent &&
+      currentShapeMatches(changing) &&
+      authorityIsCurrent() &&
       (retired
         ? coordinator.acceptsSuccessorOf(publication)
         : coordinator.isCurrent(publication))
@@ -2470,17 +2495,20 @@ function createImagePublicationRuntime(
     currentDomMatches();
   return Object.freeze({
     publication,
-    publish: (beforePublish = () => {}) => {
-      established = true;
-      replayRefs = owners.map((owner) => {
+    publish: (beforePublish: () => boolean = () => true) => {
+      const capturedRefs: ImageRefReplay[] = [];
+      for (const owner of owners) {
         const element = owner.element();
-        if (!element) {
-          throw new Error(
-            "Cannot publish image controls without every committed ref",
-          );
-        }
-        return { owner, element, detached: false, reattached: false };
-      });
+        if (!element) return false;
+        capturedRefs.push({
+          owner,
+          element,
+          detached: false,
+          reattached: false,
+        });
+      }
+      replayRefs = capturedRefs;
+      established = true;
       guard = createImageDomGuard(
         dom,
         placement,
@@ -2490,9 +2518,15 @@ function createImagePublicationRuntime(
         },
       );
       if (!guard) return false;
-      beforePublish();
-      if (!coordinator.publish(publication)) {
-        guard?.release();
+      if (
+        !beforePublish() ||
+        !currentShapeMatches() ||
+        !authorityIsCurrent() ||
+        coordinator.active() !== null ||
+        retired ||
+        !coordinator.publish(publication)
+      ) {
+        guard.release();
         return false;
       }
       return true;
@@ -2567,7 +2601,7 @@ function imageReplayValidation(
   if (!replay) {
     return Object.freeze({
       complete: () => true,
-      release: () => {},
+      release: () => true,
       reject: () => {},
     });
   }
@@ -2603,17 +2637,27 @@ function imageReplayValidation(
     return null;
   }
   let released = false;
+  let releaseAccepted = false;
   const release = () => {
-    if (released) return;
+    if (released) return releaseAccepted;
     released = true;
-    coordinator.abandonReplay(replay.source);
-    replay.release();
+    const clean = replay.release();
+    releaseAccepted =
+      !sameAuthority ||
+      (clean &&
+        coordinator.acceptsSuccessorOf(replay.source) &&
+        replay.proofIsCurrent());
+    if (releaseAccepted) coordinator.abandonReplay(replay.source);
+    else coordinator.rejectReplay(replay.source);
+    return releaseAccepted;
   };
   const reject = () => {
-    if (released) return;
-    released = true;
+    if (!released) {
+      released = true;
+      replay.release();
+    }
+    releaseAccepted = false;
     coordinator.rejectReplay(replay.source);
-    replay.release();
   };
   return Object.freeze({
     complete: () => {
@@ -3010,6 +3054,7 @@ function createImagePresentation(
       coordinator,
       dom,
       controls,
+      factsAreCurrent,
       authorizeNativeDismissal,
       expectedOwners(),
       () => {
@@ -3017,7 +3062,7 @@ function createImagePresentation(
       },
     );
     if (!runtime) {
-      replayValidation.release();
+      replayValidation.reject();
       replayRejected = true;
       abandonDeferredUpload();
       return undefined;
@@ -3031,15 +3076,15 @@ function createImagePresentation(
       abandonDeferredUpload();
       return undefined;
     }
-    currentRuntime = runtime;
-    lastRuntime = runtime;
     if (!runtime.publish(replayValidation.release)) {
-      replayValidation.release();
+      replayValidation.reject();
       runtime.retireForElement();
-      currentRuntime = null;
+      replayRejected = true;
       abandonDeferredUpload();
       return undefined;
     }
+    currentRuntime = runtime;
+    lastRuntime = runtime;
     resumeUploadSettlement();
     return runtime.retireForLayout;
   };
@@ -3364,9 +3409,10 @@ function createImagePresentation(
       return;
     }
     const nativeEvent = imageExactNativeSubmit(event, provenance);
-    if (!nativeEvent || !submitSuppressionIsCurrent(provenance)) return;
+    if (!nativeEvent) return;
     event.preventDefault();
     if (!event.defaultPrevented || !nativeEvent.defaultPrevented) return;
+    if (!submitSuppressionIsCurrent(provenance)) return;
     const publication = currentPublication(
       authority.uploading ? "file" : null,
     );

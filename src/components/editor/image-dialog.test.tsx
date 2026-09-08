@@ -2607,7 +2607,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(staleSubmit).not.toHaveBeenCalled();
   });
 
-  it("revalidates form suppression after native submit provenance", async () => {
+  it("suppresses navigation but rejects insertion after submit provenance replays a ref", async () => {
     const staleSubmit = vi.fn();
     const currentClose = vi.fn();
     const onUpload = vi.fn();
@@ -2637,7 +2637,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     });
 
     act(() => form.dispatchEvent(submit));
-    expect(submit.defaultPrevented).toBe(false);
+    expect(submit.defaultPrevented).toBe(true);
     expect(staleSubmit).not.toHaveBeenCalled();
 
     await view.render(
@@ -2734,5 +2734,218 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(screen.getByTestId("image-url")).toHaveValue(
       "/api/assets/retry",
     );
+  });
+
+  it.each(["value", "files"] as const)(
+    "rejects a candidate when its file %s getter detaches a required ref",
+    async (property) => {
+      const staleClose = vi.fn();
+      const currentClose = vi.fn();
+      const onUpload = vi.fn();
+      const prototype = HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+      if (!descriptor?.get) {
+        throw new Error(`HTMLInputElement.${property} getter is unavailable`);
+      }
+      const detach = vi.fn();
+      Object.defineProperty(prototype, property, {
+        ...descriptor,
+        get(this: HTMLInputElement) {
+          const value = descriptor.get?.call(this);
+          if (
+            detach.mock.calls.length === 0 &&
+            this.type === "file" &&
+            this.isConnected
+          ) {
+            detach();
+            reactProp<RefCallback<HTMLInputElement>>(this, "ref")(null);
+          }
+          return value;
+        },
+      });
+
+      let view: DirectView;
+      try {
+        view = await renderStrictRoot(
+          <ImageDialog
+            open
+            onOpenChange={staleClose}
+            onSubmit={vi.fn()}
+            onUpload={onUpload}
+          />,
+        );
+      } finally {
+        Object.defineProperty(prototype, property, descriptor);
+      }
+      expect(detach).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+
+      await view.render(
+        <ImageDialog
+          open
+          onOpenChange={currentClose}
+          onSubmit={vi.fn()}
+          onUpload={onUpload}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(staleClose).not.toHaveBeenCalled();
+      expect(currentClose).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("rejects replay when source release enqueues restored mutation history", async () => {
+    const failed = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const readUrl = vi.fn(() => "/api/assets/untrusted");
+    const result = {} as UploadResult;
+    Object.defineProperty(result, "url", { get: readUrl });
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(retry.promise);
+    const NativeObserver = window.MutationObserver;
+    const nativeType = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "type",
+    );
+    if (!nativeType?.get || !nativeType.set) {
+      throw new Error("HTMLInputElement.type accessors are unavailable");
+    }
+    const nativeTypeGetter = nativeType.get;
+    const nativeTypeSetter = nativeType.set;
+    let armSuccessor = false;
+    let injected = false;
+    const dirty = vi.fn();
+    class ReleaseMutationObserver extends NativeObserver {
+      override observe(target: Node, options?: MutationObserverInit) {
+        super.observe(target, options);
+        if (
+          armSuccessor &&
+          !injected &&
+          target instanceof HTMLDivElement &&
+          target.getAttribute("role") === "dialog"
+        ) {
+          const file = target.querySelector('[data-testid="image-file"]');
+          if (!(file instanceof HTMLInputElement)) {
+            throw new Error("Image file input was not rendered");
+          }
+          injected = true;
+          Object.defineProperty(file, "type", {
+            configurable: true,
+            get() {
+              Reflect.deleteProperty(file, "type");
+              dirty();
+              const className = target.className;
+              target.className = "mutated-during-source-release";
+              target.className = className;
+              return nativeTypeGetter.call(file);
+            },
+            set(value: string) {
+              nativeTypeSetter.call(file, value);
+            },
+          });
+          file.setAttribute("name", "");
+          file.setAttribute("type", "file");
+          file.removeAttribute("name");
+        }
+      }
+    }
+    vi.stubGlobal("MutationObserver", ReleaseMutationObserver);
+    const view = await renderStrictRoot(
+      <Harness onUpload={onUpload} onSubmit={vi.fn()} />,
+    );
+    choose(new File(["failed"], "failed.png", { type: "image/png" }));
+    const url = screen.getByTestId("image-url") as HTMLInputElement;
+    const ref = reactProp<RefCallback<HTMLInputElement>>(url, "ref");
+
+    armSuccessor = true;
+    await act(async () => {
+      ref(null);
+      ref(url);
+      failed.resolve(result);
+      await failed.promise;
+      await Promise.resolve();
+    });
+
+    expect(injected).toBe(true);
+    expect(dirty).toHaveBeenCalledOnce();
+    expect(readUrl).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.getByTestId("image-upload")).toBeEnabled(),
+    );
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+
+    await view.render(
+      <Harness onUpload={onUpload} onSubmit={vi.fn()} />,
+    );
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    choose(retryFile);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry" });
+      await retry.promise;
+    });
+    expect(screen.getByTestId("image-url")).toHaveValue(
+      "/api/assets/retry",
+    );
+  });
+
+  it("retires an action when a ref connectivity getter restores DOM after the prior drain", async () => {
+    const staleClose = vi.fn();
+    const currentClose = vi.fn();
+    const onUpload = vi.fn();
+    const view = await renderStrictRoot(
+      <ImageDialog
+        open
+        onOpenChange={staleClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    const cancel = screen.getByRole("button", {
+      name: "Cancel",
+    }) as HTMLButtonElement;
+    const connected = Object.getOwnPropertyDescriptor(
+      Node.prototype,
+      "isConnected",
+    );
+    if (!connected?.get) {
+      throw new Error("Node.isConnected getter is unavailable");
+    }
+    const dirty = vi.fn(() => {
+      const content = dialogContent();
+      const className = content.className;
+      content.className = "mutated-during-connectivity-read";
+      content.className = className;
+    });
+    Object.defineProperty(cancel, "isConnected", {
+      configurable: true,
+      get() {
+        Reflect.deleteProperty(cancel, "isConnected");
+        dirty();
+        return connected.get?.call(cancel);
+      },
+    });
+
+    fireEvent.click(cancel);
+    expect(dirty).toHaveBeenCalledOnce();
+    expect(staleClose).not.toHaveBeenCalled();
+
+    await view.render(
+      <ImageDialog
+        open
+        onOpenChange={currentClose}
+        onSubmit={vi.fn()}
+        onUpload={onUpload}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(staleClose).not.toHaveBeenCalled();
+    expect(currentClose).toHaveBeenCalledOnce();
   });
 });
