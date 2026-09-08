@@ -671,6 +671,104 @@ describe("CommentsPanel", () => {
       },
     );
 
+    it.each([
+      ["host", "pointer Accept"],
+      ["host", "keyboard Reject"],
+      ["document", "pointer Accept"],
+      ["document", "keyboard Reject"],
+    ] as const)(
+      "ignores an own currentTarget poison during %s hydration with %s and recovers",
+      async (hydrationTarget, activation) => {
+        const fixture = reviewSession(
+          `suggestion-${hydrationTarget}-current-target-poison-${activation.replace(" ", "-")}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        const ownerDocument = frame.contentDocument;
+        const ownerWindow = ownerDocument?.defaultView;
+        if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
+        const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
+        const page = (
+          <html>
+            {createElement("head")}
+            <body>{panel}</body>
+          </html>
+        );
+        ownerDocument.open();
+        ownerDocument.write(
+          hydrationTarget === "document"
+            ? `<!doctype html>${renderToString(page)}`
+            : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
+        );
+        ownerDocument.close();
+        const target =
+          hydrationTarget === "document"
+            ? ownerDocument
+            : ownerDocument.getElementById("root");
+        if (!target) throw new Error("The host hydration root was not rendered");
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
+
+        try {
+          const actions = captureSuggestionActions(target);
+          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
+          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
+          const forgedStopPropagation = vi.fn();
+          const poisonCurrentTarget = (nativeEvent: Event) => {
+            Object.defineProperty(nativeEvent, "currentTarget", { configurable: true, value: actions.root });
+          };
+          const nominateForgedBubble = (nativeEvent: Event) => {
+            const click = nativeEvent as MouseEvent;
+            const forged = {
+              type: click.type,
+              currentTarget: control.element as EventTarget | null,
+              target: click.target,
+              nativeEvent: click,
+              button: click.button,
+              buttons: click.buttons,
+              bubbles: click.bubbles,
+              cancelable: click.cancelable,
+              defaultPrevented: click.defaultPrevented,
+              stopPropagation: forgedStopPropagation,
+            };
+            control.click(forged);
+            forged.currentTarget = actions.root;
+            actions.rootClick(forged);
+          };
+          ownerWindow.addEventListener("click", poisonCurrentTarget, { capture: true, once: true });
+          actions.root.addEventListener("click", nominateForgedBubble, { once: true });
+          const user = userEvent.setup({ document: ownerDocument });
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(forgedStopPropagation).not.toHaveBeenCalled();
+
+          if (activation === "pointer Accept") {
+            await user.pointer({ keys: "[MouseLeft]", target: control.element });
+          } else {
+            control.element.focus();
+            await user.keyboard("{Enter}");
+          }
+          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
+          expect(errors).not.toHaveBeenCalled();
+        } finally {
+          await act(async () => root.unmount());
+          errors.mockRestore();
+          frame.remove();
+        }
+      },
+    );
+
     it("keeps the exact presentation while moving from one-button to two-button authority", async () => {
       const fixture = reviewSession("suggestion-conditional-actions");
       session = fixture.session;
