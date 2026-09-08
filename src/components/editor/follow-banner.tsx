@@ -148,7 +148,6 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
   const liveFactsMatch = () => {
     if (
       !authorityMatches() ||
-      session.follow !== follow ||
       session.followUserId !== followUserId
     ) {
       return false;
@@ -351,20 +350,25 @@ function createFollowPresentation(authority: FollowAuthority, cells: FollowCells
       nativeEvent.target !== target ||
       !(target instanceof ownerWindow.Node) ||
       target.ownerDocument !== ownerDocument ||
-      !committed.stopTargets.includes(target) ||
       !stop.isConnected ||
       stop.ownerDocument !== ownerDocument ||
       stop.disabled ||
       stop.matches(":disabled") ||
       cells.claimedEvents.has(event) ||
-      cells.claimedEvents.has(nativeEvent) ||
-      cells.active.current !== presentation ||
-      !exactDomIsCurrent(committed) ||
-      !liveFactsMatch() ||
-      cells.active.current !== presentation
+      cells.claimedEvents.has(nativeEvent)
     ) {
       return;
     }
+    if (!exactDomIsCurrent(committed)) {
+      retire();
+      return;
+    }
+    if (!committed.stopTargets.includes(target)) return;
+    if (!liveFactsMatch()) {
+      retire();
+      return;
+    }
+    if (cells.active.current !== presentation) return;
 
     actionClaimed = true;
     cells.claimedEvents.add(event);

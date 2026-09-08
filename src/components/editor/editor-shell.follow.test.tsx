@@ -1013,7 +1013,7 @@ describe("Follow banner Stop publication", () => {
     "injected descendant",
     "removed descendant",
     "replaced descendant",
-  ] as const)("rejects %s drift without consuming the restored publication", (drift) => {
+  ] as const)("retires %s drift and keeps the restored successor usable", (drift) => {
     const follow = vi.fn<(userId: string | null) => void>();
     const owner = new BannerSession(BASE_BANNER_USER.id, [bannerUser()], follow);
     const view = directRoot(<BannerBoundary session={owner} />);
@@ -1061,7 +1061,11 @@ describe("Follow banner Stop publication", () => {
       allowFactReads: true,
     });
     restore();
-    click(stopEvent(parts.stop, parts.icon));
+    act(() => view.root.render(
+      <BannerBoundary session={owner} bannerKey="banner-b" domKey="dom-b" />,
+    ));
+    const current = bannerParts(view.host);
+    stopHandler(current.stop)(stopEvent(current.stop, current.icon));
     expect(follow).toHaveBeenCalledExactlyOnceWith(null);
   });
 
@@ -1212,11 +1216,10 @@ describe("Follow banner Stop publication", () => {
     expect(followB).toHaveBeenCalledExactlyOnceWith(null);
   });
 
-  it.each(["follow target", "id", "name", "color", "section", "callback"] as const)(
-    "does not consume a publication rejected for in-place %s mutation",
+  it.each(["follow target", "id", "name", "color", "section"] as const)(
+    "retires a publication rejected for in-place %s mutation and keeps B usable",
     (fact) => {
       const follow = vi.fn<(userId: string | null) => void>();
-      const replacementFollow = vi.fn<(userId: string | null) => void>();
       const currentUser = bannerUser();
       const owner = new BannerSession(BASE_BANNER_USER.id, [currentUser], follow);
       const view = directRoot(<BannerBoundary session={owner} />);
@@ -1228,11 +1231,6 @@ describe("Follow banner Stop publication", () => {
       if (fact === "follow target") {
         owner.setTargetWithoutRender("followed-b");
         restore = () => owner.setTargetWithoutRender(BASE_BANNER_USER.id);
-      } else if (fact === "callback") {
-        owner.follow = replacementFollow;
-        restore = () => {
-          owner.follow = follow;
-        };
       } else {
         const key = fact;
         const previous = currentUser[key];
@@ -1251,15 +1249,29 @@ describe("Follow banner Stop publication", () => {
       expectRejected({
         callback: () => click(event),
         event,
-        follow: [follow, replacementFollow],
+        follow: [follow],
         owner: [owner],
         host: view.host,
         allowFactReads: true,
       });
+      const targetReads = owner.targetReads.mock.calls.length;
+      const presenceReads = owner.presence.mock.calls.length;
+      expectRejected({
+        callback: () => click(event),
+        event,
+        follow: [follow],
+        owner: [owner],
+        host: view.host,
+      });
+      expect(owner.targetReads).toHaveBeenCalledTimes(targetReads);
+      expect(owner.presence).toHaveBeenCalledTimes(presenceReads);
       restore();
-      click(event);
+      act(() => view.root.render(
+        <BannerBoundary session={owner} bannerKey="banner-b" domKey="dom-b" />,
+      ));
+      const current = bannerParts(view.host);
+      stopHandler(current.stop)(stopEvent(current.stop, current.icon));
       expect(follow).toHaveBeenCalledExactlyOnceWith(null);
-      expect(replacementFollow).not.toHaveBeenCalled();
     },
   );
 
