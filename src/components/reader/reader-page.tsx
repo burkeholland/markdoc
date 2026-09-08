@@ -42,9 +42,14 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
         <Link href={signedIn ? "/" : "/login"} className="icon-btn h-9 w-9 shrink-0" aria-label={signedIn ? "All documents" : "Sign in to Markdoc"}>
           <Logo className="h-7 w-7" />
         </Link>
-        <div className="min-w-0 flex-1 truncate text-sm font-medium text-ink" data-testid="reader-header-title">
+        <a
+          href="#reader-article"
+          title={title}
+          className="min-w-0 flex-1 truncate text-sm font-medium text-ink transition-colors hover:text-accent"
+          data-testid="reader-header-title"
+        >
           {title}
-        </div>
+        </a>
         <div className="flex shrink-0 items-center gap-2">
           {canOpenEditor && (
             <Link href={`/d/${docId}`} className="btn btn-sm btn-outline gap-1.5" data-testid="open-in-editor">
