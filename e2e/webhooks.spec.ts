@@ -3,6 +3,8 @@ import type { AddressInfo } from "node:net";
 import { test, expect } from "./fixtures";
 import { createDocument, devLogin, reloadHydrated, uniqueLogin, waitForHydration } from "./helpers";
 
+test.use({ trace: "off", screenshot: "off", video: "off" });
+
 /**
  * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
  * press Send test and see `200` in the list; delete it. Delivery and retries are covered by
@@ -33,6 +35,12 @@ test.describe("settings · webhooks", () => {
   });
 
   test("adds a webhook, shows the secret once, Send test lands a 200 in the list", async ({ page }) => {
+    await page.route("**/*", (route) => {
+      const hostname = new URL(route.request().url()).hostname;
+      return ["localhost", "127.0.0.1", "[::1]"].includes(hostname)
+        ? route.continue()
+        : route.abort();
+    });
     // Per run: the empty state and the one-row list are counted over the account, and a fixed login keeps the
     // webhook of a run that failed before the delete at the end (a CI retry would then start from one row).
     await devLogin(page, uniqueLogin("webhooks-owner"));
@@ -69,6 +77,15 @@ test.describe("settings · webhooks", () => {
     const body = (await list.json()) as { webhooks: Record<string, unknown>[] };
     expect(body.webhooks).toHaveLength(1);
     expect("secret" in body.webhooks[0]).toBeFalsy();
+
+    const refreshResponse = page.waitForResponse((candidate) =>
+      candidate.request().method() === "GET" &&
+      new URL(candidate.url()).pathname === "/api/webhooks");
+    await page.getByTestId("webhook-refresh").click();
+    expect((await refreshResponse).ok()).toBeTruthy();
+    await expect(row).toContainText(receiverUrl);
+    await expect(page.getByTestId("webhook-status")).toContainText("no deliveries yet");
+    await expect(page.getByTestId("webhook-secret")).toHaveText(secret);
 
     await page.getByTestId("webhook-test").click();
     await expect(page.getByTestId("webhook-status")).toContainText("200", { timeout: 10_000 });

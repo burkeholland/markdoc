@@ -10,8 +10,9 @@ import {
   type ChangeEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
+  type RefCallback,
 } from "react";
-import { Check, Copy, Loader2, Plus, Power, Send, Trash2, Webhook } from "lucide-react";
+import { Check, Copy, Loader2, Plus, Power, RefreshCw, Send, Trash2, Webhook } from "lucide-react";
 import { relativeTime } from "@/lib/utils";
 import { useCopy } from "@/lib/hooks";
 import { ApiError, apiErrorText } from "@/lib/api";
@@ -48,7 +49,7 @@ interface CreatedWebhook {
 }
 
 type DeliveryTone = "ok" | "bad" | "muted";
-type PanelActionKind = "add" | "cancel" | "copy" | "create" | "retry";
+type PanelActionKind = "add" | "cancel" | "copy" | "create" | "refresh" | "retry";
 type RowActionKind = RowOperation["kind"];
 
 type ActionFacts = Readonly<{
@@ -56,6 +57,22 @@ type ActionFacts = Readonly<{
   eligible: boolean;
   route: string | null;
 }>;
+
+type ListOperationIntent = "refresh" | "retry";
+type ListRequestAuthority = Readonly<{ identity: symbol }>;
+type ListRequestCallback = (operation: ListOperation) => void;
+
+interface ListOperation extends Operation {
+  readonly intent: ListOperationIntent;
+  readonly requestSequence: number;
+  readonly activation: PanelPublication;
+  readonly action: ActionFacts;
+  readonly request: ListRequestAuthority;
+  readonly route: "/api/webhooks";
+  readonly root: HTMLDivElement;
+  readonly document: Document;
+  readonly placement: PanelPlacement;
+}
 
 type DraftInputFacts = Readonly<{
   kind: "url" | "docs";
@@ -139,13 +156,15 @@ type PanelPresentation = Readonly<{
   adding: boolean;
   draft: DraftFacts;
   createOperation: Operation | null;
-  retryOperation: Operation | null;
+  listOperation: ListOperation | null;
   feedbackOperation: Operation | null;
+  requestList: ListRequestAuthority;
   listError: string | null;
   actionError: string | null;
   created: CreatedFacts | null;
   list: ListFacts;
   add: ActionFacts;
+  refresh: ActionFacts;
   create: ActionFacts | null;
   cancel: ActionFacts | null;
   retry: ActionFacts | null;
@@ -165,6 +184,7 @@ interface ElementSlot<T extends HTMLElement> {
   element: T | null;
   last: T | null;
   mouseTargets: readonly Node[] | null;
+  binding: RefCallback<T> | null;
 }
 
 interface RowElements {
@@ -179,6 +199,7 @@ interface PanelPublication {
   card: ElementSlot<HTMLDivElement>;
   header: ElementSlot<HTMLDivElement>;
   guidance: ElementSlot<HTMLParagraphElement>;
+  refresh: ElementSlot<HTMLButtonElement>;
   add: ElementSlot<HTMLButtonElement>;
   form: ElementSlot<HTMLFormElement>;
   url: ElementSlot<HTMLInputElement>;
@@ -269,6 +290,7 @@ class PanelPublicationCoordinator {
   readonly #claimedActions = new WeakSet<object>();
   readonly #claimedReactEvents = new WeakSet<object>();
   readonly #claimedNativeEvents = new WeakSet<Event>();
+  readonly #recentlyIntroduced = new WeakSet<HTMLElement>();
 
   constructor(mount: MountGeneration) {
     this.#mount = mount;
@@ -345,7 +367,6 @@ class PanelPublicationCoordinator {
       this.retire(candidate, "element");
     }
     if (introducedReplayCompleted) {
-      candidate.introducedSlots.delete(slotOwner);
       proof.detached = false;
       proof.reattached = false;
       const ownerWindow = proof.element.ownerDocument.defaultView;
@@ -413,12 +434,26 @@ class PanelPublicationCoordinator {
       const predecessorElements = new Map(
         expectedPanelSlots(predecessor).map((owner) => [owner.key, owner.element]),
       );
+      const predecessorIntroduced = new Map(
+        [...predecessor.introducedSlots].map((owner) => [owner.key, owner.element]),
+      );
       for (const owner of expected) {
-        if (
+        const introduced =
           !predecessorElements.has(owner.key) ||
-          predecessorElements.get(owner.key) !== owner.element
-        ) {
+          predecessorElements.get(owner.key) !== owner.element;
+        const carriedIntroduction =
+          owner.element !== null &&
+          (
+            predecessorIntroduced.get(owner.key) === owner.element ||
+            this.#recentlyIntroduced.has(owner.element)
+          );
+        if (introduced || carriedIntroduction) {
           candidate.introducedSlots.add(owner);
+        }
+        if (owner.element && introduced) {
+          this.#recentlyIntroduced.add(owner.element);
+        } else if (owner.element && carriedIntroduction) {
+          this.#recentlyIntroduced.delete(owner.element);
         }
       }
     }
@@ -452,10 +487,6 @@ class PanelPublicationCoordinator {
       if (this.#current === candidate && !this.#retired.has(candidate)) {
         this.#acceptInputReconciliation(candidate);
       }
-      root.ownerDocument.defaultView?.setTimeout(
-        () => candidate.introducedSlots.clear(),
-        0,
-      );
     });
     return () => {
       candidate.layoutRetired = true;
@@ -491,6 +522,34 @@ class PanelPublicationCoordinator {
     return result;
   }
 
+  ownsListOperation(operation: ListOperation) {
+    const candidate = this.#current;
+    const root = candidate?.card.element;
+    return Boolean(
+      candidate &&
+      root &&
+      this.owns(candidate) &&
+      candidate.presentation.listOperation === operation &&
+      candidate.presentation.requestList === operation.request &&
+      candidate.presentation.generation === operation.generation &&
+      operation.activation.presentation.generation === operation.generation &&
+      operation.activation.presentation.requestList === operation.request &&
+      operation.action === (
+        operation.intent === "refresh"
+          ? operation.activation.presentation.refresh
+          : operation.activation.presentation.retry
+      ) &&
+      operation.action.kind === operation.intent &&
+      operation.action.route === operation.route &&
+      root === operation.root &&
+      root.ownerDocument === operation.document &&
+      operation.placement.document === operation.document &&
+      panelPlacementMatches(root, operation.placement) &&
+      candidate.factsAreCurrent?.() === true &&
+      candidate.domIsExact?.() === true
+    );
+  }
+
   reconcileReactCommit(candidate: PanelPublication) {
     if (
       this.#current !== candidate ||
@@ -500,6 +559,14 @@ class PanelPublicationCoordinator {
       return;
     }
     this.#acceptInputReconciliation(candidate);
+  }
+
+  finishReactCommit(candidate: PanelPublication) {
+    queueMicrotask(() => {
+      if (this.#current === candidate && !this.#retired.has(candidate)) {
+        candidate.introducedSlots.clear();
+      }
+    });
   }
 
   prepareControlClaim(candidate: PanelPublication, override?: InputDomOverride) {
@@ -941,8 +1008,9 @@ function panelPresentationsMatch(
     left.draft.docs !== right.draft.docs ||
     !arraysMatch(left.draft.choices, right.draft.choices) ||
     left.createOperation !== right.createOperation ||
-    left.retryOperation !== right.retryOperation ||
+    left.listOperation !== right.listOperation ||
     left.feedbackOperation !== right.feedbackOperation ||
+    left.requestList !== right.requestList ||
     left.listError !== right.listError ||
     left.actionError !== right.actionError ||
     !createdMatchesSnapshot(left.createdSource, right.created) ||
@@ -951,6 +1019,7 @@ function panelPresentationsMatch(
     left.copyLabel !== right.copyLabel ||
     left.copied !== right.copied ||
     !actionFactsMatch(left.add, right.add) ||
+    !actionFactsMatch(left.refresh, right.refresh) ||
     !actionFactsMatch(left.create, right.create) ||
     !actionFactsMatch(left.cancel, right.cancel) ||
     !actionFactsMatch(left.retry, right.retry) ||
@@ -1095,7 +1164,13 @@ function isNativeReactSubmitEvent(
 }
 
 function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
-  return { key, element: null, last: null, mouseTargets: null };
+  return {
+    key,
+    element: null,
+    last: null,
+    mouseTargets: null,
+    binding: null,
+  };
 }
 
 function createPanelPublication(presentation: PanelPresentation): PanelPublication {
@@ -1104,6 +1179,7 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
     card: slot("card"),
     header: slot("header"),
     guidance: slot("guidance"),
+    refresh: slot("refresh"),
     add: slot("add"),
     form: slot("form"),
     url: slot("url"),
@@ -1154,8 +1230,8 @@ function expectedPanelSlots(
     publication.card,
     publication.header,
     publication.guidance,
-    publication.add,
   ];
+  slots.push(publication.refresh, publication.add);
   if (facts.adding) {
     slots.push(
       publication.form,
@@ -1200,7 +1276,7 @@ function panelButtonSlots(
   publication: PanelPublication,
 ): ElementSlot<HTMLButtonElement>[] {
   const facts = publication.presentation;
-  const slots = [publication.add];
+  const slots = [publication.refresh, publication.add];
   if (facts.adding) slots.push(publication.cancel);
   if (facts.listError) slots.push(publication.retry);
   if (facts.created) slots.push(publication.copy);
@@ -1223,7 +1299,7 @@ export function WebhooksPanel() {
   const [rowOperations, setRowOperations] = useState<Map<string, RowOperation>>(() => new Map());
   const [error, setError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
-  const [retryOperation, setRetryOperation] = useState<Operation | null>(null);
+  const [listOperation, setListOperation] = useState<ListOperation | null>(null);
   const [feedbackOperation, setFeedbackOperation] = useState<Operation | null>(null);
   const [created, setCreated] = useState<CreatedWebhook | null>(null);
   const [mountGeneration] = useState<MountGeneration>(() => Object.freeze({ identity: Symbol("webhooks-mount") }));
@@ -1233,8 +1309,12 @@ export function WebhooksPanel() {
   const createOwner = useRef<Operation | null>(null);
   const rowOwners = useRef(new Map<string, RowOperation>());
   const feedbackOwner = useRef<Operation | null>(null);
-  const retryOwner = useRef<Operation | null>(null);
+  const listOwner = useRef<ListOperation | null>(null);
+  const claimedListRequests = useRef(new WeakSet<ListOperation>());
   const listRequest = useRef(0);
+  const [listRequestCallback] = useState<ListRequestAuthority>(
+    () => Object.freeze({ identity: Symbol("webhooks-list-request") }),
+  );
   const [publicationCoordinator] = useState(
     () => new PanelPublicationCoordinator(mountGeneration),
   );
@@ -1270,7 +1350,7 @@ export function WebhooksPanel() {
       if (activeMountRef.current !== mountGeneration) return;
       activeMountRef.current = null;
       listRequest.current += 1;
-      if (retryOwner.current?.generation === mountGeneration) retryOwner.current = null;
+      if (listOwner.current?.generation === mountGeneration) listOwner.current = null;
       if (createOwner.current?.generation === mountGeneration) createOwner.current = null;
       for (const [webhookId, operation] of owners) {
         if (operation.generation === mountGeneration) owners.delete(webhookId);
@@ -1278,6 +1358,14 @@ export function WebhooksPanel() {
       if (feedbackOwner.current?.generation === mountGeneration) feedbackOwner.current = null;
     };
   }, [mountGeneration, publicationCoordinator]);
+
+  const retireListOperation = useCallback(() => {
+    const operation = listOwner.current;
+    if (!operation) return;
+    listOwner.current = null;
+    listRequest.current += 1;
+    setListOperation((current) => (current === operation ? null : current));
+  }, []);
 
   const load = useCallback(async (continuationIsCurrent: () => boolean = () => true) => {
     const generation = activeMountRef.current;
@@ -1301,9 +1389,6 @@ export function WebhooksPanel() {
   const isCreateCurrent = (operation: Operation) =>
     operation.generation === activeMountRef.current && createOwner.current === operation;
 
-  const isRetryCurrent = (operation: Operation) =>
-    operation.generation === activeMountRef.current && retryOwner.current === operation;
-
   const isRowCurrent = (operation: RowOperation) =>
     operation.generation === activeMountRef.current && rowOwners.current.get(operation.webhookId) === operation;
 
@@ -1322,6 +1407,42 @@ export function WebhooksPanel() {
     setError(null);
   };
 
+  const requestListOperation = useCallback<ListRequestCallback>((operation) => {
+    if (
+      operation.generation !== activeMountRef.current ||
+      operation.generation !== mountGeneration ||
+      operation.request !== listRequestCallback ||
+      operation.requestSequence !== listRequest.current ||
+      listOwner.current !== operation ||
+      claimedListRequests.current.has(operation)
+    ) {
+      return;
+    }
+    claimedListRequests.current.add(operation);
+    const ownsRequest = () =>
+      operation.generation === activeMountRef.current &&
+      operation.generation === mountGeneration &&
+      operation.request === listRequestCallback &&
+      operation.requestSequence === listRequest.current &&
+      listOwner.current === operation &&
+      publicationCoordinator.ownsListOperation(operation);
+    void (async () => {
+      try {
+        const res = await request<{ webhooks: WebhookRow[] }>(operation.route);
+        if (!ownsRequest()) return;
+        listOwner.current = null;
+        setListOperation((current) => (current === operation ? null : current));
+        setHooks(res.webhooks);
+        setListError(null);
+      } catch (e) {
+        if (!ownsRequest()) return;
+        listOwner.current = null;
+        setListOperation((current) => (current === operation ? null : current));
+        setListError(apiErrorText(e, "Failed to load webhooks"));
+      }
+    })();
+  }, [listRequestCallback, mountGeneration, publicationCoordinator]);
+
   const beginRowOperation = (webhookId: string, kind: RowOperation["kind"]): RowOperation | null => {
     const generation = activeMountRef.current;
     if (!generation || rowOwners.current.has(webhookId)) return null;
@@ -1334,6 +1455,7 @@ export function WebhooksPanel() {
     claimFeedback(operation);
     rowOwners.current.set(webhookId, operation);
     setRowOperations((current) => new Map(current).set(webhookId, operation));
+    retireListOperation();
     return operation;
   };
 
@@ -1361,6 +1483,7 @@ export function WebhooksPanel() {
     claimFeedback(operation);
     createOwner.current = operation;
     setCreateOperation(operation);
+    retireListOperation();
     const exactUrl = presentation.draft.url;
     const exactDocs = presentation.draft.docs;
     const exactChoices = presentation.draft.choiceInputs;
@@ -1380,6 +1503,7 @@ export function WebhooksPanel() {
         setUrl("");
         setDocs("");
         setAdding(false);
+        retireListOperation();
         await load(() => isCreateCurrent(operation));
       } catch (e) {
         if (isCreateCurrent(operation)) {
@@ -1394,17 +1518,43 @@ export function WebhooksPanel() {
     })();
   };
 
-  const startRetry = (route: string) => {
-    if (route !== "/api/webhooks" || retryOwner.current) return;
+  const startListOperation = (
+    candidate: PanelPublication,
+    action: ActionFacts,
+    intent: ListOperationIntent,
+  ) => {
+    const root = candidate.card.element;
+    const placement = candidate.placement;
+    if (
+      listOwner.current ||
+      !root ||
+      !placement ||
+      action.kind !== intent ||
+      action.route !== "/api/webhooks" ||
+      candidate.presentation.requestList !== listRequestCallback ||
+      candidate.presentation.generation !== activeMountRef.current ||
+      root.ownerDocument !== placement.document ||
+      !panelPlacementMatches(root, placement)
+    ) {
+      return;
+    }
     const operation = nextOperation();
     if (!operation) return;
-    retryOwner.current = operation;
-    setRetryOperation(operation);
-    void load(() => isRetryCurrent(operation)).finally(() => {
-      if (!isRetryCurrent(operation)) return;
-      retryOwner.current = null;
-      setRetryOperation((current) => (current === operation ? null : current));
+    const listOwnerOperation = Object.freeze<ListOperation>({
+      ...operation,
+      intent,
+      requestSequence: ++listRequest.current,
+      activation: candidate,
+      action,
+      request: listRequestCallback,
+      route: "/api/webhooks",
+      root,
+      document: root.ownerDocument,
+      placement,
     });
+    listOwner.current = listOwnerOperation;
+    setListOperation(listOwnerOperation);
+    requestListOperation(listOwnerOperation);
   };
 
   const startTest = (row: WebhookRowFacts) => {
@@ -1414,6 +1564,7 @@ export function WebhooksPanel() {
       try {
         await request(row.test.route, { method: "POST" });
         if (!isRowCurrent(operation)) return;
+        retireListOperation();
         await load(() => isRowCurrent(operation));
       } catch (e) {
         if (isRowCurrent(operation)) {
@@ -1432,6 +1583,7 @@ export function WebhooksPanel() {
       try {
         await request<{ webhook: WebhookRow }>(row.enable!.route, { method: "POST" });
         if (!isRowCurrent(operation)) return;
+        retireListOperation();
         await load(() => isRowCurrent(operation));
       } catch (e) {
         if (isRowCurrent(operation)) {
@@ -1451,6 +1603,7 @@ export function WebhooksPanel() {
         await request(row.delete.route, { method: "DELETE" });
         if (!isRowCurrent(operation)) return;
         setCreated((current) => (current?.id === row.id ? null : current));
+        retireListOperation();
         await load(() => isRowCurrent(operation));
       } catch (e) {
         if (isRowCurrent(operation)) {
@@ -1518,13 +1671,19 @@ export function WebhooksPanel() {
       adding,
       draft,
       createOperation,
-      retryOperation,
+      listOperation,
       feedbackOperation,
+      requestList: listRequestCallback,
       listError,
       actionError: error,
       created: createdFacts,
       list,
       add: Object.freeze({ kind: "add", eligible: createOperation === null, route: null }),
+      refresh: Object.freeze({
+        kind: "refresh",
+        eligible: (hooks !== null || listError !== null) && listOperation === null,
+        route: "/api/webhooks",
+      }),
       create: adding
         ? Object.freeze({
             kind: "create",
@@ -1538,7 +1697,7 @@ export function WebhooksPanel() {
       retry: listError
         ? Object.freeze({
             kind: "retry",
-            eligible: retryOperation === null,
+            eligible: listOperation === null,
             route: "/api/webhooks",
           })
         : null,
@@ -1559,11 +1718,12 @@ export function WebhooksPanel() {
     error,
     feedbackOperation,
     hooks,
+    listRequestCallback,
+    listOperation,
     listError,
     mountGeneration,
     publicationCoordinator,
     publicationRevision,
-    retryOperation,
     rowOperations,
     url,
   ]);
@@ -1575,9 +1735,13 @@ export function WebhooksPanel() {
   const bindElement = <T extends HTMLElement>(
     candidate: PanelPublication,
     owner: ElementSlot<T>,
-    element: T | null,
-  ) => {
-    publicationCoordinator.bind(candidate, owner, element);
+    afterBind?: (element: T | null) => void,
+  ): RefCallback<T> => {
+    owner.binding ??= (element) => {
+      publicationCoordinator.bind(candidate, owner, element);
+      afterBind?.(element);
+    };
+    return owner.binding;
   };
 
   const domIsExact = useCallback((
@@ -1589,6 +1753,7 @@ export function WebhooksPanel() {
     const card = candidate.card.element;
     const header = candidate.header.element;
     const guidance = candidate.guidance.element;
+    const refreshButton = candidate.refresh.element;
     const addButton = candidate.add.element;
     if (
       !card ||
@@ -1611,12 +1776,31 @@ export function WebhooksPanel() {
       card.children.item(1) !== guidance ||
       header.parentElement !== card ||
       guidance.parentElement !== card ||
+      header.children.length !== 3 ||
       header.lastElementChild !== addButton ||
       addButton.parentElement !== header ||
       addButton.type !== "button" ||
       ((!focus || focus === addButton) && addButton.disabled !== !facts.add.eligible) ||
       addButton.dataset.testid !== "webhook-add" ||
       addButton.textContent?.trim() !== "Add webhook"
+    ) {
+      return false;
+    }
+    const refreshing = facts.listOperation?.intent === "refresh";
+    if (
+      !refreshButton ||
+      !refreshButton.isConnected ||
+      refreshButton.parentElement !== header ||
+      header.children.item(1) !== refreshButton ||
+      refreshButton.nextElementSibling !== addButton ||
+      refreshButton.type !== "button" ||
+      ((!focus || focus === refreshButton) &&
+        refreshButton.disabled !== !facts.refresh.eligible) ||
+      refreshButton.dataset.testid !== "webhook-refresh" ||
+      refreshButton.getAttribute("aria-busy") !== (refreshing ? "true" : null) ||
+      refreshButton.textContent?.trim() !== (
+        refreshing ? "Refreshing webhooks" : "Refresh webhooks"
+      )
     ) {
       return false;
     }
@@ -1745,8 +1929,12 @@ export function WebhooksPanel() {
         retryButton.parentElement !== listErrorBlock ||
         retryButton.type !== "button" ||
         ((!focus || focus === retryButton) && retryButton.disabled !== !facts.retry.eligible) ||
-        retryButton.getAttribute("aria-busy") !== (facts.retryOperation ? "true" : null) ||
-        retryButton.textContent?.trim() !== (facts.retryOperation ? "Retrying…" : "Retry")
+        retryButton.getAttribute("aria-busy") !== (
+          facts.listOperation?.intent === "retry" ? "true" : null
+        ) ||
+        retryButton.textContent?.trim() !== (
+          facts.listOperation?.intent === "retry" ? "Retrying…" : "Retry"
+        )
       ) {
         return false;
       }
@@ -1949,8 +2137,9 @@ export function WebhooksPanel() {
       facts.draft.docs !== docs ||
       !arraysMatch(choices, facts.draft.choices) ||
       facts.createOperation !== createOperation ||
-      facts.retryOperation !== retryOperation ||
+      facts.listOperation !== listOperation ||
       facts.feedbackOperation !== feedbackOperation ||
+      facts.requestList !== listRequestCallback ||
       feedbackOperation !== feedbackOwner.current ||
       facts.listError !== listError ||
       facts.actionError !== error ||
@@ -1960,9 +2149,12 @@ export function WebhooksPanel() {
       (createOperation
         ? createOwner.current !== createOperation || createOperation.generation !== mountGeneration
         : createOwner.current !== null) ||
-      (retryOperation
-        ? retryOwner.current !== retryOperation || retryOperation.generation !== mountGeneration
-        : retryOwner.current !== null)
+      (listOperation
+        ? listOwner.current !== listOperation ||
+          listOperation.generation !== mountGeneration ||
+          listOperation.request !== listRequestCallback ||
+          listOperation.requestSequence !== listRequest.current
+        : listOwner.current !== null)
     ) {
       return false;
     }
@@ -2006,7 +2198,8 @@ export function WebhooksPanel() {
     mountGeneration,
     publicationCoordinator,
     publicationRevision,
-    retryOperation,
+    listOperation,
+    listRequestCallback,
     rowOperations,
     url,
   ]);
@@ -2045,17 +2238,17 @@ export function WebhooksPanel() {
       owner.mouseTargets,
       candidate.card.element,
     );
-    if (nativeEvent) publicationCoordinator.prepareControlClaim(candidate);
-    return Boolean(
-      nativeEvent &&
-      ownsPanelAction(candidate, action, event.currentTarget, owner) &&
-      publicationCoordinator.claim(
-        candidate,
-        row,
-        action,
-        event,
-        nativeEvent,
-      ),
+    if (!nativeEvent) return false;
+    publicationCoordinator.prepareControlClaim(candidate);
+    if (!ownsPanelAction(candidate, action, event.currentTarget, owner)) {
+      return false;
+    }
+    return publicationCoordinator.claim(
+      candidate,
+      row,
+      action,
+      event,
+      nativeEvent,
     );
   };
 
@@ -2076,23 +2269,57 @@ export function WebhooksPanel() {
   useLayoutEffect(() => {
     publicationCoordinator.reconcileReactCommit(publication);
   });
+  useEffect(() => {
+    publicationCoordinator.finishReactCommit(publication);
+  }, [publication, publicationCoordinator]);
 
   return (
     <div
-      ref={(element) => bindElement(publication, publication.card, element)}
+      ref={bindElement(publication, publication.card)}
       className="rounded-2xl border border-line bg-surface"
       id="webhooks"
       data-testid="webhooks-card"
     >
       <div
-        ref={(element) => bindElement(publication, publication.header, element)}
+        ref={bindElement(publication, publication.header)}
         className="flex items-center gap-2 border-b border-line px-5 py-3 text-sm font-semibold text-ink"
       >
         <Webhook size={16} className="text-ink-3" /> Webhooks
         <button
-          ref={(element) => bindElement(publication, publication.add, element)}
+          ref={bindElement(publication, publication.refresh)}
           type="button"
           className="btn btn-outline btn-sm ml-auto gap-1.5"
+          onClick={(event) => {
+            if (!claimPublishedClick(
+              publication,
+              null,
+              presentation.refresh,
+              event,
+              publication.refresh,
+            )) return;
+            requestPublicationSuccessor();
+            startListOperation(publication, presentation.refresh, "refresh");
+          }}
+          disabled={!presentation.refresh.eligible}
+          aria-busy={presentation.listOperation?.intent === "refresh" || undefined}
+          data-testid="webhook-refresh"
+        >
+          <RefreshCw
+            size={14}
+            className={
+              presentation.listOperation?.intent === "refresh"
+                ? "animate-spin"
+                : undefined
+            }
+          />
+          {presentation.listOperation?.intent === "refresh"
+            ? "Refreshing webhooks"
+            : "Refresh webhooks"}
+        </button>
+        <button
+          ref={bindElement(publication, publication.add)}
+          type="button"
+          className="btn btn-outline btn-sm gap-1.5"
           onClick={(event) => {
            if (!claimPublishedClick(
              publication,
@@ -2111,7 +2338,7 @@ export function WebhooksPanel() {
         </button>
       </div>
       <p
-        ref={(element) => bindElement(publication, publication.guidance, element)}
+        ref={bindElement(publication, publication.guidance)}
         className="px-5 pt-3 text-sm leading-6 text-ink-3"
       >
         Push the events <code className="text-xs">markdoc_watch</code> returns to an HTTP endpoint instead of long-polling: a GitHub Actions job, a bot, a Slack bridge. Each
@@ -2121,7 +2348,7 @@ export function WebhooksPanel() {
 
       {presentation.adding && (
         <form
-          ref={(element) => bindElement(publication, publication.form, element)}
+          ref={bindElement(publication, publication.form)}
           className="m-5 flex flex-col gap-3 rounded-xl border border-line bg-surface-2 p-4"
           data-testid="webhook-form"
           aria-busy={presentation.createOperation !== null || undefined}
@@ -2176,7 +2403,7 @@ export function WebhooksPanel() {
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">
             URL
             <input
-              ref={(element) => bindElement(publication, publication.url, element)}
+              ref={bindElement(publication, publication.url)}
               className="input"
               value={presentation.draft.url}
               onChange={(event: ChangeEvent<HTMLInputElement>) => {
@@ -2222,7 +2449,7 @@ export function WebhooksPanel() {
               {presentation.draft.choiceInputs.map((choice) => (
                 <label key={choice.id} className="flex min-h-6 items-center gap-1.5 font-mono text-xs text-ink-2">
                   <input
-                    ref={(element) => bindElement(publication, publication.choices[choice.index]!, element)}
+                    ref={bindElement(publication, publication.choices[choice.index]!)}
                     type="checkbox"
                     checked={choice.checked}
                     onChange={(event: ChangeEvent<HTMLInputElement>) => {
@@ -2270,7 +2497,7 @@ export function WebhooksPanel() {
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">
             Only these documents (optional: ids or links, comma or space separated)
             <input
-              ref={(element) => bindElement(publication, publication.docs, element)}
+              ref={bindElement(publication, publication.docs)}
               className="input"
               value={presentation.draft.docs}
               onChange={(event: ChangeEvent<HTMLInputElement>) => {
@@ -2311,7 +2538,7 @@ export function WebhooksPanel() {
           </label>
           <div className="flex items-center gap-2">
             <button
-              ref={(element) => bindElement(publication, publication.create, element)}
+              ref={bindElement(publication, publication.create)}
               type="submit"
               className="btn btn-primary btn-sm gap-1.5"
               disabled={!presentation.create?.eligible}
@@ -2320,7 +2547,7 @@ export function WebhooksPanel() {
               {presentation.createOperation ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />} Add webhook
             </button>
             <button
-              ref={(element) => bindElement(publication, publication.cancel, element)}
+              ref={bindElement(publication, publication.cancel)}
               type="button"
               className="btn btn-ghost btn-sm"
               onClick={(event) => {
@@ -2343,12 +2570,12 @@ export function WebhooksPanel() {
       )}
       {presentation.listError && (
         <div
-          ref={(element) => bindElement(publication, publication.listError, element)}
+          ref={bindElement(publication, publication.listError)}
           className="mx-5 mt-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
           data-testid="webhooks-list-error"
         >
           <span
-            ref={(element) => bindElement(publication, publication.listAlert, element)}
+            ref={bindElement(publication, publication.listAlert)}
             className="min-w-0 flex-1"
             role="alert"
             aria-atomic="true"
@@ -2356,7 +2583,7 @@ export function WebhooksPanel() {
             {presentation.listError}
           </span>
           <button
-            ref={(element) => bindElement(publication, publication.retry, element)}
+            ref={bindElement(publication, publication.retry)}
             type="button"
             className="btn btn-outline btn-sm shrink-0 gap-1.5"
             onClick={(event) => {
@@ -2368,19 +2595,19 @@ export function WebhooksPanel() {
                publication.retry,
              )) return;
              requestPublicationSuccessor();
-              startRetry(presentation.retry.route!);
+              startListOperation(publication, presentation.retry, "retry");
             }}
             disabled={!presentation.retry?.eligible}
-            aria-busy={presentation.retryOperation !== null || undefined}
+            aria-busy={presentation.listOperation?.intent === "retry" || undefined}
           >
-            {presentation.retryOperation && <Loader2 size={14} className="animate-spin" />}
-            {presentation.retryOperation ? "Retrying…" : "Retry"}
+            {presentation.listOperation?.intent === "retry" && <Loader2 size={14} className="animate-spin" />}
+            {presentation.listOperation?.intent === "retry" ? "Retrying…" : "Retry"}
           </button>
         </div>
       )}
       {presentation.actionError && (
         <div
-          ref={(element) => bindElement(publication, publication.actionError, element)}
+          ref={bindElement(publication, publication.actionError)}
           className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
           role="alert"
           aria-atomic="true"
@@ -2392,7 +2619,7 @@ export function WebhooksPanel() {
 
       {presentation.created && (
         <div
-          ref={(element) => bindElement(publication, publication.created, element)}
+          ref={bindElement(publication, publication.created)}
           className="m-5 rounded-xl border border-green-200 bg-green-50 p-4 dark:border-green-900 dark:bg-green-950/40"
           role="status"
           aria-live="polite"
@@ -2402,17 +2629,16 @@ export function WebhooksPanel() {
           <div className="mb-2 text-sm font-medium text-green-900 dark:text-green-200">Webhook added. Copy the signing secret now; it will not be shown again.</div>
           <div className="flex items-center gap-2">
             <code
-              ref={(element) => {
-                bindElement(publication, publication.secret, element);
+              ref={bindElement(publication, publication.secret, (element) => {
                 if (element) secretTarget.current = element;
-              }}
+              })}
               className="min-w-0 flex-1 select-text break-all rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink"
               data-testid="webhook-secret"
             >
               {presentation.created.secret}
             </code>
             <button
-              ref={(element) => bindElement(publication, publication.copy, element)}
+              ref={bindElement(publication, publication.copy)}
               type="button"
               className="btn btn-outline btn-sm shrink-0 gap-1.5"
               onClick={(event) => {
@@ -2442,14 +2668,14 @@ export function WebhooksPanel() {
 
       {presentation.list.kind === "loading" ? (
         <div
-          ref={(element) => bindElement(publication, publication.listContent, element)}
+          ref={bindElement(publication, publication.listContent)}
           className="px-5 py-6 text-sm text-ink-3"
         >
           Loading…
         </div>
       ) : presentation.list.kind === "unavailable" ? null : presentation.list.kind === "empty" ? (
         <div
-          ref={(element) => bindElement(publication, publication.listContent, element)}
+          ref={bindElement(publication, publication.listContent)}
           className="px-5 py-6 text-sm text-ink-3"
           data-testid="webhooks-empty"
         >
@@ -2457,10 +2683,9 @@ export function WebhooksPanel() {
         </div>
       ) : (
         <ul
-          ref={(element) => {
-            bindElement(publication, publication.listContent, element);
-            bindElement(publication, publication.rowsList, element);
-          }}
+          ref={bindElement(publication, publication.listContent, (element) => {
+            publicationCoordinator.bind(publication, publication.rowsList, element);
+          })}
           className="mt-3 divide-y divide-line border-t border-line"
         >
           {presentation.list.rows!.map((row) => {
@@ -2468,7 +2693,7 @@ export function WebhooksPanel() {
             return (
               <li
                 key={row.id}
-                ref={(element) => bindElement(publication, rowElements.root, element)}
+                ref={bindElement(publication, rowElements.root)}
                 className="flex items-center gap-4 px-5 py-3"
                 data-testid="webhook-row"
               >
@@ -2484,7 +2709,7 @@ export function WebhooksPanel() {
                 </div>
                 {row.enable && (
                   <button
-                    ref={(element) => bindElement(publication, rowElements.enable, element)}
+                    ref={bindElement(publication, rowElements.enable)}
                     type="button"
                     className="btn btn-outline btn-sm gap-1.5"
                     onClick={(event) => {
@@ -2505,7 +2730,7 @@ export function WebhooksPanel() {
                   </button>
                 )}
                 <button
-                  ref={(element) => bindElement(publication, rowElements.test, element)}
+                  ref={bindElement(publication, rowElements.test)}
                   type="button"
                   className="btn btn-outline btn-sm gap-1.5"
                   onClick={(event) => {
@@ -2525,7 +2750,7 @@ export function WebhooksPanel() {
                   {row.operation?.kind === "test" ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Send test
                 </button>
                 <button
-                  ref={(element) => bindElement(publication, rowElements.delete, element)}
+                  ref={bindElement(publication, rowElements.delete)}
                   type="button"
                   className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
                   onClick={(event) => {
