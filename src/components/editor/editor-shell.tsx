@@ -15,7 +15,7 @@ import type { LintIssue } from "@/editor/markdown/lint";
 import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
 import { activateHighlight } from "@/editor/highlight-activation";
-import { api, ApiError, apiErrorText, type SyncStatusDto } from "@/lib/api";
+import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
@@ -73,7 +73,12 @@ const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { 
 // exactly one `import()` here, shared by its components and by any prefetch (`prefetchVersions`), so it gets
 // exactly one chunk.
 const loadCommentsPanel = () => import("./comments-panel");
-const loadVersionsPanel = () => import("./versions-panel");
+let loadedVersionsPanelModule: typeof import("./versions-panel") | null = null;
+const loadVersionsPanel = () =>
+  import("./versions-panel").then((module) => {
+    loadedVersionsPanelModule = module;
+    return module;
+  });
 const loadActivityPanel = () => import("./activity-panel");
 const loadShareDialog = () => import("./share-dialog");
 const loadGitHubDialog = () => import("./github-dialog");
@@ -85,7 +90,11 @@ const loadCommandPalette = () => import("./command-palette");
 const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
 const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
 const ActivityPanel = lazyOnFirstUse(loadActivityPanel, (m) => m.ActivityPanel, () => <SidePanelPlaceholder title="Activity" />);
-const VersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const LazyVersionDiffView = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionDiffView);
+const VersionDiffView: typeof import("./versions-panel").VersionDiffView = (props) => {
+  const Ready = loadedVersionsPanelModule?.VersionDiffView;
+  return Ready ? <Ready {...props} /> : <LazyVersionDiffView {...props} />;
+};
 const ShareDialog = lazyOnFirstUse(loadShareDialog, (m) => m.ShareDialog);
 const GitHubDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.GitHubDialog);
 const CommitDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.CommitDialog);
@@ -140,6 +149,10 @@ type PublishPullKind = "publish" | "pull";
 type EditorIdentity = { documentId: string; session: CollabSession };
 type PreviewSourceKind = "versions" | "github-compare";
 type PreviewProducer = (preview: VersionPreview | null) => void;
+const PREVIEW_ROOT_CLASS = "flex h-full min-h-0 min-w-0 flex-col";
+const PREVIEW_BAR_CLASS = "flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2";
+const PREVIEW_BACK_CLASS = "btn btn-sm btn-outline ml-auto";
+const PREVIEW_MESSAGE = "Comparing GitHub\\u2019s copy with this document.";
 type ToastKind = "info" | "error" | "success";
 interface ToastAction {
   readonly label: string;
@@ -171,6 +184,8 @@ type DocumentMutationOwner = {
   operation: number;
 };
 interface EditorPreviewVisit {
+  readonly generation: symbol;
+  readonly revision: number;
   readonly mount: symbol;
   readonly editor: EditorIdentity;
   readonly document: DocumentDto;
@@ -187,28 +202,1271 @@ interface EditorPreviewVisit {
   readonly actions: EditorActions;
   readonly versionsProducer: PreviewProducer;
   readonly githubProducer: (preview: VersionPreview) => void;
-  active: boolean;
-  retired: boolean;
+  readonly captureContainer: (element: HTMLDivElement | null) => void;
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+  readonly owns: () => boolean;
+  readonly container: () => HTMLDivElement | null;
 }
-interface PreviewPublication {
-  readonly visit: EditorPreviewVisit;
-  readonly source: PreviewSourceKind;
+interface PreviewValueFacts {
   readonly preview: VersionPreview;
   readonly version: VersionPreview["version"];
+  readonly versionFacts: Readonly<VersionSummary>;
   readonly content: string;
   readonly base: VersionPreview["base"];
+  readonly baseVersion: VersionSummary | null;
+  readonly baseVersionFacts: Readonly<VersionSummary> | null;
+  readonly baseContent: string | null;
   readonly range: VersionPreview["range"];
-  readonly setRoot: (element: HTMLDivElement | null) => void;
-  readonly setBackControl: (element: HTMLButtonElement | null) => void;
+  readonly rangeVersions: readonly VersionPreview["version"][] | null;
+  readonly rangeFacts: readonly Readonly<VersionSummary>[] | null;
+}
+interface PreviewSelection {
+  readonly action: symbol;
+  readonly visit: EditorPreviewVisit;
+  readonly producer: PreviewProducer;
+  readonly source: PreviewSourceKind;
+  readonly value: PreviewValueFacts;
+}
+interface PreviewPresentationAuthority {
+  readonly generation: symbol;
+  readonly revision: number;
+  readonly mount: symbol;
+  readonly selection: PreviewSelection;
+  readonly rootClass: string;
+  readonly barClass: string;
+  readonly backClass: string;
+  readonly message: string;
+}
+interface PreviewPresentation {
+  readonly authority: PreviewPresentationAuthority;
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly captureBack: (element: HTMLButtonElement | null) => void;
+  readonly establish: () => void;
+  readonly retireLayout: () => boolean;
+  readonly retire: () => void;
   readonly activateBack: (event: React.MouseEvent<HTMLButtonElement>) => void;
-  root: HTMLDivElement | null;
-  backControl: HTMLButtonElement | null;
+}
+interface PreviewGrant {
+  readonly generation: symbol;
+  readonly publication: PreviewPresentation;
+  readonly committed: PreviewDomSnapshot;
+  actionClaimed: boolean;
+  retired: boolean;
+  readonly retire: () => void;
+}
+interface PreviewVisitCells {
+  readonly active: {
+    current: EditorPreviewVisit | null;
+    revision: number;
+  };
+  readonly replay: { current: PreviewVisitSuccessor | null };
+  readonly retired: WeakSet<EditorPreviewVisit>;
+}
+interface PreviewPublicationCells {
+  readonly active: {
+    current: PreviewGrant | null;
+    revision: number;
+  };
+  readonly replay: { current: PreviewPublicationSuccessor | null };
+  readonly claimedEvents: WeakSet<object>;
+  readonly claimedActions: WeakSet<object>;
+}
+interface PreviewPlacement {
+  readonly document: Document;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+interface PreviewContainerSnapshot extends PreviewPlacement {
+  readonly element: HTMLDivElement;
+  readonly className: string;
+}
+interface PreviewVisitSuccessor {
+  readonly source: EditorPreviewVisit;
+  readonly snapshot: PreviewContainerSnapshot;
+  readonly revision: number;
+}
+interface PreviewNodeSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly PreviewNodeSnapshot[];
+}
+interface PreviewDomSnapshot extends PreviewPlacement {
+  readonly root: HTMLDivElement;
+  readonly content: HTMLDivElement;
+  readonly bar: HTMLDivElement | null;
+  readonly back: HTMLButtonElement | null;
+  readonly rootSnapshot: PreviewNodeSnapshot;
+  readonly rootAttributes: readonly (readonly [string, string])[];
+  readonly contentAttributes: readonly (readonly [string, string])[];
+  readonly rootChildren: readonly Node[];
+  readonly barSnapshot: PreviewNodeSnapshot | null;
+  readonly backTargets: readonly Node[];
+}
+interface PreviewPublicationSuccessor {
+  readonly source: PreviewPresentation;
+  readonly authority: PreviewPresentationAuthority;
+  readonly committed: PreviewDomSnapshot;
+  readonly history: PreviewMutationHistory;
+  readonly revision: number;
 }
 interface GitHubCompareRequest {
   readonly visit: EditorPreviewVisit;
   readonly document: DocumentDto;
   readonly documentId: string;
   readonly request: symbol;
+}
+
+type PreviewVisitPhase =
+  | "mounting"
+  | "active"
+  | "layout-retired"
+  | "ref-detached"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+type PreviewPresentationPhase =
+  | "mounting"
+  | "active"
+  | "layout-retired"
+  | "refs-detached"
+  | "replay-ready"
+  | "successor-requested"
+  | "dead";
+
+type PreviewElementName = "root" | "back";
+
+function freezeVersionSummary(version: VersionSummary): Readonly<VersionSummary> {
+  return Object.freeze({
+    id: version.id,
+    number: version.number,
+    title: version.title,
+    kind: version.kind,
+    createdBy: version.createdBy,
+    createdByName: version.createdByName,
+    commitSha: version.commitSha,
+    createdAt: version.createdAt,
+    size: version.size,
+  });
+}
+
+function versionSummaryMatches(version: VersionSummary, facts: Readonly<VersionSummary>) {
+  return (
+    version.id === facts.id &&
+    version.number === facts.number &&
+    version.title === facts.title &&
+    version.kind === facts.kind &&
+    version.createdBy === facts.createdBy &&
+    version.createdByName === facts.createdByName &&
+    version.commitSha === facts.commitSha &&
+    version.createdAt === facts.createdAt &&
+    version.size === facts.size
+  );
+}
+
+function freezePreviewValue(preview: VersionPreview): PreviewValueFacts {
+  const rangeVersions = preview.range ? Object.freeze([...preview.range]) : null;
+  return Object.freeze({
+    preview,
+    version: preview.version,
+    versionFacts: freezeVersionSummary(preview.version),
+    content: preview.content,
+    base: preview.base,
+    baseVersion: preview.base?.version ?? null,
+    baseVersionFacts: preview.base ? freezeVersionSummary(preview.base.version) : null,
+    baseContent: preview.base?.content ?? null,
+    range: preview.range,
+    rangeVersions,
+    rangeFacts: rangeVersions
+      ? Object.freeze(rangeVersions.map(freezeVersionSummary))
+      : null,
+  });
+}
+
+function previewValueMatches(value: PreviewValueFacts) {
+  const { preview } = value;
+  if (
+    preview !== value.preview ||
+    preview.version !== value.version ||
+    !versionSummaryMatches(preview.version, value.versionFacts) ||
+    preview.content !== value.content ||
+    preview.base !== value.base ||
+    preview.range !== value.range
+  ) {
+    return false;
+  }
+  if (value.base) {
+    if (
+      value.base.version !== value.baseVersion ||
+      !value.baseVersionFacts ||
+      !versionSummaryMatches(value.base.version, value.baseVersionFacts) ||
+      value.base.content !== value.baseContent
+    ) {
+      return false;
+    }
+  } else if (
+    value.baseVersion !== null ||
+    value.baseVersionFacts !== null ||
+    value.baseContent !== null
+  ) {
+    return false;
+  }
+  if (!value.range || !value.rangeVersions || !value.rangeFacts) {
+    return (
+      value.range === undefined &&
+      value.rangeVersions === null &&
+      value.rangeFacts === null
+    );
+  }
+  return (
+    value.range.length === value.rangeVersions.length &&
+    value.range.length === value.rangeFacts.length &&
+    value.range.every((version, index) =>
+      version === value.rangeVersions?.[index] &&
+      Boolean(value.rangeFacts?.[index] &&
+        versionSummaryMatches(version, value.rangeFacts[index]!)))
+  );
+}
+
+function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function attributesMatch(
+  element: Element,
+  expected: readonly (readonly [string, string])[],
+) {
+  const current = snapshotAttributes(element);
+  return Boolean(
+    current &&
+    current.length === expected.length &&
+    current.every(([name, value], index) =>
+      name === expected[index]?.[0] && value === expected[index]?.[1]),
+  );
+}
+
+function snapshotPreviewNode(node: Node): PreviewNodeSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotPreviewNode)),
+  });
+}
+
+function previewNodeMatches(snapshot: PreviewNodeSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) =>
+      name !== snapshot.attributes?.[index]?.[0] ||
+      value !== snapshot.attributes?.[index]?.[1])
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every((child, index) =>
+      node.childNodes.item(index) === child.node && previewNodeMatches(child))
+  );
+}
+
+function descendantsOf(element: Element): readonly Node[] {
+  const nodes: Node[] = [];
+  const collect = (node: Node) => {
+    nodes.push(node);
+    for (const child of node.childNodes) collect(child);
+  };
+  collect(element);
+  return Object.freeze(nodes);
+}
+
+function capturePreviewPlacement(element: HTMLElement): PreviewPlacement | null {
+  const parent = element.parentNode;
+  if (!parent) return null;
+  return Object.freeze({
+    document: element.ownerDocument,
+    parent,
+    previousSibling: element.previousSibling,
+    nextSibling: element.nextSibling,
+  });
+}
+
+function previewPlacementMatches(element: HTMLElement, placement: PreviewPlacement) {
+  return (
+    element.ownerDocument === placement.document &&
+    element.parentNode === placement.parent &&
+    element.previousSibling === placement.previousSibling &&
+    element.nextSibling === placement.nextSibling
+  );
+}
+
+class PreviewMutationHistory {
+  private dirty = false;
+  private readonly rootObserver: MutationObserver;
+  private readonly placementObserver: MutationObserver;
+
+  constructor(
+    private readonly committed: PreviewDomSnapshot,
+    private readonly onDirty: () => void,
+  ) {
+    const ownerWindow = committed.document.defaultView;
+    if (!ownerWindow) throw new Error("The preview root has no owner window");
+    this.rootObserver = new ownerWindow.MutationObserver((records) => {
+      if (this.recordRoot(records)) this.onDirty();
+    });
+    this.placementObserver = new ownerWindow.MutationObserver((records) => {
+      if (this.recordPlacement(records)) this.onDirty();
+    });
+    this.rootObserver.observe(committed.root, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    this.placementObserver.observe(committed.parent, { childList: true });
+  }
+
+  private recordRoot(records: readonly MutationRecord[]) {
+    if (records.length > 0) this.dirty = true;
+    return this.dirty;
+  }
+
+  private recordPlacement(records: readonly MutationRecord[]) {
+    const root = this.committed.root;
+    for (const record of records) {
+      if (
+        record.previousSibling === root ||
+        record.nextSibling === root ||
+        [...record.addedNodes, ...record.removedNodes].includes(root)
+      ) {
+        this.dirty = true;
+      }
+    }
+    return this.dirty;
+  }
+
+  readonly isPristine = () => {
+    this.recordRoot(this.rootObserver.takeRecords());
+    this.recordPlacement(this.placementObserver.takeRecords());
+    return !this.dirty;
+  };
+
+  readonly disconnect = () => {
+    this.recordRoot(this.rootObserver.takeRecords());
+    this.recordPlacement(this.placementObserver.takeRecords());
+    this.rootObserver.disconnect();
+    this.placementObserver.disconnect();
+  };
+}
+
+function sameVisitFacts(left: EditorPreviewVisit, right: EditorPreviewVisit) {
+  return (
+    left.mount === right.mount &&
+    left.editor === right.editor &&
+    left.document === right.document &&
+    left.documentId === right.documentId &&
+    left.storage === right.storage &&
+    left.gistId === right.gistId &&
+    left.gistFile === right.gistFile &&
+    left.repoOwner === right.repoOwner &&
+    left.repoName === right.repoName &&
+    left.repoBranch === right.repoBranch &&
+    left.repoPath === right.repoPath &&
+    left.githubUrl === right.githubUrl &&
+    left.session === right.session &&
+    left.actions === right.actions
+  );
+}
+
+function createEditorPreviewVisit({
+  revision,
+  mount,
+  editor,
+  document,
+  session,
+  actions,
+  cells,
+  requestSuccessor,
+  publishPreview,
+  retireWork,
+}: {
+  revision: number;
+  mount: symbol;
+  editor: EditorIdentity;
+  document: DocumentDto;
+  session: CollabSession;
+  actions: EditorActions;
+  cells: PreviewVisitCells;
+  requestSuccessor: () => void;
+  publishPreview: (
+    visit: EditorPreviewVisit,
+    producer: PreviewProducer,
+    source: PreviewSourceKind,
+    preview: VersionPreview | null,
+  ) => void;
+  retireWork: (visit: EditorPreviewVisit) => void;
+}): EditorPreviewVisit {
+  const generation = Symbol("editor-preview-visit");
+  const documentId = document.id;
+  const storage = document.storage;
+  const gistId = document.gistId;
+  const gistFile = document.gistFile;
+  const repoOwner = document.repoOwner;
+  const repoName = document.repoName;
+  const repoBranch = document.repoBranch;
+  const repoPath = document.repoPath;
+  const githubUrl = document.githubUrl;
+  let phase: PreviewVisitPhase = "mounting";
+  let container: HTMLDivElement | null = null;
+  let committed: PreviewContainerSnapshot | null = null;
+  let expiry = 0;
+
+  const factsAreCurrent = () =>
+    visit.generation === generation &&
+    visit.revision === revision &&
+    visit.mount === mount &&
+    visit.editor === editor &&
+    visit.document === document &&
+    visit.documentId === documentId &&
+    visit.storage === storage &&
+    visit.gistId === gistId &&
+    visit.gistFile === gistFile &&
+    visit.repoOwner === repoOwner &&
+    visit.repoName === repoName &&
+    visit.repoBranch === repoBranch &&
+    visit.repoPath === repoPath &&
+    visit.githubUrl === githubUrl &&
+    visit.session === session &&
+    visit.actions === actions &&
+    document.id === documentId &&
+    document.storage === storage &&
+    document.gistId === gistId &&
+    document.gistFile === gistFile &&
+    document.repoOwner === repoOwner &&
+    document.repoName === repoName &&
+    document.repoBranch === repoBranch &&
+    document.repoPath === repoPath &&
+    document.githubUrl === githubUrl &&
+    editor.documentId === documentId &&
+    editor.session === session &&
+    session.docId === documentId &&
+    visit.versionsProducer === versionsProducer &&
+    visit.githubProducer === githubProducer;
+
+  const exactContainer = (snapshot: PreviewContainerSnapshot | null) =>
+    Boolean(
+      container &&
+      container.isConnected &&
+      container.tagName === "DIV" &&
+      container.getAttribute("class") === PANES_BOX &&
+      container.ownerDocument.defaultView &&
+      container.parentNode &&
+      (!snapshot ||
+        (container === snapshot.element &&
+          container.getAttribute("class") === snapshot.className &&
+          previewPlacementMatches(container, snapshot))),
+    );
+
+  const clearActive = () => {
+    cells.retired.add(visit);
+    if (cells.active.current === visit) {
+      cells.active.current = null;
+      cells.active.revision++;
+      retireWork(visit);
+    }
+  };
+
+  const releaseReplay = () => {
+    if (cells.replay.current?.source === visit) cells.replay.current = null;
+  };
+
+  const invalidate = () => {
+    expiry++;
+    phase = "dead";
+    releaseReplay();
+    clearActive();
+  };
+
+  const captureContainer = (element: HTMLDivElement | null) => {
+    if (container === element || phase === "dead" || phase === "successor-requested") return;
+    const previous = container;
+    container = element;
+    if (phase === "mounting") {
+      if (previous !== null || element === null) invalidate();
+      return;
+    }
+    if (phase === "active" || phase === "replay-ready") {
+      invalidate();
+      return;
+    }
+    if (phase === "layout-retired") {
+      if (!committed || previous !== committed.element || element !== null) {
+        invalidate();
+        return;
+      }
+      phase = "ref-detached";
+      return;
+    }
+    if (
+      phase !== "ref-detached" ||
+      previous !== null ||
+      !committed ||
+      element !== committed.element
+    ) {
+      invalidate();
+      return;
+    }
+    phase = "replay-ready";
+  };
+
+  function versionsProducer(preview: VersionPreview | null) {
+    publishPreview(visit, versionsProducer, "versions", preview);
+  }
+
+  function githubProducer(preview: VersionPreview | null) {
+    if (preview) publishPreview(visit, githubProducer, "github-compare", preview);
+  }
+
+  const activate = (snapshot: PreviewContainerSnapshot) => {
+    const previous = cells.active.current;
+    if (previous && previous !== visit) previous.retire();
+    if (cells.active.current) {
+      invalidate();
+      return;
+    }
+    committed = snapshot;
+    cells.active.current = visit;
+    cells.active.revision++;
+    phase = "active";
+  };
+
+  const establishInitial = () => {
+    let successor = cells.replay.current;
+    if (successor && !sameVisitFacts(successor.source, visit)) {
+      cells.replay.current = null;
+      successor = null;
+    }
+    if (
+      successor &&
+      (cells.active.current !== null ||
+        cells.active.revision !== successor.revision ||
+        !exactContainer(successor.snapshot))
+    ) {
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    if (!factsAreCurrent() || !exactContainer(null) || !container) {
+      invalidate();
+      return;
+    }
+    const placement = capturePreviewPlacement(container);
+    if (!placement) {
+      invalidate();
+      return;
+    }
+    const snapshot = Object.freeze({
+      element: container,
+      className: PANES_BOX,
+      ...placement,
+    });
+    if (
+      Boolean(successor && !exactContainer(successor.snapshot)) ||
+      !factsAreCurrent() ||
+      !exactContainer(snapshot)
+    ) {
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    cells.replay.current = null;
+    activate(snapshot);
+  };
+
+  const establishReplay = () => {
+    if (
+      phase !== "replay-ready" ||
+      !committed ||
+      cells.active.current !== null ||
+      !factsAreCurrent() ||
+      !exactContainer(committed)
+    ) {
+      invalidate();
+      return;
+    }
+    cells.replay.current = Object.freeze({
+      source: visit,
+      snapshot: committed,
+      revision: cells.active.revision,
+    });
+    phase = "successor-requested";
+    const ticket = ++expiry;
+    requestSuccessor();
+    queueMicrotask(() => {
+      if (expiry === ticket && cells.replay.current?.source === visit) invalidate();
+    });
+  };
+
+  const establish = () => {
+    if (phase === "mounting") establishInitial();
+    else if (phase === "replay-ready") establishReplay();
+    else invalidate();
+  };
+
+  const retire = () => {
+    if (phase === "successor-requested") return false;
+    if (
+      phase !== "active" ||
+      !committed ||
+      cells.active.current !== visit ||
+      !exactContainer(committed)
+    ) {
+      invalidate();
+      return false;
+    }
+    clearActive();
+    phase = "layout-retired";
+    const ticket = ++expiry;
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        (phase === "layout-retired" ||
+          phase === "ref-detached" ||
+          phase === "replay-ready")
+      ) {
+        invalidate();
+      }
+    });
+    return true;
+  };
+
+  const owns = () =>
+    phase === "active" &&
+    cells.active.current === visit &&
+    !cells.retired.has(visit) &&
+    factsAreCurrent() &&
+    exactContainer(null);
+
+  const visit: EditorPreviewVisit = Object.freeze({
+    generation,
+    revision,
+    mount,
+    editor,
+    document,
+    documentId,
+    storage,
+    gistId,
+    gistFile,
+    repoOwner,
+    repoName,
+    repoBranch,
+    repoPath,
+    githubUrl,
+    session,
+    actions,
+    versionsProducer,
+    githubProducer,
+    captureContainer,
+    establish,
+    retire,
+    owns,
+    container: () => container,
+  });
+  return visit;
+}
+
+function samePreviewAuthorityFacts(
+  left: PreviewPresentationAuthority,
+  right: PreviewPresentationAuthority,
+) {
+  return (
+    left.mount === right.mount &&
+    left.selection === right.selection &&
+    left.rootClass === right.rootClass &&
+    left.barClass === right.barClass &&
+    left.backClass === right.backClass &&
+    left.message === right.message
+  );
+}
+
+class PreviewElementOwner<T extends HTMLElement> {
+  private current: T | null = null;
+
+  constructor(
+    private readonly name: PreviewElementName,
+    private readonly onChange: (
+      name: PreviewElementName,
+      previous: T | null,
+      current: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    this.current = element;
+    this.onChange(this.name, previous, element);
+  };
+}
+
+function createPreviewPresentation({
+  authority,
+  cells,
+  selectionCurrent,
+  requestSuccessor,
+  clearSelection,
+}: {
+  authority: PreviewPresentationAuthority;
+  cells: PreviewPublicationCells;
+  selectionCurrent: () => PreviewSelection | null;
+  requestSuccessor: () => void;
+  clearSelection: (selection: PreviewSelection) => void;
+}): PreviewPresentation {
+  const {
+    generation,
+    revision,
+    mount,
+    selection,
+    rootClass,
+    barClass,
+    backClass,
+    message,
+  } = authority;
+  const expectedRefs: readonly PreviewElementName[] =
+    selection.source === "github-compare"
+      ? ["root", "back"]
+      : ["root"];
+  let phase: PreviewPresentationPhase = "mounting";
+  let grant: PreviewGrant | null = null;
+  let history: PreviewMutationHistory | null = null;
+  let replay: {
+    readonly committed: PreviewDomSnapshot;
+    readonly revision: number;
+    readonly detached: Set<PreviewElementName>;
+    readonly attached: Set<PreviewElementName>;
+  } | null = null;
+  let expiry = 0;
+  const initialRefs = new Set<PreviewElementName>();
+
+  const refsComplete = (refs: ReadonlySet<PreviewElementName>) =>
+    expectedRefs.every((name) => refs.has(name));
+
+  const releaseOwnedSuccessor = () => {
+    const pending = cells.replay.current;
+    if (!pending || pending.source !== presentation) return;
+    pending.history.disconnect();
+    cells.replay.current = null;
+  };
+
+  const clearGrant = (current: PreviewGrant) => {
+    current.retired = true;
+    if (cells.active.current === current) {
+      cells.active.current = null;
+      cells.active.revision++;
+    }
+    if (grant === current) grant = null;
+  };
+
+  const invalidate = () => {
+    expiry++;
+    phase = "dead";
+    replay = null;
+    releaseOwnedSuccessor();
+    const currentHistory = history;
+    history = null;
+    currentHistory?.disconnect();
+    if (grant) clearGrant(grant);
+  };
+
+  const elementOf = (snapshot: PreviewDomSnapshot, name: PreviewElementName) => {
+    if (name === "root") return snapshot.root;
+    return snapshot.back;
+  };
+
+  const onElementChange = (
+    name: PreviewElementName,
+    previous: HTMLElement | null,
+    element: HTMLElement | null,
+  ) => {
+    if (phase === "dead") return;
+    if (history && !history.isPristine()) {
+      invalidate();
+      return;
+    }
+    if (phase === "successor-requested") return;
+    if (phase === "mounting") {
+      if (previous !== null || element === null || initialRefs.has(name)) {
+        invalidate();
+        return;
+      }
+      initialRefs.add(name);
+      return;
+    }
+    if (phase === "active" || phase === "replay-ready") {
+      invalidate();
+      return;
+    }
+    if (!replay) {
+      invalidate();
+      return;
+    }
+    const expected = elementOf(replay.committed, name);
+    if (!expected) {
+      invalidate();
+      return;
+    }
+    if (phase === "layout-retired") {
+      if (
+        previous !== expected ||
+        element !== null ||
+        replay.detached.has(name) ||
+        replay.attached.size > 0
+      ) {
+        invalidate();
+        return;
+      }
+      replay.detached.add(name);
+      if (refsComplete(replay.detached)) phase = "refs-detached";
+      return;
+    }
+    if (
+      phase !== "refs-detached" ||
+      previous !== null ||
+      element !== expected ||
+      !replay.detached.has(name) ||
+      replay.attached.has(name)
+    ) {
+      invalidate();
+      return;
+    }
+    replay.attached.add(name);
+    if (refsComplete(replay.attached)) phase = "replay-ready";
+  };
+
+  const rootOwner = new PreviewElementOwner<HTMLDivElement>("root", onElementChange);
+  const backOwner = new PreviewElementOwner<HTMLButtonElement>("back", onElementChange);
+
+  const authorityMatches = () =>
+    authority.generation === generation &&
+    authority.revision === revision &&
+    authority.mount === mount &&
+    authority.selection === selection &&
+    authority.rootClass === rootClass &&
+    authority.barClass === barClass &&
+    authority.backClass === backClass &&
+    authority.message === message &&
+    presentation.authority === authority;
+
+  const liveFactsMatch = () => {
+    const expectedProducer =
+      selection.source === "versions"
+        ? selection.visit.versionsProducer
+        : selection.visit.githubProducer;
+    return (
+      authorityMatches() &&
+      selectionCurrent() === selection &&
+      selection.visit.mount === mount &&
+      selection.visit.owns() &&
+      selection.producer === expectedProducer &&
+      previewValueMatches(selection.value)
+    );
+  };
+
+  const currentElements = () => {
+    const root = rootOwner.element();
+    const back = backOwner.element();
+    if (
+      !root ||
+      (selection.source === "github-compare" ? !back : back !== null)
+    ) {
+      return null;
+    }
+    return { root, back };
+  };
+
+  const exactDomIsCurrent = (snapshot: PreviewDomSnapshot | null) => {
+    const elements = currentElements();
+    const container = selection.visit.container();
+    if (!elements || !container) return false;
+    const { root, back } = elements;
+    const ownerDocument = root.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const content = root.children.item(root.children.length - 1);
+    const bar = selection.source === "github-compare"
+      ? root.children.item(0)
+      : null;
+    const messageElement = bar?.children.item(0);
+    if (
+      !ownerWindow ||
+      !root.isConnected ||
+      root.parentElement !== container ||
+      root.tagName !== "DIV" ||
+      root.getAttribute("class") !== rootClass ||
+      !(content instanceof ownerWindow.HTMLDivElement) ||
+      content.ownerDocument !== ownerDocument ||
+      !content.isConnected ||
+      content.tagName !== "DIV" ||
+      content.parentElement !== root ||
+      root.children.item(root.children.length - 1) !== content ||
+      (selection.source === "versions"
+        ? root.children.length !== 1 ||
+          root.childNodes.length !== 1 ||
+          root.children.item(0) !== content ||
+          root.querySelector("[data-testid='sync-compare-bar']") !== null
+        : !(bar instanceof ownerWindow.HTMLDivElement) ||
+          bar.ownerDocument !== ownerDocument ||
+          !bar.isConnected ||
+          bar.parentElement !== root ||
+          bar.getAttribute("class") !== barClass ||
+          bar.getAttribute("data-testid") !== "sync-compare-bar" ||
+          root.children.length !== 2 ||
+          root.childNodes.length !== 2 ||
+          bar.children.length !== 2 ||
+          bar.childNodes.length !== 2 ||
+          !(messageElement instanceof ownerWindow.HTMLSpanElement) ||
+          messageElement.parentElement !== bar ||
+          messageElement.textContent !== message ||
+          !(back instanceof ownerWindow.HTMLButtonElement) ||
+          back.ownerDocument !== ownerDocument ||
+          !back.isConnected ||
+          back.parentElement !== bar ||
+          bar.children.item(1) !== back ||
+          back.tagName !== "BUTTON" ||
+          back.getAttribute("type") !== "button" ||
+          back.type !== "button" ||
+          back.disabled ||
+          back.matches(":disabled") ||
+          back.getAttribute("class") !== backClass ||
+          back.getAttribute("data-testid") !== "sync-compare-close" ||
+          back.children.length !== 0 ||
+          back.childNodes.length !== 1 ||
+          back.textContent !== "Back to editing")
+    ) {
+      return false;
+    }
+    if (!snapshot) return true;
+    return (
+      snapshot.root === root &&
+      snapshot.content === content &&
+      snapshot.bar === bar &&
+      snapshot.back === back &&
+      previewNodeMatches(snapshot.rootSnapshot) &&
+      attributesMatch(root, snapshot.rootAttributes) &&
+      attributesMatch(content, snapshot.contentAttributes) &&
+      root.childNodes.length === snapshot.rootChildren.length &&
+      snapshot.rootChildren.every((node, index) =>
+        root.childNodes.item(index) === node) &&
+      (snapshot.barSnapshot
+        ? previewNodeMatches(snapshot.barSnapshot)
+        : bar === null) &&
+      previewPlacementMatches(root, snapshot)
+    );
+  };
+
+  const snapshotDom = (): PreviewDomSnapshot | null => {
+    const elements = currentElements();
+    if (!elements) return null;
+    const { root, back } = elements;
+    const content = root.children.item(root.children.length - 1);
+    const ownerWindow = root.ownerDocument.defaultView;
+    const placement = capturePreviewPlacement(root);
+    const rootAttributes = snapshotAttributes(root);
+    const bar = selection.source === "github-compare"
+      ? root.children.item(0)
+      : null;
+    if (
+      !ownerWindow ||
+      !placement ||
+      !(content instanceof ownerWindow.HTMLDivElement) ||
+      !rootAttributes ||
+      (bar !== null && !(bar instanceof ownerWindow.HTMLDivElement))
+    ) {
+      return null;
+    }
+    const contentAttributes = snapshotAttributes(content);
+    if (!contentAttributes) return null;
+    return Object.freeze({
+      root,
+      content,
+      bar: bar as HTMLDivElement | null,
+      back,
+      rootSnapshot: snapshotPreviewNode(root),
+      rootAttributes,
+      contentAttributes,
+      rootChildren: Object.freeze([...root.childNodes]),
+      barSnapshot: bar ? snapshotPreviewNode(bar) : null,
+      backTargets: back ? descendantsOf(back) : Object.freeze([]),
+      ...placement,
+    });
+  };
+
+  const activate = (
+    committed: PreviewDomSnapshot,
+    currentHistory: PreviewMutationHistory,
+  ) => {
+    const current: PreviewGrant = {
+      generation: Symbol("preview-publication"),
+      publication: presentation,
+      committed,
+      actionClaimed: false,
+      retired: false,
+      retire: () => {
+        if (current.retired) return;
+        if (grant === current) invalidate();
+        else current.retired = true;
+      },
+    };
+    const previous = cells.active.current;
+    previous?.retire();
+    if (cells.active.current) {
+      currentHistory.disconnect();
+      current.retired = true;
+      invalidate();
+      return;
+    }
+    history = currentHistory;
+    grant = current;
+    cells.active.current = current;
+    cells.active.revision++;
+    phase = "active";
+  };
+
+  const establishInitial = () => {
+    let successor = cells.replay.current;
+    if (successor && !samePreviewAuthorityFacts(successor.authority, authority)) {
+      successor.history.disconnect();
+      cells.replay.current = null;
+      successor = null;
+    }
+    if (
+      successor &&
+      (cells.active.current !== null ||
+        cells.active.revision !== successor.revision ||
+        !successor.history.isPristine() ||
+        !exactDomIsCurrent(successor.committed))
+    ) {
+      successor.history.disconnect();
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    if (
+      !refsComplete(initialRefs) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(null)
+    ) {
+      invalidate();
+      return;
+    }
+    const committed = snapshotDom();
+    if (!committed) {
+      invalidate();
+      return;
+    }
+    const currentHistory = new PreviewMutationHistory(committed, () => {
+      if (history === currentHistory && phase === "active") invalidate();
+    });
+    if (
+      !currentHistory.isPristine() ||
+      Boolean(successor && !successor.history.isPristine()) ||
+      Boolean(successor && !exactDomIsCurrent(successor.committed)) ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed)
+    ) {
+      currentHistory.disconnect();
+      successor?.history.disconnect();
+      cells.replay.current = null;
+      invalidate();
+      return;
+    }
+    successor?.history.disconnect();
+    cells.replay.current = null;
+    if (
+      !currentHistory.isPristine() ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed)
+    ) {
+      currentHistory.disconnect();
+      invalidate();
+      return;
+    }
+    activate(committed, currentHistory);
+  };
+
+  const establishReplay = () => {
+    const candidate = replay;
+    const previousHistory = history;
+    if (
+      !candidate ||
+      !previousHistory ||
+      phase !== "replay-ready" ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision ||
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch() ||
+      cells.replay.current
+    ) {
+      invalidate();
+      return;
+    }
+    if (
+      !previousHistory.isPristine() ||
+      !exactDomIsCurrent(candidate.committed) ||
+      !liveFactsMatch() ||
+      cells.active.current !== null ||
+      cells.active.revision !== candidate.revision ||
+      cells.replay.current
+    ) {
+      invalidate();
+      return;
+    }
+    cells.replay.current = Object.freeze({
+      source: presentation,
+      authority,
+      committed: candidate.committed,
+      history: previousHistory,
+      revision: candidate.revision,
+    });
+    history = null;
+    replay = null;
+    phase = "successor-requested";
+    const ticket = ++expiry;
+    requestSuccessor();
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        cells.replay.current?.source === presentation
+      ) {
+        invalidate();
+      }
+    });
+  };
+
+  const establish = () => {
+    if (phase === "mounting") establishInitial();
+    else if (phase === "replay-ready") establishReplay();
+    else invalidate();
+  };
+
+  const retireLayout = () => {
+    if (phase === "successor-requested") return false;
+    if (
+      phase !== "active" ||
+      !grant ||
+      !history ||
+      cells.active.current !== grant ||
+      !history.isPristine() ||
+      !exactDomIsCurrent(grant.committed)
+    ) {
+      invalidate();
+      return false;
+    }
+    const retired = grant;
+    clearGrant(retired);
+    replay = {
+      committed: retired.committed,
+      revision: cells.active.revision,
+      detached: new Set<PreviewElementName>(),
+      attached: new Set<PreviewElementName>(),
+    };
+    phase = "layout-retired";
+    const ticket = ++expiry;
+    queueMicrotask(() => {
+      if (
+        expiry === ticket &&
+        (phase === "layout-retired" ||
+          phase === "refs-detached" ||
+          phase === "replay-ready")
+      ) {
+        invalidate();
+      }
+    });
+    return true;
+  };
+
+  const activateBack = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const current = grant;
+    if (
+      !current ||
+      current.retired ||
+      cells.active.current !== current ||
+      phase !== "active" ||
+      current.actionClaimed ||
+      selection.source !== "github-compare" ||
+      !event ||
+      typeof event !== "object"
+    ) {
+      return;
+    }
+    const { committed } = current;
+    const back = committed.back;
+    if (!back) return;
+    const ownerDocument = back.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const nativeEvent = event.nativeEvent;
+    const target = event.target;
+    if (
+      !ownerWindow ||
+      event.type !== "click" ||
+      event.button !== 0 ||
+      event.currentTarget !== back ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      nativeEvent.type !== "click" ||
+      nativeEvent.button !== 0 ||
+      nativeEvent.target !== target ||
+      !(target instanceof ownerWindow.Node) ||
+      target.ownerDocument !== ownerDocument ||
+      !committed.backTargets.includes(target) ||
+      event.defaultPrevented ||
+      nativeEvent.defaultPrevented ||
+      cells.claimedEvents.has(event) ||
+      cells.claimedEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    current.actionClaimed = true;
+    cells.claimedEvents.add(event);
+    cells.claimedEvents.add(nativeEvent);
+    if (
+      !history ||
+      !history.isPristine() ||
+      !liveFactsMatch() ||
+      !exactDomIsCurrent(committed) ||
+      current.retired ||
+      cells.active.current !== current
+    ) {
+      invalidate();
+      return;
+    }
+    invalidate();
+    clearSelection(selection);
+  };
+
+  const presentation: PreviewPresentation = Object.freeze({
+    authority,
+    captureRoot: rootOwner.capture,
+    captureBack: backOwner.capture,
+    establish,
+    retireLayout,
+    retire: invalidate,
+    activateBack,
+  });
+  return presentation;
 }
 
 const publishPullBusyError = () => new Error("Another publish or pull is already in progress.");
@@ -466,10 +1724,23 @@ export function EditorShell({
   const toastRenderKeySequence = useRef(0);
   const [toastPublications, setToastPublications] = useState<readonly ToastPublication[]>([]);
   const [previewMount] = useState(() => Symbol("editor-previews"));
-  const activePreviewVisitRef = useRef<EditorPreviewVisit | null>(null);
-  const previewPublicationRef = useRef<PreviewPublication | null>(null);
+  const [previewVisitCells] = useState<PreviewVisitCells>(() => ({
+    active: { current: null, revision: 0 },
+    replay: { current: null },
+    retired: new WeakSet<EditorPreviewVisit>(),
+  }));
+  const [previewPublicationCells] = useState<PreviewPublicationCells>(() => ({
+    active: { current: null, revision: 0 },
+    replay: { current: null },
+    claimedEvents: new WeakSet<object>(),
+    claimedActions: new WeakSet<object>(),
+  }));
+  const previewValueClaimsRef = useRef(new WeakMap<EditorPreviewVisit, WeakSet<VersionPreview>>());
+  const previewSelectionRef = useRef<PreviewSelection | null>(null);
   const githubCompareRequestsRef = useRef<Set<GitHubCompareRequest>>(new Set());
-  const [previewPublication, setPreviewPublication] = useState<PreviewPublication | null>(null);
+  const [previewSelection, setPreviewSelection] = useState<PreviewSelection | null>(null);
+  const [previewVisitRevision, setPreviewVisitRevision] = useState(0);
+  const [previewPresentationRevision, setPreviewPresentationRevision] = useState(0);
   const [versionsRefresh, setVersionsRefresh] = useState(0);
   const [linkInitial, setLinkInitial] = useState<{ href: string; text: string } | null>(null);
   const [viewsReady, setViewsReady] = useState(0);
@@ -480,107 +1751,74 @@ export function EditorShell({
   const [syncScroll, setSyncScrollState] = useState(true);
   const [findUi, setFindUi] = useState<{ replace: boolean; nonce: number } | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const ownsPreviewVisit = useCallback(
-    (visit: EditorPreviewVisit) =>
-      visit.mount === previewMount &&
-      visit.active &&
-      !visit.retired &&
-      activePreviewVisitRef.current === visit &&
-      currentEditorRef.current === visit.editor &&
-      visit.editor.documentId === visit.documentId &&
-      visit.editor.session === visit.session,
-    [previewMount],
-  );
-  const ownsPreviewPublication = useCallback(
-    (publication: PreviewPublication) =>
-      ownsPreviewVisit(publication.visit) &&
-      previewPublicationRef.current === publication &&
-      publication.preview.version === publication.version &&
-      publication.preview.content === publication.content &&
-      publication.preview.base === publication.base &&
-      publication.preview.range === publication.range,
-    [ownsPreviewVisit],
-  );
-  const activatePreviewBack = useCallback(
-    (publication: PreviewPublication, event: React.MouseEvent<HTMLButtonElement>) => {
-      const root = publication.root;
-      const control = publication.backControl;
-      if (
-        publication.source !== "github-compare" ||
-        !ownsPreviewPublication(publication) ||
-        !root ||
-        !control ||
-        event.currentTarget !== control ||
-        !root.isConnected ||
-        !control.isConnected ||
-        !root.contains(control)
-      ) {
-        return;
-      }
-      previewPublicationRef.current = null;
-      setPreviewPublication((current) => current === publication ? null : current);
-    },
-    [ownsPreviewPublication],
-  );
+  const ownsPreviewVisit = useCallback((visit: EditorPreviewVisit) => visit.owns(), []);
+  const clearPreviewSelection = useCallback((selection: PreviewSelection) => {
+    if (previewSelectionRef.current !== selection) return;
+    const grant = previewPublicationCells.active.current;
+    if (grant?.publication.authority.selection === selection) grant.retire();
+    previewSelectionRef.current = null;
+    setPreviewSelection((current) => current === selection ? null : current);
+  }, [previewPublicationCells]);
   const publishPreview = useCallback(
-    (visit: EditorPreviewVisit, source: PreviewSourceKind, preview: VersionPreview | null) => {
-      if (!ownsPreviewVisit(visit)) return;
+    (
+      visit: EditorPreviewVisit,
+      producer: PreviewProducer,
+      source: PreviewSourceKind,
+      preview: VersionPreview | null,
+    ) => {
+      const exactProducer =
+        source === "versions"
+          ? visit.versionsProducer === producer
+          : visit.githubProducer === producer;
+      if (!exactProducer || !visit.owns()) return;
       if (!preview) {
-        const publication = previewPublicationRef.current;
-        if (!publication || publication.visit !== visit) return;
-        previewPublicationRef.current = null;
-        setPreviewPublication((current) => current === publication ? null : current);
+        const selection = previewSelectionRef.current;
+        if (
+          !selection ||
+          selection.visit !== visit ||
+          selection.producer !== producer ||
+          selection.source !== source ||
+          !previewValueMatches(selection.value) ||
+          previewPublicationCells.claimedActions.has(selection)
+        ) {
+          return;
+        }
+        previewPublicationCells.claimedActions.add(selection);
+        clearPreviewSelection(selection);
         return;
       }
-
-      function setRoot(element: HTMLDivElement | null) {
-        if (element) {
-          if (ownsPreviewPublication(publication)) publication.root = element;
-        } else if (publication.root) {
-          publication.root = null;
-        }
+      let claimedValues = previewValueClaimsRef.current.get(visit);
+      if (!claimedValues) {
+        claimedValues = new WeakSet<VersionPreview>();
+        previewValueClaimsRef.current.set(visit, claimedValues);
       }
-      function setBackControl(element: HTMLButtonElement | null) {
-        if (element) {
-          if (ownsPreviewPublication(publication)) publication.backControl = element;
-        } else if (publication.backControl) {
-          publication.backControl = null;
-        }
-      }
-      function activateBack(event: React.MouseEvent<HTMLButtonElement>) {
-        activatePreviewBack(publication, event);
-      }
-      const publication: PreviewPublication = {
+      if (claimedValues.has(preview)) return;
+      claimedValues.add(preview);
+      const selection: PreviewSelection = Object.freeze({
+        action: Symbol("preview-producer-action"),
         visit,
+        producer,
         source,
-        preview,
-        version: preview.version,
-        content: preview.content,
-        base: preview.base,
-        range: preview.range,
-        setRoot,
-        setBackControl,
-        activateBack,
-        root: null,
-        backControl: null,
-      };
-      previewPublicationRef.current = publication;
-      setPreviewPublication(publication);
+        value: freezePreviewValue(preview),
+      });
+      previewPublicationCells.active.current?.retire();
+      previewSelectionRef.current = selection;
+      setPreviewSelection(selection);
     },
-    [activatePreviewBack, ownsPreviewPublication, ownsPreviewVisit],
+    [clearPreviewSelection, previewPublicationCells],
   );
-  const retirePreviewVisit = useCallback((visit: EditorPreviewVisit) => {
-    if (visit.retired) return;
-    visit.active = false;
-    visit.retired = true;
-    if (activePreviewVisitRef.current === visit) activePreviewVisitRef.current = null;
+  const retirePreviewVisitWork = useCallback((visit: EditorPreviewVisit) => {
     for (const request of githubCompareRequestsRef.current) {
       if (request.visit === visit) githubCompareRequestsRef.current.delete(request);
     }
-    const publication = previewPublicationRef.current;
-    if (publication?.visit !== visit) return;
-    previewPublicationRef.current = null;
-    setPreviewPublication((current) => current === publication ? null : current);
+    const selection = previewSelectionRef.current;
+    if (selection?.visit === visit) clearPreviewSelection(selection);
+  }, [clearPreviewSelection]);
+  const requestPreviewVisitSuccessor = useCallback(() => {
+    setPreviewVisitRevision((revision) => revision + 1);
+  }, []);
+  const requestPreviewPresentationSuccessor = useCallback(() => {
+    setPreviewPresentationRevision((revision) => revision + 1);
   }, []);
   const dismissToast = useCallback((publication: ToastPublication, timerFired = false) => {
     if (
@@ -781,45 +2019,84 @@ export function EditorShell({
     else setDialog(kind);
   }, [openNameVersion]);
   const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
-  const previewVisit = useMemo<EditorPreviewVisit>(() => {
-    function versionsProducer(preview: VersionPreview | null) {
-      publishPreview(visit, "versions", preview);
-    }
-    function githubProducer(preview: VersionPreview) {
-      publishPreview(visit, "github-compare", preview);
-    }
-    const visit: EditorPreviewVisit = {
-      mount: previewMount,
-      editor: editorIdentity,
-      document: initialDoc,
-      documentId: initialDoc.id,
-      storage: initialDoc.storage,
-      gistId: initialDoc.gistId,
-      gistFile: initialDoc.gistFile,
-      repoOwner: initialDoc.repoOwner,
-      repoName: initialDoc.repoName,
-      repoBranch: initialDoc.repoBranch,
-      repoPath: initialDoc.repoPath,
-      githubUrl: initialDoc.githubUrl,
-      session,
+  const previewVisit = useMemo(
+    () =>
+      createEditorPreviewVisit({
+        revision: previewVisitRevision,
+        mount: previewMount,
+        editor: editorIdentity,
+        document: initialDoc,
+        session,
+        actions,
+        cells: previewVisitCells,
+        requestSuccessor: requestPreviewVisitSuccessor,
+        publishPreview,
+        retireWork: retirePreviewVisitWork,
+      }),
+    [
       actions,
-      versionsProducer,
-      githubProducer,
-      active: false,
-      retired: false,
-    };
-    return visit;
-  }, [actions, editorIdentity, initialDoc, previewMount, publishPreview, session]);
+      editorIdentity,
+      initialDoc,
+      previewMount,
+      previewVisitCells,
+      previewVisitRevision,
+      publishPreview,
+      requestPreviewVisitSuccessor,
+      retirePreviewVisitWork,
+      session,
+    ],
+  );
   useLayoutEffect(() => {
-    const previous = activePreviewVisitRef.current;
-    if (previous && previous !== previewVisit) retirePreviewVisit(previous);
-    previewVisit.active = true;
-    previewVisit.retired = false;
-    activePreviewVisitRef.current = previewVisit;
+    previewVisit.establish();
     return () => {
-      retirePreviewVisit(previewVisit);
+      previewVisit.retire();
     };
-  }, [previewVisit, retirePreviewVisit]);
+  }, [previewVisit]);
+  const previewAuthority = useMemo<PreviewPresentationAuthority | null>(
+    () =>
+      previewSelection && previewSelectionRef.current === previewSelection
+        ? Object.freeze({
+            generation: Symbol("preview-presentation"),
+            revision: previewPresentationRevision,
+            mount: previewMount,
+            selection: previewSelection,
+            rootClass: PREVIEW_ROOT_CLASS,
+            barClass: PREVIEW_BAR_CLASS,
+            backClass: PREVIEW_BACK_CLASS,
+            message: PREVIEW_MESSAGE,
+          })
+        : null,
+    [
+      previewMount,
+      previewPresentationRevision,
+      previewSelection,
+    ],
+  );
+  const previewPresentation = useMemo(
+    () =>
+      previewAuthority
+        ? createPreviewPresentation({
+            authority: previewAuthority,
+            cells: previewPublicationCells,
+            selectionCurrent: () => previewSelectionRef.current,
+            requestSuccessor: requestPreviewPresentationSuccessor,
+            clearSelection: clearPreviewSelection,
+          })
+        : null,
+    [
+      clearPreviewSelection,
+      previewAuthority,
+      previewPublicationCells,
+      requestPreviewPresentationSuccessor,
+    ],
+  );
+  useLayoutEffect(() => {
+    if (!previewPresentation) return;
+    previewPresentation.establish();
+    return () => {
+      previewPresentation.retireLayout();
+    };
+  }, [previewPresentation]);
   const slashMenu = useSlashMenuController();
   const isOwner = role === "owner";
   useEffect(() => {
@@ -1111,7 +2388,9 @@ export function EditorShell({
         ownsPreviewVisit(owner.visit);
       return (async () => {
         try {
+          const versionsModule = loadVersionsPanel();
           const body = await api.documents.sync(owner.documentId, { fresh: true, content: true });
+          await versionsModule;
           if (!ownsRequest()) return;
           const remoteContent = body.remoteContent ?? "";
           const now = new Date().toISOString();
@@ -1682,16 +2961,15 @@ export function EditorShell({
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;
   const showLoading = hydrated && !contentReady;
-  const renderedPreviewPublication =
-    previewPublication &&
-    previewPublication.visit === previewVisit &&
-    previewPublicationRef.current === previewPublication &&
-    activePreviewVisitRef.current === previewVisit &&
-    previewVisit.active &&
-    !previewVisit.retired
-      ? previewPublication
+  const renderedPreviewPresentation =
+    previewPresentation &&
+    previewSelectionRef.current === previewPresentation.authority.selection &&
+    previewPresentation.authority.selection.visit === previewVisit &&
+    previewVisit.owns()
+      ? previewPresentation
       : null;
-  const versionPreview = renderedPreviewPublication?.preview ?? null;
+  const versionPreview =
+    renderedPreviewPresentation?.authority.selection.value.preview ?? null;
   const showCode = shownLayout !== "rich" && !versionPreview;
   const showRich = shownLayout !== "code" && !versionPreview;
   // The code pane mounts the first time a code/split layout shows it and stays mounted (the column hides
@@ -1924,29 +3202,38 @@ export function EditorShell({
             // renders assume a desktop viewport, so without it a phone paints a 224 px rail first (#1470).
             <OutlinePanel className="max-md:hidden" session={session} open={outlineOpen} onToggle={toggleOutline} onSelect={onOutlineSelect} />
           )}
-          <div className={PANES_BOX}>
+          <div ref={previewVisit.captureContainer} className={PANES_BOX}>
             {showLoading && !showRichPlaceholder && (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                 Loading…
               </div>
             )}
-            {renderedPreviewPublication ? (
-              <div ref={renderedPreviewPublication.setRoot} className="flex h-full min-h-0 min-w-0 flex-col">
-                {renderedPreviewPublication.source === "github-compare" && (
-                  <div className="flex items-center gap-3 border-b border-line bg-surface-2 px-6 py-1.5 text-sm text-ink-2" data-testid="sync-compare-bar">
-                    <span>Comparing GitHub\u2019s copy with this document.</span>
+            {renderedPreviewPresentation ? (
+              <div
+                ref={renderedPreviewPresentation.captureRoot}
+                className={renderedPreviewPresentation.authority.rootClass}
+              >
+                {renderedPreviewPresentation.authority.selection.source === "github-compare" && (
+                  <div
+                    className={renderedPreviewPresentation.authority.barClass}
+                    data-testid="sync-compare-bar"
+                  >
+                    <span>{renderedPreviewPresentation.authority.message}</span>
                     <button
-                      ref={renderedPreviewPublication.setBackControl}
+                      ref={renderedPreviewPresentation.captureBack}
                       type="button"
-                      className="btn btn-sm btn-outline ml-auto"
-                      onClick={renderedPreviewPublication.activateBack}
+                      className={renderedPreviewPresentation.authority.backClass}
+                      onClick={renderedPreviewPresentation.activateBack}
                       data-testid="sync-compare-close"
                     >
                       Back to editing
                     </button>
                   </div>
                 )}
-                <VersionDiffView session={renderedPreviewPublication.visit.session} preview={renderedPreviewPublication.preview} />
+                <VersionDiffView
+                  session={renderedPreviewPresentation.authority.selection.visit.session}
+                  preview={renderedPreviewPresentation.authority.selection.value.preview}
+                />
               </div>
             ) : (
               <>
