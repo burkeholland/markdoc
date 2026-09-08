@@ -136,7 +136,16 @@ function reactHandler<T>(element: Element, name: string): T {
 type StopHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 
 function activateStop(handler: StopHandler, currentTarget: HTMLButtonElement) {
-  handler({ currentTarget } as ReactMouseEvent<HTMLButtonElement>);
+  const ownerWindow = currentTarget.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Stop control has no owner window");
+  const nativeEvent = new ownerWindow.MouseEvent("click", { bubbles: true, button: 0 });
+  Object.defineProperty(nativeEvent, "target", { configurable: true, value: currentTarget });
+  handler({
+    type: "click",
+    currentTarget,
+    target: currentTarget,
+    nativeEvent,
+  } as unknown as ReactMouseEvent<HTMLButtonElement>);
 }
 
 interface WorkProbe {
