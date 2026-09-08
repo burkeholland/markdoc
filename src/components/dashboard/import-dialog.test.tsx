@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect, useLayoutEffect, useState, type ReactNode, type RefCallback } from "react";
+import { StrictMode, useEffect, useLayoutEffect, useState, type ReactNode, type RefCallback } from "react";
 import { createRoot } from "react-dom/client";
 import type { FailedImport, ImportedDocument, ImportBatch } from "@/lib/import-upload";
 
@@ -21,6 +21,8 @@ function Harness({
   onDone,
   captureStart,
   captureRetry,
+  captureResultLayout,
+  onDialogOpenChange,
 }: {
   label?: string;
   batches: File[][];
@@ -28,6 +30,8 @@ function Harness({
   onDone?: (documents: ImportedDocument[], failed: FailedImport[]) => void;
   captureStart?: (start: ReturnType<typeof useFileImport>["start"]) => void;
   captureRetry?: (retry: (() => void) | undefined) => void;
+  captureResultLayout?: () => void;
+  onDialogOpenChange?: (open: boolean) => void;
 }) {
   const { items, ignored, open, setOpen, start, input } = useFileImport({ onError, onDone });
   captureStart?.(start);
@@ -40,7 +44,27 @@ function Harness({
           {label} batch {index + 1}
         </button>
       ))}
-      <ImportDialog open={open} onOpenChange={setOpen} items={items} ignored={ignored} />
+      <ImportDialog
+        open={open}
+        onOpenChange={
+          onDialogOpenChange
+            ? (next) => {
+                onDialogOpenChange(next);
+                setOpen(next);
+              }
+            : setOpen
+        }
+        items={items}
+        ignored={ignored}
+        footer={
+          captureResultLayout &&
+          items.some((item) => item.status !== "uploading") ? (
+            <ResultLayoutCapture capture={() => captureResultLayout()}>
+              {null}
+            </ResultLayoutCapture>
+          ) : undefined
+        }
+      />
     </>
   );
 }
@@ -63,6 +87,17 @@ function ImportLayoutBoundary({
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
+}
+
+function ResultLayoutCapture({
+  capture,
+  children,
+}: {
+  capture: () => void;
+  children: ReactNode;
+}) {
+  useLayoutEffect(capture, [capture]);
+  return children;
 }
 
 interface ResultMouseEvent<T extends HTMLElement> {
@@ -112,6 +147,39 @@ function captureResultOpen(index = 0): CapturedResultControl<HTMLAnchorElement> 
 function captureResultRetry(): CapturedResultControl<HTMLButtonElement> {
   const element = screen.getByTestId("import-retry") as HTMLButtonElement;
   return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
+}
+
+interface CapturedResultControlView {
+  element: HTMLElement;
+  onClick: ResultClick<HTMLAnchorElement> | ResultClick<HTMLButtonElement>;
+  invoke: (currentTarget?: HTMLElement) => ResultMouseEvent<HTMLElement>;
+}
+
+function captureResultControl(kind: "Open" | "Retry"): CapturedResultControlView {
+  if (kind === "Open") {
+    const control = captureResultOpen();
+    return {
+      element: control.element,
+      onClick: control.onClick,
+      invoke: (currentTarget = control.element) => {
+        if (!(currentTarget instanceof HTMLAnchorElement)) {
+          throw new Error("Open requires an anchor target");
+        }
+        return invokeResultControl(control, currentTarget);
+      },
+    };
+  }
+  const control = captureResultRetry();
+  return {
+    element: control.element,
+    onClick: control.onClick,
+    invoke: (currentTarget = control.element) => {
+      if (!(currentTarget instanceof HTMLButtonElement)) {
+        throw new Error("Retry requires a button target");
+      }
+      return invokeResultControl(control, currentTarget);
+    },
+  };
 }
 
 interface ResultEventOverrides {
@@ -420,6 +488,444 @@ describe("ImportDialog result publications", () => {
   });
 
   it.each(["Open", "Retry"] as const)(
+    "keeps exact %s usable once after direct-root Strict Mode replay",
+    (kind) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onOpenChange = vi.fn();
+      const retry = vi.fn();
+      const layouts: Array<{
+        control: CapturedResultControlView;
+        rootRef: RefCallback<HTMLElement>;
+      }> = [];
+      let current: CapturedResultControlView | undefined;
+      const capture = () => {
+        layouts.push({
+          control: captureResultControl(kind),
+          rootRef: reactRef(screen.getByTestId("import-dialog")),
+        });
+      };
+      const footer = <ResultLayoutCapture capture={capture}>{null}</ResultLayoutCapture>;
+
+      if (kind === "Open") {
+        onOpenChange.mockImplementation(() => current?.element.click());
+      } else {
+        retry.mockImplementation(() => current?.element.click());
+      }
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={onOpenChange}
+                items={resultItems(retry)}
+                ignored={["same.pdf"]}
+                footer={footer}
+              />
+            </StrictMode>,
+          );
+        });
+        const retiredByReplay = layouts[0];
+        const currentControl = captureResultControl(kind);
+        current = currentControl;
+        if (!retiredByReplay) throw new Error("Strict Mode did not publish its first layout");
+        expect(retiredByReplay.control.element).toBe(currentControl.element);
+        expect(retiredByReplay.control.onClick).not.toBe(currentControl.onClick);
+
+        retiredByReplay.rootRef(screen.getByTestId("import-dialog"));
+        retiredByReplay.rootRef(null);
+        retiredByReplay.control.invoke(currentControl.element);
+        expect(onOpenChange).not.toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
+
+        currentControl.element.click();
+        currentControl.element.click();
+        if (kind === "Open") {
+          expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+          expect(retry).not.toHaveBeenCalled();
+        } else {
+          expect(onOpenChange).not.toHaveBeenCalled();
+          expect(retry).toHaveBeenCalledOnce();
+        }
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([
+    "partial ref replay",
+    "root detach and reinsert",
+    "root replacement and restore",
+    "list replacement and restore",
+    "row replacement and restore",
+    "row reorder and restore",
+    "href drift and restore",
+    "status drift and restore",
+    "retry drift and restore",
+    "descendant mutation and restore",
+  ] as const)("rejects Strict Mode replay after %s without poisoning a fresh result", (change) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const staleOpenChange = vi.fn();
+    const currentOpenChange = vi.fn();
+    const staleRetry = vi.fn();
+    const currentRetry = vi.fn();
+    const replacementRetry = vi.fn();
+    const items = resultItems(staleRetry);
+    let staleOpen: CapturedResultControl<HTMLAnchorElement> | undefined;
+    let staleRetryControl: CapturedResultControl<HTMLButtonElement> | undefined;
+    let staleRootRef: RefCallback<HTMLElement> | undefined;
+    let layoutSetups = 0;
+    const perturbReplay = () => {
+      layoutSetups++;
+      const resultRoot = screen.getByTestId("import-dialog");
+      const list = screen.getByTestId("import-list");
+      const rows = screen.getAllByTestId("import-item");
+      const open = screen.getAllByTestId("import-open")[0] as HTMLAnchorElement | undefined;
+      const retry = screen.getByTestId("import-retry") as HTMLButtonElement;
+      if (!open) throw new Error("Strict replay had no Open control");
+      if (layoutSetups === 1) {
+        staleOpen = captureResultOpen();
+        staleRetryControl = captureResultRetry();
+        staleRootRef = reactRef(resultRoot);
+        return;
+      }
+      if (layoutSetups !== 2) return;
+
+      if (change === "partial ref replay") {
+        staleRootRef?.(null);
+      } else if (change === "root detach and reinsert") {
+        const parent = resultRoot.parentNode;
+        const next = resultRoot.nextSibling;
+        if (!parent) throw new Error("Import result root had no parent");
+        resultRoot.remove();
+        parent.insertBefore(resultRoot, next);
+      } else if (change === "root replacement and restore") {
+        const replacement = resultRoot.cloneNode(true);
+        const parent = resultRoot.parentNode;
+        if (!parent) throw new Error("Import result root had no parent");
+        parent.replaceChild(replacement, resultRoot);
+        parent.replaceChild(resultRoot, replacement);
+      } else if (change === "list replacement and restore") {
+        const replacement = list.cloneNode(true);
+        const parent = list.parentNode;
+        if (!parent) throw new Error("Import result list had no parent");
+        parent.replaceChild(replacement, list);
+        parent.replaceChild(list, replacement);
+      } else if (change === "row replacement and restore") {
+        const replacement = rows[0].cloneNode(true);
+        const parent = rows[0].parentNode;
+        if (!parent) throw new Error("Import result row had no parent");
+        parent.replaceChild(replacement, rows[0]);
+        parent.replaceChild(rows[0], replacement);
+      } else if (change === "row reorder and restore") {
+        list.append(rows[0]);
+        list.insertBefore(rows[0], rows[1]);
+      } else if (change === "href drift and restore") {
+        open.setAttribute("href", "/d/changed");
+        open.setAttribute("href", "/d/doc-first");
+      } else if (change === "status drift and restore") {
+        items[0].status = "error";
+        rows[0].dataset.status = "error";
+        items[0].status = "done";
+        rows[0].dataset.status = "done";
+      } else if (change === "retry drift and restore") {
+        items[1].retry = replacementRetry;
+        retry.disabled = true;
+        items[1].retry = staleRetry;
+        retry.disabled = false;
+      } else {
+        const label = open.parentElement?.querySelector("span[title]");
+        if (!label) throw new Error("Strict replay Open row had no title");
+        label.textContent = "Changed";
+        label.textContent = "First";
+      }
+    };
+    const footer = <ResultLayoutCapture capture={perturbReplay}>{null}</ResultLayoutCapture>;
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={staleOpenChange}
+              items={items}
+              ignored={["same.pdf"]}
+              footer={footer}
+            />
+          </StrictMode>,
+        );
+      });
+      if (!staleOpen || !staleRetryControl) {
+        throw new Error("Strict Mode did not publish its first result");
+      }
+      const rejectedOpen = invokeResultControl(staleOpen);
+      const rejectedRetry = invokeResultControl(staleRetryControl);
+      expect(rejectedOpen.preventDefault).not.toHaveBeenCalled();
+      expect(rejectedOpen.stopPropagation).not.toHaveBeenCalled();
+      expect(rejectedRetry.preventDefault).not.toHaveBeenCalled();
+      expect(rejectedRetry.stopPropagation).not.toHaveBeenCalled();
+      expect(staleOpenChange).not.toHaveBeenCalled();
+      expect(staleRetry).not.toHaveBeenCalled();
+      expect(replacementRetry).not.toHaveBeenCalled();
+
+      act(() => {
+        root.render(
+          <ImportDialog
+            open
+            onOpenChange={currentOpenChange}
+            items={resultItems(currentRetry)}
+            ignored={["same.pdf"]}
+          />,
+        );
+      });
+      invokeResultControl(staleOpen, captureResultOpen().element);
+      invokeResultControl(staleRetryControl, captureResultRetry().element);
+      invokeResultControl(captureResultOpen());
+      invokeResultControl(captureResultRetry());
+      expect(staleOpenChange).not.toHaveBeenCalled();
+      expect(staleRetry).not.toHaveBeenCalled();
+      expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(currentRetry).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["Open", "Retry"] as const)(
+    "keeps a newly placed %s exact after a direct-root Strict Mode upload commit",
+    async (kind) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const initialUpload = deferred<ImportBatch>();
+      const retryUpload = deferred<ImportBatch>();
+      const onDialogOpenChange = vi.fn();
+      const layouts: Array<{
+        control: CapturedResultControlView;
+        rootRef: RefCallback<HTMLElement>;
+      }> = [];
+      let current: CapturedResultControlView | undefined;
+      const capture = () => {
+        const target = screen.queryByTestId(
+          kind === "Open" ? "import-open" : "import-retry",
+        );
+        if (!target) return;
+        layouts.push({
+          control: captureResultControl(kind),
+          rootRef: reactRef(screen.getByTestId("import-dialog")),
+        });
+      };
+      if (kind === "Open") {
+        onDialogOpenChange.mockImplementation(() => current?.element.click());
+      }
+      uploadImportBatch.mockReturnValueOnce(initialUpload.promise);
+      if (kind === "Retry") {
+        uploadImportBatch.mockImplementationOnce(() => {
+          current?.element.click();
+          return retryUpload.promise;
+        });
+      }
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Harness
+                batches={[[new File(["# New"], "new.md", { type: "text/markdown" })]]}
+                onError={vi.fn()}
+                onDialogOpenChange={onDialogOpenChange}
+                captureResultLayout={capture}
+              />
+            </StrictMode>,
+          );
+        });
+        act(() => screen.getByRole("button", { name: "Import batch 1" }).click());
+        await act(async () => {
+          initialUpload.resolve(
+            kind === "Open"
+              ? {
+                  documents: [
+                    { id: "new-document", title: "New", warnings: [] },
+                  ],
+                  failed: [],
+                }
+              : {
+                  documents: [],
+                  failed: [{ index: 0, name: "new.md", error: "Failed" }],
+                },
+          );
+        });
+
+        const stale = layouts.at(-1);
+        current = captureResultControl(kind);
+        if (!stale) throw new Error("The upload commit did not publish a result layout");
+        expect(stale.control.element).toBe(current.element);
+        expect(stale.control.onClick).not.toBe(current.onClick);
+
+        stale.rootRef(null);
+        stale.rootRef(screen.getByTestId("import-dialog"));
+        stale.rootRef(null);
+        stale.control.invoke(current.element);
+        expect(onDialogOpenChange).not.toHaveBeenCalled();
+        expect(uploadImportBatch).toHaveBeenCalledOnce();
+
+        current.element.click();
+        current.element.click();
+        if (kind === "Open") {
+          expect(onDialogOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+          expect(uploadImportBatch).toHaveBeenCalledOnce();
+        } else {
+          expect(onDialogOpenChange).not.toHaveBeenCalled();
+          expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+          await act(async () => {
+            retryUpload.resolve({
+              documents: [
+                { id: "retried-document", title: "Retried", warnings: [] },
+              ],
+              failed: [],
+            });
+          });
+        }
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["Open", "mutation"],
+    ["Open", "detach"],
+    ["Retry", "mutation"],
+    ["Retry", "detach"],
+  ] as const)(
+    "rejects a newly placed %s after replay %s and leaves the next upload exact",
+    async (kind, change) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const firstUpload = deferred<ImportBatch>();
+      const secondUpload = deferred<ImportBatch>();
+      const retryUpload = deferred<ImportBatch>();
+      const onDialogOpenChange = vi.fn();
+      let firstLayoutSetups = 0;
+      let perturbed = false;
+      let stale: CapturedResultControlView | undefined;
+      let current: CapturedResultControlView | undefined;
+      const capture = () => {
+        const target = screen.queryByTestId(
+          kind === "Open" ? "import-open" : "import-retry",
+        );
+        if (!(target instanceof HTMLElement) || perturbed) return;
+        firstLayoutSetups++;
+        stale ??= captureResultControl(kind);
+        if (firstLayoutSetups !== 2) return;
+        perturbed = true;
+        if (change === "mutation") {
+          if (target instanceof HTMLAnchorElement) {
+            target.setAttribute("href", "/d/changed");
+            target.setAttribute("href", "/d/first-result");
+          } else if (target instanceof HTMLButtonElement) {
+            target.disabled = true;
+            target.disabled = false;
+          }
+          return;
+        }
+        const parent = target.parentNode;
+        const next = target.nextSibling;
+        if (!parent) throw new Error("The replayed result control had no parent");
+        target.remove();
+        parent.insertBefore(target, next);
+      };
+      if (kind === "Open") {
+        onDialogOpenChange.mockImplementation(() => current?.element.click());
+      }
+      uploadImportBatch
+        .mockReturnValueOnce(firstUpload.promise)
+        .mockReturnValueOnce(secondUpload.promise);
+      if (kind === "Retry") {
+        uploadImportBatch.mockImplementationOnce(() => {
+          current?.element.click();
+          return retryUpload.promise;
+        });
+      }
+      const result = (id: string): ImportBatch =>
+        kind === "Open"
+          ? {
+              documents: [{ id, title: id, warnings: [] }],
+              failed: [],
+            }
+          : {
+              documents: [],
+              failed: [{ index: 0, name: `${id}.md`, error: "Failed" }],
+            };
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Harness
+                batches={[
+                  [new File(["# First"], "first.md", { type: "text/markdown" })],
+                  [new File(["# Second"], "second.md", { type: "text/markdown" })],
+                ]}
+                onError={vi.fn()}
+                onDialogOpenChange={onDialogOpenChange}
+                captureResultLayout={capture}
+              />
+            </StrictMode>,
+          );
+        });
+        act(() => screen.getByRole("button", { name: "Import batch 1" }).click());
+        await act(async () => firstUpload.resolve(result("first-result")));
+        expect(firstLayoutSetups).toBe(2);
+        if (!stale) throw new Error("The first upload did not expose its replay handler");
+
+        captureResultControl(kind).element.click();
+        expect(onDialogOpenChange).not.toHaveBeenCalled();
+        expect(uploadImportBatch).toHaveBeenCalledOnce();
+
+        act(() => screen.getByText("Import batch 2").click());
+        await act(async () => secondUpload.resolve(result("second-result")));
+        current = captureResultControl(kind);
+        stale.invoke(current.element);
+        expect(onDialogOpenChange).not.toHaveBeenCalled();
+        expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+
+        current.element.click();
+        current.element.click();
+        if (kind === "Open") {
+          expect(onDialogOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+          expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+        } else {
+          expect(onDialogOpenChange).not.toHaveBeenCalled();
+          expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+          await act(async () => {
+            retryUpload.resolve({
+              documents: [
+                { id: "retry-result", title: "Retried", warnings: [] },
+              ],
+              failed: [],
+            });
+          });
+        }
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["Open", "Retry"] as const)(
     "rejects fabricated or inconsistent native events for %s without poisoning its exact control",
     (kind) => {
       const host = document.createElement("div");
@@ -446,16 +952,6 @@ describe("ImportDialog result publications", () => {
             () => invokeResultControl(control, control.element, { type: "pointerup" }),
             () => invokeResultControl(control, control.element, { nativeType: "mousedown" }),
             () => invokeResultControl(control, control.element, { nativeTarget: foreignTarget }),
-            () => {
-              const unpublished = document.createElement("span");
-              control.element.append(unpublished);
-              const event = invokeResultControl(control, control.element, {
-                target: unpublished,
-                nativeTarget: unpublished,
-              });
-              unpublished.remove();
-              return event;
-            },
           ];
 
           for (const attempt of attempts) {
@@ -967,6 +1463,7 @@ describe("ImportDialog result publications", () => {
         parent.replaceChild(replacement, control.element);
         currentTarget = replacement;
         restore = () => parent.replaceChild(control.element, replacement);
+        needsSuccessor = true;
       } else if (source === "moved") {
         currentTarget = control.element;
         foreign.append(control.element);
@@ -978,6 +1475,7 @@ describe("ImportDialog result publications", () => {
         restore = () => {
           control.element.disabled = false;
         };
+        needsSuccessor = true;
       }
 
       const activeElement = document.activeElement;

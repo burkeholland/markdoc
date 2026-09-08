@@ -158,9 +158,17 @@ interface CollaboratorRowElements {
 
 interface SharePresentationRuntime {
   active: boolean;
+  retired: boolean;
+  published: boolean;
+  predecessor: SharePresentation | null;
   dialog: HTMLDivElement | null;
+  overlay: HTMLDivElement | null;
+  portalParent: HTMLElement | null;
+  close: HTMLButtonElement | null;
   root: HTMLDivElement | null;
   form: HTMLFormElement | null;
+  loginControl: HTMLDivElement | null;
+  login: HTMLInputElement | null;
   newRole: HTMLSelectElement | null;
   add: HTMLButtonElement | null;
   addError: HTMLDivElement | null;
@@ -180,7 +188,21 @@ interface SharePresentationRuntime {
   footer: HTMLDivElement | null;
   done: HTMLButtonElement | null;
   claims: Set<string>;
+  mutated: boolean;
+  observer: MutationObserver | null;
+  observerRetirement: object | null;
+  removeCloseCapture: (() => void) | null;
+  closeProvenance: ShareCloseProvenance | null;
+  closeProvenanceRetirement: { provenance: ShareCloseProvenance; timer: number } | null;
 }
+
+interface SharePresentationLineage {
+  current: SharePresentation;
+}
+
+type ShareCloseProvenance =
+  | { readonly kind: "escape"; readonly event: KeyboardEvent }
+  | { readonly kind: "outside" | "close-button"; readonly event: MouseEvent };
 
 interface ShareLiveFacts {
   open: boolean;
@@ -428,9 +450,11 @@ function isExactNativeClick(event: ReactMouseEvent<HTMLButtonElement>, control: 
   const target = event.target;
   return (
     event.type === "click" &&
+    !event.defaultPrevented &&
     ownerWindow !== null &&
     event.nativeEvent instanceof ownerWindow.MouseEvent &&
     event.nativeEvent.type === "click" &&
+    !event.nativeEvent.defaultPrevented &&
     event.currentTarget === control &&
     target instanceof ownerWindow.Node &&
     target === event.nativeEvent.target &&
@@ -442,9 +466,11 @@ function isExactNativeChange(event: ReactChangeEvent<HTMLSelectElement>, control
   const ownerWindow = control.ownerDocument.defaultView;
   return (
     event.type === "change" &&
+    !event.defaultPrevented &&
     ownerWindow !== null &&
     event.nativeEvent instanceof ownerWindow.Event &&
     event.nativeEvent.type === "change" &&
+    !event.nativeEvent.defaultPrevented &&
     event.currentTarget === control &&
     event.target === control &&
     event.nativeEvent.target === control
@@ -459,10 +485,12 @@ function isExactNativeSubmit(
   const ownerWindow = form.ownerDocument.defaultView;
   if (
     event.type !== "submit" ||
+    event.defaultPrevented ||
     ownerWindow === null ||
     typeof ownerWindow.SubmitEvent !== "function" ||
     !(event.nativeEvent instanceof ownerWindow.SubmitEvent) ||
     event.nativeEvent.type !== "submit" ||
+    event.nativeEvent.defaultPrevented ||
     event.currentTarget !== form ||
     event.target !== form ||
     event.nativeEvent.target !== form
@@ -540,6 +568,171 @@ function linkSelectIsExact(
   });
 }
 
+function presentationFactsAreExactReplay(previous: SharePresentation, next: SharePresentation): boolean {
+  const previousKeys = Object.keys(previous) as (keyof SharePresentation)[];
+  const nextKeys = Object.keys(next) as (keyof SharePresentation)[];
+  return (
+    previousKeys.length === nextKeys.length &&
+    previousKeys.every((key) => previous[key] === next[key])
+  );
+}
+
+function runtimeElementsAreExactReplay(
+  previous: SharePresentationRuntime,
+  next: SharePresentationRuntime,
+): boolean {
+  const elementKeys = [
+    "dialog",
+    "overlay",
+    "portalParent",
+    "close",
+    "root",
+    "form",
+    "loginControl",
+    "login",
+    "newRole",
+    "add",
+    "addError",
+    "actionError",
+    "people",
+    "list",
+    "listState",
+    "retry",
+    "owner",
+    "empty",
+    "editorLink",
+    "linkHint",
+    "general",
+    "linkAccess",
+    "agent",
+    "footer",
+    "done",
+  ] as const;
+  return (
+    elementKeys.every((key) => previous[key] === next[key]) &&
+    previous.rows.length === next.rows.length &&
+    previous.rows.every(
+      (row, index) =>
+        row.row === next.rows[index]?.row &&
+        row.role === next.rows[index]?.role &&
+        row.remove === next.rows[index]?.remove,
+    )
+  );
+}
+
+function mutationTouchesPresentation(runtime: SharePresentationRuntime, record: MutationRecord): boolean {
+  if (record.target === runtime.portalParent && record.type === "childList") {
+    const placementNodes = new Set<Node | null>([
+      runtime.overlay,
+      runtime.dialog,
+    ]);
+    return (
+      [...record.addedNodes, ...record.removedNodes].some((node) => placementNodes.has(node)) ||
+      (record.previousSibling === runtime.overlay && record.nextSibling === runtime.dialog)
+    );
+  }
+
+  const changedNodes = [...record.addedNodes, ...record.removedNodes];
+  const ownedElements = [
+    runtime.dialog,
+    runtime.overlay,
+    runtime.close,
+    runtime.root,
+    runtime.form,
+    runtime.loginControl,
+    runtime.login,
+    runtime.newRole,
+    runtime.add,
+    runtime.addError,
+    runtime.actionError,
+    runtime.people,
+    runtime.list,
+    runtime.listState,
+    runtime.retry,
+    runtime.owner,
+    runtime.empty,
+    runtime.editorLink,
+    runtime.linkHint,
+    ...runtime.rows.flatMap((row) => [row.row, row.role, row.remove]),
+    runtime.general,
+    runtime.linkAccess,
+    runtime.agent,
+    runtime.footer,
+    runtime.done,
+  ].filter((element) => element !== null);
+  if (
+    changedNodes.some((node) =>
+      ownedElements.some((element) => node === element || (node instanceof Element && node.contains(element))),
+    )
+  ) {
+    return true;
+  }
+
+  const target = record.target;
+  if (
+    record.type === "attributes" &&
+    ((target === runtime.overlay &&
+      (record.attributeName === "aria-hidden" || record.attributeName === "data-aria-hidden")) ||
+      (target === runtime.dialog &&
+        (record.attributeName === "aria-describedby" ||
+          record.attributeName === "aria-labelledby" ||
+          record.attributeName === "style")))
+  ) {
+    return false;
+  }
+  if (runtime.loginControl?.contains(target) || runtime.agent?.contains(target)) {
+    return record.type === "attributes" && (target === runtime.loginControl || target === runtime.agent);
+  }
+  return ownedElements.some(
+    (element) =>
+      target === element ||
+      ((element instanceof HTMLButtonElement || element instanceof HTMLSelectElement) &&
+        element.contains(target)),
+  );
+}
+
+function drainPresentationMutations(runtime: SharePresentationRuntime): boolean {
+  const records = runtime.observer?.takeRecords() ?? [];
+  if (records.some((record) => mutationTouchesPresentation(runtime, record))) runtime.mutated = true;
+  return !runtime.mutated;
+}
+
+function stopPresentationObservation(runtime: SharePresentationRuntime): boolean {
+  const clean = drainPresentationMutations(runtime);
+  runtime.observer?.disconnect();
+  runtime.observer = null;
+  runtime.observerRetirement = null;
+  return clean;
+}
+
+function clearShareCloseProvenance(
+  runtime: SharePresentationRuntime,
+  expected?: ShareCloseProvenance,
+) {
+  if (expected && runtime.closeProvenance !== expected) return;
+  runtime.closeProvenance = null;
+  const retirement = runtime.closeProvenanceRetirement;
+  if (!retirement || (expected && retirement.provenance !== expected)) return;
+  runtime.closeProvenanceRetirement = null;
+  runtime.dialog?.ownerDocument.defaultView?.clearTimeout(retirement.timer);
+}
+
+function captureRuntimeDerivedElements(runtime: SharePresentationRuntime) {
+  const ownerWindow = runtime.root?.ownerDocument.defaultView;
+  const dialog = runtime.root?.parentElement;
+  runtime.dialog = ownerWindow && dialog instanceof ownerWindow.HTMLDivElement ? dialog : null;
+  const overlay = runtime.dialog?.previousElementSibling;
+  runtime.overlay = ownerWindow && overlay instanceof ownerWindow.HTMLDivElement ? overlay : null;
+  const portalParent = runtime.dialog?.parentElement;
+  runtime.portalParent = ownerWindow && portalParent instanceof ownerWindow.HTMLElement ? portalParent : null;
+  const close = runtime.dialog?.firstElementChild?.lastElementChild;
+  runtime.close = ownerWindow && close instanceof ownerWindow.HTMLButtonElement ? close : null;
+  const loginControl = runtime.form?.firstElementChild;
+  runtime.loginControl = ownerWindow && loginControl instanceof ownerWindow.HTMLDivElement ? loginControl : null;
+  const login = runtime.loginControl?.querySelector('[data-testid="share-login"]');
+  runtime.login = ownerWindow && login instanceof ownerWindow.HTMLInputElement ? login : null;
+}
+
 export const ShareDialog = memo(function ShareDialog({
   open,
   onOpenChange,
@@ -556,6 +749,10 @@ export const ShareDialog = memo(function ShareDialog({
   const [mount] = useState(() => Symbol("share-dialog"));
   const activePresentationRef = useRef<SharePresentation | null>(null);
   const presentationRuntimesRef = useRef(new WeakMap<SharePresentation, SharePresentationRuntime>());
+  const presentationLineagesRef = useRef(new WeakMap<SharePresentation, SharePresentationLineage>());
+  const publishPresentationRef = useRef<
+    ((source: SharePresentation, expected?: SharePresentation) => SharePresentation | null) | null
+  >(null);
   const shareVisit = useRef<ShareVisit | null>(null);
   const [collaboratorList, setCollaboratorList] = useState<CollaboratorListState | null>(null);
   const listRequest = useRef(0);
@@ -938,15 +1135,23 @@ export const ShareDialog = memo(function ShareDialog({
     };
   }, [liveFacts]);
 
-  const runtimeFor = useCallback((candidate: SharePresentation) => {
+  const runtimeFor = useCallback((candidate: SharePresentation, predecessor: SharePresentation | null = null) => {
     const runtimes = presentationRuntimesRef.current;
     let runtime = runtimes.get(candidate);
     if (!runtime) {
       runtime = {
         active: false,
+        retired: false,
+        published: false,
+        predecessor,
         dialog: null,
+        overlay: null,
+        portalParent: null,
+        close: null,
         root: null,
         form: null,
+        loginControl: null,
+        login: null,
         newRole: null,
         add: null,
         addError: null,
@@ -968,50 +1173,147 @@ export const ShareDialog = memo(function ShareDialog({
         footer: null,
         done: null,
         claims: new Set(),
+        mutated: false,
+        observer: null,
+        observerRetirement: null,
+        removeCloseCapture: null,
+        closeProvenance: null,
+        closeProvenanceRetirement: null,
       };
       runtimes.set(candidate, runtime);
     }
     return runtime;
   }, []);
 
+  const lineageFor = useCallback((candidate: SharePresentation) => {
+    const lineages = presentationLineagesRef.current;
+    let lineage = lineages.get(candidate);
+    if (!lineage) {
+      lineage = { current: candidate };
+      lineages.set(candidate, lineage);
+    }
+    return lineage;
+  }, []);
+
+  const currentPresentation = useCallback(
+    (candidate: SharePresentation) => presentationLineagesRef.current.get(candidate)?.current ?? candidate,
+    [],
+  );
+
+  const runtimeForBinding = useCallback(
+    (source: SharePresentation) => {
+      const lineage = lineageFor(source);
+      let candidate = lineage.current;
+      let runtime = runtimeFor(candidate);
+      if (runtime.retired) {
+        const predecessor = candidate;
+        candidate = Object.freeze({ ...candidate });
+        lineage.current = candidate;
+        presentationLineagesRef.current.set(candidate, lineage);
+        runtime = runtimeFor(candidate, predecessor);
+      }
+      return { candidate, runtime };
+    },
+    [lineageFor, runtimeFor],
+  );
+
   const retirePresentation = useCallback((candidate: SharePresentation) => {
     const runtime = presentationRuntimesRef.current.get(candidate);
-    if (runtime) runtime.active = false;
+    if (runtime && !runtime.retired) {
+      runtime.active = false;
+      runtime.retired = true;
+      clearShareCloseProvenance(runtime);
+      runtime.removeCloseCapture?.();
+      runtime.removeCloseCapture = null;
+      if (runtime.observer) {
+        const retirement = {};
+        runtime.observerRetirement = retirement;
+        queueMicrotask(() => {
+          if (runtime.observerRetirement === retirement) stopPresentationObservation(runtime);
+        });
+      }
+    }
     if (activePresentationRef.current === candidate) activePresentationRef.current = null;
   }, []);
 
+  const retirePresentationLineage = useCallback(
+    (candidate: SharePresentation) => {
+      const lineage = presentationLineagesRef.current.get(candidate);
+      const current = lineage?.current;
+      const active = activePresentationRef.current;
+      retirePresentation(candidate);
+      if (current && current !== candidate) retirePresentation(current);
+      if (
+        lineage &&
+        active &&
+        active !== candidate &&
+        active !== current &&
+        presentationLineagesRef.current.get(active) === lineage
+      ) {
+        retirePresentation(active);
+      }
+    },
+    [retirePresentation],
+  );
+
+  const schedulePresentationPublication = useCallback(
+    (source: SharePresentation, expected: SharePresentation) => {
+      queueMicrotask(() => publishPresentationRef.current?.(source, expected));
+    },
+    [],
+  );
+
   const bindElement = useCallback(
     <
-      K extends Exclude<keyof SharePresentationRuntime, "active" | "dialog" | "rows" | "claims">
+      K extends Exclude<
+        keyof SharePresentationRuntime,
+        | "active"
+        | "retired"
+        | "published"
+        | "predecessor"
+        | "dialog"
+        | "overlay"
+        | "portalParent"
+        | "close"
+        | "loginControl"
+        | "login"
+        | "rows"
+        | "claims"
+        | "mutated"
+        | "observer"
+        | "observerRetirement"
+        | "removeCloseCapture"
+        | "closeProvenance"
+        | "closeProvenanceRetirement"
+      >
     >(
-      candidate: SharePresentation,
+      source: SharePresentation,
       kind: K,
       element: SharePresentationRuntime[K],
     ) => {
-      const runtime = runtimeFor(candidate);
+      if (!element) return;
+      const { candidate, runtime } = runtimeForBinding(source);
       const existing = runtime[kind];
-      if (!element) {
-        runtime[kind] = null as SharePresentationRuntime[K];
-        retirePresentation(candidate);
-        return;
-      }
-      if (runtime.active && existing && existing !== element) {
+      if (existing && existing !== element) {
         retirePresentation(candidate);
         return;
       }
       runtime[kind] = element;
+      captureRuntimeDerivedElements(runtime);
+      schedulePresentationPublication(source, candidate);
     },
-    [retirePresentation, runtimeFor],
+    [retirePresentation, runtimeForBinding, schedulePresentationPublication],
   );
 
   const bindRowElement = useCallback(
     <K extends keyof CollaboratorRowElements>(
-      candidate: SharePresentation,
+      source: SharePresentation,
       row: CollaboratorPublication,
       kind: K,
       element: CollaboratorRowElements[K],
     ) => {
-      const runtime = runtimeFor(candidate);
+      if (!element) return;
+      const { candidate, runtime } = runtimeForBinding(source);
       const elements = runtime.rows[row.index];
       if (
         candidate.list.status !== "loaded" ||
@@ -1022,18 +1324,15 @@ export const ShareDialog = memo(function ShareDialog({
         return;
       }
       const existing = elements[kind];
-      if (!element) {
-        elements[kind] = null;
-        retirePresentation(candidate);
-        return;
-      }
-      if (runtime.active && existing && existing !== element) {
+      if (existing && existing !== element) {
         retirePresentation(candidate);
         return;
       }
       elements[kind] = element;
+      captureRuntimeDerivedElements(runtime);
+      schedulePresentationPublication(source, candidate);
     },
-    [retirePresentation, runtimeFor],
+    [retirePresentation, runtimeForBinding, schedulePresentationPublication],
   );
 
   const presentationFactsAreCurrent = useCallback((candidate: SharePresentation) => {
@@ -1109,10 +1408,25 @@ export const ShareDialog = memo(function ShareDialog({
       const ownerWindow = root?.ownerDocument.defaultView;
       if (
         !runtime ||
+        runtime.retired ||
+        !drainPresentationMutations(runtime) ||
         !ownerWindow ||
         !(dialog instanceof ownerWindow.HTMLDivElement) ||
         !dialog.isConnected ||
         dialog.getAttribute("role") !== "dialog" ||
+        !(runtime.overlay instanceof ownerWindow.HTMLDivElement) ||
+        !runtime.overlay.isConnected ||
+        runtime.overlay.parentElement !== runtime.portalParent ||
+        runtime.overlay.nextElementSibling !== dialog ||
+        !(runtime.portalParent instanceof ownerWindow.HTMLElement) ||
+        dialog.parentElement !== runtime.portalParent ||
+        !(runtime.close instanceof ownerWindow.HTMLButtonElement) ||
+        runtime.close.type !== "button" ||
+        runtime.close.disabled ||
+        runtime.close.getAttribute("aria-label") !== "Close" ||
+        runtime.close.parentElement !== dialog.firstElementChild ||
+        dialog.firstElementChild?.lastElementChild !== runtime.close ||
+        dialog.children.length !== 2 ||
         !(root instanceof ownerWindow.HTMLDivElement) ||
         !root.isConnected ||
         root.parentElement !== dialog ||
@@ -1158,6 +1472,8 @@ export const ShareDialog = memo(function ShareDialog({
 
       if (candidate.isOwner) {
         const form = runtime.form;
+        const loginControl = runtime.loginControl;
+        const loginInput = runtime.login;
         const newRole = runtime.newRole;
         const addButton = runtime.add;
         if (
@@ -1165,9 +1481,19 @@ export const ShareDialog = memo(function ShareDialog({
           !form.isConnected ||
           form.parentElement !== root ||
           form.children.length !== 3 ||
+          !(loginControl instanceof ownerWindow.HTMLDivElement) ||
+          loginControl.parentElement !== form ||
+          form.firstElementChild !== loginControl ||
+          !(loginInput instanceof ownerWindow.HTMLInputElement) ||
+          loginInput.parentElement !== loginControl ||
+          loginControl.querySelectorAll('[data-testid="share-login"]').length !== 1 ||
+          loginInput.value !== candidate.sourceLogin ||
+          loginInput.disabled ||
+          loginInput.form !== form ||
           !(newRole instanceof ownerWindow.HTMLSelectElement) ||
           newRole.parentElement !== form ||
           form.children.item(1) !== newRole ||
+          newRole.form !== form ||
           !(addButton instanceof ownerWindow.HTMLButtonElement) ||
           addButton.parentElement !== form ||
           form.lastElementChild !== addButton ||
@@ -1280,10 +1606,12 @@ export const ShareDialog = memo(function ShareDialog({
               !(roleElement instanceof ownerWindow.HTMLSelectElement) ||
               roleElement.parentElement !== elements.row ||
               elements.row.children.item(elements.row.children.length - 2) !== roleElement ||
+              roleElement.form !== null ||
               !roleSelectIsExact(roleElement, expectedValue, row.pending) ||
               !(removeElement instanceof ownerWindow.HTMLButtonElement) ||
               removeElement.parentElement !== elements.row ||
               elements.row.lastElementChild !== removeElement ||
+              removeElement.form !== null ||
               removeElement.type !== "button" ||
               removeElement.disabled !== row.pending ||
               removeElement.getAttribute("aria-label") !== `Remove ${row.login}`
@@ -1317,6 +1645,7 @@ export const ShareDialog = memo(function ShareDialog({
           !linkAccessElement.isConnected ||
           !runtime.general.contains(linkAccessElement) ||
           runtime.general.querySelectorAll('[data-testid="link-access"]').length !== 1 ||
+          linkAccessElement.form !== null ||
           !linkSelectIsExact(
             linkAccessElement,
             change?.kind === "link-access" ? change.value : candidate.linkAccess,
@@ -1334,6 +1663,7 @@ export const ShareDialog = memo(function ShareDialog({
         !(done instanceof ownerWindow.HTMLButtonElement) ||
         !done.isConnected ||
         done.parentElement !== runtime.footer ||
+        done.form !== null ||
         runtime.footer.children.length !== 1 ||
         runtime.footer.firstElementChild !== done ||
         done.type !== "button" ||
@@ -1348,51 +1678,174 @@ export const ShareDialog = memo(function ShareDialog({
   );
 
   const presentationIsCurrent = useCallback(
-    (candidate: SharePresentation, change?: ShareDomChange) =>
-      activePresentationRef.current === candidate &&
-      presentationRuntimesRef.current.get(candidate)?.active === true &&
-      presentationFactsAreCurrent(candidate) &&
-      presentationDomIsValid(candidate, change),
-    [presentationDomIsValid, presentationFactsAreCurrent],
+    (source: SharePresentation, change?: ShareDomChange) => {
+      const candidate = currentPresentation(source);
+      return (
+        activePresentationRef.current === candidate &&
+        presentationRuntimesRef.current.get(candidate)?.active === true &&
+        presentationFactsAreCurrent(candidate) &&
+        presentationDomIsValid(candidate, change)
+      );
+    },
+    [currentPresentation, presentationDomIsValid, presentationFactsAreCurrent],
   );
 
   const claim = useCallback(
-    (candidate: SharePresentation, key: string, change?: ShareDomChange) => {
+    (source: SharePresentation, key: string, change?: ShareDomChange) => {
+      const candidate = currentPresentation(source);
       const runtime = presentationRuntimesRef.current.get(candidate);
       if (!runtime || runtime.claims.has(key)) return false;
-      if (!presentationIsCurrent(candidate, change)) {
+      if (!presentationIsCurrent(source, change)) {
         retirePresentation(candidate);
         return false;
       }
       runtime.claims.add(key);
       return true;
     },
-    [presentationIsCurrent, retirePresentation],
+    [currentPresentation, presentationIsCurrent, retirePresentation],
   );
+
+  const startPresentationObservation = useCallback((runtime: SharePresentationRuntime) => {
+    const ownerWindow = runtime.root?.ownerDocument.defaultView;
+    if (!ownerWindow || !runtime.dialog || !runtime.overlay || !runtime.portalParent) return false;
+    const Observer = ownerWindow.MutationObserver;
+    if (typeof Observer !== "function") return false;
+    const observer = new Observer((records) => {
+      if (records.some((record) => mutationTouchesPresentation(runtime, record))) runtime.mutated = true;
+    });
+    observer.observe(runtime.dialog, { attributes: true, characterData: true, childList: true, subtree: true });
+    observer.observe(runtime.overlay, { attributes: true, characterData: true, childList: true, subtree: true });
+    observer.observe(runtime.portalParent, { childList: true });
+    runtime.observer = observer;
+    runtime.observerRetirement = null;
+    return true;
+  }, []);
+
+  const startCloseCapture = useCallback((candidate: SharePresentation, runtime: SharePresentationRuntime) => {
+    const dialog = runtime.dialog;
+    const close = runtime.close;
+    const ownerWindow = dialog?.ownerDocument.defaultView;
+    if (!ownerWindow || !dialog || !close) return false;
+    const remember = (event: Event) => {
+      clearShareCloseProvenance(runtime);
+      if (!runtime.active || runtime.retired || activePresentationRef.current !== candidate) return;
+      const target = event.target;
+      let provenance: ShareCloseProvenance | null = null;
+      if (
+        event instanceof ownerWindow.KeyboardEvent &&
+        event.type === "keydown" &&
+        event.key === "Escape" &&
+        target instanceof ownerWindow.Node &&
+        dialog.contains(target)
+      ) {
+        provenance = { kind: "escape", event };
+      } else if (
+        event instanceof ownerWindow.MouseEvent &&
+        event.type === "click" &&
+        target instanceof ownerWindow.Node
+      ) {
+        if (close.contains(target)) provenance = { kind: "close-button", event };
+        else if (!dialog.contains(target)) provenance = { kind: "outside", event };
+      }
+      if (!provenance) return;
+      runtime.closeProvenance = provenance;
+      const retirement = { provenance, timer: -1 };
+      runtime.closeProvenanceRetirement = retirement;
+      retirement.timer = ownerWindow.setTimeout(() => {
+        if (runtime.closeProvenanceRetirement !== retirement) return;
+        runtime.closeProvenanceRetirement = null;
+        if (runtime.closeProvenance === provenance) runtime.closeProvenance = null;
+      }, 0);
+    };
+    const forget = (event: Event) => {
+      const provenance = runtime.closeProvenance;
+      if (provenance?.event === event) clearShareCloseProvenance(runtime, provenance);
+    };
+    ownerWindow.addEventListener("keydown", remember, true);
+    ownerWindow.addEventListener("click", remember, true);
+    ownerWindow.addEventListener("keydown", forget);
+    ownerWindow.addEventListener("click", forget);
+    runtime.removeCloseCapture = () => {
+      ownerWindow.removeEventListener("keydown", remember, true);
+      ownerWindow.removeEventListener("click", remember, true);
+      ownerWindow.removeEventListener("keydown", forget);
+      ownerWindow.removeEventListener("click", forget);
+    };
+    return true;
+  }, []);
 
   const publishPresentation = useCallback(
-    (candidate: SharePresentation) => {
+    (source: SharePresentation, expected?: SharePresentation) => {
+      const candidate = currentPresentation(source);
+      if (expected && candidate !== expected) return null;
       const existing = activePresentationRef.current;
-      if (existing && existing !== candidate) retirePresentation(existing);
-      const runtime = runtimeFor(candidate);
-      const dialog = runtime.root?.parentElement;
-      const ownerWindow = runtime.root?.ownerDocument.defaultView;
-      runtime.dialog = ownerWindow && dialog instanceof ownerWindow.HTMLDivElement ? dialog : null;
-      if (!presentationFactsAreCurrent(candidate) || !presentationDomIsValid(candidate)) {
-        retirePresentation(candidate);
-        return;
+      const runtime = presentationRuntimesRef.current.get(candidate);
+      if (!runtime || runtime.retired || (runtime.predecessor && existing && existing !== runtime.predecessor)) {
+        if (runtime) retirePresentationLineage(candidate);
+        return null;
+      }
+      if (runtime.published && runtime.active && existing === candidate) return candidate;
+      captureRuntimeDerivedElements(runtime);
+
+      const predecessor = runtime.predecessor;
+      if (predecessor) {
+        const previousRuntime = presentationRuntimesRef.current.get(predecessor);
+        if (
+          !previousRuntime ||
+          !previousRuntime.retired ||
+          previousRuntime.claims.size > 0 ||
+          !presentationFactsAreExactReplay(predecessor, candidate) ||
+          !runtimeElementsAreExactReplay(previousRuntime, runtime) ||
+          !stopPresentationObservation(previousRuntime)
+        ) {
+          retirePresentationLineage(candidate);
+          return null;
+        }
+      }
+      if (!presentationFactsAreCurrent(candidate)) {
+        retirePresentationLineage(candidate);
+        return null;
+      }
+      if (existing && existing !== candidate) retirePresentationLineage(existing);
+      if (!presentationDomIsValid(candidate)) {
+        retirePresentationLineage(candidate);
+        return null;
+      }
+      if (!startPresentationObservation(runtime)) {
+        retirePresentationLineage(candidate);
+        return null;
       }
       runtime.active = true;
+      runtime.published = true;
       activePresentationRef.current = candidate;
+      if (!startCloseCapture(candidate, runtime)) {
+        retirePresentationLineage(candidate);
+        return null;
+      }
+      return candidate;
     },
-    [presentationDomIsValid, presentationFactsAreCurrent, retirePresentation, runtimeFor],
+    [
+      currentPresentation,
+      presentationDomIsValid,
+      presentationFactsAreCurrent,
+      retirePresentationLineage,
+      startCloseCapture,
+      startPresentationObservation,
+    ],
   );
+  useLayoutEffect(() => {
+    publishPresentationRef.current = publishPresentation;
+    return () => {
+      if (publishPresentationRef.current === publishPresentation) publishPresentationRef.current = null;
+    };
+  }, [publishPresentation]);
 
   const claimAdd = (
-    candidate: SharePresentation,
+    source: SharePresentation,
     form: HTMLFormElement,
     addButton: HTMLButtonElement,
   ) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const accepted = candidate.visit
       ? Object.freeze({
@@ -1413,14 +1866,15 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.add !== addButton ||
       addButton.disabled ||
       addButton.form !== form ||
-      !claim(candidate, "add")
+      !claim(source, "add")
     ) {
       return null;
     }
     return accepted;
   };
 
-  const claimRetry = (candidate: SharePresentation, button: HTMLButtonElement) => {
+  const claimRetry = (source: SharePresentation, button: HTMLButtonElement) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const documentId = candidate.document.id;
     if (
@@ -1429,7 +1883,7 @@ export const ShareDialog = memo(function ShareDialog({
       candidate.listPending ||
       runtime?.retry !== button ||
       button.disabled ||
-      !claim(candidate, "retry")
+      !claim(source, "retry")
     ) {
       return null;
     }
@@ -1437,17 +1891,18 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const claimNewRole = (
-    candidate: SharePresentation,
+    source: SharePresentation,
     select: HTMLSelectElement,
     nextRole: CollaboratorRole,
   ) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     if (
       !candidate.isOwner ||
       nextRole === candidate.newRole ||
       runtime?.newRole !== select ||
       select.disabled ||
-      !claim(candidate, "new-role", { kind: "new-role", value: nextRole })
+      !claim(source, "new-role", { kind: "new-role", value: nextRole })
     ) {
       return false;
     }
@@ -1455,11 +1910,12 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const claimCollaboratorRole = (
-    candidate: SharePresentation,
+    source: SharePresentation,
     row: CollaboratorPublication,
     select: HTMLSelectElement,
     nextRole: CollaboratorRole,
   ) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const accepted = candidate.permissionContext
       ? Object.freeze({
@@ -1477,7 +1933,7 @@ export const ShareDialog = memo(function ShareDialog({
       nextRole === row.role ||
       runtime?.rows[row.index]?.role !== select ||
       select.disabled ||
-      !claim(candidate, `role:${row.index}`, {
+      !claim(source, `role:${row.index}`, {
         kind: "collaborator-role",
         row,
         value: nextRole,
@@ -1489,10 +1945,11 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const claimRemove = (
-    candidate: SharePresentation,
+    source: SharePresentation,
     row: CollaboratorPublication,
     button: HTMLButtonElement,
   ) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const accepted = candidate.permissionContext
       ? Object.freeze({
@@ -1508,7 +1965,7 @@ export const ShareDialog = memo(function ShareDialog({
       row.operation ||
       runtime?.rows[row.index]?.remove !== button ||
       button.disabled ||
-      !claim(candidate, `remove:${row.index}`)
+      !claim(source, `remove:${row.index}`)
     ) {
       return null;
     }
@@ -1516,10 +1973,11 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const claimLinkAccess = (
-    candidate: SharePresentation,
+    source: SharePresentation,
     select: HTMLSelectElement,
     value: DocumentDto["linkAccess"],
   ) => {
+    const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const accepted = candidate.permissionContext
       ? Object.freeze({
@@ -1537,7 +1995,7 @@ export const ShareDialog = memo(function ShareDialog({
       value === candidate.linkAccess ||
       runtime?.linkAccess !== select ||
       select.disabled ||
-      !claim(candidate, "link-access", { kind: "link-access", value })
+      !claim(source, "link-access", { kind: "link-access", value })
     ) {
       return null;
     }
@@ -1545,16 +2003,50 @@ export const ShareDialog = memo(function ShareDialog({
   };
 
   const claimDone = (candidate: SharePresentation, button: HTMLButtonElement) => {
-    const runtime = presentationRuntimesRef.current.get(candidate);
+    const runtime = presentationRuntimesRef.current.get(currentPresentation(candidate));
     return runtime?.done === button && !button.disabled && claim(candidate, "done");
   };
 
+  const claimNativeClose = (source: SharePresentation) => {
+    const candidate = currentPresentation(source);
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const provenance = runtime?.closeProvenance;
+    const ownerWindow = runtime?.dialog?.ownerDocument.defaultView;
+    const target = provenance?.event.target;
+    if (
+      !runtime ||
+      !provenance ||
+      !ownerWindow ||
+      !(target instanceof ownerWindow.Node) ||
+      (provenance.kind === "escape"
+        ? !(
+            provenance.event instanceof ownerWindow.KeyboardEvent &&
+            provenance.event.type === "keydown" &&
+            provenance.event.key === "Escape" &&
+            runtime.dialog?.contains(target)
+          )
+        : !(
+            provenance.event instanceof ownerWindow.MouseEvent &&
+            provenance.event.type === "click" &&
+            (provenance.kind === "close-button"
+              ? runtime.close?.contains(target)
+              : !runtime.dialog?.contains(target))
+          )) ||
+      !claim(source, "close")
+    ) {
+      return null;
+    }
+    clearShareCloseProvenance(runtime, provenance);
+    return candidate;
+  };
+
   const closePresentation = (
-    candidate: SharePresentation,
-    acceptedOnOpenChange = candidate.onOpenChange,
+    source: SharePresentation,
+    acceptedOnOpenChange = source.onOpenChange,
   ) => {
-    if (!presentationIsCurrent(candidate)) return;
-    retirePresentation(candidate);
+    const candidate = currentPresentation(source);
+    if (!presentationIsCurrent(source)) return;
+    retirePresentationLineage(candidate);
     retireShareRequests(candidate.visit ?? undefined);
     retirePermissionOperations(candidate.permissionContext ?? undefined);
     acceptedOnOpenChange(false);
@@ -1565,13 +2057,14 @@ export const ShareDialog = memo(function ShareDialog({
       if (presentationIsCurrent(presentation)) presentation.onOpenChange(true);
       return;
     }
-    closePresentation(presentation);
+    const candidate = claimNativeClose(presentation);
+    if (candidate) closePresentation(candidate);
   };
 
   useLayoutEffect(() => {
     publishPresentation(presentation);
-    return () => retirePresentation(presentation);
-  }, [presentation, publishPresentation, retirePresentation]);
+    return () => retirePresentationLineage(presentation);
+  }, [presentation, publishPresentation, retirePresentationLineage]);
 
   const linkOption = LINK_OPTIONS.find((option) => option.value === presentation.linkAccess);
 
@@ -1588,7 +2081,7 @@ export const ShareDialog = memo(function ShareDialog({
             ref={(element) => bindElement(presentation, "form", element)}
             className="flex gap-2"
             onSubmit={(e) => {
-              const runtime = presentationRuntimesRef.current.get(presentation);
+              const runtime = presentationRuntimesRef.current.get(currentPresentation(presentation));
               const addButton = runtime?.add;
               if (
                 !addButton ||
@@ -1615,7 +2108,7 @@ export const ShareDialog = memo(function ShareDialog({
               ]}
               onPick={() => {
                 if (!presentationIsCurrent(presentation)) return;
-                presentationRuntimesRef.current.get(presentation)?.newRole?.focus();
+                presentationRuntimesRef.current.get(currentPresentation(presentation))?.newRole?.focus();
               }}
             />
             <select
