@@ -2004,7 +2004,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
         value: { writeText },
       });
       vi.stubGlobal("navigator", navigatorWithClipboard);
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
 
       await within(view.host).findByTestId("webhooks-empty");
@@ -2044,7 +2045,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
           if (keyDown && escape) keyDown(escape.event);
           Reflect.apply(nativePreventDefault, this, []);
         });
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
@@ -2105,6 +2107,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
       const docs = within(view.host).getByTestId("webhook-docs") as HTMLInputElement;
       const callsBeforeEscape = fetchMock.mock.calls.length;
       docs.focus();
+      preventDefault.mockClear();
       const escape = keyboardEvent(form, docs);
       act(() => reactProp<KeyDownHandler>(form, "onKeyDown")(escape.event));
 
@@ -2147,6 +2150,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
       const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
       expect(form).toHaveAttribute("aria-busy", "true");
       form.focus();
+      preventDefault.mockClear();
       const escape = keyboardEvent(form, form);
       const requestsAtEscape = fetchMock.mock.calls.length;
       act(() => reactProp<KeyDownHandler>(form, "onKeyDown")(escape.event));
@@ -2165,7 +2169,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
 
     it("rejects every ineligible key and event provenance without poisoning the current form", async () => {
       const preventDefault = trackNativePrevention();
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
@@ -2297,7 +2302,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
 
     it("rejects a stale draft handler and admits only its current successor", async () => {
       const preventDefault = trackNativePrevention();
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
@@ -2332,7 +2338,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
       "reorder and restore the form",
     ] as const)("permanently rejects restored DOM history after %s and recovers on a keyed mount", async (history) => {
       const preventDefault = trackNativePrevention();
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(
         <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
       );
@@ -2387,7 +2394,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
 
     it("rejects a partial Strict replay and lets a complete keyed successor recover", async () => {
       const preventDefault = trackNativePrevention();
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(
         <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
       );
@@ -2427,7 +2435,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
 
     it("releases a removed form's authority and leaves a fresh Strict root usable", async () => {
       const preventDefault = trackNativePrevention();
-      fetchMock.mockResolvedValue(response({ webhooks: [] }));
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
       const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
