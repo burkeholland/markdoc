@@ -1,5 +1,6 @@
 "use client";
 
+import { useLayoutEffect, useState, type MouseEvent } from "react";
 import { Bot, Loader2, Radio } from "lucide-react";
 import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import { agentDisplayName } from "@/editor/collab/mentions";
@@ -132,31 +133,346 @@ export interface PresenceRequestsProps {
   onCancel?: (requestId: string) => void;
 }
 
+const REQUEST_SECTION_CLASS = "mt-1.5 border-t border-line pt-1.5";
+const REQUEST_TITLE_CLASS = "px-2 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3";
+const REQUEST_LIST_CLASS = "flex max-h-56 flex-col gap-0.5 overflow-y-auto";
+const REQUEST_ROW_CLASS = "flex items-start gap-2 rounded-lg px-2 py-1.5 text-sm";
+const REQUEST_DETAILS_CLASS = "min-w-0 flex-1";
+const REQUEST_INSTRUCTION_CLASS = "block truncate text-ink";
+const REQUEST_STATE_CLASS = "block text-xs text-ink-3";
+const REQUEST_CANCEL_CLASS = "btn btn-sm btn-outline h-7 shrink-0 px-2 text-xs";
+const KEEP_AGENT_CLASS = "btn w-full justify-center gap-1.5";
+
+class PresenceElementOwner<T extends HTMLElement> {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(private readonly onReplacement: () => void) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const replaced = element !== null && this.last !== null && this.last !== element;
+    this.current = element;
+    if (element) this.last = element;
+    if (replaced || element === null) this.onReplacement();
+  };
+}
+
+interface PresenceRequestRender {
+  readonly request: AgentRequestMirror;
+  readonly id: string;
+  readonly userId: string;
+  readonly status: AgentRequestMirror["status"];
+  readonly mode: AgentRequestMirror["mode"];
+  readonly instruction: string;
+  readonly claimedBy: string | null;
+  readonly claimedByLogin: AgentRequestMirror["claimedByLogin"];
+  readonly requester: string | null;
+  readonly state: string;
+  readonly cancellable: boolean;
+}
+
+interface PresenceRequestsAuthority {
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly user: CollabSession["user"];
+  readonly userId: string;
+  readonly viewer: string | null;
+  readonly role: CollabSession["role"];
+  readonly pendingSource: AgentRequestMirror[];
+  readonly pending: readonly AgentRequestMirror[];
+  readonly nameOf: PresenceRequestsProps["nameOf"];
+  readonly ownerNameOf: PresenceRequestsProps["ownerNameOf"];
+  readonly onCancel: PresenceRequestsProps["onCancel"];
+  readonly rows: readonly PresenceRequestRender[];
+}
+
+interface PresenceRequestsCells {
+  readonly active: { current: PresenceRequestsPublication | null };
+  readonly claimedEvents: WeakSet<object>;
+}
+
+interface PresenceRequestPublication {
+  readonly render: PresenceRequestRender;
+  readonly captureRow: (element: HTMLLIElement | null) => void;
+  readonly captureCancel: (element: HTMLButtonElement | null) => void;
+  readonly onCancel: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+interface PresenceRequestsPublication {
+  readonly authority: PresenceRequestsAuthority;
+  readonly rows: readonly PresenceRequestPublication[];
+  readonly captureSection: (element: HTMLDivElement | null) => void;
+  readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+}
+
+function createPresenceRequestsAuthority(
+  mount: symbol,
+  { session, pending, nameOf, ownerNameOf, onCancel }: PresenceRequestsProps,
+): PresenceRequestsAuthority {
+  const user = session.user;
+  const userId = user.id;
+  const viewer = user.login ?? null;
+  const role = session.role;
+  const rows = pending.map((request): PresenceRequestRender => {
+    const requester = request.userId === userId ? "you" : nameOf(request.userId);
+    const state =
+      `${request.status === "claimed" ? `${claimerName(request, viewer, ownerNameOf)} is on it` : "Waiting for an agent"} · ${describeMode(request.mode)}` +
+      (requester ? ` · ${requester === "you" ? "asked by you" : `asked by ${requester}`}` : "");
+    return Object.freeze({
+      request,
+      id: request.id,
+      userId: request.userId,
+      status: request.status,
+      mode: request.mode,
+      instruction: request.instruction,
+      claimedBy: request.claimedBy,
+      claimedByLogin: request.claimedByLogin,
+      requester,
+      state,
+      cancellable: !!onCancel && (request.userId === userId || role === "owner"),
+    });
+  });
+  return Object.freeze({
+    mount,
+    session,
+    user,
+    userId,
+    viewer,
+    role,
+    pendingSource: pending,
+    pending: Object.freeze([...pending]),
+    nameOf,
+    ownerNameOf,
+    onCancel,
+    rows: Object.freeze(rows),
+  });
+}
+
+function createPresenceRequestsPublication(
+  authority: PresenceRequestsAuthority,
+  cells: PresenceRequestsCells,
+): PresenceRequestsPublication {
+  const { mount, session, user, userId, viewer, role, pendingSource, pending, nameOf, ownerNameOf, onCancel } = authority;
+  const renders = authority.rows;
+  const retireForReplacement = () => publication.retire();
+  const sectionOwner = new PresenceElementOwner<HTMLDivElement>(retireForReplacement);
+  const listOwner = new PresenceElementOwner<HTMLUListElement>(retireForReplacement);
+  const rowOwners = renders.map(() => new PresenceElementOwner<HTMLLIElement>(retireForReplacement));
+  const cancelOwners = renders.map(() => new PresenceElementOwner<HTMLButtonElement>(retireForReplacement));
+
+  const factsAreCurrent = () =>
+    authority.mount === mount &&
+    authority.session === session &&
+    authority.user === user &&
+    session.user === user &&
+    authority.userId === userId &&
+    user.id === userId &&
+    authority.viewer === viewer &&
+    (user.login ?? null) === viewer &&
+    authority.role === role &&
+    session.role === role &&
+    authority.pendingSource === pendingSource &&
+    authority.pending === pending &&
+    authority.nameOf === nameOf &&
+    authority.ownerNameOf === ownerNameOf &&
+    authority.onCancel === onCancel &&
+    pendingSource.length === pending.length &&
+    pending.length === renders.length &&
+    renders.every((row, index) => {
+      const request = pendingSource[index];
+      return (
+        pending[index] === request &&
+        row.request === request &&
+        request?.id === row.id &&
+        request.userId === row.userId &&
+        request.status === row.status &&
+        request.mode === row.mode &&
+        request.instruction === row.instruction &&
+        request.claimedBy === row.claimedBy &&
+        request.claimedByLogin === row.claimedByLogin &&
+        row.cancellable === (!!onCancel && (row.userId === userId || role === "owner"))
+      );
+    });
+  const exactDomIsCurrent = () => {
+    const section = sectionOwner.element();
+    const list = listOwner.element();
+    if (
+      !section ||
+      !section.isConnected ||
+      section.tagName !== "DIV" ||
+      section.className !== REQUEST_SECTION_CLASS ||
+      section.dataset.testid !== "presence-requests" ||
+      !list ||
+      !list.isConnected ||
+      list.tagName !== "UL" ||
+      list.className !== REQUEST_LIST_CLASS ||
+      list.parentElement !== section ||
+      section.children.length !== 2 ||
+      section.children.item(1) !== list ||
+      list.children.length !== renders.length
+    ) {
+      return false;
+    }
+    const title = section.children.item(0);
+    if (
+      !(title instanceof HTMLDivElement) ||
+      title.className !== REQUEST_TITLE_CLASS ||
+      title.textContent !== "Requests"
+    ) {
+      return false;
+    }
+    return renders.every((render, index) => {
+      const row = rowOwners[index]?.element() ?? null;
+      const cancel = cancelOwners[index]?.element() ?? null;
+      if (
+        !row ||
+        !row.isConnected ||
+        row.tagName !== "LI" ||
+        row.parentElement !== list ||
+        list.children.item(index) !== row ||
+        row.className !== REQUEST_ROW_CLASS ||
+        row.dataset.testid !== "presence-request" ||
+        row.dataset.status !== render.status ||
+        row.children.length !== (render.cancellable ? 3 : 2)
+      ) {
+        return false;
+      }
+      const icon = row.children.item(0);
+      const details = row.children.item(1);
+      const instruction = details?.children.item(0);
+      const state = details?.children.item(1);
+      if (
+        !(icon instanceof HTMLSpanElement) ||
+        icon.className !== cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3") ||
+        icon.children.length !== 1 ||
+        icon.children.item(0)?.getAttribute("aria-hidden") !== "true" ||
+        !(details instanceof HTMLSpanElement) ||
+        details.className !== REQUEST_DETAILS_CLASS ||
+        details.children.length !== 2 ||
+        !(instruction instanceof HTMLSpanElement) ||
+        instruction.className !== REQUEST_INSTRUCTION_CLASS ||
+        instruction.textContent !== render.instruction ||
+        !(state instanceof HTMLSpanElement) ||
+        state.className !== REQUEST_STATE_CLASS ||
+        state.dataset.testid !== "presence-request-state" ||
+        state.textContent !== render.state
+      ) {
+        return false;
+      }
+      if (!render.cancellable) return cancel === null;
+      return (
+        !!cancel &&
+        cancel.isConnected &&
+        cancel.tagName === "BUTTON" &&
+        cancel.parentElement === row &&
+        row.children.item(2) === cancel &&
+        cancel.type === "button" &&
+        !cancel.disabled &&
+        cancel.className === REQUEST_CANCEL_CLASS &&
+        cancel.getAttribute("aria-label") === "Cancel request" &&
+        cancel.dataset.testid === "presence-request-cancel" &&
+        cancel.textContent?.trim() === "Cancel"
+      );
+    });
+  };
+  const ownsAuthority = () =>
+    cells.active.current === publication &&
+    publication.authority === authority &&
+    factsAreCurrent() &&
+    exactDomIsCurrent();
+  const ownsCancel = (index: number, button: HTMLButtonElement) => {
+    const render = renders[index];
+    const row = rowOwners[index]?.element() ?? null;
+    return (
+      !!render?.cancellable &&
+      ownsAuthority() &&
+      cancelOwners[index]?.element() === button &&
+      button.isConnected &&
+      !button.disabled &&
+      !!row &&
+      button.parentElement === row &&
+      row.parentElement === listOwner.element() &&
+      listOwner.element()?.children.item(index) === row
+    );
+  };
+  const claimEvent = (event: object) => {
+    if (cells.claimedEvents.has(event)) return false;
+    cells.claimedEvents.add(event);
+    return true;
+  };
+  const retire = () => {
+    if (cells.active.current !== publication) return false;
+    cells.active.current = null;
+    return true;
+  };
+  const establish = () => {
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.retire();
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
+    cells.active.current = publication;
+  };
+  const rows = renders.map(
+    (render, index): PresenceRequestPublication =>
+      Object.freeze({
+        render,
+        captureRow: rowOwners[index]!.capture,
+        captureCancel: cancelOwners[index]!.capture,
+        onCancel: (event: MouseEvent<HTMLButtonElement>) => {
+          if (!ownsCancel(index, event.currentTarget) || !claimEvent(event)) return;
+          onCancel!(render.id);
+        },
+      }),
+  );
+  const publication: PresenceRequestsPublication = Object.freeze({
+    authority,
+    rows: Object.freeze(rows),
+    captureSection: sectionOwner.capture,
+    captureList: listOwner.capture,
+    establish,
+    retire,
+  });
+  return publication;
+}
+
 /** The "Requests" section of the presence popover: one row per open request, with Cancel for the requester or the owner. */
-export function PresenceRequests({ session, pending, nameOf, ownerNameOf, onCancel }: PresenceRequestsProps) {
-  const canCancel = (r: AgentRequestMirror) => !!onCancel && (r.userId === session.user.id || session.role === "owner");
-  const who = (r: AgentRequestMirror) => (r.userId === session.user.id ? "you" : nameOf(r.userId));
-  const viewer = session.user.login ?? null;
+export function PresenceRequests(props: PresenceRequestsProps) {
+  const [mount] = useState(() => Symbol("presence requests"));
+  const [cells] = useState<PresenceRequestsCells>(() => ({
+    active: { current: null },
+    claimedEvents: new WeakSet<object>(),
+  }));
+  const publication = createPresenceRequestsPublication(createPresenceRequestsAuthority(mount, props), cells);
+
+  useLayoutEffect(() => {
+    publication.establish();
+    return () => {
+      publication.retire();
+    };
+  }, [publication]);
+  const { captureSection, captureList, rows } = publication;
+
   return (
-    <div className="mt-1.5 border-t border-line pt-1.5" data-testid="presence-requests">
-      <div className="px-2 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Requests</div>
-      <ul className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
-        {pending.map((r) => {
-          const requester = who(r);
+    <div ref={captureSection} className={REQUEST_SECTION_CLASS} data-testid="presence-requests">
+      <div className={REQUEST_TITLE_CLASS}>Requests</div>
+      <ul ref={captureList} className={REQUEST_LIST_CLASS}>
+        {rows.map(({ render, captureRow, captureCancel, onCancel }) => {
           return (
-            <li key={r.id} className="flex items-start gap-2 rounded-lg px-2 py-1.5 text-sm" data-testid="presence-request" data-status={r.status}>
-              <span className={cn("mt-0.5 shrink-0", r.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3")}>
-                {r.status === "claimed" ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Bot size={14} aria-hidden="true" />}
+            <li ref={captureRow} key={render.id} className={REQUEST_ROW_CLASS} data-testid="presence-request" data-status={render.status}>
+              <span className={cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3")}>
+                {render.status === "claimed" ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Bot size={14} aria-hidden="true" />}
               </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-ink">{r.instruction}</span>
-                <span className="block text-xs text-ink-3" data-testid="presence-request-state">
-                  {r.status === "claimed" ? `${claimerName(r, viewer, ownerNameOf)} is on it` : "Waiting for an agent"} · {describeMode(r.mode)}
-                  {requester ? ` · ${requester === "you" ? "asked by you" : `asked by ${requester}`}` : ""}
+              <span className={REQUEST_DETAILS_CLASS}>
+                <span className={REQUEST_INSTRUCTION_CLASS}>{render.instruction}</span>
+                <span className={REQUEST_STATE_CLASS} data-testid="presence-request-state">
+                  {render.state}
                 </span>
               </span>
-              {canCancel(r) && (
-                <button type="button" className="btn btn-sm btn-outline h-7 shrink-0 px-2 text-xs" onClick={() => onCancel!(r.id)} aria-label="Cancel request" data-testid="presence-request-cancel">
+              {render.cancellable && (
+                <button ref={captureCancel} type="button" className={REQUEST_CANCEL_CLASS} onClick={onCancel} aria-label="Cancel request" data-testid="presence-request-cancel">
                   Cancel
                 </button>
               )}
@@ -168,10 +484,117 @@ export function PresenceRequests({ session, pending, nameOf, ownerNameOf, onCanc
   );
 }
 
+interface KeepAgentAuthority {
+  readonly mount: symbol;
+  readonly onClick: () => void;
+  readonly primary: boolean | undefined;
+  readonly className: string;
+}
+
+interface KeepAgentCells {
+  readonly active: { current: KeepAgentPublication | null };
+  readonly claimedEvents: WeakSet<object>;
+}
+
+interface KeepAgentPublication {
+  readonly authority: KeepAgentAuthority;
+  readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly establish: () => void;
+  readonly retire: () => boolean;
+  readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+}
+
+function createKeepAgentPublication(
+  authority: KeepAgentAuthority,
+  cells: KeepAgentCells,
+): KeepAgentPublication {
+  const { mount, onClick, primary, className } = authority;
+  const retireForReplacement = () => publication.retire();
+  const buttonOwner = new PresenceElementOwner<HTMLButtonElement>(retireForReplacement);
+  const factsAreCurrent = () =>
+    authority.mount === mount &&
+    authority.onClick === onClick &&
+    authority.primary === primary &&
+    authority.className === className &&
+    className === cn(KEEP_AGENT_CLASS, primary ? "btn-primary" : "btn-outline btn-sm");
+  const exactDomIsCurrent = () => {
+    const button = buttonOwner.element();
+    return (
+      !!button &&
+      button.isConnected &&
+      button.tagName === "BUTTON" &&
+      button.type === "button" &&
+      !button.disabled &&
+      button.className === className &&
+      button.dataset.testid === "keep-agent-here" &&
+      button.children.length === 1 &&
+      button.children.item(0)?.getAttribute("aria-hidden") === "true" &&
+      button.textContent?.trim() === "Keep an agent here"
+    );
+  };
+  const ownsButton = (button: HTMLButtonElement) =>
+    cells.active.current === publication &&
+    publication.authority === authority &&
+    factsAreCurrent() &&
+    exactDomIsCurrent() &&
+    buttonOwner.element() === button &&
+    button.isConnected &&
+    !button.disabled;
+  const claimEvent = (event: object) => {
+    if (cells.claimedEvents.has(event)) return false;
+    cells.claimedEvents.add(event);
+    return true;
+  };
+  const retire = () => {
+    if (cells.active.current !== publication) return false;
+    cells.active.current = null;
+    return true;
+  };
+  const establish = () => {
+    const previous = cells.active.current;
+    if (previous && previous !== publication) previous.retire();
+    if (!factsAreCurrent() || !exactDomIsCurrent()) return;
+    cells.active.current = publication;
+  };
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    if (!ownsButton(event.currentTarget) || !claimEvent(event)) return;
+    onClick();
+  };
+  const publication: KeepAgentPublication = Object.freeze({
+    authority,
+    captureButton: buttonOwner.capture,
+    establish,
+    retire,
+    onClick: handleClick,
+  });
+  return publication;
+}
+
 /** "Keep an agent here" — the popover's way to the dialog with the paste-able sentence. */
 export function KeepAgentHereButton({ onClick, primary }: { onClick: () => void; primary?: boolean }) {
+  const [mount] = useState(() => Symbol("keep agent here"));
+  const [cells] = useState<KeepAgentCells>(() => ({
+    active: { current: null },
+    claimedEvents: new WeakSet<object>(),
+  }));
+  const authority: KeepAgentAuthority = Object.freeze({
+    mount,
+    onClick,
+    primary,
+    className: cn(KEEP_AGENT_CLASS, primary ? "btn-primary" : "btn-outline btn-sm"),
+  });
+  const publication = createKeepAgentPublication(authority, cells);
+
+  useLayoutEffect(() => {
+    publication.establish();
+    return () => {
+      publication.retire();
+    };
+  }, [publication]);
+  const { captureButton, onClick: handleClick } = publication;
+
   return (
-    <button type="button" className={cn("btn w-full justify-center gap-1.5", primary ? "btn-primary" : "btn-outline btn-sm")} onClick={onClick} data-testid="keep-agent-here">
+    <button ref={captureButton} type="button" className={authority.className} onClick={handleClick} data-testid="keep-agent-here">
       <Radio size={14} aria-hidden="true" /> Keep an agent here
     </button>
   );
