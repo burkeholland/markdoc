@@ -3339,6 +3339,7 @@ interface CommitDialogVisit {
 interface CommitDialogOperation {
   readonly identity: symbol;
   readonly visit: CommitDialogVisit;
+  readonly currentVisit: CommitCurrentValue<CommitDialogVisit>;
   readonly origin: CommitDialogPublication;
   readonly message: string;
   readonly commit: (message: string) => Promise<void>;
@@ -3480,7 +3481,14 @@ interface CommitDialogRender {
   readonly captureSubmit: (element: HTMLButtonElement | null) => void | (() => void);
   readonly establish: () => void | (() => void);
   readonly owns: (publication: CommitDialogPublication, changing?: CommitChangingControl) => boolean;
+  readonly onBridgeChangeCapture: (event: ReactChangeEvent<HTMLDivElement>) => void;
+  readonly onBridgeChange: (event: ReactChangeEvent<HTMLDivElement>) => void;
   readonly onBridgeClickCapture: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly onBridgeClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly onBridgeKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly onBridgeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly onBridgeSubmitCapture: (event: ReactFormEvent<HTMLDivElement>) => void;
+  readonly onBridgeSubmit: (event: ReactFormEvent<HTMLDivElement>) => void;
   readonly onMessageChange: (event: ReactChangeEvent<HTMLInputElement>) => void;
   readonly onMessageKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   readonly onCancel: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -3488,6 +3496,7 @@ interface CommitDialogRender {
   readonly onSubmit: (event: ReactFormEvent<HTMLFormElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
   readonly authorizeNativeDismissal: (publication: CommitDialogPublication, event: Event) => void;
+  readonly authorizeNativeDelivery: (publication: CommitDialogPublication, event: Event) => void;
 }
 
 class CommitCurrentValue<T> {
@@ -3546,6 +3555,10 @@ class CommitPublicationCoordinator {
   private readonly terminalPublications = new WeakSet<CommitDialogPublication>();
   private readonly actions = new WeakSet<object>();
   private readonly events = new WeakSet<object>();
+  private readonly deliveredReactEvents = new WeakSet<object>();
+  private readonly deliveredNativeEvents = new WeakSet<Event>();
+  private readonly preparedSubmits = new WeakSet<Event>();
+  private readonly forms = new WeakSet<HTMLFormElement>();
   private readonly operations = new WeakSet<CommitDialogOperation>();
   private readonly timers = new WeakSet<CommitDialogTimerOwner>();
   private readonly firedTimers = new WeakSet<CommitDialogTimerOwner>();
@@ -3604,6 +3617,34 @@ class CommitPublicationCoordinator {
     if (this.successor === publication) this.successor = null;
   }
 
+  registerForm(form: HTMLFormElement) {
+    this.forms.add(form);
+  }
+
+  ownsForm(form: HTMLFormElement) {
+    return this.forms.has(form);
+  }
+
+  noteNativeEvent(event: Event) {
+    this.deliveredNativeEvents.add(event);
+  }
+
+  nativeEventWasDelivered(event: Event) {
+    return this.deliveredNativeEvents.has(event);
+  }
+
+  noteReactEvent(event: object) {
+    this.deliveredReactEvents.add(event);
+  }
+
+  prepareSubmit(event: Event) {
+    this.preparedSubmits.add(event);
+  }
+
+  submitIsPrepared(event: Event) {
+    return this.preparedSubmits.has(event);
+  }
+
   claimEvent(publication: CommitDialogPublication, action: object, event: object, nativeEvent: object) {
     if (
       !this.isCurrent(publication) ||
@@ -3619,11 +3660,63 @@ class CommitPublicationCoordinator {
     return true;
   }
 
+  claimReactEvent(
+    publication: CommitDialogPublication,
+    action: object,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    return (
+      this.deliveredReactEvents.has(event) &&
+      this.deliveredNativeEvents.has(nativeEvent) &&
+      this.claimEvent(publication, action, event, nativeEvent)
+    );
+  }
+
   claimTerminal(publication: CommitDialogPublication, action: object, event: object, nativeEvent: object) {
     if (this.terminalPublications.has(publication) || !this.claimEvent(publication, action, event, nativeEvent)) {
       return false;
     }
     this.terminalPublications.add(publication);
+    return true;
+  }
+
+  claimTerminalReact(
+    publication: CommitDialogPublication,
+    action: object,
+    event: object,
+    nativeEvent: Event,
+  ) {
+    if (
+      this.terminalPublications.has(publication) ||
+      !this.claimReactEvent(publication, action, event, nativeEvent)
+    ) {
+      return false;
+    }
+    this.terminalPublications.add(publication);
+    return true;
+  }
+
+  claimTerminalSequence(
+    publication: CommitDialogPublication,
+    action: object,
+    events: readonly Event[],
+  ) {
+    if (
+      events.length === 0 ||
+      this.terminalPublications.has(publication) ||
+      !this.isCurrent(publication) ||
+      this.actions.has(action) ||
+      events.some(
+        (event) =>
+          !this.deliveredNativeEvents.has(event) || this.events.has(event),
+      )
+    ) {
+      return false;
+    }
+    this.terminalPublications.add(publication);
+    this.actions.add(action);
+    events.forEach((event) => this.events.add(event));
     return true;
   }
 
@@ -3695,6 +3788,62 @@ function commitDocumentFactsMatch(facts: CommitDocumentFacts) {
       const expected = facts.values[index];
       return expected?.[0] === name && Object.is(expected[1], value);
     })
+  );
+}
+
+function commitDocumentFactsAllowOperationHandoff(
+  previous: CommitDocumentFacts,
+  current: CommitDocumentFacts,
+) {
+  if (
+    previous.source === current.source ||
+    previous.values.length !== current.values.length ||
+    !commitDocumentFactsMatch(previous) ||
+    !commitDocumentFactsMatch(current)
+  ) {
+    return false;
+  }
+  let unpublishedTransition = false;
+  let publicationClockChange = false;
+  const exactResultShape = current.values.every(([name, value], index) => {
+    const prior = previous.values[index];
+    if (!prior || prior[0] !== name) return false;
+    if (Object.is(prior[1], value)) return true;
+    if (name === "hasUnpublishedChanges") {
+      unpublishedTransition = prior[1] === true && value === false;
+      return unpublishedTransition;
+    }
+    if (name === "publishedAt" || name === "updatedAt") {
+      publicationClockChange = true;
+      return true;
+    }
+    return false;
+  });
+  return exactResultShape && unpublishedTransition && publicationClockChange;
+}
+
+function commitOperationAllowsVisitHandoff(
+  operation: CommitDialogOperation,
+  previous: CommitDialogVisit,
+  current: CommitDialogVisit,
+) {
+  return (
+    operation.currentVisit.get() === previous &&
+    operation.visit === previous &&
+    previous.mount === current.mount &&
+    previous.open === current.open &&
+    previous.onCommit === current.onCommit &&
+    previous.onOpenChange === current.onOpenChange &&
+    previous.isOwner === current.isOwner &&
+    previous.initialMessage === current.initialMessage &&
+    previous.title === current.title &&
+    previous.description === current.description &&
+    previous.label === current.label &&
+    operation.commit === current.onCommit &&
+    commitDocumentFactsAllowOperationHandoff(
+      previous.documentFacts,
+      current.documentFacts,
+    )
   );
 }
 
@@ -3814,7 +3963,8 @@ function commitAuthorityFactsMatch(
     commitVisitFactsMatch(authority.visit) &&
     (operation === null ||
       (activeOperation.get() === operation &&
-        operation.visit === authority.visit &&
+        operation.currentVisit.get() === authority.visit &&
+        commitVisitFactsMatch(operation.visit) &&
         operation.commit === authority.visit.onCommit &&
         operation.message === operation.message.trim())) &&
     (timer === null ||
@@ -4320,6 +4470,57 @@ function exactCommitKey(
     : null;
 }
 
+function exactOwnedCommitSubmit(
+  event: ReactFormEvent<HTMLFormElement>,
+  coordinator: CommitPublicationCoordinator,
+) {
+  if (!event || typeof event !== "object") return null;
+  const candidate = event as { currentTarget?: unknown };
+  const possibleForm = candidate.currentTarget;
+  if (!possibleForm || typeof possibleForm !== "object") return null;
+  const possibleDocument = Reflect.get(possibleForm, "ownerDocument");
+  if (!possibleDocument || typeof possibleDocument !== "object") return null;
+  const ownerDocument = possibleDocument as Document;
+  const ownerWindow = ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    !(possibleForm instanceof ownerWindow.HTMLFormElement)
+  ) {
+    return null;
+  }
+  const form = possibleForm;
+  if (form.ownerDocument !== ownerDocument) return null;
+  if (!coordinator.ownsForm(form)) return null;
+  const Submit = ownerWindow.SubmitEvent;
+  if (!Submit) return null;
+  const nativeEvent = event.nativeEvent;
+  const prepared = coordinator.submitIsPrepared(nativeEvent);
+  const submitter = nativeEvent instanceof Submit ? nativeEvent.submitter : null;
+  return (
+    commitSyntheticEventShape(event, "onSubmit", prepared) &&
+    event.type === "submit" &&
+    nativeEvent instanceof Submit &&
+    nativeEvent.constructor === Submit &&
+    nativeEvent.type === "submit" &&
+    nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
+    event.eventPhase === nativeEvent.eventPhase &&
+    event.bubbles === nativeEvent.bubbles &&
+    event.cancelable === nativeEvent.cancelable &&
+    event.defaultPrevented === prepared &&
+    nativeEvent.defaultPrevented === prepared &&
+    event.target === form &&
+    nativeEvent.target === form &&
+    (submitter === null ||
+      (submitter instanceof ownerWindow.HTMLButtonElement &&
+        submitter.type === "submit" &&
+        submitter.form === form)) &&
+    form.isConnected &&
+    commitEventPath(nativeEvent, form, ownerDocument, [form])
+  )
+    ? nativeEvent
+    : null;
+}
+
 function exactRenderedCommitSubmit(
   event: ReactFormEvent<HTMLFormElement>,
   form: HTMLFormElement,
@@ -4331,7 +4532,7 @@ function exactRenderedCommitSubmit(
   const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
   return ownerWindow?.SubmitEvent &&
-    commitSyntheticEventShape(event, "onSubmit", false) &&
+    commitSyntheticEventShape(event, "onSubmit", true) &&
     event.type === "submit" &&
     nativeEvent instanceof ownerWindow.SubmitEvent &&
     nativeEvent.constructor === ownerWindow.SubmitEvent &&
@@ -4340,8 +4541,8 @@ function exactRenderedCommitSubmit(
     event.eventPhase === nativeEvent.eventPhase &&
     event.bubbles === nativeEvent.bubbles &&
     event.cancelable === nativeEvent.cancelable &&
-    !event.defaultPrevented &&
-    !nativeEvent.defaultPrevented &&
+    event.defaultPrevented &&
+    nativeEvent.defaultPrevented &&
     event.currentTarget === form &&
     event.target === form &&
     nativeEvent.target === form &&
@@ -4356,7 +4557,7 @@ function exactRenderedCommitSubmit(
     : null;
 }
 
-function exactCommitDismissal(event: Event, publication: CommitDialogPublication) {
+function exactCommitNativeEvent(event: Event, publication: CommitDialogPublication) {
   const ownerDocument = publication.ownerDocument;
   const ownerWindow = ownerDocument.defaultView;
   const target = event.target;
@@ -4370,8 +4571,19 @@ function exactCommitDismissal(event: Event, publication: CommitDialogPublication
     target.ownerDocument !== ownerDocument ||
     !commitEventPath(event, target, ownerDocument, [target])
   ) {
-    return false;
+    return null;
   }
+  return { ownerWindow, target };
+}
+
+function exactCommitInstantDismissal(
+  event: Event,
+  publication: CommitDialogPublication,
+  close: HTMLButtonElement,
+) {
+  const exact = exactCommitNativeEvent(event, publication);
+  if (!exact) return false;
+  const { ownerWindow, target } = exact;
   if (event instanceof ownerWindow.KeyboardEvent) {
     return (
       event.constructor === ownerWindow.KeyboardEvent &&
@@ -4385,15 +4597,94 @@ function exactCommitDismissal(event: Event, publication: CommitDialogPublication
     );
   }
   const Pointer = ownerWindow.PointerEvent;
+  return (
+    event instanceof ownerWindow.MouseEvent &&
+    (event.constructor === ownerWindow.MouseEvent ||
+      Boolean(Pointer && event.constructor === Pointer)) &&
+    event.type === "click" &&
+    event.button === 0 &&
+    !event.ctrlKey &&
+    close.isConnected &&
+    close.contains(target) &&
+    publication.content.contains(close)
+  );
+}
+
+function exactCommitOutsidePointerDown(
+  event: Event,
+  publication: CommitDialogPublication,
+) {
+  const exact = exactCommitNativeEvent(event, publication);
+  if (!exact) return null;
+  const { ownerWindow, target } = exact;
+  const Pointer = ownerWindow.PointerEvent;
+  return Pointer &&
+    event instanceof Pointer &&
+    event.constructor === Pointer &&
+    event.type === "pointerdown" &&
+      event.button === 0 &&
+      event.isPrimary &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    !publication.content.contains(target)
+    ? { event, target }
+    : null;
+}
+
+function exactCommitPointerContinuation(
+  event: Event,
+  publication: CommitDialogPublication,
+  proof: {
+    readonly target: Node;
+    readonly pointerId: number;
+    readonly pointerType: string;
+    readonly button: number;
+  },
+) {
+  const exact = exactCommitNativeEvent(event, publication);
+  if (!exact || exact.target !== proof.target) return false;
+  const { ownerWindow } = exact;
+  const Pointer = ownerWindow.PointerEvent;
+  if (event.type === "click") {
+    if (Pointer && event instanceof Pointer) {
+      return (
+        event.constructor === Pointer &&
+        event.button === proof.button &&
+        event.detail > 0 &&
+        event.isPrimary &&
+        event.pointerId === proof.pointerId &&
+        event.pointerType === proof.pointerType &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey
+      );
+    }
+    return (
+      event instanceof ownerWindow.MouseEvent &&
+      event.constructor === ownerWindow.MouseEvent &&
+      event.button === proof.button &&
+      event.detail > 0 &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey
+    );
+  }
   return Boolean(
     Pointer &&
       event instanceof Pointer &&
       event.constructor === Pointer &&
-      event.type === "pointerdown" &&
-      event.button === 0 &&
-      event.isPrimary &&
+      (event.type === "pointerup" || event.type === "pointercancel") &&
+      event.pointerId === proof.pointerId &&
+      event.pointerType === proof.pointerType &&
+      !event.altKey &&
       !event.ctrlKey &&
-      !publication.content.contains(target),
+      !event.metaKey &&
+      !event.shiftKey &&
+      (event.type === "pointercancel" || event.button === proof.button),
   );
 }
 
@@ -4595,14 +4886,208 @@ function createCommitDialogRender(
   let establishmentQueued = false;
   let dismissal:
     | {
+        readonly kind: "instant";
         readonly publication: CommitDialogPublication;
         readonly action: object;
-        readonly event: object;
-        readonly nativeEvent: Event;
+        readonly events: readonly [Event];
+      }
+    | {
+        readonly kind: "pointer";
+        readonly publication: CommitDialogPublication;
+        readonly action: object;
+        readonly events: Event[];
+        readonly target: Node;
+        readonly pointerId: number;
+        readonly pointerType: string;
+        readonly button: number;
+        pointerUp: Event | null;
+        click: Event | null;
+        expiration: number | null;
       }
     | null = null;
   const clearDismissal = () => {
+    if (dismissal?.kind === "pointer" && dismissal.expiration !== null) {
+      dismissal.publication.ownerDocument.defaultView?.clearTimeout(
+        dismissal.expiration,
+      );
+    }
     dismissal = null;
+  };
+  const pendingReactDeliveries = new WeakMap<
+    Event,
+    Map<object, () => void>
+  >();
+  const reactCaptureProofs = new WeakMap<
+    Event,
+    {
+      readonly publication: CommitDialogPublication;
+      readonly reactName: "onChange" | "onClick" | "onKeyDown" | "onSubmit";
+      readonly type: string;
+      readonly prototype: object;
+    }
+  >();
+  const bridgeReactDeliveries = new WeakMap<
+    Event,
+    {
+      readonly publication: CommitDialogPublication;
+      readonly event: object;
+      readonly run: () => void;
+      readonly reactName: "onChange" | "onClick" | "onKeyDown" | "onSubmit";
+      readonly type: string;
+      readonly prototype: object;
+    }
+  >();
+  const captureReactEvent = (
+    event: object,
+    reactName: "onChange" | "onClick" | "onKeyDown" | "onSubmit",
+    type: string,
+  ) => {
+    const publication = coordinator.active();
+    const bridge = bridgeOwner.element();
+    const candidate = event as {
+      currentTarget?: unknown;
+      nativeEvent?: unknown;
+      type?: unknown;
+    };
+    const nativeEvent = candidate.nativeEvent;
+    const ownerWindow = publication?.ownerDocument.defaultView;
+    const prototype = Object.getPrototypeOf(event);
+    if (
+      !publication ||
+      publication.authority !== authority ||
+      !bridge ||
+      bridge !== publication.bridge ||
+      candidate.currentTarget !== bridge ||
+      candidate.type !== type ||
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      !coordinator.nativeEventWasDelivered(nativeEvent) ||
+      !prototype ||
+      pendingReactDeliveries.has(nativeEvent) ||
+      reactCaptureProofs.has(nativeEvent) ||
+      !commitSyntheticEventShape(event, reactName, nativeEvent.defaultPrevented)
+    ) {
+      return;
+    }
+    reactCaptureProofs.set(nativeEvent, {
+      publication,
+      reactName,
+      type,
+      prototype,
+    });
+  };
+  const stageReactDelivery = (
+    event: object,
+    nativeEvent: Event,
+    run: () => void,
+  ) => {
+    const proof = reactCaptureProofs.get(nativeEvent);
+    if (
+      !proof ||
+      proof.publication !== coordinator.active() ||
+      Object.getPrototypeOf(event) !== proof.prototype
+    ) {
+      return;
+    }
+    const pending =
+      pendingReactDeliveries.get(nativeEvent) ?? new Map<object, () => void>();
+    if (!pendingReactDeliveries.has(nativeEvent)) {
+      pendingReactDeliveries.set(nativeEvent, pending);
+    }
+    if (!pending.has(event)) pending.set(event, run);
+  };
+  const deliverReactEvent = (
+    event: object,
+    reactName: "onChange" | "onClick" | "onKeyDown" | "onSubmit",
+    type: string,
+  ) => {
+    const publication = coordinator.active();
+    const bridge = bridgeOwner.element();
+    const candidate = event as {
+      currentTarget?: unknown;
+      nativeEvent?: unknown;
+      type?: unknown;
+    };
+    const nativeEvent = candidate.nativeEvent;
+    const ownerWindow = publication?.ownerDocument.defaultView;
+    const proof =
+      ownerWindow && nativeEvent instanceof ownerWindow.Event
+        ? reactCaptureProofs.get(nativeEvent)
+        : undefined;
+    if (
+      !publication ||
+      publication.authority !== authority ||
+      !bridge ||
+      bridge !== publication.bridge ||
+      candidate.currentTarget !== bridge ||
+      candidate.type !== type ||
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.Event) ||
+      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
+      !coordinator.nativeEventWasDelivered(nativeEvent) ||
+      !proof ||
+      proof.publication !== publication ||
+      proof.reactName !== reactName ||
+      proof.type !== type ||
+      Object.getPrototypeOf(event) !== proof.prototype ||
+      !commitSyntheticEventShape(event, reactName, nativeEvent.defaultPrevented)
+    ) {
+      return;
+    }
+    const pending = pendingReactDeliveries.get(nativeEvent);
+    const run = pending?.get(event);
+    if (!run) {
+      bridgeReactDeliveries.delete(nativeEvent);
+      pendingReactDeliveries.delete(nativeEvent);
+      reactCaptureProofs.delete(nativeEvent);
+      return;
+    }
+    bridgeReactDeliveries.set(nativeEvent, {
+      publication,
+      event,
+      run,
+      reactName,
+      type,
+      prototype: proof.prototype,
+    });
+  };
+  const authorizeNativeDelivery = (
+    publication: CommitDialogPublication,
+    nativeEvent: Event,
+  ) => {
+    const candidate = bridgeReactDeliveries.get(nativeEvent);
+    bridgeReactDeliveries.delete(nativeEvent);
+    pendingReactDeliveries.delete(nativeEvent);
+    reactCaptureProofs.delete(nativeEvent);
+    if (!candidate) return;
+    const ownerDocument = publication.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const reactEvent = candidate.event as {
+      currentTarget?: unknown;
+      nativeEvent?: unknown;
+      type?: unknown;
+    };
+    if (
+      !ownerWindow ||
+      nativeEvent.currentTarget !== ownerDocument ||
+      nativeEvent.eventPhase !== ownerWindow.Event.BUBBLING_PHASE ||
+      candidate.publication !== publication ||
+      publication.authority !== authority ||
+      reactEvent.currentTarget !== null ||
+      reactEvent.nativeEvent !== nativeEvent ||
+      reactEvent.type !== candidate.type ||
+      Object.getPrototypeOf(candidate.event) !== candidate.prototype ||
+      !commitSyntheticEventShape(
+        candidate.event,
+        candidate.reactName,
+        nativeEvent.defaultPrevented,
+      )
+    ) {
+      return;
+    }
+    coordinator.noteReactEvent(candidate.event);
+    candidate.run();
   };
   const onElementChange = (
     owner: CommitElementOwnerView,
@@ -4618,6 +5103,10 @@ function createCommitDialogRender(
       clearDismissal();
     }
     if (owner === bridgeOwner && element) prepareDismissalCapture(element.ownerDocument);
+    const form = formOwner.element();
+    if (owner === formOwner && element && form === element) {
+      coordinator.registerForm(form);
+    }
     if (runtime?.isExactReplay() && coordinator.acceptsSuccessorOf(runtime.publication)) {
       requestReplaySuccessor(runtime);
     }
@@ -4920,46 +5409,122 @@ function createCommitDialogRender(
     }
     return runtime.retireForLayout;
   };
-  const stageDismissal = (
+  const stageInstantDismissal = (
     publication: CommitDialogPublication,
-    event: object,
-    nativeEvent: Event,
+    event: Event,
   ) => {
     clearDismissal();
     if (!owns(publication)) return;
     const proof = {
+      kind: "instant" as const,
       publication,
       action: Object.freeze({ identity: Symbol("commit-dialog-dismissal") }),
-      event,
-      nativeEvent,
+      events: [event] as const,
     };
     dismissal = proof;
     publication.ownerDocument.defaultView?.queueMicrotask(() => {
       if (dismissal === proof) dismissal = null;
     });
   };
-  const onBridgeClickCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
-    const publication = coordinator.active();
-    const dom = exactDom();
-    if (
-      !publication ||
-      !dom ||
-      event.currentTarget !== dom.bridge ||
-      !dom.close.contains(event.target as Node)
-    ) {
-      return;
-    }
-    const nativeEvent = exactCommitClick(event, dom.bridge, dom.close, dom.content, null);
-    if (nativeEvent) stageDismissal(publication, event, nativeEvent);
+  const stagePointerDismissal = (
+    publication: CommitDialogPublication,
+    event: PointerEvent,
+    target: Node,
+  ) => {
+    clearDismissal();
+    if (!owns(publication)) return;
+    dismissal = {
+      kind: "pointer",
+      publication,
+      action: Object.freeze({ identity: Symbol("commit-dialog-dismissal") }),
+      events: [event],
+      target,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      button: event.button,
+      pointerUp: null,
+      click: null,
+      expiration: null,
+    };
   };
   const authorizeNativeDismissal = (publication: CommitDialogPublication, event: Event) => {
-    if (
-      publication.authority !== authority ||
-      !exactCommitDismissal(event, publication)
-    ) {
+    if (publication.authority !== authority) return;
+    const dom = exactDom();
+    if (!dom || publication.content !== dom.content) return;
+    if (event.type === "keydown") {
+      if (exactCommitInstantDismissal(event, publication, dom.close)) {
+        stageInstantDismissal(publication, event);
+      }
       return;
     }
-    stageDismissal(publication, event, event);
+    if (event.type === "pointerdown") {
+      const exact = exactCommitOutsidePointerDown(event, publication);
+      if (exact) {
+        stagePointerDismissal(
+          publication,
+          exact.event as PointerEvent,
+          exact.target,
+        );
+      } else {
+        clearDismissal();
+      }
+      return;
+    }
+    const proof = dismissal;
+    if (proof?.kind === "pointer") {
+      if (
+        proof.publication !== publication ||
+        !exactCommitPointerContinuation(event, publication, proof)
+      ) {
+        clearDismissal();
+        return;
+      }
+      if (event.type === "pointercancel") {
+        clearDismissal();
+        return;
+      }
+      if (event.type === "pointerup") {
+        if (proof.pointerUp) {
+          clearDismissal();
+          return;
+        }
+        proof.pointerUp = event;
+        proof.events.push(event);
+        proof.expiration = publication.ownerDocument.defaultView?.setTimeout(
+          () => {
+            if (dismissal === proof) clearDismissal();
+          },
+          0,
+        ) ?? null;
+        return;
+      }
+      if (event.type === "click") {
+        if (!proof.pointerUp || proof.click) {
+          clearDismissal();
+          return;
+        }
+        if (proof.expiration !== null) {
+          publication.ownerDocument.defaultView?.clearTimeout(proof.expiration);
+          proof.expiration = null;
+        }
+        proof.click = event;
+        proof.events.push(event);
+        publication.ownerDocument.defaultView?.queueMicrotask(() => {
+          if (dismissal !== proof || proof.expiration !== null) return;
+          proof.expiration =
+            publication.ownerDocument.defaultView?.setTimeout(() => {
+              if (dismissal === proof) clearDismissal();
+            }, 0) ?? null;
+        });
+      }
+      return;
+    }
+    if (
+      event.type === "click" &&
+      exactCommitInstantDismissal(event, publication, dom.close)
+    ) {
+      stageInstantDismissal(publication, event);
+    }
   };
   const onOpenChange = (open: boolean) => {
     const proof = dismissal;
@@ -4968,11 +5533,10 @@ function createCommitDialogRender(
       !proof ||
       proof.publication.authority !== authority ||
       !owns(proof.publication) ||
-      !coordinator.claimTerminal(
+      !coordinator.claimTerminalSequence(
         proof.publication,
         proof.action,
-        proof.event,
-        proof.nativeEvent,
+        proof.events,
       )
     ) {
       clearDismissal();
@@ -4980,6 +5544,30 @@ function createCommitDialogRender(
     }
     clearDismissal();
     closeVisit(proof.publication, authority);
+  };
+  const onBridgeChangeCapture = (event: ReactChangeEvent<HTMLDivElement>) => {
+    captureReactEvent(event, "onChange", "change");
+  };
+  const onBridgeChange = (event: ReactChangeEvent<HTMLDivElement>) => {
+    deliverReactEvent(event, "onChange", "change");
+  };
+  const onBridgeClickCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
+    captureReactEvent(event, "onClick", "click");
+  };
+  const onBridgeClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    deliverReactEvent(event, "onClick", "click");
+  };
+  const onBridgeKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    captureReactEvent(event, "onKeyDown", "keydown");
+  };
+  const onBridgeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    deliverReactEvent(event, "onKeyDown", "keydown");
+  };
+  const onBridgeSubmitCapture = (event: ReactFormEvent<HTMLDivElement>) => {
+    captureReactEvent(event, "onSubmit", "submit");
+  };
+  const onBridgeSubmit = (event: ReactFormEvent<HTMLDivElement>) => {
+    deliverReactEvent(event, "onSubmit", "submit");
   };
   const onMessageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
     const publication = coordinator.active();
@@ -4994,14 +5582,17 @@ function createCommitDialogRender(
     }
     const nativeEvent = exactCommitChange(event, dom.message, dom.form, dom.content);
     const action = Object.freeze({ identity: Symbol("commit-message-change") });
-    if (
-      !nativeEvent ||
-      !owns(publication, "message") ||
-      !coordinator.claimEvent(publication, action, event, nativeEvent)
-    ) {
-      return;
-    }
-    updateMessage(publication, authority, dom.message.value);
+    if (!nativeEvent) return;
+    const message = dom.message.value;
+    stageReactDelivery(event, nativeEvent, () => {
+      if (
+        !owns(publication, "message") ||
+        !coordinator.claimReactEvent(publication, action, event, nativeEvent)
+      ) {
+        return;
+      }
+      updateMessage(publication, authority, message);
+    });
   };
   const onMessageKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
@@ -5010,13 +5601,15 @@ function createCommitDialogRender(
     if (!publication || !dom || event.currentTarget !== dom.message) return;
     const nativeEvent = exactCommitKey(event, dom.message, dom.form, dom.content);
     const action = Object.freeze({ identity: Symbol("commit-message-key") });
-    if (
-      nativeEvent &&
-      owns(publication) &&
-      coordinator.claimEvent(publication, action, event, nativeEvent)
-    ) {
-      return;
-    }
+    if (!nativeEvent) return;
+    stageReactDelivery(event, nativeEvent, () => {
+      if (
+        owns(publication) &&
+        coordinator.claimReactEvent(publication, action, event, nativeEvent)
+      ) {
+        return;
+      }
+    });
   };
   const onSubmitClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
     const publication = coordinator.active();
@@ -5024,13 +5617,15 @@ function createCommitDialogRender(
     if (!publication || !dom || event.currentTarget !== dom.submit) return;
     const nativeEvent = exactCommitClick(event, dom.submit, dom.submit, dom.content, dom.form);
     const action = Object.freeze({ identity: Symbol("commit-submit-click") });
-    if (
-      nativeEvent &&
-      owns(publication) &&
-      coordinator.claimEvent(publication, action, event, nativeEvent)
-    ) {
-      return;
-    }
+    if (!nativeEvent) return;
+    stageReactDelivery(event, nativeEvent, () => {
+      if (
+        owns(publication) &&
+        coordinator.claimReactEvent(publication, action, event, nativeEvent)
+      ) {
+        return;
+      }
+    });
   };
   const onCancel = (event: ReactMouseEvent<HTMLButtonElement>) => {
     const publication = coordinator.active();
@@ -5038,40 +5633,59 @@ function createCommitDialogRender(
     if (!publication || !dom || event.currentTarget !== dom.cancel) return;
     const nativeEvent = exactCommitClick(event, dom.cancel, dom.cancel, dom.content, dom.form);
     const action = Object.freeze({ identity: Symbol("commit-cancel") });
-    if (
-      !nativeEvent ||
-      !owns(publication) ||
-      !coordinator.claimTerminal(publication, action, event, nativeEvent)
-    ) {
-      return;
-    }
-    closeVisit(publication, authority);
+    if (!nativeEvent) return;
+    stageReactDelivery(event, nativeEvent, () => {
+      if (
+        !owns(publication) ||
+        !coordinator.claimTerminalReact(
+          publication,
+          action,
+          event,
+          nativeEvent,
+        )
+      ) {
+        return;
+      }
+      closeVisit(publication, authority);
+    });
   };
   const onSubmit = (event: ReactFormEvent<HTMLFormElement>) => {
+    const ownedNativeEvent = exactOwnedCommitSubmit(event, coordinator);
+    if (!ownedNativeEvent) return;
+    if (!coordinator.submitIsPrepared(ownedNativeEvent)) {
+      event.preventDefault();
+      if (
+        !commitSyntheticEventShape(event, "onSubmit", true) ||
+        !event.defaultPrevented ||
+        !ownedNativeEvent.defaultPrevented
+      ) {
+        return;
+      }
+      coordinator.prepareSubmit(ownedNativeEvent);
+    }
     const dom = exactDom();
     if (!dom || event.currentTarget !== dom.form) return;
     const nativeEvent = exactRenderedCommitSubmit(event, dom.form, dom.submit, dom.content);
     if (!nativeEvent) return;
-    event.preventDefault();
-    if (
-      !commitSyntheticEventShape(event, "onSubmit", true) ||
-      !event.defaultPrevented ||
-      !nativeEvent.defaultPrevented
-    ) {
-      return;
-    }
     const publication = coordinator.active();
     const action = Object.freeze({ identity: Symbol("commit-submit") });
-    if (
-      !publication ||
-      publication.authority !== authority ||
-      authority.submitDisabled ||
-      !owns(publication) ||
-      !coordinator.claimTerminal(publication, action, event, nativeEvent)
-    ) {
-      return;
-    }
-    startOperation(publication, authority);
+    if (!publication) return;
+    stageReactDelivery(event, nativeEvent, () => {
+      if (
+        publication.authority !== authority ||
+        authority.submitDisabled ||
+        !owns(publication) ||
+        !coordinator.claimTerminalReact(
+          publication,
+          action,
+          event,
+          nativeEvent,
+        )
+      ) {
+        return;
+      }
+      startOperation(publication, authority);
+    });
   };
   const render: CommitDialogRender = Object.freeze({
     authority,
@@ -5086,7 +5700,14 @@ function createCommitDialogRender(
     captureSubmit: submitOwner.capture,
     establish,
     owns,
+    onBridgeChangeCapture,
+    onBridgeChange,
     onBridgeClickCapture,
+    onBridgeClick,
+    onBridgeKeyDownCapture,
+    onBridgeKeyDown,
+    onBridgeSubmitCapture,
+    onBridgeSubmit,
     onMessageChange,
     onMessageKeyDown,
     onCancel,
@@ -5094,6 +5715,7 @@ function createCommitDialogRender(
     onSubmit,
     onOpenChange,
     authorizeNativeDismissal,
+    authorizeNativeDelivery,
   });
   return render;
 }
@@ -5192,7 +5814,21 @@ export const CommitDialog = memo(function CommitDialog({
   );
   let state = storedState;
   if (visit ? state?.visit !== visit : state !== null) {
-    state = visit ? initialCommitDialogState(visit) : null;
+    const operation = activeOperation.get();
+    if (
+      visit &&
+      state?.busy &&
+      !state.done &&
+      state.operation &&
+      state.operation === operation &&
+      state.closeTimer === null &&
+      commitOperationAllowsVisitHandoff(operation, state.visit, visit)
+    ) {
+      operation.currentVisit.set(visit);
+      state = Object.freeze({ ...state, visit });
+    } else {
+      state = visit ? initialCommitDialogState(visit) : null;
+    }
     setStoredState(state);
   }
   latestState.set(state);
@@ -5206,7 +5842,7 @@ export const CommitDialog = memo(function CommitDialog({
         timer.handle = undefined;
       }
       const operation = activeOperation.get();
-      if (operation?.visit === candidate) activeOperation.set(null);
+      if (operation?.currentVisit.get() === candidate) activeOperation.set(null);
     },
     [activeOperation, activeTimer],
   );
@@ -5249,15 +5885,16 @@ export const CommitDialog = memo(function CommitDialog({
       return Boolean(
         publication &&
           activeOperation.get() === operation &&
-          currentVisit.get() === operation.visit &&
-          !closedVisits.has(operation.visit) &&
-          state?.visit === operation.visit &&
+          currentVisit.get() === operation.currentVisit.get() &&
+          !closedVisits.has(operation.currentVisit.get()) &&
+          state?.visit === operation.currentVisit.get() &&
           (state.operation === operation || publication === operation.origin) &&
-          publication.authority.visit === operation.visit &&
+          publication.authority.visit === operation.currentVisit.get() &&
           coordinator.isCurrent(publication) &&
           !publication.isRetired() &&
           publication.publishedDomMatches() &&
-          commitVisitFactsMatch(operation.visit),
+          commitVisitFactsMatch(operation.visit) &&
+          commitVisitFactsMatch(operation.currentVisit.get()),
       );
     },
     [activeOperation, closedVisits, coordinator, currentVisit, latestState],
@@ -5297,6 +5934,7 @@ export const CommitDialog = memo(function CommitDialog({
       const operation = Object.freeze<CommitDialogOperation>({
         identity: Symbol("commit-dialog-operation"),
         visit: authority.visit,
+        currentVisit: new CommitCurrentValue(authority.visit),
         origin: publication,
         message: authority.trimmedMessage,
         commit: authority.visit.onCommit,
@@ -5304,7 +5942,7 @@ export const CommitDialog = memo(function CommitDialog({
       if (!coordinator.claimOperation(operation)) return;
       activeOperation.set(operation);
       setStoredState((current) =>
-        current?.visit === operation.visit
+        current?.visit === operation.currentVisit.get()
           ? commitState(current, {
               busy: true,
               error: null,
@@ -5323,11 +5961,12 @@ export const CommitDialog = memo(function CommitDialog({
       void Promise.resolve(pending).then(
         () => {
           if (!operationOwns(operation) || activeTimer.get()) return;
+          const operationVisit = operation.currentVisit.get();
           const timer: CommitDialogTimerOwner = {
             identity: Symbol("commit-dialog-close-timer"),
-            visit: operation.visit,
+            visit: operationVisit,
             operation,
-            onOpenChange: operation.visit.onOpenChange,
+            onOpenChange: operationVisit.onOpenChange,
             handle: undefined,
           };
           if (!coordinator.claimTimer(timer)) return;
@@ -5367,7 +6006,8 @@ export const CommitDialog = memo(function CommitDialog({
             timer.onOpenChange(false);
           }, 900);
           setStoredState((current) =>
-            current?.visit === operation.visit && current.operation === operation
+            current?.visit === operation.currentVisit.get() &&
+            current.operation === operation
               ? commitState(current, {
                   busy: false,
                   error: null,
@@ -5379,9 +6019,10 @@ export const CommitDialog = memo(function CommitDialog({
         },
         (error: unknown) => {
           if (!operationOwns(operation)) return;
+          const operationVisit = operation.currentVisit.get();
           activeOperation.set(null);
           setStoredState((current) =>
-            current?.visit === operation.visit &&
+            current?.visit === operationVisit &&
             (current.operation === operation || current === authority.state)
               ? commitState(current, {
                   busy: false,
@@ -5414,18 +6055,47 @@ export const CommitDialog = memo(function CommitDialog({
       }
       previous?.remove();
       const remember = (event: Event) => {
+        coordinator.noteNativeEvent(event);
         const publication = coordinator.active();
         if (publication) {
           publication.presentation.authorizeNativeDismissal(publication, event);
         }
       };
+      const finish = (event: Event) => {
+        const publication = coordinator.active();
+        if (publication) {
+          publication.presentation.authorizeNativeDelivery(publication, event);
+        }
+      };
       ownerDocument.addEventListener("keydown", remember, true);
+      ownerDocument.addEventListener("input", remember, true);
+      ownerDocument.addEventListener("change", remember, true);
+      ownerDocument.addEventListener("click", remember, true);
+      ownerDocument.addEventListener("submit", remember, true);
       ownerDocument.addEventListener("pointerdown", remember, true);
+      ownerDocument.addEventListener("pointerup", remember, true);
+      ownerDocument.addEventListener("pointercancel", remember, true);
+      ownerDocument.addEventListener("keydown", finish);
+      ownerDocument.addEventListener("input", finish);
+      ownerDocument.addEventListener("change", finish);
+      ownerDocument.addEventListener("click", finish);
+      ownerDocument.addEventListener("submit", finish);
       const capture = {
         ownerDocument,
         remove: () => {
           ownerDocument.removeEventListener("keydown", remember, true);
+          ownerDocument.removeEventListener("input", remember, true);
+          ownerDocument.removeEventListener("change", remember, true);
+          ownerDocument.removeEventListener("click", remember, true);
+          ownerDocument.removeEventListener("submit", remember, true);
           ownerDocument.removeEventListener("pointerdown", remember, true);
+          ownerDocument.removeEventListener("pointerup", remember, true);
+          ownerDocument.removeEventListener("pointercancel", remember, true);
+          ownerDocument.removeEventListener("keydown", finish);
+          ownerDocument.removeEventListener("input", finish);
+          ownerDocument.removeEventListener("change", finish);
+          ownerDocument.removeEventListener("click", finish);
+          ownerDocument.removeEventListener("submit", finish);
         },
       };
       dismissalCapture.set(capture);
@@ -5510,7 +6180,14 @@ export const CommitDialog = memo(function CommitDialog({
   const captureError = presentation?.captureError;
   const captureCancel = presentation?.captureCancel;
   const captureSubmit = presentation?.captureSubmit;
+  const onBridgeChangeCapture = presentation?.onBridgeChangeCapture;
+  const onBridgeChange = presentation?.onBridgeChange;
   const onBridgeClickCapture = presentation?.onBridgeClickCapture;
+  const onBridgeClick = presentation?.onBridgeClick;
+  const onBridgeKeyDownCapture = presentation?.onBridgeKeyDownCapture;
+  const onBridgeKeyDown = presentation?.onBridgeKeyDown;
+  const onBridgeSubmitCapture = presentation?.onBridgeSubmitCapture;
+  const onBridgeSubmit = presentation?.onBridgeSubmit;
   const onMessageChange = presentation?.onMessageChange;
   const onMessageKeyDown = presentation?.onMessageKeyDown;
   const onCancel = presentation?.onCancel;
@@ -5523,7 +6200,14 @@ export const CommitDialog = memo(function CommitDialog({
       <div
         ref={captureBridge}
         className="contents"
+        onChangeCapture={onBridgeChangeCapture}
+        onChange={onBridgeChange}
         onClickCapture={onBridgeClickCapture}
+        onClick={onBridgeClick}
+        onKeyDownCapture={onBridgeKeyDownCapture}
+        onKeyDown={onBridgeKeyDown}
+        onSubmitCapture={onBridgeSubmitCapture}
+        onSubmit={onBridgeSubmit}
       >
         {presentation && shown && (
           <DialogContent title={shown.visit.title} description={shown.visit.description}>

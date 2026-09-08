@@ -40,6 +40,25 @@ interface CommitBoundaryProps {
   onPassiveCleanup?: () => void;
 }
 
+interface ControlledPointerEventInit extends MouseEventInit {
+  pointerId?: number;
+  pointerType?: string;
+  isPrimary?: boolean;
+}
+
+class ControlledPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: ControlledPointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 1;
+    this.pointerType = init.pointerType ?? "mouse";
+    this.isPrimary = init.isPrimary ?? true;
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -268,6 +287,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllTimers();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -303,6 +323,86 @@ describe("CommitDialog visit authority", () => {
       expect(current.onCommit).toHaveBeenCalledTimes(1);
       await advance(5_000);
       expect(current.onOpenChange).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("hands a pending operation to its exact callback-caused document refresh", async () => {
+    const pending = deferred<void>();
+    const current = actions();
+    const doc = repoDocument("doc-refresh", "docs/refresh.md");
+    const refreshed = {
+      ...doc,
+      hasUnpublishedChanges: false,
+      publishedAt: "2026-09-07T12:00:01.000Z",
+      updatedAt: "2026-09-07T12:00:01.000Z",
+    };
+    const { host, root } = createHost();
+
+    current.onCommit.mockImplementationOnce(() => {
+      root.render(
+        <StrictMode>
+          <CommitBoundary
+            visit="refreshed"
+            doc={refreshed}
+            actions={current}
+          />
+        </StrictMode>,
+      );
+      return pending.promise;
+    });
+
+    try {
+      await render(root, { visit: "initial", doc, actions: current });
+      fireEvent.change(message(), { target: { value: "  Publish refresh  " } });
+      await submit();
+
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Publish refresh");
+      expect(message()).toHaveValue("  Publish refresh  ");
+      expect(screen.getByTestId("commit-submit")).toBeDisabled();
+
+      await resolve(pending);
+      expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+      await advance(900);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("does not hand a pending operation to an unrelated metadata refresh", async () => {
+    const stalePending = deferred<void>();
+    const currentPending = deferred<void>();
+    const current = actions(stalePending.promise, currentPending.promise);
+    const doc = repoDocument("doc-unrelated-refresh", "docs/unrelated.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "initial", doc, actions: current });
+      await submit();
+      await render(root, {
+        visit: "metadata",
+        doc: {
+          ...doc,
+          updatedAt: "2026-09-07T12:00:01.000Z",
+        },
+        actions: current,
+      });
+
+      expect(screen.getByTestId("commit-submit")).toBeEnabled();
+      await resolve(stalePending);
+      expect(screen.queryByRole("button", { name: "Published" })).toBeNull();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      await submit();
+      expect(current.onCommit).toHaveBeenCalledTimes(2);
+      await resolve(currentPending);
+      expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+      await advance(900);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     } finally {
       await act(async () => root.unmount());
       host.remove();
@@ -754,6 +854,50 @@ describe("CommitDialog visit authority", () => {
     }
   });
 
+  it("prevents a current app-owned submit before a stale form handler rejects it", async () => {
+    const pending = deferred<void>();
+    const stale = actions();
+    const current = actions(pending.promise);
+    const doc = repoDocument("doc-stale-submit", "docs/stale-submit.md");
+    const { host, root } = createHost();
+    type SubmitHandler = (event: ReactFormEvent<HTMLFormElement>) => void;
+
+    try {
+      await render(root, { visit: "stale", doc, actions: stale });
+      const staleSubmit = reactProp<SubmitHandler>(commitForm(), "onSubmit");
+
+      await render(root, {
+        visit: "current",
+        doc: { ...doc },
+        actions: current,
+      });
+      const form = commitForm();
+      const currentSubmit = reactProp<SubmitHandler>(form, "onSubmit");
+      setReactProp(form, "onSubmit", (event: ReactFormEvent<HTMLFormElement>) => {
+        staleSubmit(event);
+        currentSubmit(event);
+      });
+      const nativeEvent = nativeSubmit(
+        form,
+        screen.getByTestId("commit-submit") as HTMLButtonElement,
+      );
+
+      act(() => {
+        form.dispatchEvent(nativeEvent);
+      });
+
+      expect(nativeEvent.defaultPrevented).toBe(true);
+      expect(stale.onCommit).not.toHaveBeenCalled();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith(
+        "Update docs/stale-submit.md",
+      );
+      await resolve(pending);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it("owns one primary gist Update click and schedules one exact success close", async () => {
     const pending = deferred<void>();
     const timeout = vi.spyOn(globalThis, "setTimeout");
@@ -837,6 +981,184 @@ describe("CommitDialog visit authority", () => {
       }
     },
   );
+
+  it("keeps one exact outside touch proof through pointerup microtasks and the linked click", async () => {
+    vi.stubGlobal("PointerEvent", ControlledPointerEvent);
+    const current = actions();
+    const doc = repoDocument("doc-touch-dismiss", "docs/touch-dismiss.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "current", doc, actions: current });
+      await advance(0);
+      const overlay = document.querySelector(".dialog-overlay");
+      if (!(overlay instanceof HTMLDivElement)) {
+        throw new Error("The commit dialog overlay was not rendered");
+      }
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+      });
+      await Promise.resolve();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerup", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+      });
+      await Promise.resolve();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            detail: 1,
+            pointerId: 99,
+            pointerType: "mouse",
+            isPrimary: true,
+          }),
+        );
+      });
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+        overlay.dispatchEvent(
+          new ControlledPointerEvent("pointerup", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId: 17,
+            pointerType: "touch",
+            isPrimary: true,
+          }),
+        );
+      });
+      await Promise.resolve();
+
+      act(() => {
+        overlay.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            detail: 1,
+          }),
+        );
+      });
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects an in-flight forged React wrapper before the genuine delegated wrapper closes", async () => {
+    const current = actions();
+    const doc = repoDocument("doc-react-delivery", "docs/react-delivery.md");
+    const { host, root } = createHost();
+    let forged: Record<string, unknown> | null = null;
+    let retryForgery: EventListener | null = null;
+
+    try {
+      await render(root, { visit: "current", doc, actions: current });
+      const cancel = screen.getByRole("button", { name: "Cancel" });
+      const bridge = host.firstElementChild;
+      if (!(bridge instanceof HTMLDivElement)) {
+        throw new Error("The commit dialog bridge was not rendered");
+      }
+      const genuine = reactProp<
+        (event: React.MouseEvent<HTMLButtonElement>) => void
+      >(cancel, "onClick");
+      const directBridge = reactProp<
+        (event: React.MouseEvent<HTMLDivElement>) => void
+      >(bridge, "onClick");
+      retryForgery = () => {
+        if (!forged) return;
+        forged.currentTarget = bridge;
+        directBridge(forged as unknown as React.MouseEvent<HTMLDivElement>);
+        forged.currentTarget = null;
+      };
+      document.body.addEventListener("click", retryForgery);
+      setReactProp(
+        cancel,
+        "onClick",
+        (event: React.MouseEvent<HTMLButtonElement>) => {
+          forged = Object.assign(
+            Object.create(Object.getPrototypeOf(event)) as Record<
+              string,
+              unknown
+            >,
+            {
+              _reactName: "onClick",
+              type: "click",
+              nativeEvent: event.nativeEvent,
+              currentTarget: event.currentTarget,
+              target: event.target,
+              eventPhase: event.eventPhase,
+              bubbles: event.bubbles,
+              cancelable: event.cancelable,
+              defaultPrevented: false,
+              button: event.button,
+              preventDefault: () => undefined,
+              isDefaultPrevented: () => false,
+              isPropagationStopped: () => false,
+              persist: () => undefined,
+            },
+          );
+          genuine(forged as unknown as React.MouseEvent<HTMLButtonElement>);
+          forged.currentTarget = bridge;
+          directBridge(forged as unknown as React.MouseEvent<HTMLDivElement>);
+          forged.currentTarget = null;
+          expect(current.onOpenChange).not.toHaveBeenCalled();
+        },
+      );
+
+      fireEvent.click(cancel);
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      document.body.removeEventListener("click", retryForgery);
+      retryForgery = null;
+      setReactProp(cancel, "onClick", genuine);
+      fireEvent.click(cancel);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      if (retryForgery) {
+        document.body.removeEventListener("click", retryForgery);
+      }
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 
   it("rejects stale equal-looking handlers after reopen and accepts the fresh message and Cancel", async () => {
     const stale = actions();
