@@ -20,6 +20,8 @@ const FAILURE_COORDINATE_LIMIT = 32;
 const SAFE_AREA = { top: 9, right: 11, bottom: 13, left: 15 };
 const IMAGE_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" viewBox="0 0 640 240"><rect width="640" height="240" fill="#0f766e"/></svg>';
+const AVATAR_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80"><rect width="80" height="80" rx="40" fill="#475569"/></svg>';
 
 export const MATRIX_AXES = {
   viewport: [
@@ -147,6 +149,13 @@ export interface MatrixSummary {
     replacementStaleOwners: number | null;
     unmountStaleOwners: number | null;
   };
+  network: {
+    contexts: number;
+    expectedAvatarSubstitutions: number;
+    avatarSubstitutions: number;
+    unexpectedRequests: number;
+    routingErrors: number;
+  };
   failureCount: number;
   failures: MatrixFailureCoordinate[];
 }
@@ -219,6 +228,13 @@ export function createMatrixSummary(
       replacementStaleOwners: null,
       unmountStaleOwners: null,
     },
+    network: {
+      contexts: 0,
+      expectedAvatarSubstitutions: 0,
+      avatarSubstitutions: 0,
+      unexpectedRequests: 0,
+      routingErrors: 0,
+    },
     failureCount: 0,
     failures: [],
   };
@@ -286,23 +302,197 @@ function loopback(url: string): boolean {
   );
 }
 
-export async function preventNonLoopbackTraffic(context: BrowserContext) {
-  const state = { blocked: 0 };
-  await context.route("**/*", async (route) => {
-    if (!loopback(route.request().url())) {
-      state.blocked++;
-      await route.abort("blockedbyclient");
-      return;
+export interface MatrixNetworkFixture {
+  avatarURL: string;
+  expectedAvatarSubstitutions: 1;
+}
+
+export interface MatrixTrafficState {
+  blocked: number;
+  expectedAvatarSubstitutions: number;
+  avatarSubstitutions: number;
+  routingErrors: number;
+  recorded: boolean;
+}
+
+type HttpDecision = "continue" | "fulfill-avatar" | "abort";
+
+export function createMatrixNetworkFixture(
+  login: string,
+): MatrixNetworkFixture {
+  if (!/^[a-z0-9-]+$/.test(login)) {
+    throw new Error("matrix-avatar-login-not-canonical");
+  }
+  return {
+    avatarURL: `https://avatars.githubusercontent.com/${login}?s=80`,
+    expectedAvatarSubstitutions: 1,
+  };
+}
+
+function createTrafficState(
+  fixture: MatrixNetworkFixture,
+): MatrixTrafficState {
+  return {
+    blocked: 0,
+    expectedAvatarSubstitutions: fixture.expectedAvatarSubstitutions,
+    avatarSubstitutions: 0,
+    routingErrors: 0,
+    recorded: false,
+  };
+}
+
+function classifyHttpRequest(
+  fixture: MatrixNetworkFixture,
+  state: MatrixTrafficState,
+  request: { url: string; method: string; resourceType: string },
+): HttpDecision {
+  if (loopback(request.url)) return "continue";
+  if (
+    request.url === fixture.avatarURL &&
+    request.method === "GET" &&
+    request.resourceType === "image" &&
+    state.avatarSubstitutions < fixture.expectedAvatarSubstitutions
+  ) {
+    state.avatarSubstitutions++;
+    return "fulfill-avatar";
+  }
+  state.blocked++;
+  return "abort";
+}
+
+export function assertMatrixNetworkRoutingContract() {
+  const fixture = createMatrixNetworkFixture(
+    "selection-toolbar-matrix-static",
+  );
+  const exact = {
+    url: fixture.avatarURL,
+    method: "GET",
+    resourceType: "image",
+  };
+  const state = createTrafficState(fixture);
+  if (
+    classifyHttpRequest(fixture, state, exact) !== "fulfill-avatar" ||
+    state.avatarSubstitutions !== 1 ||
+    state.blocked !== 0 ||
+    AVATAR_SVG.length > 512
+  ) {
+    throw new Error("matrix-avatar-exact-routing-contract");
+  }
+  if (
+    classifyHttpRequest(fixture, state, exact) !== "abort" ||
+    state.blocked !== 1
+  ) {
+    throw new Error("matrix-avatar-repetition-routing-contract");
+  }
+  const rejected = [
+    { ...exact, url: `${fixture.avatarURL}0` },
+    { ...exact, method: "POST" },
+    { ...exact, resourceType: "fetch" },
+    {
+      ...exact,
+      url: "https://avatars.githubusercontent.com/other?s=80",
+    },
+  ];
+  for (const [index, request] of rejected.entries()) {
+    const rejectedState = createTrafficState(fixture);
+    if (
+      classifyHttpRequest(fixture, rejectedState, request) !== "abort" ||
+      rejectedState.blocked !== 1 ||
+      rejectedState.avatarSubstitutions !== 0
+    ) {
+      throw new Error(`matrix-avatar-rejection-contract-${index}`);
     }
-    await route.continue();
+  }
+  const loopbackState = createTrafficState(fixture);
+  if (
+    classifyHttpRequest(fixture, loopbackState, {
+      ...exact,
+      url: "http://127.0.0.1:3100/local.svg",
+    }) !== "continue" ||
+    loopbackState.blocked !== 0 ||
+    loopbackState.avatarSubstitutions !== 0
+  ) {
+    throw new Error("matrix-loopback-routing-contract");
+  }
+}
+
+export function completeMatrixTraffic(
+  summary: MatrixSummary,
+  state: MatrixTrafficState,
+  context: string,
+) {
+  if (state.recorded) {
+    throw new MatrixCheckError(`${context}:traffic-recorded-twice`);
+  }
+  state.recorded = true;
+  summary.network.contexts++;
+  summary.network.expectedAvatarSubstitutions +=
+    state.expectedAvatarSubstitutions;
+  summary.network.avatarSubstitutions += state.avatarSubstitutions;
+  summary.network.unexpectedRequests += state.blocked;
+  summary.network.routingErrors += state.routingErrors;
+  check(state.routingErrors === 0, `${context}:network-routing-error`);
+  check(state.blocked === 0, `${context}:unexpected-non-loopback-request`);
+  check(
+    state.avatarSubstitutions === state.expectedAvatarSubstitutions,
+    `${context}:avatar-substitution-count`,
+  );
+}
+
+export async function preventNonLoopbackTraffic(
+  context: BrowserContext,
+  fixture: MatrixNetworkFixture,
+) {
+  const state = createTrafficState(fixture);
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    let decision: HttpDecision;
+    try {
+      decision = classifyHttpRequest(fixture, state, {
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
+      if (decision === "fulfill-avatar") {
+        await route.fulfill({
+          status: 200,
+          contentType: "image/svg+xml",
+          headers: {
+            "cache-control": "public, max-age=31536000, immutable",
+          },
+          body: AVATAR_SVG,
+        });
+      } else if (decision === "abort") {
+        await route.abort("blockedbyclient");
+      } else {
+        await route.continue();
+      }
+    } catch {
+      if (decision! === "fulfill-avatar") state.avatarSubstitutions--;
+      state.routingErrors++;
+      try {
+        await route.abort("failed");
+      } catch {
+        // The state remains failed even when Playwright already completed the route.
+      }
+    }
   });
   await context.routeWebSocket("**/*", (socket) => {
-    if (!loopback(socket.url())) {
-      state.blocked++;
-      socket.close({ code: 1008, reason: "loopback only" });
-      return;
+    try {
+      if (!loopback(socket.url())) {
+        state.blocked++;
+        socket.close({ code: 1008, reason: "loopback only" });
+        return;
+      }
+      socket.connectToServer();
+    } catch {
+      state.routingErrors++;
+      try {
+        socket.close({ code: 1011, reason: "routing error" });
+      } catch {
+        // The state remains failed even when Playwright already closed the socket.
+      }
     }
-    socket.connectToServer();
   });
   return state;
 }

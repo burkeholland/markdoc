@@ -9,8 +9,11 @@ import { createDocument, devLogin, uniqueLogin } from "./helpers";
 import {
   MATRIX_AXES,
   MATRIX_ROWS,
+  assertMatrixNetworkRoutingContract,
+  completeMatrixTraffic,
   completeLateFont,
   completeLateImage,
+  createMatrixNetworkFixture,
   createMatrixSummary,
   exerciseActions,
   finalizeMatrixSummary,
@@ -24,8 +27,10 @@ import {
   setMatrixEnvironment,
   setupLateResources,
   type FontAsset,
+  type MatrixNetworkFixture,
   type MatrixRow,
   type MatrixSummary,
+  type MatrixTrafficState,
 } from "./selection-bubble-matrix";
 
 const SELECTED_TEXT =
@@ -57,9 +62,18 @@ const MATRIX_CONTEXT_KINDS = ["setup", "row", "lifecycle"] as const;
 
 type StoredSession = Awaited<ReturnType<BrowserContext["storageState"]>>;
 type MatrixContextRequest =
-  | { kind: "setup" }
-  | { kind: "row"; storageState: StoredSession; row: MatrixRow }
-  | { kind: "lifecycle"; storageState: StoredSession };
+  | { kind: "setup"; networkFixture: MatrixNetworkFixture }
+  | {
+      kind: "row";
+      storageState: StoredSession;
+      row: MatrixRow;
+      networkFixture: MatrixNetworkFixture;
+    }
+  | {
+      kind: "lifecycle";
+      storageState: StoredSession;
+      networkFixture: MatrixNetworkFixture;
+    };
 
 function matrixContextOptions(
   request: MatrixContextRequest,
@@ -98,10 +112,13 @@ function assertMatrixContextFactoryPolicy() {
   const row = MATRIX_ROWS[0];
   if (!row) throw new Error("matrix-context-row-probe-missing");
   const storageState: StoredSession = { cookies: [], origins: [] };
+  const networkFixture = createMatrixNetworkFixture(
+    "selection-toolbar-matrix-static",
+  );
   const requests: MatrixContextRequest[] = [
-    { kind: "setup" },
-    { kind: "row", storageState, row },
-    { kind: "lifecycle", storageState },
+    { kind: "setup", networkFixture },
+    { kind: "row", storageState, row, networkFixture },
+    { kind: "lifecycle", storageState, networkFixture },
   ];
   const coveredKinds = new Set(requests.map((request) => request.kind));
   if (
@@ -125,6 +142,12 @@ function assertMatrixContextFactoryPolicy() {
     if (observedOptions[index]?.serviceWorkers !== "block") {
       throw new Error(`matrix-context-service-workers-${request.kind}`);
     }
+    if (
+      request.networkFixture !== networkFixture ||
+      request.networkFixture.expectedAvatarSubstitutions !== 1
+    ) {
+      throw new Error(`matrix-context-avatar-fixture-${request.kind}`);
+    }
   }
 }
 
@@ -147,15 +170,15 @@ async function withOwnedContext<
   }
 }
 
-interface RowInitialization<Context, MatrixPage, Resources> {
-  installRouting(context: Context): Promise<{ blocked: number }>;
+interface RowInitialization<Context, MatrixPage, Resources, Traffic> {
+  installRouting(context: Context): Promise<Traffic>;
   openPage(context: Context): Promise<MatrixPage>;
   setupResources(page: MatrixPage): Promise<Resources>;
 }
 
-async function initializeRow<Context, MatrixPage, Resources>(
+async function initializeRow<Context, MatrixPage, Resources, Traffic>(
   context: Context,
-  initialization: RowInitialization<Context, MatrixPage, Resources>,
+  initialization: RowInitialization<Context, MatrixPage, Resources, Traffic>,
 ) {
   const traffic = await initialization.installRouting(context);
   const page = await initialization.openPage(context);
@@ -223,6 +246,7 @@ async function assertContextFailureCleanup() {
 }
 
 assertMatrixContextFactoryPolicy();
+assertMatrixNetworkRoutingContract();
 await assertContextFailureCleanup();
 
 // Fullscreen is intentionally not a browser axis: Markdoc has no reachable
@@ -275,16 +299,22 @@ async function findLocalFontAsset(page: Page): Promise<FontAsset> {
 
 async function createAuthenticatedState(
   context: BrowserContext,
+  login: string,
+  networkFixture: MatrixNetworkFixture,
+  summary: MatrixSummary,
 ): Promise<{
   storageState: Awaited<ReturnType<BrowserContext["storageState"]>>;
   font: FontAsset;
 }> {
-  const traffic = await preventNonLoopbackTraffic(context);
+  const traffic = await preventNonLoopbackTraffic(context, networkFixture);
   const page = await context.newPage();
-  await devLogin(page, uniqueLogin("selection-toolbar-matrix"));
-  const font = await findLocalFontAsset(page);
-  if (traffic.blocked !== 0) throw new Error("setup-non-loopback-request");
-  return { storageState: await context.storageState(), font };
+  try {
+    await devLogin(page, login);
+    const font = await findLocalFontAsset(page);
+    return { storageState: await context.storageState(), font };
+  } finally {
+    completeMatrixTraffic(summary, traffic, "setup");
+  }
 }
 
 async function deleteDocument(page: Page, documentId: string) {
@@ -296,19 +326,23 @@ async function runRow(
   browserContext: () => Promise<BrowserContext>,
   row: MatrixRow,
   font: FontAsset,
+  networkFixture: MatrixNetworkFixture,
   summary: MatrixSummary,
 ) {
   await withOwnedContext(browserContext, async (context) => {
     let page: Page | null = null;
     let resources: Awaited<ReturnType<typeof setupLateResources>> | null = null;
+    let traffic: MatrixTrafficState | null = null;
     let documentId: string | null = null;
 
     try {
       const initialized = await initializeRow(context, {
-        installRouting: preventNonLoopbackTraffic,
+        installRouting: (ownedContext) =>
+          preventNonLoopbackTraffic(ownedContext, networkFixture),
         openPage: (ownedContext) => ownedContext.newPage(),
         setupResources: (matrixPage) => setupLateResources(matrixPage, font),
       });
+      traffic = initialized.traffic;
       page = initialized.page;
       resources = initialized.resources;
       documentId = await createDocument(
@@ -337,13 +371,14 @@ async function runRow(
       );
       await exerciseActions(page, row, summary, ACTION_TEXT);
 
-      if (initialized.traffic.blocked !== 0) {
-        throw new Error("row-non-loopback-request");
-      }
       summary.rows.completed++;
     } finally {
       resources?.releaseAll();
-      if (page && documentId) await deleteDocument(page, documentId);
+      try {
+        if (page && documentId) await deleteDocument(page, documentId);
+      } finally {
+        if (traffic) completeMatrixTraffic(summary, traffic, `row-${row.ordinal}`);
+      }
     }
   });
 }
@@ -354,12 +389,24 @@ test(
     test.setTimeout(3 * 60 * 60 * 1000);
     const summary = createMatrixSummary(MATRIX_AXES, MATRIX_ROWS.length);
     const attempts = new Map<string, number>();
+    const login = uniqueLogin("selection-toolbar-matrix");
+    const networkFixture = createMatrixNetworkFixture(login);
 
     try {
       assertDedicatedLoopbackPort(testInfo);
       const { storageState, font } = await withOwnedContext(
-        () => createMatrixContext(browser, { kind: "setup" }),
-        createAuthenticatedState,
+        () =>
+          createMatrixContext(browser, {
+            kind: "setup",
+            networkFixture,
+          }),
+        (context) =>
+          createAuthenticatedState(
+            context,
+            login,
+            networkFixture,
+            summary,
+          ),
       );
 
       for (const row of MATRIX_ROWS) {
@@ -372,9 +419,11 @@ test(
                 kind: "row",
                 storageState,
                 row,
+                networkFixture,
               }),
             row,
             font,
+            networkFixture,
             summary,
           );
         } catch (error) {
@@ -387,13 +436,17 @@ test(
           createMatrixContext(browser, {
             kind: "lifecycle",
             storageState,
+            networkFixture,
           }),
         async (lifecycleContext) => {
           const lifecycleDocuments: string[] = [];
           let page: Page | null = null;
+          let traffic: MatrixTrafficState | null = null;
           try {
-            const traffic =
-              await preventNonLoopbackTraffic(lifecycleContext);
+            traffic = await preventNonLoopbackTraffic(
+              lifecycleContext,
+              networkFixture,
+            );
             page = await lifecycleContext.newPage();
             await installOwnershipProbe(page);
             const first = await createDocument(
@@ -415,9 +468,6 @@ test(
               replacement,
               SELECTED_TEXT,
             );
-            if (traffic.blocked !== 0) {
-              throw new Error("lifecycle-non-loopback-request");
-            }
           } catch (error) {
             recordMatrixFailure(summary, "lifecycle", "teardown", error);
           } finally {
@@ -433,6 +483,18 @@ test(
                     error,
                   );
                 }
+              }
+            }
+            if (traffic) {
+              try {
+                completeMatrixTraffic(summary, traffic, "lifecycle");
+              } catch (error) {
+                recordMatrixFailure(
+                  summary,
+                  "lifecycle",
+                  "network",
+                  error,
+                );
               }
             }
           }
@@ -456,6 +518,11 @@ test(
       report.rows.attempted !== MATRIX_ROWS.length ||
       report.rows.completed !== MATRIX_ROWS.length ||
       report.overflow.hiddenOrClippedRows !== 0 ||
+      report.network.contexts !== MATRIX_ROWS.length + 2 ||
+      report.network.avatarSubstitutions !==
+        report.network.expectedAvatarSubstitutions ||
+      report.network.unexpectedRequests !== 0 ||
+      report.network.routingErrors !== 0 ||
       report.coverage.fullscreenBrowserClaims !== 0
     ) {
       throw new Error("selection-toolbar-reachable-geometry-failed");
