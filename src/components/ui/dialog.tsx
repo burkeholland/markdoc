@@ -349,17 +349,89 @@ function isFocusGuard(node: Node): node is HTMLElement {
   );
 }
 
-function subtreeHasFocusGuardMarker(node: Node): boolean {
-  if (node.nodeType !== 1) return false;
-  const element = node as Element;
-  return (
-    element.hasAttribute("data-radix-focus-guard")
-    || element.querySelector("[data-radix-focus-guard]") !== null
-  );
+interface DialogChildRelations {
+  readonly contains: (parent: Node, child: Node) => boolean;
+  readonly children: (parent: Node) => Node[];
+  readonly firstElementChild: (parent: Element) => Element | null;
+  readonly lastElementChild: (parent: Element) => Element | null;
+  readonly hasAttribute: (element: Element, name: string) => boolean;
 }
 
-function exactFocusGuards(ownerDocument: Document): FocusGuardPair | null {
-  const guards = [...ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
+function captureDialogChildRelations(ownerDocument: Document): DialogChildRelations {
+  const ownerWindow = ownerDocument.defaultView;
+  const nodePrototype = ownerWindow?.Node.prototype;
+  const elementPrototype = ownerWindow?.Element.prototype;
+  const contains = nodePrototype?.contains;
+  const childNodes = nodePrototype
+    ? Object.getOwnPropertyDescriptor(nodePrototype, "childNodes")?.get
+    : undefined;
+  const firstElementChild = elementPrototype
+    ? Object.getOwnPropertyDescriptor(elementPrototype, "firstElementChild")?.get
+    : undefined;
+  const lastElementChild = elementPrototype
+    ? Object.getOwnPropertyDescriptor(elementPrototype, "lastElementChild")?.get
+    : undefined;
+  const hasAttribute = elementPrototype?.hasAttribute;
+  if (
+    typeof contains !== "function"
+    || typeof childNodes !== "function"
+    || typeof firstElementChild !== "function"
+    || typeof lastElementChild !== "function"
+    || typeof hasAttribute !== "function"
+  ) {
+    throw new Error("Cannot publish a dialog without canonical DOM child relations");
+  }
+  return Object.freeze({
+    contains: (parent: Node, child: Node) =>
+      Reflect.apply(contains, parent, [child]) as boolean,
+    children: (parent: Node) =>
+      Array.from(Reflect.apply(childNodes, parent, []) as NodeListOf<Node>),
+    firstElementChild: (parent: Element) =>
+      Reflect.apply(firstElementChild, parent, []) as Element | null,
+    lastElementChild: (parent: Element) =>
+      Reflect.apply(lastElementChild, parent, []) as Element | null,
+    hasAttribute: (element: Element, name: string) =>
+      Reflect.apply(hasAttribute, element, [name]) as boolean,
+  });
+}
+
+function focusGuardNodes(
+  ownerDocument: Document,
+  relations: DialogChildRelations,
+) {
+  const guards: Element[] = [];
+  const visit = (node: Node) => {
+    if (
+      node.nodeType === 1
+      && relations.hasAttribute(node as Element, "data-radix-focus-guard")
+    ) {
+      guards.push(node as Element);
+    }
+    relations.children(node).forEach(visit);
+  };
+  visit(ownerDocument);
+  return guards;
+}
+
+function subtreeHasFocusGuardMarker(
+  node: Node,
+  relations: DialogChildRelations,
+): boolean {
+  if (
+    node.nodeType === 1
+    && relations.hasAttribute(node as Element, "data-radix-focus-guard")
+  ) {
+    return true;
+  }
+  return relations.children(node).some((child) =>
+    subtreeHasFocusGuardMarker(child, relations));
+}
+
+function exactFocusGuards(
+  ownerDocument: Document,
+  relations: DialogChildRelations,
+): FocusGuardPair | null {
+  const guards = focusGuardNodes(ownerDocument, relations);
   return (
     guards.length === 2
     && guards.every(isFocusGuard)
@@ -368,12 +440,15 @@ function exactFocusGuards(ownerDocument: Document): FocusGuardPair | null {
     : null;
 }
 
-function edgeFocusGuards(ownerDocument: Document): FocusGuardPair | null {
-  const guards = exactFocusGuards(ownerDocument);
+function edgeFocusGuards(
+  ownerDocument: Document,
+  relations: DialogChildRelations,
+): FocusGuardPair | null {
+  const guards = exactFocusGuards(ownerDocument, relations);
   return (
     guards
-    && guards[0] === ownerDocument.body.firstElementChild
-    && guards[1] === ownerDocument.body.lastElementChild
+    && guards[0] === relations.firstElementChild(ownerDocument.body)
+    && guards[1] === relations.lastElementChild(ownerDocument.body)
   )
     ? guards
     : null;
@@ -389,6 +464,7 @@ function styleParts(ownerDocument: Document, value: string | null) {
 
 class MutationJournal {
   readonly #ownerDocument: Document;
+  readonly #relations: DialogChildRelations;
   readonly #overlay: HTMLDivElement | null;
   readonly #content: HTMLDivElement;
   readonly #body: HTMLDivElement;
@@ -439,6 +515,7 @@ class MutationJournal {
     onInvalid: () => void,
   ) {
     this.#ownerDocument = elements.content.ownerDocument;
+    this.#relations = captureDialogChildRelations(this.#ownerDocument);
     this.#overlay = elements.overlay;
     this.#content = elements.content;
     this.#body = elements.body;
@@ -449,8 +526,8 @@ class MutationJournal {
     this.#onFocusGuardViolation = onFocusGuardViolation;
     this.#expectedFocusGuards = expectedFocusGuards;
     this.#initialBodyPointerEvents = this.#ownerDocument.body.style.pointerEvents;
-    const guardNodes = [...this.#ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
-    const guards = edgeFocusGuards(this.#ownerDocument);
+    const guardNodes = focusGuardNodes(this.#ownerDocument, this.#relations);
+    const guards = edgeFocusGuards(this.#ownerDocument, this.#relations);
     if (
       guardNodes.length === 2
       && guardNodes.every(isFocusGuard)
@@ -531,7 +608,7 @@ class MutationJournal {
   }
 
   #hasExactFocusGuardTopology() {
-    const guards = [...this.#ownerDocument.querySelectorAll("[data-radix-focus-guard]")];
+    const guards = focusGuardNodes(this.#ownerDocument, this.#relations);
     if (
       (this.#validatingReplayTeardown || this.#replaying)
       && this.#focusGuards.size === 0
@@ -552,7 +629,7 @@ class MutationJournal {
   }
 
   #hasExactFocusGuardEdges() {
-    const guards = edgeFocusGuards(this.#ownerDocument);
+    const guards = edgeFocusGuards(this.#ownerDocument, this.#relations);
     if (!guards) return false;
     const leading = this.#focusGuards.get(guards[0]);
     const trailing = this.#focusGuards.get(guards[1]);
@@ -588,16 +665,17 @@ class MutationJournal {
     return (
       node === this.#overlay
       || node === this.#content
-      || Boolean(this.#overlay?.contains(node))
-      || this.#content.contains(node)
+      || Boolean(this.#overlay && this.#relations.contains(this.#overlay, node))
+      || this.#relations.contains(this.#content, node)
     );
   }
 
   #isBodyDescendant(node: Node) {
+    const header = this.#relations.firstElementChild(this.#content);
     return (
       node !== this.#content
-      && this.#content.contains(node)
-      && !this.#content.firstElementChild?.contains(node)
+      && this.#relations.contains(this.#content, node)
+      && !(header && this.#relations.contains(header, node))
     );
   }
 
@@ -614,7 +692,7 @@ class MutationJournal {
     const expected = values.get(name);
     const next = this.#nextAttributeValue(index, target, name);
     const mutableFormAttribute = (
-      this.#body.contains(target)
+      this.#relations.contains(this.#body, target)
       && isMutableFormAttribute(target, name)
     );
     if (
@@ -627,7 +705,7 @@ class MutationJournal {
     let allowed = false;
     if (
       name === "aria-expanded"
-      && this.#body.contains(target)
+      && this.#relations.contains(this.#body, target)
       && target.getAttribute("role") === "combobox"
       && [null, "false", "true"].includes(record.oldValue)
       && [null, "false", "true"].includes(next)
@@ -641,7 +719,7 @@ class MutationJournal {
       allowed = true;
     } else if (
       target instanceof HTMLInputElement
-      && this.#body.contains(target)
+      && this.#relations.contains(this.#body, target)
       && name === "name"
       && ((record.oldValue === null && next === "")
         || (record.oldValue === "" && next === null))
@@ -676,7 +754,8 @@ class MutationJournal {
     } else if (
       (name === "aria-hidden" || name === "data-aria-hidden")
       && (target === this.#overlay
-        || (!this.#isOwned(target) && !target.contains(this.#content)))
+        || (!this.#isOwned(target)
+          && !this.#relations.contains(target, this.#content)))
       && ((record.oldValue === null && next === "true")
         || ((this.#closing || this.#allowsReplayTeardown())
           && record.oldValue === "true"
@@ -754,7 +833,7 @@ class MutationJournal {
     }
     if (this.#hasExactFocusGuardEdges()) {
       const completedReplacement = this.#acceptingReplayGuardReplacement;
-      const current = edgeFocusGuards(this.#ownerDocument);
+      const current = edgeFocusGuards(this.#ownerDocument, this.#relations);
       if (
         !current
         || !this.#onFocusGuards(
@@ -885,7 +964,12 @@ class MutationJournal {
     ) {
       return false;
     }
-    if ([...added, ...removed].some(subtreeHasFocusGuardMarker)) return false;
+    if (
+      [...added, ...removed].some((node) =>
+        subtreeHasFocusGuardMarker(node, this.#relations))
+    ) {
+      return false;
+    }
     if (this.#isBodyDescendant(record.target)) return true;
     if (
       record.target === this.#portalParent
@@ -918,9 +1002,10 @@ class MutationJournal {
         !this.#focusGuards.has(node)
         && !this.#nestedRoots.has(node)
         && !this.#isOwned(node)
-        && !node.contains?.(this.#content)
+        && !this.#relations.contains(node, this.#content)
         && !(this.#overlay
-          && (this.#overlay.contains(node) || node.contains?.(this.#overlay)))
+          && (this.#relations.contains(this.#overlay, node)
+            || this.#relations.contains(node, this.#overlay)))
       ))
     ) {
       return true;
@@ -945,9 +1030,11 @@ class MutationJournal {
     if (record.type === "childList") {
       return [...record.addedNodes, ...record.removedNodes].some((node) =>
         this.#isOwned(node)
-        || node.contains?.(this.#content)
-        || Boolean(this.#overlay && node.contains?.(this.#overlay))
-        || subtreeHasFocusGuardMarker(node));
+        || this.#relations.contains(node, this.#content)
+        || Boolean(
+          this.#overlay && this.#relations.contains(node, this.#overlay),
+        )
+        || subtreeHasFocusGuardMarker(node, this.#relations));
     }
     return false;
   }
@@ -961,9 +1048,10 @@ class MutationJournal {
       || [...record.addedNodes, ...record.removedNodes].some((node) =>
         this.#focusGuards.has(node)
         || isFocusGuard(node)
-        || (subtreeHasFocusGuardMarker(node)
-          && !node.contains?.(this.#content)
-          && !(this.#overlay && node.contains?.(this.#overlay))))
+        || (subtreeHasFocusGuardMarker(node, this.#relations)
+          && !this.#relations.contains(node, this.#content)
+          && !(this.#overlay
+            && this.#relations.contains(node, this.#overlay))))
     );
   }
 
