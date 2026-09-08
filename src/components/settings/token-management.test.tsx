@@ -2136,7 +2136,7 @@ describe("one-time lifecycle and setup", () => {
     expect(preSealEvent.preventDefault).not.toHaveBeenCalled();
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.getByTestId("token-document-old")).toBeVisible();
-    await act(async () => await Promise.resolve());
+    await settleDocumentChooserCommit();
     fireEvent.click(oldButton);
     expect(documentListCount()).toBe(2);
 
@@ -2151,7 +2151,7 @@ describe("one-time lifecycle and setup", () => {
     expect(documentListCount()).toBe(3);
     await act(async () => currentInitial.resolve(response({ documents: [{ id: "current", title: "Current document" }] })));
     const currentButton = await screen.findByRole("button", { name: "Refresh documents" }) as HTMLButtonElement;
-    await act(async () => await Promise.resolve());
+    await settleDocumentChooserCommit();
     const staleEvent = tokenClickEvent(currentButton);
     act(() => oldHandler(staleEvent));
     expect(documentListCount()).toBe(3);
