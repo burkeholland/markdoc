@@ -486,6 +486,24 @@ function fabricatedTemplateClick(
   };
 }
 
+function fabricatedTemplateBubble(
+  button: HTMLButtonElement,
+  nativeEvent: MouseEvent,
+) {
+  return {
+    type: "click",
+    button: nativeEvent.button,
+    buttons: nativeEvent.buttons,
+    detail: nativeEvent.detail,
+    eventPhase: nativeEvent.BUBBLING_PHASE,
+    bubbles: nativeEvent.bubbles,
+    defaultPrevented: false,
+    currentTarget: button,
+    target: nativeEvent.target,
+    nativeEvent,
+  };
+}
+
 function invokePlainTemplateTraversal(
   grid: HTMLUListElement,
   button: HTMLButtonElement,
@@ -1031,6 +1049,87 @@ describe("TemplateGrid publication ownership", () => {
         templateButton(host, template.id).click();
       });
       expect(callsDuringAttack).toBe(0);
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("waits for genuine delegated React bubble after an inner native bubble forgery", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+    let callsDuringAttack = -1;
+    let button!: HTMLButtonElement;
+    const attack = (event: MouseEvent) => {
+      captureTemplateActivation(button)(
+        fabricatedTemplateBubble(button, event),
+      );
+      callsDuringAttack = onPick.mock.calls.length;
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const grid = templateGrid(host);
+      button = templateButton(host, template.id);
+      grid.addEventListener("click", attack);
+      await act(async () => {
+        button.click();
+      });
+      expect(callsDuringAttack).toBe(0);
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+      grid.removeEventListener("click", attack);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rechecks native default prevention after a forged bubble wrapper reports false", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onPick = vi.fn<(template: Template) => void>();
+    const template = PICKER_TEMPLATES[0];
+    let button!: HTMLButtonElement;
+    const attack = (event: MouseEvent) => {
+      event.preventDefault();
+      captureTemplateActivation(button)(
+        fabricatedTemplateBubble(button, event),
+      );
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <TemplateGrid onPick={onPick} busy={null} />
+          </StrictMode>,
+        );
+      });
+      const grid = templateGrid(host);
+      button = templateButton(host, template.id);
+      grid.addEventListener("click", attack);
+      await act(async () => {
+        button.click();
+      });
+      expect(onPick).not.toHaveBeenCalled();
+
+      grid.removeEventListener("click", attack);
+      await act(async () => {
+        button.click();
+      });
       expect(onPick).toHaveBeenCalledTimes(1);
       expect(onPick).toHaveBeenLastCalledWith(template);
     } finally {
