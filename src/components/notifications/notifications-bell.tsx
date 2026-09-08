@@ -542,22 +542,6 @@ const NOTIFICATION_UI_GETTERS = captureNotificationGetters(
   NOTIFICATION_UI_EVENT_PROTOTYPE,
   ["detail", "view"] as const,
 );
-const NOTIFICATION_KEYBOARD_EVENT_PROBE = (() => {
-  if (!NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR) return null;
-  try {
-    return notificationReflectConstruct(
-      NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR,
-      ["notification-keyboard-intrinsic"],
-      NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR,
-    ) as KeyboardEvent;
-  } catch {
-    return null;
-  }
-})();
-const NOTIFICATION_EVENT_TRUSTED = captureNotificationUnforgeableGetter(
-  NOTIFICATION_KEYBOARD_EVENT_PROBE,
-  "isTrusted",
-);
 const NOTIFICATION_REALM_DESCRIPTORS = Object.freeze([
   captureNotificationDescriptor(NOTIFICATION_EVENT_CONSTRUCTOR, "prototype"),
   captureNotificationDescriptor(NOTIFICATION_UI_EVENT_CONSTRUCTOR, "prototype"),
@@ -618,8 +602,7 @@ function notificationKeyboardRealmIsCurrent(
     ) &&
     NOTIFICATION_EVENT_GETTERS?.isCurrent() === true &&
     NOTIFICATION_KEYBOARD_GETTERS?.isCurrent() === true &&
-    NOTIFICATION_UI_GETTERS?.isCurrent() === true &&
-    NOTIFICATION_EVENT_TRUSTED?.isCurrent() === true
+    NOTIFICATION_UI_GETTERS?.isCurrent() === true
   );
 }
 
@@ -627,13 +610,39 @@ function captureNotificationKeyboardAuthority(
   ownerDocument: Document,
   ownerWindow: Window & typeof globalThis,
 ): NotificationKeyboardAuthority | null {
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const construct = ownerWindow.Reflect.construct;
   if (
     !NOTIFICATION_EVENT_GETTERS ||
     !NOTIFICATION_KEYBOARD_GETTERS ||
     !NOTIFICATION_UI_GETTERS ||
-    !NOTIFICATION_EVENT_TRUSTED ||
+    KeyboardEventConstructor !== NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR ||
+    construct !== notificationReflectConstruct ||
     !notificationKeyboardRealmIsCurrent(ownerWindow)
   ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = notificationReflectApply(construct, ownerWindow.Reflect, [
+      KeyboardEventConstructor,
+      ["notification-keyboard-intrinsic"],
+      KeyboardEventConstructor,
+    ]) as KeyboardEvent;
+  } catch {
+    return null;
+  }
+  const trusted = captureNotificationUnforgeableGetter(probe, "isTrusted");
+  if (
+    !trusted ||
+    notificationPrototypeOf(probe) !== NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ||
+    !notificationKeyboardRealmIsCurrent(ownerWindow)
+  ) {
+    return null;
+  }
+  try {
+    if (trusted.read(probe) !== false) return null;
+  } catch {
     return null;
   }
   const document = captureNotificationGetters(ownerWindow.Document.prototype, [
@@ -672,7 +681,10 @@ function captureNotificationKeyboardAuthority(
   const checkHistory = () => {
     if (!historyIsClean) return false;
     historyIsClean =
-      notificationKeyboardRealmIsCurrent(ownerWindow) && document.isCurrent();
+      notificationKeyboardRealmIsCurrent(ownerWindow) &&
+      document.isCurrent() &&
+      notificationPrototypeOf(probe) === NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE &&
+      trusted.isCurrent();
     return historyIsClean;
   };
   return Object.freeze({
@@ -692,7 +704,7 @@ function captureNotificationKeyboardAuthority(
     focus,
     addEventListener,
     removeEventListener,
-    trusted: NOTIFICATION_EVENT_TRUSTED,
+    trusted,
     historyIsClean: checkHistory,
   });
 }

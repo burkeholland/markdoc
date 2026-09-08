@@ -1429,6 +1429,117 @@ describe("notification row keyboard browsing", () => {
     ).toBeUndefined();
   });
 
+  it("constructs a fresh probe for each authority and never carries stale probe trust forward", async () => {
+    const NativeKeyboardEvent = window.KeyboardEvent;
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(
+      NativeKeyboardEvent.prototype,
+      "constructor",
+    );
+    if (!constructorDescriptor || !("value" in constructorDescriptor)) {
+      throw new Error("KeyboardEvent prototype constructor is unavailable");
+    }
+    const probes: KeyboardEvent[] = [];
+    let rejectProbeConstruction = false;
+    const ObservedKeyboardEvent = new Proxy(NativeKeyboardEvent, {
+      construct(target, args, newTarget) {
+        const isAuthorityProbe =
+          args[0] === "notification-keyboard-intrinsic";
+        if (isAuthorityProbe && rejectProbeConstruction) {
+          throw new Error("Authority probe construction rejected");
+        }
+        const event = Reflect.construct(target, args, newTarget) as KeyboardEvent;
+        if (isAuthorityProbe) probes.push(event);
+        return event;
+      },
+    });
+    let view: ReturnType<typeof render> | null = null;
+    Object.defineProperty(NativeKeyboardEvent.prototype, "constructor", {
+      ...constructorDescriptor,
+      value: ObservedKeyboardEvent,
+    });
+    window.KeyboardEvent = ObservedKeyboardEvent;
+    try {
+      vi.resetModules();
+      const { NotificationsBell: IsolatedNotificationsBell } = await import(
+        "./notifications-bell"
+      );
+      expect(probes).toHaveLength(0);
+      const onOpen = vi.fn();
+      store.useNotifications.mockReturnValue(state);
+      view = render(
+        <TooltipProvider>
+          <IsolatedNotificationsBell onOpen={onOpen} />
+        </TooltipProvider>,
+      );
+      expect(probes.length).toBeGreaterThan(0);
+      const staleProbe = probes[0]!;
+      const closedProbeCount = probes.length;
+      markJsdomEventTrusted(staleProbe);
+
+      fireEvent.click(screen.getByTestId("notifications-bell"));
+
+      expect(screen.getByTestId("notifications-popover")).toBeVisible();
+      expect(probes.length).toBeGreaterThan(closedProbeCount);
+      expect(new Set(probes).size).toBe(probes.length);
+      expect(probes.slice(closedProbeCount)).not.toContain(staleProbe);
+      const rows = screen.getAllByTestId("notification-item");
+      const source = rows[0]!;
+      source.focus();
+      const synthetic = new ObservedKeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+
+      fireEvent(source, synthetic);
+
+      expect(synthetic.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expectNoKeyboardActions(onOpen);
+
+      const trusted = new ObservedKeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markJsdomEventTrusted(trusted);
+      fireEvent(source, trusted);
+      expect(trusted.defaultPrevented).toBe(true);
+      expect(rows[1]).toHaveFocus();
+      expectNoKeyboardActions(onOpen);
+
+      fireEvent.click(screen.getByTestId("notifications-bell"));
+      rejectProbeConstruction = true;
+      const probeCountBeforeFailure = probes.length;
+      fireEvent.click(screen.getByTestId("notifications-bell"));
+      expect(screen.getByTestId("notifications-popover")).toBeVisible();
+      expect(probes).toHaveLength(probeCountBeforeFailure);
+      const currentRow = screen.getAllByTestId("notification-item")[0]!;
+      currentRow.focus();
+      const rejected = new ObservedKeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markJsdomEventTrusted(rejected);
+      fireEvent(currentRow, rejected);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(currentRow).toHaveFocus();
+      currentRow.click();
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    } finally {
+      view?.unmount();
+      window.KeyboardEvent = NativeKeyboardEvent;
+      Object.defineProperty(
+        NativeKeyboardEvent.prototype,
+        "constructor",
+        constructorDescriptor,
+      );
+      vi.resetModules();
+    }
+  });
+
   it.each([
     [
       "KeyboardEvent constructor",
