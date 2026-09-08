@@ -1334,6 +1334,87 @@ describe("Copilot permission exact copy control", () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it.each(["mutation and restoration", "immediate parent restoration", "higher wrapper restoration"] as const)(
+    "permanently retires direct-root Strict Mode publication history after %s",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const strictHint = (key: string) => (
+        <StrictMode>
+          <div key={key} data-testid="permission-ancestor-outer">
+            <span data-testid="permission-distant-sibling">unrelated</span>
+            <span>adjacent</span>
+            <div data-testid="permission-higher-wrapper">
+              <section data-testid="permission-immediate-parent">
+                <CopilotPermissionsHint testIdPrefix="placement-hint" scope="comment" />
+              </section>
+            </div>
+          </div>
+        </StrictMode>
+      );
+      const view = renderDirect(strictHint("stale"));
+      const stale = capturePermissionHint("placement-hint");
+
+      if (scenario === "mutation and restoration") {
+        stale.pre.setAttribute("data-transient", "changed");
+        stale.pre.removeAttribute("data-transient");
+      } else {
+        const detached = within(view.host).getByTestId(
+          scenario === "immediate parent restoration"
+            ? "permission-immediate-parent"
+            : "permission-higher-wrapper",
+        );
+        const parent = detached.parentNode;
+        const nextSibling = detached.nextSibling;
+        if (!parent) throw new Error(`The ${scenario} target is not connected`);
+        parent.removeChild(detached);
+        parent.insertBefore(detached, nextSibling);
+      }
+
+      const firstStaleEvent = permissionEvent(stale.button);
+      const secondStaleEvent = permissionEvent(stale.button);
+      act(() => {
+        stale.click(firstStaleEvent);
+        stale.click(secondStaleEvent);
+        vi.advanceTimersByTime(5000);
+      });
+
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(stale.button).toHaveTextContent("Copy");
+      expect(vi.getTimerCount()).toBe(0);
+      expectEventUntouched(firstStaleEvent);
+      expectEventUntouched(secondStaleEvent);
+
+      act(() => view.root.render(strictHint("fresh")));
+      const current = capturePermissionHint("placement-hint");
+      expect(current.root).not.toBe(stale.root);
+      const outer = within(view.host).getByTestId("permission-ancestor-outer");
+      const distant = within(view.host).getByTestId("permission-distant-sibling");
+      outer.removeChild(distant);
+      outer.insertBefore(distant, outer.firstChild);
+
+      const currentEvent = permissionEvent(current.button);
+      await act(async () => {
+        current.click(currentEvent);
+        await Promise.resolve();
+      });
+
+      expect(copyText).toHaveBeenCalledExactlyOnceWith(copilotAllowToolLine(undefined, "comment"));
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(current.button).toHaveTextContent("Copied");
+      expect(vi.getTimerCount()).toBe(1);
+      expectEventUntouched(currentEvent);
+
+      act(() => {
+        stale.click(permissionEvent(stale.button));
+        vi.advanceTimersByTime(1500);
+      });
+      expect(copyText).toHaveBeenCalledOnce();
+      expect(current.button).toHaveTextContent("Copy");
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
   it("preserves the rendered hint and claims an exact event only once", async () => {
     const settlement = deferred<boolean>();
     copyText.mockReturnValue(settlement.promise);
