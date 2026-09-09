@@ -2911,8 +2911,7 @@ describe("ShareDialog agent disclosure directional keys", () => {
       );
       await screen.findByText("@bob");
       const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
-      const outside = document.createElement("button");
-      document.body.append(outside);
+      const done = screen.getByRole("button", { name: "Done" });
       toggle.focus();
       preventDefault.mockClear();
 
@@ -2941,13 +2940,14 @@ describe("ShareDialog agent disclosure directional keys", () => {
         expect(event.defaultPrevented).toBe(event === previouslyPrevented);
         expect(toggle).toHaveAttribute("aria-expanded", "false");
       }
-      outside.focus();
+      done.focus();
+      expect(done).toHaveFocus();
       const unfocused = dispatchAgentKey(toggle, "ArrowRight");
       expect(unfocused.defaultPrevented).toBe(false);
 
       expect(preventionCallCount(preventDefault, ...rejected, unfocused)).toBe(0);
       expect(toggle).toHaveAttribute("aria-expanded", "false");
-      expect(outside).toHaveFocus();
+      expect(done).toHaveFocus();
       expect(tokensCreate).not.toHaveBeenCalled();
       expect(copyText).not.toHaveBeenCalled();
 
@@ -2958,7 +2958,6 @@ describe("ShareDialog agent disclosure directional keys", () => {
       await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
       expect(preventionCallCount(preventDefault, recovered)).toBe(1);
       expect(toggle).toHaveFocus();
-      outside.remove();
     } finally {
       preventDefault.mockRestore();
     }
