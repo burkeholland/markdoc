@@ -2356,6 +2356,7 @@ interface SearchError {
 type SearchControlActionKind =
   | "change"
   | "escape"
+  | "focus-result"
   | "inline-clear"
   | "empty-clear"
   | "retry";
@@ -2375,7 +2376,9 @@ type SearchControlElementRole =
   | "empty-icon"
   | "empty-primary"
   | "empty-secondary"
-  | "empty-clear";
+  | "empty-clear"
+  | "result-root"
+  | "result-link";
 
 interface SearchControlRenderPublication {
   readonly identity: symbol;
@@ -2393,6 +2396,7 @@ interface SearchControlRenderPublication {
   readonly pending: boolean;
   readonly filter: Filter;
   readonly filtered: readonly (Doc & { snippet?: string | null })[];
+  readonly resultOrder: readonly (Doc & { snippet?: string | null })[];
   readonly setQuery: Dispatch<SetStateAction<string>>;
   readonly retry: () => void;
 }
@@ -2421,6 +2425,7 @@ interface SearchControlPublication {
   readonly ownerDocument: Document;
   readonly searchRoot: HTMLDivElement;
   readonly input: HTMLInputElement;
+  readonly resultLinks: readonly HTMLAnchorElement[];
   readonly controls: ReadonlyMap<
     SearchControlActionKind,
     SearchPublishedControl
@@ -2441,8 +2446,8 @@ interface SearchPublishedControl {
 }
 
 interface SearchControlRootPublication {
-  readonly role: "search-root" | "error-root" | "empty-root";
-  readonly element: HTMLDivElement;
+  readonly role: "search-root" | "error-root" | "empty-root" | "result-root";
+  readonly element: HTMLDivElement | HTMLUListElement;
   readonly dom: TemplateGridDomSnapshot;
   readonly placement: TemplateGridPlacement;
 }
@@ -2454,10 +2459,17 @@ interface SearchControlReplay {
   readonly release: () => void;
 }
 
+interface SearchControlDomBarrier {
+  readonly attempted: () => boolean;
+  readonly noteAttempt: () => void;
+  readonly release: () => void;
+}
+
 interface SearchControlPublicationCells {
   active: SearchControlPublication | null;
   successorOf: SearchControlPublication | null;
   replay: SearchControlReplay | null;
+  domBarrier: SearchControlDomBarrier | null;
   delivery: symbol | null;
   readonly claimedPublications: WeakSet<SearchControlPublication>;
   readonly claimedControls: WeakSet<SearchPublishedControl>;
@@ -2491,7 +2503,11 @@ interface SearchNativeEventProof {
   readonly button: number | null;
   readonly buttons: number | null;
   readonly detail: number | null;
+  readonly trusted: boolean | null;
+  readonly view: Window | null;
+  readonly focusDestination: HTMLAnchorElement | null;
   readonly propagationStopped: () => boolean;
+  crossed: boolean;
 }
 
 interface SearchReactEventProof {
@@ -2517,10 +2533,12 @@ interface SearchControlPublicationRuntime {
     element: Element | null,
     previous: Element | null,
   ) => void;
+  readonly canSettleSynchronousRefReplay: () => boolean;
+  readonly settleSynchronousRefReplay: () => boolean;
   readonly isExactReplay: () => boolean;
   readonly replay: () => SearchControlReplay | null;
   readonly captureRoot: (
-    role: "search-root" | "error-root" | "empty-root",
+    role: "search-root" | "error-root" | "empty-root" | "result-root",
     event: ReactSyntheticEvent,
   ) => void;
   readonly captureControl: (
@@ -2580,6 +2598,12 @@ interface SearchControlPublicationSet {
   readonly captureEmptyClear: (
     element: HTMLButtonElement | null,
   ) => void | (() => void);
+  readonly captureResultRoot: (
+    element: HTMLUListElement | null,
+  ) => void | (() => void);
+  readonly captureResultLinks: readonly ((
+    element: HTMLAnchorElement | null,
+  ) => void | (() => void))[];
   readonly captureRootChange: (
     event: ReactChangeEvent<HTMLDivElement>,
   ) => void;
@@ -2658,6 +2682,304 @@ class SearchControlElementOwner<T extends Element>
   };
 }
 
+interface SearchOwnerGetter<T> {
+  readonly read: (receiver: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface SearchOwnerMethod<Args extends unknown[], Result> {
+  readonly call: (receiver: object, args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface SearchResultKeyboardAuthority {
+  readonly trusted: FilterTrustedAuthority;
+  readonly activeElement: FilterActiveElementAuthority;
+  readonly currentTarget: (event: Event) => EventTarget | null;
+  readonly defaultPrevented: (event: Event) => boolean;
+  readonly target: (event: Event) => EventTarget | null;
+  readonly type: (event: Event) => string;
+  readonly phase: (event: Event) => number;
+  readonly bubbles: (event: Event) => boolean;
+  readonly cancelable: (event: Event) => boolean;
+  readonly cancelBubble: (event: Event) => boolean;
+  readonly key: (event: Event) => string;
+  readonly ctrlKey: (event: Event) => boolean;
+  readonly metaKey: (event: Event) => boolean;
+  readonly altKey: (event: Event) => boolean;
+  readonly shiftKey: (event: Event) => boolean;
+  readonly repeat: (event: Event) => boolean;
+  readonly composing: (event: Event) => boolean;
+  readonly view: (event: Event) => Window | null;
+  readonly composedPath: (event: Event) => EventTarget[];
+  readonly preventDefault: (event: Event) => void;
+  readonly stopPropagation: (event: Event) => void;
+  readonly stopImmediatePropagation: (event: Event) => void;
+  readonly focus: (element: HTMLElement, options: FocusOptions) => void;
+  readonly isCurrent: () => boolean;
+}
+
+function captureSearchOwnerGetter<T>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SearchOwnerGetter<T> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  for (
+    let owner: object | null = prototype;
+    owner;
+    owner = getPrototypeOf(owner) as object | null
+  ) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (!descriptor) continue;
+    if (typeof descriptor.get !== "function") return null;
+    const expected = Object.freeze({ ...descriptor });
+    const getter = descriptor.get;
+    return Object.freeze({
+      read: (receiver: object) => apply(getter, receiver, []) as T,
+      isCurrent: () =>
+        view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+        view.Object.getPrototypeOf === getPrototypeOf &&
+        view.Reflect.apply === apply &&
+        filterDescriptorsMatch(
+          getOwnPropertyDescriptor(owner, property),
+          expected,
+        ),
+    });
+  }
+  return null;
+}
+
+function captureSearchOwnerMethod<Args extends unknown[], Result>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SearchOwnerMethod<Args, Result> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  for (
+    let owner: object | null = prototype;
+    owner;
+    owner = getPrototypeOf(owner) as object | null
+  ) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (!descriptor) continue;
+    if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+      return null;
+    }
+    const expected = Object.freeze({ ...descriptor });
+    const method = descriptor.value as (...args: Args) => Result;
+    return Object.freeze({
+      call: (receiver: object, args: Args) => apply(method, receiver, args),
+      isCurrent: () =>
+        view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+        view.Object.getPrototypeOf === getPrototypeOf &&
+        view.Reflect.apply === apply &&
+        filterDescriptorsMatch(
+          getOwnPropertyDescriptor(owner, property),
+          expected,
+        ),
+    });
+  }
+  return null;
+}
+
+function captureSearchResultKeyboardAuthority(
+  view: Window & typeof globalThis,
+): SearchResultKeyboardAuthority | null {
+  const trusted = captureFilterTrustedAuthority(view);
+  const activeElement = captureFilterActiveElementAuthority(view);
+  const currentTarget = captureSearchOwnerGetter<EventTarget | null>(
+    view,
+    view.Event.prototype,
+    "currentTarget",
+  );
+  const defaultPrevented = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "defaultPrevented",
+  );
+  const target = captureSearchOwnerGetter<EventTarget | null>(
+    view,
+    view.Event.prototype,
+    "target",
+  );
+  const type = captureSearchOwnerGetter<string>(
+    view,
+    view.Event.prototype,
+    "type",
+  );
+  const phase = captureSearchOwnerGetter<number>(
+    view,
+    view.Event.prototype,
+    "eventPhase",
+  );
+  const bubbles = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "bubbles",
+  );
+  const cancelable = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "cancelable",
+  );
+  const cancelBubble = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "cancelBubble",
+  );
+  const key = captureSearchOwnerGetter<string>(
+    view,
+    view.KeyboardEvent.prototype,
+    "key",
+  );
+  const ctrlKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "ctrlKey",
+  );
+  const metaKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "metaKey",
+  );
+  const altKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "altKey",
+  );
+  const shiftKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "shiftKey",
+  );
+  const repeat = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "repeat",
+  );
+  const composing = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "isComposing",
+  );
+  const eventView = captureSearchOwnerGetter<Window | null>(
+    view,
+    view.UIEvent.prototype,
+    "view",
+  );
+  const composedPath = captureSearchOwnerMethod<[], EventTarget[]>(
+    view,
+    view.Event.prototype,
+    "composedPath",
+  );
+  const preventDefault = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "preventDefault",
+  );
+  const stopPropagation = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "stopPropagation",
+  );
+  const stopImmediatePropagation = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "stopImmediatePropagation",
+  );
+  const focus = captureSearchOwnerMethod<[FocusOptions?], void>(
+    view,
+    view.HTMLElement.prototype,
+    "focus",
+  );
+  if (
+    !trusted ||
+    !activeElement ||
+    !currentTarget ||
+    !defaultPrevented ||
+    !target ||
+    !type ||
+    !phase ||
+    !bubbles ||
+    !cancelable ||
+    !cancelBubble ||
+    !key ||
+    !ctrlKey ||
+    !metaKey ||
+    !altKey ||
+    !shiftKey ||
+    !repeat ||
+    !composing ||
+    !eventView ||
+    !composedPath ||
+    !preventDefault ||
+    !stopPropagation ||
+    !stopImmediatePropagation ||
+    !focus
+  ) {
+    return null;
+  }
+  const authorities = [
+    currentTarget,
+    defaultPrevented,
+    target,
+    type,
+    phase,
+    bubbles,
+    cancelable,
+    cancelBubble,
+    key,
+    ctrlKey,
+    metaKey,
+    altKey,
+    shiftKey,
+    repeat,
+    composing,
+    eventView,
+    composedPath,
+    preventDefault,
+    stopPropagation,
+    stopImmediatePropagation,
+    focus,
+  ];
+  return Object.freeze({
+    trusted,
+    activeElement,
+    currentTarget: (event: Event) => currentTarget.read(event),
+    defaultPrevented: (event: Event) => defaultPrevented.read(event),
+    target: (event: Event) => target.read(event),
+    type: (event: Event) => type.read(event),
+    phase: (event: Event) => phase.read(event),
+    bubbles: (event: Event) => bubbles.read(event),
+    cancelable: (event: Event) => cancelable.read(event),
+    cancelBubble: (event: Event) => cancelBubble.read(event),
+    key: (event: Event) => key.read(event),
+    ctrlKey: (event: Event) => ctrlKey.read(event),
+    metaKey: (event: Event) => metaKey.read(event),
+    altKey: (event: Event) => altKey.read(event),
+    shiftKey: (event: Event) => shiftKey.read(event),
+    repeat: (event: Event) => repeat.read(event),
+    composing: (event: Event) => composing.read(event),
+    view: (event: Event) => eventView.read(event),
+    composedPath: (event: Event) => composedPath.call(event, []),
+    preventDefault: (event: Event) => preventDefault.call(event, []),
+    stopPropagation: (event: Event) => stopPropagation.call(event, []),
+    stopImmediatePropagation: (event: Event) =>
+      stopImmediatePropagation.call(event, []),
+    focus: (element: HTMLElement, options: FocusOptions) =>
+      focus.call(element, [options]),
+    isCurrent: () =>
+      trusted.isCurrent() &&
+      activeElement.isCurrent() &&
+      authorities.every((authority) => authority.isCurrent()),
+  });
+}
+
 const SEARCH_CONTROL_MISSING = Symbol("search-control-missing");
 
 function searchControlOwnValue(
@@ -2715,7 +3037,12 @@ function searchControlRenderIsExact(render: SearchControlRenderPublication) {
     render.searching === (render.request !== null) &&
     (render.error === null ||
       (render.error.authority === render.authority &&
-        render.error.query === render.trimmed))
+        render.error.query === render.trimmed)) &&
+    Object.isFrozen(render.resultOrder) &&
+    render.resultOrder.length === render.filtered.length &&
+    render.resultOrder.every(
+      (document, index) => document === render.filtered[index],
+    )
   );
 }
 
@@ -2738,6 +3065,7 @@ function searchControlRendersMatch(
     previous.pending === current.pending &&
     previous.filter === current.filter &&
     previous.filtered === current.filtered &&
+    previous.resultOrder === current.resultOrder &&
     previous.setQuery === current.setQuery &&
     previous.retry === current.retry &&
     searchControlRenderIsExact(previous) &&
@@ -2779,6 +3107,20 @@ interface SearchControlOwners {
   readonly emptyPrimary: SearchControlElementOwner<HTMLParagraphElement>;
   readonly emptySecondary: SearchControlElementOwner<HTMLParagraphElement>;
   readonly emptyClear: SearchControlElementOwner<HTMLButtonElement>;
+  readonly resultRoot: SearchControlElementOwner<HTMLUListElement>;
+  readonly resultLinks: readonly {
+    readonly index: number;
+    readonly document: Doc & { snippet?: string | null };
+    readonly owner: SearchControlElementOwner<HTMLAnchorElement>;
+  }[];
+}
+
+function searchControlHasResults(render: SearchControlRenderPublication) {
+  return (
+    render.filter !== "trash" &&
+    render.trimmed.length > 0 &&
+    render.resultOrder.length > 0
+  );
 }
 
 function searchControlHasEmptyState(render: SearchControlRenderPublication) {
@@ -2813,6 +3155,12 @@ function searchControlExpectedOwners(
           owners.emptyPrimary,
           owners.emptySecondary,
           ...(searchControlHasEmptyClear(render) ? [owners.emptyClear] : []),
+        ]
+      : []),
+    ...(searchControlHasResults(render)
+      ? [
+          owners.resultRoot,
+          ...owners.resultLinks.map(({ owner }) => owner),
         ]
       : []),
   ]);
@@ -2883,6 +3231,8 @@ function searchControlElementsAreExact(
   const emptyPrimary = owners.emptyPrimary.element();
   const emptySecondary = owners.emptySecondary.element();
   const emptyClear = owners.emptyClear.element();
+  const resultRoot = owners.resultRoot.element();
+  const resultLinks = owners.resultLinks.map(({ owner }) => owner.element());
   const ownerDocument = searchRoot?.ownerDocument;
   const ownerWindow = ownerDocument?.defaultView;
   if (
@@ -3081,6 +3431,48 @@ function searchControlElementsAreExact(
     return false;
   }
 
+  if (searchControlHasResults(render)) {
+    if (
+      !(resultRoot instanceof ownerWindow.HTMLUListElement) ||
+      !resultRoot.isConnected ||
+      resultRoot.ownerDocument !== ownerDocument ||
+      resultRoot.className !== "grid gap-3 sm:grid-cols-2 lg:grid-cols-3" ||
+      resultRoot.dataset.testid !== "document-list" ||
+      resultRoot.children.length !== render.resultOrder.length ||
+      owners.resultLinks.length !== render.resultOrder.length
+    ) {
+      return false;
+    }
+    for (const entry of owners.resultLinks) {
+      const item: Element | null = resultRoot.children.item(entry.index);
+      const link = entry.owner.element();
+      if (
+        entry.document !== render.resultOrder[entry.index] ||
+        !(item instanceof ownerWindow.HTMLLIElement) ||
+        !(link instanceof ownerWindow.HTMLAnchorElement) ||
+        item.parentElement !== resultRoot ||
+        item.className !== "group relative min-w-0" ||
+        item.dataset.testid !== "search-result" ||
+        item.children.item(0) !== link ||
+        link.parentElement !== item ||
+        link.ownerDocument !== ownerDocument ||
+        link.getAttribute("href") !== `/d/${entry.document.id}` ||
+        link.className !==
+          "flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md" ||
+        link.dataset.testid !== "document-card" ||
+        !searchControlAncestorsAreEnabled(link, resultRoot)
+      ) {
+        return false;
+      }
+    }
+  } else if (
+    resultRoot !== null ||
+    owners.resultLinks.length !== 0 ||
+    resultLinks.some((link) => link !== null)
+  ) {
+    return false;
+  }
+
   const expectedOwners = searchControlExpectedOwners(render, owners);
   const elements = expectedOwners.map((owner) => owner.element());
   return (
@@ -3267,6 +3659,54 @@ function searchControlNativeSupportIsAvailable() {
   );
 }
 
+function armSearchControlDomBarrier(
+  cells: SearchControlPublicationCells,
+  ownerDocument: Document,
+  roots: readonly SearchControlRootPublication[],
+) {
+  cells.domBarrier?.release();
+  let attempted = false;
+  let released = false;
+  const listener = (event: Event) => {
+    if (
+      released ||
+      !TRUSTED_EVENT_TARGET ||
+      !TRUSTED_EVENT_TYPE ||
+      !["input", "change", "keydown", "click"].includes(
+        TRUSTED_EVENT_TYPE(event),
+      )
+    ) {
+      return;
+    }
+    const target = TRUSTED_EVENT_TARGET(event);
+    if (
+      target instanceof Node &&
+      roots.some(({ element }) => element.contains(target))
+    ) {
+      attempted = true;
+    }
+  };
+  for (const type of ["input", "change", "keydown", "click"]) {
+    TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, listener, true);
+  }
+  const barrier: SearchControlDomBarrier = Object.freeze({
+    attempted: () => attempted,
+    noteAttempt: () => {
+      attempted = true;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      for (const type of ["input", "change", "keydown", "click"]) {
+        TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, listener, true);
+      }
+    },
+  });
+  cells.domBarrier = barrier;
+  cells.replay?.release();
+  cells.replay = null;
+}
+
 function createSearchControlPublication(
   render: SearchControlRenderPublication,
   cells: SearchControlPublicationCells,
@@ -3275,6 +3715,7 @@ function createSearchControlPublication(
   let currentRuntime: SearchControlPublicationRuntime | null = null;
   let lastRuntime: SearchControlPublicationRuntime | null = null;
   let successorRequested = false;
+  let synchronousRefCheckRuntime: SearchControlPublicationRuntime | null = null;
 
   const onElementChange = (
     owner: SearchControlElementOwnerView,
@@ -3288,8 +3729,36 @@ function createSearchControlPublication(
       element === null ||
       (element !== null && last !== null && element !== last)
     ) {
-      currentRuntime?.retireForElement();
-      currentRuntime = null;
+      const retiringRuntime = currentRuntime;
+      if (
+        element === null &&
+        retiringRuntime?.canSettleSynchronousRefReplay()
+      ) {
+        if (!synchronousRefCheckRuntime) {
+          synchronousRefCheckRuntime = retiringRuntime;
+          queueMicrotask(() => {
+            if (synchronousRefCheckRuntime !== retiringRuntime) return;
+            synchronousRefCheckRuntime = null;
+            if (
+              currentRuntime === retiringRuntime &&
+              retiringRuntime.settleSynchronousRefReplay()
+            ) {
+              return;
+            }
+            retiringRuntime.retireForElement();
+            if (currentRuntime === retiringRuntime) currentRuntime = null;
+          });
+        }
+      } else {
+        retiringRuntime?.retireForElement();
+        if (currentRuntime === retiringRuntime) currentRuntime = null;
+      }
+    }
+    if (
+      element !== null &&
+      currentRuntime?.settleSynchronousRefReplay()
+    ) {
+      synchronousRefCheckRuntime = null;
     }
     if (
       !successorRequested &&
@@ -3370,6 +3839,20 @@ function createSearchControlPublication(
       "empty-clear",
       onElementChange,
     ),
+    resultRoot: new SearchControlElementOwner<HTMLUListElement>(
+      "result-root",
+      onElementChange,
+    ),
+    resultLinks: searchControlHasResults(render)
+      ? render.resultOrder.map((document, index) => ({
+          index,
+          document,
+          owner: new SearchControlElementOwner<HTMLAnchorElement>(
+            "result-link",
+            onElementChange,
+          ),
+        }))
+      : [],
   };
 
   const createRuntime = (): SearchControlPublicationRuntime | null => {
@@ -3423,6 +3906,10 @@ function createSearchControlPublication(
           "stopImmediatePropagation",
         )
       : null;
+    const resultKeyboardAuthority =
+      ownerWindow && searchControlHasResults(render)
+        ? captureSearchResultKeyboardAuthority(ownerWindow)
+        : null;
     if (
       !ownerWindow ||
       !addOwnerWindowListener ||
@@ -3430,14 +3917,24 @@ function createSearchControlPublication(
       !preventOwnerDefault ||
       !stopOwnerPropagation ||
       !stopOwnerImmediatePropagation ||
+      (searchControlHasResults(render) && !resultKeyboardAuthority) ||
       !(searchRoot instanceof ownerWindow.HTMLDivElement) ||
       !(input instanceof ownerWindow.HTMLInputElement)
     ) {
       return null;
     }
+    let resultKeyboardAuthorityHistoryIsClean = true;
+    const resultKeyboardAuthorityIsCurrent = () => {
+      if (!resultKeyboardAuthority) return false;
+      resultKeyboardAuthorityHistoryIsClean =
+        resultKeyboardAuthorityHistoryIsClean &&
+        ownerDocument.defaultView === ownerWindow &&
+        resultKeyboardAuthority.isCurrent();
+      return resultKeyboardAuthorityHistoryIsClean;
+    };
     const rootEntries: [
       SearchControlRootPublication["role"],
-      HTMLDivElement | null,
+      HTMLDivElement | HTMLUListElement | null,
     ][] = [
       ["search-root", searchRoot],
       [
@@ -3450,6 +3947,12 @@ function createSearchControlPublication(
         "empty-root",
         searchControlHasEmptyState(render)
           ? (owners.emptyRoot.element() as HTMLDivElement | null)
+          : null,
+      ],
+      [
+        "result-root",
+        searchControlHasResults(render)
+          ? owners.resultRoot.element()
           : null,
       ],
     ];
@@ -3471,6 +3974,21 @@ function createSearchControlPublication(
     if (!searchControlRootsMatch(ownerDocument, publishedRoots)) return null;
 
     const identity = Symbol("dashboard-search-controls-publication");
+    const resultLinks = owners.resultLinks.map(({ owner }) => owner.element());
+    if (
+      searchControlHasResults(render) &&
+      resultLinks.some(
+        (link) => !(link instanceof ownerWindow.HTMLAnchorElement),
+      )
+    ) {
+      return null;
+    }
+    const publishedResultLinks = Object.freeze(
+      resultLinks.filter(
+        (link): link is HTMLAnchorElement =>
+          link instanceof ownerWindow.HTMLAnchorElement,
+      ),
+    );
     const controls = new Map<SearchControlActionKind, SearchPublishedControl>();
     const addControl = (
       kind: SearchControlActionKind,
@@ -3507,6 +4025,24 @@ function createSearchControlPublication(
     ) {
       return null;
     }
+    if (
+      searchControlHasResults(render) &&
+      !addControl("focus-result", input, searchRoot)
+    ) {
+      return null;
+    }
+    const focusWindowTarget = searchControlHasResults(render)
+      ? (controls.get("focus-result")?.paths.get(input)?.at(-1) ?? null)
+      : null;
+    if (searchControlHasResults(render) && !focusWindowTarget) {
+      return null;
+    }
+    const addFocusWindowEventListener = focusWindowTarget
+      ? focusWindowTarget.addEventListener.bind(focusWindowTarget)
+      : null;
+    const removeFocusWindowEventListener = focusWindowTarget
+      ? focusWindowTarget.removeEventListener.bind(focusWindowTarget)
+      : null;
     const inlineClear = owners.inlineClear.element();
     if (
       render.query &&
@@ -3538,8 +4074,9 @@ function createSearchControlPublication(
 
     let retired = false;
     let retirement: Retirement | null = null;
-    let layoutRetired = false;
     let established = false;
+    let partialReplayWindowOpen = false;
+    let synchronousRefReplayPending = false;
     let refs: SearchControlRefReplay[] = [];
     let guard: SearchControlDomGuard | null = null;
     let nativeProof: SearchNativeEventProof | null = null;
@@ -3553,12 +4090,14 @@ function createSearchControlPublication(
       target: EventTarget;
       type: string;
     }> | null = null;
+    let focusWindowListenerAttached = false;
     const publication: SearchControlPublication = Object.freeze({
       identity,
       render,
       ownerDocument,
       searchRoot,
       input,
+      resultLinks: publishedResultLinks,
       controls,
       roots: publishedRoots,
       retire: () => retire("other"),
@@ -3590,7 +4129,6 @@ function createSearchControlPublication(
       guard = null;
     };
     const retire = (reason: Retirement) => {
-      if (reason === "layout") layoutRetired = true;
       if (retired) return false;
       retired = true;
       retirement = reason;
@@ -3640,7 +4178,22 @@ function createSearchControlPublication(
         return controls.get("change") ?? null;
       }
       if (type === "keydown" && target === input) {
-        return controls.get("escape") ?? null;
+        if (
+          resultKeyboardAuthority &&
+          resultKeyboardAuthorityIsCurrent() &&
+          TRUSTED_IS_PROTOTYPE_OF(
+            ownerWindow.KeyboardEvent.prototype,
+            event,
+          )
+        ) {
+          const key = resultKeyboardAuthority.key(event);
+          if (key === "ArrowDown" || key === "ArrowUp") {
+            return controls.get("focus-result") ?? null;
+          }
+        }
+        return TRUSTED_KEYBOARD_KEY?.(event) === "Escape"
+          ? (controls.get("escape") ?? null)
+          : null;
       }
       if (type !== "click") return null;
       for (const kind of [
@@ -3658,6 +4211,7 @@ function createSearchControlPublication(
       origin: SearchNativeEventProof["origin"],
       control: SearchPublishedControl,
     ): SearchNativeEventProof | null => {
+      const isResultFocus = control.action.kind === "focus-result";
       if (
         !TRUSTED_EVENT_CURRENT_TARGET ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
@@ -3669,23 +4223,57 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
         !TRUSTED_INPUT_VALUE ||
         !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.Event.prototype, event) ||
+        (isResultFocus && !resultKeyboardAuthorityIsCurrent()) ||
         !publicationOwnsCurrentDom(control.action.kind === "change")
       ) {
         return null;
       }
-      const type = TRUSTED_EVENT_TYPE(event);
-      const target = TRUSTED_EVENT_TARGET(event);
+      const type =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.type(event)
+          : TRUSTED_EVENT_TYPE(event);
+      const target =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.target(event)
+          : TRUSTED_EVENT_TARGET(event);
       if (!(target instanceof ownerWindow.Node)) return null;
       const expectedPath = control.paths.get(target);
-      const path = TRUSTED_EVENT_COMPOSED_PATH(event);
+      const path =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.composedPath(event)
+          : TRUSTED_EVENT_COMPOSED_PATH(event);
+      const currentTarget =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(event)
+          : TRUSTED_EVENT_CURRENT_TARGET(event);
+      const phase =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(event)
+          : TRUSTED_EVENT_PHASE(event);
+      const bubbles =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.bubbles(event)
+          : TRUSTED_EVENT_BUBBLES(event);
+      const cancelable =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.cancelable(event)
+          : TRUSTED_EVENT_CANCELABLE(event);
+      const defaultPrevented =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.defaultPrevented(event)
+          : TRUSTED_EVENT_DEFAULT_PREVENTED(event);
+      const cancelBubble =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.cancelBubble(event)
+          : TRUSTED_EVENT_CANCEL_BUBBLE(event);
       if (
         !expectedPath ||
         !searchControlPathMatches(expectedPath, path, ownerDocument) ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.CAPTURING_PHASE ||
-        !TRUSTED_EVENT_BUBBLES(event) ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        currentTarget !== ownerDocument ||
+        phase !== ownerWindow.Event.CAPTURING_PHASE ||
+        !bubbles ||
+        defaultPrevented ||
+        cancelBubble ||
         control.publicationIdentity !== identity ||
         control.action.publicationIdentity !== identity ||
         control.action.controlIdentity !== control.identity ||
@@ -3705,6 +4293,9 @@ function createSearchControlPublication(
       let button: number | null = null;
       let buttons: number | null = null;
       let detail: number | null = null;
+      let trusted: boolean | null = null;
+      let view: Window | null = null;
+      let focusDestination: HTMLAnchorElement | null = null;
       if (control.action.kind === "change") {
         if (type !== "input" && type !== "change") return null;
         value = TRUSTED_INPUT_VALUE(input);
@@ -3716,30 +4307,77 @@ function createSearchControlPublication(
         ) {
           composing = TRUSTED_INPUT_COMPOSING(event);
         }
-      } else if (control.action.kind === "escape") {
+      } else if (
+        control.action.kind === "escape" ||
+        control.action.kind === "focus-result"
+      ) {
         if (
           type !== "keydown" ||
-          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.KeyboardEvent.prototype, event) ||
-          !TRUSTED_KEYBOARD_KEY ||
-          !TRUSTED_KEYBOARD_CTRL ||
-          !TRUSTED_KEYBOARD_META ||
-          !TRUSTED_KEYBOARD_ALT ||
-          !TRUSTED_KEYBOARD_SHIFT ||
-          !TRUSTED_KEYBOARD_REPEAT ||
-          !TRUSTED_KEYBOARD_COMPOSING ||
-          !TRUSTED_UI_DETAIL
+          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.KeyboardEvent.prototype, event)
         ) {
           return null;
         }
-        key = TRUSTED_KEYBOARD_KEY(event);
-        ctrlKey = TRUSTED_KEYBOARD_CTRL(event);
-        metaKey = TRUSTED_KEYBOARD_META(event);
-        altKey = TRUSTED_KEYBOARD_ALT(event);
-        shiftKey = TRUSTED_KEYBOARD_SHIFT(event);
-        repeat = TRUSTED_KEYBOARD_REPEAT(event);
-        composing = TRUSTED_KEYBOARD_COMPOSING(event);
-        detail = TRUSTED_UI_DETAIL(event);
-        if (key !== "Escape" || repeat || composing) return null;
+        if (control.action.kind === "escape") {
+          if (
+            !TRUSTED_KEYBOARD_KEY ||
+            !TRUSTED_KEYBOARD_CTRL ||
+            !TRUSTED_KEYBOARD_META ||
+            !TRUSTED_KEYBOARD_ALT ||
+            !TRUSTED_KEYBOARD_SHIFT ||
+            !TRUSTED_KEYBOARD_REPEAT ||
+            !TRUSTED_KEYBOARD_COMPOSING ||
+            !TRUSTED_UI_DETAIL
+          ) {
+            return null;
+          }
+          key = TRUSTED_KEYBOARD_KEY(event);
+          ctrlKey = TRUSTED_KEYBOARD_CTRL(event);
+          metaKey = TRUSTED_KEYBOARD_META(event);
+          altKey = TRUSTED_KEYBOARD_ALT(event);
+          shiftKey = TRUSTED_KEYBOARD_SHIFT(event);
+          repeat = TRUSTED_KEYBOARD_REPEAT(event);
+          composing = TRUSTED_KEYBOARD_COMPOSING(event);
+          detail = TRUSTED_UI_DETAIL(event);
+          if (key !== "Escape" || repeat || composing) return null;
+        } else {
+          if (
+            !resultKeyboardAuthority ||
+            !resultKeyboardAuthorityIsCurrent() ||
+            !resultKeyboardAuthority.trusted.matches(event) ||
+            resultKeyboardAuthority.trusted.read(event) !== true ||
+            !cancelable ||
+            resultKeyboardAuthority.activeElement.read(ownerDocument) !== input
+          ) {
+            return null;
+          }
+          key = resultKeyboardAuthority.key(event);
+          ctrlKey = resultKeyboardAuthority.ctrlKey(event);
+          metaKey = resultKeyboardAuthority.metaKey(event);
+          altKey = resultKeyboardAuthority.altKey(event);
+          shiftKey = resultKeyboardAuthority.shiftKey(event);
+          repeat = resultKeyboardAuthority.repeat(event);
+          composing = resultKeyboardAuthority.composing(event);
+          trusted = true;
+          view = resultKeyboardAuthority.view(event);
+          focusDestination =
+            key === "ArrowDown"
+              ? (publication.resultLinks[0] ?? null)
+              : key === "ArrowUp"
+                ? (publication.resultLinks.at(-1) ?? null)
+                : null;
+          if (
+            !focusDestination ||
+            ctrlKey ||
+            metaKey ||
+            altKey ||
+            shiftKey ||
+            repeat ||
+            composing ||
+            view !== ownerWindow
+          ) {
+            return null;
+          }
+        }
       } else {
         if (
           type !== "click" ||
@@ -3770,11 +4408,19 @@ function createSearchControlPublication(
       let propagationStopped = false;
       const stopPropagation = () => {
         propagationStopped = true;
-        stopOwnerPropagation(event);
+        if (isResultFocus && resultKeyboardAuthority) {
+          resultKeyboardAuthority.stopPropagation(event);
+        } else {
+          stopOwnerPropagation(event);
+        }
       };
       const stopImmediatePropagation = () => {
         propagationStopped = true;
-        stopOwnerImmediatePropagation(event);
+        if (isResultFocus && resultKeyboardAuthority) {
+          resultKeyboardAuthority.stopImmediatePropagation(event);
+        } else {
+          stopOwnerImmediatePropagation(event);
+        }
       };
       if (
         !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
@@ -3792,7 +4438,7 @@ function createSearchControlPublication(
       ) {
         return null;
       }
-      return Object.freeze({
+      return {
         identity: Symbol("dashboard-search-native-event"),
         origin,
         event,
@@ -3802,8 +4448,8 @@ function createSearchControlPublication(
         target,
         path: Object.freeze([...path]),
         type,
-        bubbles: true,
-        cancelable: TRUSTED_EVENT_CANCELABLE(event),
+        bubbles,
+        cancelable,
         value,
         composing,
         key,
@@ -3815,8 +4461,12 @@ function createSearchControlPublication(
         button,
         buttons,
         detail,
+        trusted,
+        view,
+        focusDestination,
         propagationStopped: () => propagationStopped,
-      });
+        crossed: false,
+      };
     };
 
     const blockCrossedEvent = (event: Event) => {
@@ -3829,21 +4479,36 @@ function createSearchControlPublication(
     ) => {
       if (nativeProof) {
         if (nativeProof.event === event) return nativeProof;
-        if (controlForNative(event)) {
+        const crossedControl = controlForNative(event);
+        if (crossedControl) {
+          if (
+            nativeProof.action.kind === "focus-result" ||
+            crossedControl.action.kind === "focus-result"
+          ) {
+            nativeProof.crossed = true;
+          }
           cells.attemptedNativeEvents.add(event);
-          blockCrossedEvent(event);
+          if (
+            nativeProof.action.kind !== "focus-result" &&
+            crossedControl.action.kind !== "focus-result"
+          ) {
+            blockCrossedEvent(event);
+          }
         }
         return null;
       }
       const control = controlForNative(event);
       if (!control) return null;
       if (cells.attemptedNativeEvents.has(event)) {
-        blockCrossedEvent(event);
+        if (control.action.kind !== "focus-result") blockCrossedEvent(event);
         return null;
       }
       cells.attemptedNativeEvents.add(event);
       const proof = exactNativeEvent(event, origin, control);
-      if (!proof) return null;
+      if (!proof) {
+        cells.domBarrier?.noteAttempt();
+        return null;
+      }
       nativeProof = proof;
       queueMicrotask(() => {
         if (nativeProof !== proof || terminal !== null) return;
@@ -3855,6 +4520,41 @@ function createSearchControlPublication(
     };
 
     const nativeEventStillMatches = (proof: SearchNativeEventProof) => {
+      if (proof.action.kind === "focus-result") {
+        if (
+          !resultKeyboardAuthority ||
+          !resultKeyboardAuthorityIsCurrent() ||
+          !resultKeyboardAuthority.trusted.matches(proof.event) ||
+          resultKeyboardAuthority.trusted.read(proof.event) !== proof.trusted ||
+          resultKeyboardAuthority.target(proof.event) !== proof.target ||
+          resultKeyboardAuthority.type(proof.event) !== proof.type ||
+          resultKeyboardAuthority.bubbles(proof.event) !== proof.bubbles ||
+          resultKeyboardAuthority.cancelable(proof.event) !== proof.cancelable ||
+          resultKeyboardAuthority.key(proof.event) !== proof.key ||
+          resultKeyboardAuthority.ctrlKey(proof.event) !== proof.ctrlKey ||
+          resultKeyboardAuthority.metaKey(proof.event) !== proof.metaKey ||
+          resultKeyboardAuthority.altKey(proof.event) !== proof.altKey ||
+          resultKeyboardAuthority.shiftKey(proof.event) !== proof.shiftKey ||
+          resultKeyboardAuthority.repeat(proof.event) !== proof.repeat ||
+          resultKeyboardAuthority.composing(proof.event) !== proof.composing ||
+          resultKeyboardAuthority.view(proof.event) !== proof.view ||
+          resultKeyboardAuthority.activeElement.read(ownerDocument) !== input ||
+          proof.crossed
+        ) {
+          return false;
+        }
+        const destination =
+          proof.key === "ArrowDown"
+            ? publication.resultLinks[0]
+            : publication.resultLinks.at(-1);
+        const resultRoot = owners.resultRoot.element();
+        return Boolean(
+          destination &&
+            destination === proof.focusDestination &&
+            resultRoot &&
+            searchControlAncestorsAreEnabled(destination, resultRoot),
+        );
+      }
       if (
         !TRUSTED_EVENT_TARGET ||
         !TRUSTED_EVENT_TYPE ||
@@ -3867,6 +4567,7 @@ function createSearchControlPublication(
       ) {
         return false;
       }
+      if (proof.crossed) return false;
       if (proof.action.kind === "escape") {
         return Boolean(
           TRUSTED_KEYBOARD_KEY &&
@@ -3914,13 +4615,13 @@ function createSearchControlPublication(
     const expectedReactName = (kind: SearchControlActionKind) =>
       kind === "change"
         ? "onChange"
-        : kind === "escape"
+        : kind === "escape" || kind === "focus-result"
           ? "onKeyDown"
           : "onClick";
     const expectedReactType = (kind: SearchControlActionKind) =>
       kind === "change"
         ? "change"
-        : kind === "escape"
+        : kind === "escape" || kind === "focus-result"
           ? "keydown"
           : "click";
     const reactEventMatches = (
@@ -3939,17 +4640,28 @@ function createSearchControlPublication(
         searchControlOwnValue(event, "nativeEvent") !== proof.event ||
         searchControlOwnValue(event, "target") !== proof.target ||
         searchControlOwnValue(event, "currentTarget") !== currentTarget ||
-        searchControlOwnValue(event, "bubbles") !== proof.bubbles ||
-        searchControlOwnValue(event, "defaultPrevented") !==
-          TRUSTED_EVENT_DEFAULT_PREVENTED(proof.event)
+        searchControlOwnValue(event, "bubbles") !== proof.bubbles
       ) {
         return null;
       }
-      const dispatchTarget = TRUSTED_EVENT_CURRENT_TARGET(proof.event);
-      const nativePhase = TRUSTED_EVENT_PHASE(proof.event);
+      const isResultFocus = proof.action.kind === "focus-result";
+      const dispatchTarget =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(proof.event)
+          : TRUSTED_EVENT_CURRENT_TARGET(proof.event);
+      const nativePhase =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(proof.event)
+          : TRUSTED_EVENT_PHASE(proof.event);
+      const nativeDefaultPrevented =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.defaultPrevented(proof.event)
+          : TRUSTED_EVENT_DEFAULT_PREVENTED(proof.event);
       if (
         !dispatchTarget ||
         nativePhase === ownerWindow.Event.NONE ||
+        searchControlOwnValue(event, "defaultPrevented") !==
+          nativeDefaultPrevented ||
         (dispatchTarget !== ownerDocument &&
           (!(dispatchTarget instanceof ownerWindow.Node) ||
             dispatchTarget.ownerDocument !== ownerDocument ||
@@ -3957,7 +4669,10 @@ function createSearchControlPublication(
       ) {
         return null;
       }
-      if (proof.action.kind === "escape") {
+      if (
+        proof.action.kind === "escape" ||
+        proof.action.kind === "focus-result"
+      ) {
         const reactComposing = searchControlOwnValue(event, "isComposing");
         if (
           searchControlOwnValue(event, "key") !== proof.key ||
@@ -3968,6 +4683,14 @@ function createSearchControlPublication(
           searchControlOwnValue(event, "repeat") !== proof.repeat ||
           (reactComposing !== SEARCH_CONTROL_MISSING &&
             reactComposing !== proof.composing)
+        ) {
+          return null;
+        }
+        if (
+          proof.action.kind === "focus-result" &&
+          (searchControlOwnValue(event, "cancelable") !== proof.cancelable ||
+            searchControlOwnValue(event, "isTrusted") !== proof.trusted ||
+            searchControlOwnValue(event, "view") !== proof.view)
         ) {
           return null;
         }
@@ -4004,19 +4727,29 @@ function createSearchControlPublication(
       return true;
     };
     const captureRoot = (
-      role: "search-root" | "error-root" | "empty-root",
+      role: "search-root" | "error-root" | "empty-root" | "result-root",
       event: ReactSyntheticEvent,
     ) => {
       if (!event || typeof event !== "object") return;
       if (!startReactWrapper(event, null)) return;
       const nativeEvent = searchControlOwnValue(event, "nativeEvent");
       if (!(nativeEvent instanceof ownerWindow.Event)) return;
+      const candidate = controlForNative(nativeEvent);
+      const candidateIsResultFocus =
+        candidate?.action.kind === "focus-result";
+      const nativeCurrentTarget =
+        candidateIsResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(nativeEvent)
+          : TRUSTED_EVENT_CURRENT_TARGET?.(nativeEvent);
+      const nativePhase =
+        candidateIsResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(nativeEvent)
+          : TRUSTED_EVENT_PHASE?.(nativeEvent);
       const proof =
         nativeProof?.event === nativeEvent
           ? nativeProof
-          : TRUSTED_EVENT_CURRENT_TARGET?.(nativeEvent) === ownerDocument &&
-              TRUSTED_EVENT_PHASE?.(nativeEvent) ===
-                ownerWindow.Event.CAPTURING_PHASE
+          : nativeCurrentTarget === ownerDocument &&
+              nativePhase === ownerWindow.Event.CAPTURING_PHASE
             ? beginNativeEvent(nativeEvent, "document-root-react-capture")
             : null;
       if (
@@ -4178,6 +4911,19 @@ function createSearchControlPublication(
             TRUSTED_BLUR?.(publication.input);
             requestSuccessor();
           }
+        } else if (native.action.kind === "focus-result") {
+          if (
+            !resultKeyboardAuthority ||
+            !native.focusDestination ||
+            !resultKeyboardAuthorityIsCurrent()
+          ) {
+            return false;
+          }
+          resultKeyboardAuthority.preventDefault(native.event);
+          resultKeyboardAuthority.focus(native.focusDestination, {
+            preventScroll: true,
+          });
+          requestSuccessor();
         } else if (
           native.action.kind === "inline-clear" ||
           native.action.kind === "empty-clear"
@@ -4199,6 +4945,26 @@ function createSearchControlPublication(
       publication.retire();
       requestSuccessor();
     };
+    const proofCurrentTarget = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.currentTarget(proof.event)
+        : TRUSTED_EVENT_CURRENT_TARGET?.(proof.event);
+    const proofPhase = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.phase(proof.event)
+        : TRUSTED_EVENT_PHASE?.(proof.event);
+    const proofDefaultPrevented = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.defaultPrevented(proof.event)
+        : TRUSTED_EVENT_DEFAULT_PREVENTED?.(proof.event);
+    const proofCancelBubble = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.cancelBubble(proof.event)
+        : TRUSTED_EVENT_CANCEL_BUBBLE?.(proof.event);
+    const proofComposedPath = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.composedPath(proof.event)
+        : TRUSTED_EVENT_COMPOSED_PATH(proof.event);
     const settleTerminal = (proof: SearchTerminalEventProof) => {
       const native = proof.native;
       if (
@@ -4211,10 +4977,10 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(native.event) !== null ||
-        TRUSTED_EVENT_PHASE(native.event) !== ownerWindow.Event.NONE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(native.event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(native.event) ||
+        proofCurrentTarget(native) !== null ||
+        proofPhase(native) !== ownerWindow.Event.NONE ||
+        proofDefaultPrevented(native) ||
+        proofCancelBubble(native) ||
         native.propagationStopped() ||
         !nativeEventStillMatches(native) ||
         !publicationOwnsCurrentDom(native.action.kind === "change") ||
@@ -4237,50 +5003,77 @@ function createSearchControlPublication(
       beginNativeEvent(event, "document-capture");
     };
     const onNativeBubble = (event: Event) => {
+      const proof = nativeProof;
       if (
-        !nativeProof ||
-        nativeProof.event !== event ||
+        !proof ||
+        proof.event !== event ||
         !TRUSTED_EVENT_CURRENT_TARGET ||
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event)
+        proofCurrentTarget(proof) !== ownerDocument ||
+        proofPhase(proof) !== ownerWindow.Event.BUBBLING_PHASE ||
+        proofDefaultPrevented(proof) ||
+        proofCancelBubble(proof)
       ) {
         return;
       }
-      const authenticated = authenticateTerminal(nativeProof);
+      const authenticated = authenticateTerminal(proof);
       if (!authenticated) return;
       const windowTarget =
         authenticated.native.path[authenticated.native.path.length - 1];
       if (
         !windowTarget ||
-        !TRUSTED_IS_PROTOTYPE_OF(
-          ownerWindow.EventTarget.prototype,
-          windowTarget,
-        )
+        (authenticated.native.action.kind === "focus-result"
+          ? !focusWindowTarget ||
+            !searchControlPathMatches(
+              [focusWindowTarget],
+              [windowTarget],
+              ownerDocument,
+            )
+          : !TRUSTED_IS_PROTOTYPE_OF(
+              ownerWindow.EventTarget.prototype,
+              windowTarget,
+            ))
       ) {
         return;
       }
       terminal = authenticated;
-      removeTerminalWindowListener();
-      addOwnerWindowListener(
-        windowTarget,
-        authenticated.native.type,
-        onNativeWindowBubble,
-      );
-      terminalWindowListener = Object.freeze({
-        target: windowTarget,
-        type: authenticated.native.type,
-      });
+      if (authenticated.native.action.kind === "focus-result") {
+        if (
+          !focusWindowListenerAttached ||
+          !focusWindowTarget ||
+          !searchControlPathMatches(
+            [focusWindowTarget],
+            [windowTarget],
+            ownerDocument,
+          ) ||
+          authenticated.native.type !== "keydown"
+        ) {
+          terminal = null;
+          return;
+        }
+      } else {
+        removeTerminalWindowListener();
+        addOwnerWindowListener(
+          windowTarget,
+          authenticated.native.type,
+          onNativeWindowBubble,
+        );
+        terminalWindowListener = Object.freeze({
+          target: windowTarget,
+          type: authenticated.native.type,
+        });
+      }
       queueMicrotask(() => {
         if (terminal === authenticated) settleTerminal(authenticated);
       });
     };
     const onNativeWindowBubble = (event: Event) => {
       const authenticated = terminal;
+      const currentTarget = authenticated
+        ? proofCurrentTarget(authenticated.native)
+        : null;
       if (
         !authenticated ||
         authenticated.native.event !== event ||
@@ -4288,14 +5081,22 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== terminalWindowListener?.target ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        (authenticated.native.action.kind === "focus-result"
+          ? !focusWindowTarget ||
+            !currentTarget ||
+            !searchControlPathMatches(
+              [focusWindowTarget],
+              [currentTarget],
+              ownerDocument,
+            )
+          : currentTarget !== terminalWindowListener?.target) ||
+        proofPhase(authenticated.native) !== ownerWindow.Event.BUBBLING_PHASE ||
+        proofDefaultPrevented(authenticated.native) ||
+        proofCancelBubble(authenticated.native) ||
         authenticated.native.propagationStopped() ||
         !searchControlPathMatches(
           authenticated.native.path,
-          TRUSTED_EVENT_COMPOSED_PATH(event),
+          proofComposedPath(authenticated.native),
           ownerDocument,
         )
       ) {
@@ -4303,23 +5104,50 @@ function createSearchControlPublication(
       }
       windowTerminal = authenticated;
     };
+    const addFocusWindowListener = () => {
+      if (
+        focusWindowListenerAttached ||
+        !resultKeyboardAuthority ||
+        !focusWindowTarget ||
+        !addFocusWindowEventListener ||
+        !resultKeyboardAuthorityIsCurrent() ||
+        cells.active !== publication ||
+        resultKeyboardAuthority.activeElement.read(ownerDocument) !== input
+      ) {
+        return;
+      }
+      addFocusWindowEventListener("keydown", onNativeWindowBubble);
+      focusWindowListenerAttached = true;
+    };
+    const removeFocusWindowListener = () => {
+      if (!focusWindowListenerAttached) return;
+      removeFocusWindowEventListener?.("keydown", onNativeWindowBubble);
+      focusWindowListenerAttached = false;
+    };
+    const onInputFocus = () => addFocusWindowListener();
+    const onInputBlur = () => removeFocusWindowListener();
     const boundaryListeners = [...controls.values()].map((control) => {
       const type =
         control.action.kind === "change"
           ? ["input", "change"]
-          : control.action.kind === "escape"
+          : control.action.kind === "escape" ||
+              control.action.kind === "focus-result"
             ? ["keydown"]
             : ["click"];
       const listener = (event: Event) => {
         if (
           nativeProof?.event === event &&
           nativeProof.control === control &&
-          TRUSTED_EVENT_CURRENT_TARGET?.(event) === control.element &&
-          (TRUSTED_EVENT_PHASE?.(event) ===
+          proofCurrentTarget(nativeProof) === control.element &&
+          (proofPhase(nativeProof) ===
             ownerWindow.Event.CAPTURING_PHASE ||
-            TRUSTED_EVENT_PHASE?.(event) === ownerWindow.Event.AT_TARGET) &&
+            proofPhase(nativeProof) === ownerWindow.Event.AT_TARGET) &&
           publicationOwnsCurrentDom(control.action.kind === "change") &&
-          searchControlIsEnabled(control.element, control.root)
+          searchControlIsEnabled(control.element, control.root) &&
+          (control.action.kind !== "focus-result" ||
+            (resultKeyboardAuthorityIsCurrent() &&
+              resultKeyboardAuthority?.activeElement.read(ownerDocument) ===
+                input))
         ) {
           nativeBoundaryProof = nativeProof;
         }
@@ -4346,6 +5174,11 @@ function createSearchControlPublication(
           );
         }
       }
+      if (resultKeyboardAuthority) {
+        TRUSTED_ADD_EVENT_LISTENER(input, "focus", onInputFocus);
+        TRUSTED_ADD_EVENT_LISTENER(input, "blur", onInputBlur);
+        addFocusWindowListener();
+      }
     };
     const releaseNativeListeners = () => {
       for (const type of ["input", "change", "keydown", "click"]) {
@@ -4358,6 +5191,11 @@ function createSearchControlPublication(
         TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
       }
       removeTerminalWindowListener();
+      if (resultKeyboardAuthority) {
+        TRUSTED_REMOVE_EVENT_LISTENER(input, "focus", onInputFocus);
+        TRUSTED_REMOVE_EVENT_LISTENER(input, "blur", onInputBlur);
+        removeFocusWindowListener();
+      }
       for (const { control, type, listener } of boundaryListeners) {
         for (const eventType of type) {
           TRUSTED_REMOVE_EVENT_LISTENER(
@@ -4374,6 +5212,10 @@ function createSearchControlPublication(
       publication,
       publish: () => {
         established = true;
+        partialReplayWindowOpen = true;
+        queueMicrotask(() => {
+          partialReplayWindowOpen = false;
+        });
         refs = searchControlExpectedOwners(render, owners).map((owner) => {
           const element = owner.element();
           if (!element) {
@@ -4386,7 +5228,13 @@ function createSearchControlPublication(
         guard = createSearchControlDomGuard(
           ownerDocument,
           publishedRoots,
-          () => retire("other"),
+          () => {
+            const ownedActivePublication = cells.active === publication;
+            retire("other");
+            if (ownedActivePublication) {
+              armSearchControlDomBarrier(cells, ownerDocument, publishedRoots);
+            }
+          },
           (records) =>
             ((nativeProof?.action.kind === "change" &&
               nativeBoundaryProof === nativeProof &&
@@ -4440,6 +5288,8 @@ function createSearchControlPublication(
           element === null &&
           previous === proof.element
         ) {
+          synchronousRefReplayPending =
+            synchronousRefReplayPending || partialReplayWindowOpen;
           proof.state = "detached";
         } else if (
           proof.state === "detached" &&
@@ -4451,20 +5301,31 @@ function createSearchControlPublication(
           proof.state = "invalid";
         }
       },
+      canSettleSynchronousRefReplay: () =>
+        established && partialReplayWindowOpen,
+      settleSynchronousRefReplay: () => {
+        const exact =
+          !retired &&
+          synchronousRefReplayPending &&
+          refs.some((entry) => entry.state === "reattached") &&
+          refs.every(
+            (entry) =>
+              entry.state === "attached" || entry.state === "reattached",
+          ) &&
+          refs.every((entry) => entry.owner.element() === entry.element) &&
+          searchControlElementsAreExact(render, owners) &&
+          searchControlRootsMatch(ownerDocument, publishedRoots) &&
+          Boolean(guard?.unchanged());
+        if (!exact) return false;
+        for (const entry of refs) entry.state = "attached";
+        synchronousRefReplayPending = false;
+        return true;
+      },
       isExactReplay: () =>
         retired &&
         established &&
-        ((layoutRetired &&
-          (retirement === "layout" || retirement === "element") &&
-          refs.every((entry) => entry.state === "reattached")) ||
-          (!layoutRetired &&
-            retirement === "element" &&
-            refs.some((entry) => entry.state === "reattached") &&
-            refs.every(
-              (entry) =>
-                entry.state === "attached" ||
-                entry.state === "reattached",
-            ))) &&
+        (retirement === "layout" || retirement === "element") &&
+        refs.every((entry) => entry.state === "reattached") &&
         refs.length === searchControlExpectedOwners(render, owners).length &&
         refs.every(
           (entry) =>
@@ -4490,6 +5351,13 @@ function createSearchControlPublication(
   };
 
   const establish = () => {
+    const domBarrier = cells.domBarrier;
+    if (domBarrier) {
+      if (!domBarrier.attempted()) return;
+      domBarrier.release();
+      cells.domBarrier = null;
+      cells.successorOf = null;
+    }
     if (lastRuntime) {
       if (
         !successorRequested &&
@@ -4521,7 +5389,9 @@ function createSearchControlPublication(
               ? owners.searchRoot.element()
               : root.role === "error-root"
                 ? owners.errorRoot.element()
-                : owners.emptyRoot.element();
+                : root.role === "empty-root"
+                  ? owners.emptyRoot.element()
+                  : owners.resultRoot.element();
           return (
             currentRoot === root.element &&
             publishedRootStillMatches(root)
@@ -4557,7 +5427,7 @@ function createSearchControlPublication(
   };
 
   const root = (
-    role: "search-root" | "error-root" | "empty-root",
+    role: "search-root" | "error-root" | "empty-root" | "result-root",
     event: ReactSyntheticEvent,
   ) => currentRuntime?.captureRoot(role, event);
   const capture = (
@@ -4586,6 +5456,10 @@ function createSearchControlPublication(
     captureEmptyPrimary: owners.emptyPrimary.capture,
     captureEmptySecondary: owners.emptySecondary.capture,
     captureEmptyClear: owners.emptyClear.capture,
+    captureResultRoot: owners.resultRoot.capture,
+    captureResultLinks: Object.freeze(
+      owners.resultLinks.map(({ owner }) => owner.capture),
+    ),
     captureRootChange: (event: ReactChangeEvent<HTMLDivElement>) =>
       root("search-root", event),
     captureInputChange: (event: ReactChangeEvent<HTMLInputElement>) =>
@@ -4594,10 +5468,14 @@ function createSearchControlPublication(
       bubble("change", event),
     captureRootKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) =>
       root("search-root", event),
-    captureInputKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) =>
-      capture("escape", event),
-    keyDownInput: (event: ReactKeyboardEvent<HTMLInputElement>) =>
-      bubble("escape", event),
+    captureInputKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      capture("escape", event);
+      capture("focus-result", event);
+    },
+    keyDownInput: (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      bubble("escape", event);
+      bubble("focus-result", event);
+    },
     captureSearchClick: (event: ReactMouseEvent<HTMLDivElement>) =>
       root("search-root", event),
     captureInlineClearClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
@@ -7887,6 +8765,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     active: null,
     successorOf: null,
     replay: null,
+    domBarrier: null,
     delivery: null,
     claimedPublications: new WeakSet(),
     claimedControls: new WeakSet(),
@@ -7900,6 +8779,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const requestSearchControlSuccessor = useCallback(() => {
     setSearchControlRevision((revision) => revision + 1);
   }, []);
+  useLayoutEffect(
+    () => () => {
+      searchControlCells.domBarrier?.release();
+      searchControlCells.domBarrier = null;
+    },
+    [searchControlCells],
+  );
   const searchAuthorityRef = useRef<SearchAuthority | null>(null);
   const searchShortcutOwnerRef = useRef<SearchShortcutOwner | null>(null);
   const paletteShortcutOwnerRef = useRef<PaletteShortcutOwner | null>(null);
@@ -8571,6 +9457,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       ? results
       : null;
   const currentSearchRequest = searching ? searchingOwner : null;
+  const resultOrder = Object.freeze([...filtered]);
   // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
   // eslint-disable-next-line react-hooks/refs
   const searchControlRender: SearchControlRenderPublication = Object.freeze({
@@ -8589,6 +9476,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     pending,
     filter,
     filtered,
+    resultOrder,
     setQuery,
     retry: retrySearch,
   });
@@ -8609,6 +9497,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     captureEmptyPrimary,
     captureEmptySecondary,
     captureEmptyClear,
+    captureResultRoot,
+    captureResultLinks,
     captureRootChange,
     captureInputChange,
     changeInput,
@@ -9062,10 +9952,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
           ) : (
-            <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
-              {filtered.map((d) => (
+            <ul
+              ref={trimmed ? captureResultRoot : undefined}
+              className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+              data-testid="document-list"
+            >
+              {filtered.map((d, index) => (
                 <li key={d.id} className="group relative min-w-0" data-testid={trimmed ? "search-result" : undefined}>
                   <Link
+                    ref={trimmed ? captureResultLinks[index] : undefined}
                     href={`/d/${d.id}`}
                     className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md"
                     data-testid="document-card"
