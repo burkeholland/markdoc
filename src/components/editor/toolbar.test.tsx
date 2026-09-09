@@ -927,10 +927,18 @@ describe("Toolbar Text style trusted arrows", () => {
       self: { value: structural },
     });
     const handlers = headingKeyHandlers(trigger);
+    const listenerObservation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      originalPathTerminal?: EventTarget;
+    } = {};
     const stageTerminal = vi.fn(function (
       this: EventTarget,
       event: Event,
     ) {
+      listenerObservation.receiver = this;
+      listenerObservation.currentTarget = event.currentTarget;
+      listenerObservation.originalPathTerminal = event.composedPath().at(-1);
       replaceJsdomPathTerminal(event, structural);
     });
     ownerWindow.addEventListener(
@@ -947,8 +955,12 @@ describe("Toolbar Text style trusted arrows", () => {
       bubble: handlers.action,
     });
 
-    expect(stageTerminal.mock.contexts).toEqual([ownerWindow]);
-    expect(stageTerminal.mock.contexts[0]).not.toBe(structural);
+    expect(stageTerminal).toHaveBeenCalledOnce();
+    expect(listenerObservation.receiver).toBe(listenerObservation.currentTarget);
+    expect(listenerObservation.receiver).toBe(
+      listenerObservation.originalPathTerminal,
+    );
+    expect(listenerObservation.receiver).not.toBe(structural);
     expect(rejected.composedPath()).toEqual([]);
     expect(rejected.defaultPrevented).toBe(false);
     expect(preventDefault).not.toHaveBeenCalled();
