@@ -925,7 +925,7 @@ describe("status bar directional menu authority", () => {
         const current = callbacks();
         await renderStatus(statusProps(current));
         const trigger = screen.getByTestId("layout-menu");
-        const child = trigger.querySelector<HTMLElement>("svg");
+        const child = trigger.querySelector<HTMLElement>("span");
         if (!child) throw new Error("Menu trigger child was not rendered");
         const reject = async (
           event: KeyboardEvent,
@@ -1586,7 +1586,7 @@ describe("status bar directional issues authority", () => {
         const current = callbacks();
         await renderStatus(statusProps(current));
         const trigger = screen.getByTestId("issues-button");
-        const child = trigger.querySelector<HTMLElement>("span");
+        const child = trigger.querySelector<HTMLElement>("svg");
         if (!child) throw new Error("Issues trigger child was not rendered");
         const reject = async (
           event: KeyboardEvent,
