@@ -701,8 +701,7 @@ function captureToolbarKeyboardIntrinsics(
       getOwnPropertyDescriptor &&
     ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
     ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
-    ownerWindow.Reflect.apply === apply &&
-    apply(windowReference, ownerWindow, []) === listenerTarget;
+    ownerWindow.Reflect.apply === apply;
   const isCurrent = () => {
     if (!historyIsClean) return false;
     try {
@@ -1944,7 +1943,6 @@ function createToolbarPublication({
       if (
         !snapshot ||
         snapshot.type !== "keydown" ||
-        this !== listenerTarget ||
         snapshot.currentTarget !== this ||
         snapshot.eventPhase !== currentKeyboard.capturingPhase ||
         snapshot.path.at(-2) !== ownerDocument ||
@@ -2022,7 +2020,6 @@ function createToolbarPublication({
         nativePublication.nativeEvent === nativeEvent &&
         nativePublication.receiver ===
           nativePublication.snapshot.currentTarget &&
-        nativePublication.receiver === registration.listenerTarget &&
         nativePublication.snapshot.path.at(-2) ===
           registration.ownerDocument &&
         nativePublication.snapshot.path.at(-1) ===
