@@ -158,7 +158,7 @@ function reactProp<T>(element: Element, name: string): T {
 
 async function chooseFromCommittedSuccessor(
   file: File,
-  previousOnChange: ChangeEventHandler<HTMLInputElement>,
+  settlingOnChange: ChangeEventHandler<HTMLInputElement>,
 ) {
   let candidate:
     | {
@@ -173,7 +173,7 @@ async function chooseFromCommittedSuccessor(
       "onChange",
     );
     if (
-      onChange === previousOnChange ||
+      onChange === settlingOnChange ||
       input !== candidate?.input ||
       onChange !== candidate?.onChange
     ) {
@@ -491,11 +491,21 @@ describe("ImageDialog upload lifecycle", () => {
       await renderStrictRoot(<Harness onUpload={onUpload} />);
 
       const input = screen.getByTestId("image-file") as HTMLInputElement;
-      const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      const initialOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
         input,
         "onChange",
       );
-      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const failedFile = new File(["failed"], "failed.png", {
+        type: "image/png",
+      });
+      choose(failedFile);
+      expect(onUpload).toHaveBeenCalledOnce();
+      expect(onUpload).toHaveBeenCalledWith(failedFile);
+      expect(onUpload.mock.results[0]?.value).toBe(failed.promise);
+      expect(screen.getByTestId("image-file")).toBe(input);
+      const settlingOnChange =
+        reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+      expect(settlingOnChange).not.toBe(initialOnChange);
       setInputValue(input, "failed-selection");
 
       if (getter === "error") {
@@ -544,9 +554,10 @@ describe("ImageDialog upload lifecycle", () => {
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
       });
-      await chooseFromCommittedSuccessor(retryFile, oldOnChange);
+      await chooseFromCommittedSuccessor(retryFile, settlingOnChange);
       expect(onUpload).toHaveBeenCalledTimes(2);
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
       await act(async () => {
         retry.resolve({ url: "/api/assets/retry" });
         await retry.promise;
@@ -573,11 +584,22 @@ describe("ImageDialog upload lifecycle", () => {
       .mockReturnValueOnce(retry.promise);
     await renderStrictRoot(<Harness onUpload={onUpload} />);
 
-    const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
-      screen.getByTestId("image-file"),
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const initialOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      input,
       "onChange",
     );
-    choose(new File(["hostile"], "hostile.png", { type: "image/png" }));
+    const hostileFile = new File(["hostile"], "hostile.png", {
+      type: "image/png",
+    });
+    choose(hostileFile);
+    expect(onUpload).toHaveBeenCalledOnce();
+    expect(onUpload).toHaveBeenCalledWith(hostileFile);
+    expect(onUpload.mock.results[0]?.value).toBe(hostile);
+    expect(screen.getByTestId("image-file")).toBe(input);
+    const settlingOnChange =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+    expect(settlingOnChange).not.toBe(initialOnChange);
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
         "Upload then getter failed",
@@ -588,9 +610,10 @@ describe("ImageDialog upload lifecycle", () => {
     const retryFile = new File(["retry"], "retry.png", {
       type: "image/png",
     });
-    await chooseFromCommittedSuccessor(retryFile, oldOnChange);
+    await chooseFromCommittedSuccessor(retryFile, settlingOnChange);
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
     await act(async () => {
       retry.resolve({ url: "/api/assets/retry" });
       await retry.promise;
