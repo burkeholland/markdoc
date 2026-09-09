@@ -1460,7 +1460,7 @@ describe("editor header Publish options directional focus", () => {
       readonly nativeEvent: globalThis.KeyboardEvent;
       readonly view: unknown;
     } = null;
-    await renderStrict(
+    const view = await renderStrict(
       <div
         onKeyDown={(current) => {
           reactPair = {
@@ -1473,45 +1473,81 @@ describe("editor header Publish options directional focus", () => {
       </div>,
     );
     const button = publishTrigger();
+    const ownerWindow = button.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
     const ref = fiberFor(button).ref;
     if (typeof ref !== "function") throw new Error("Publish trigger callback ref was not attached");
-    const listenerAdds = () => {
+    const publicationListeners = () => {
       const addEventListener = vi.mocked(EventTarget.prototype.addEventListener);
-      return addEventListener.mock.calls.filter(
+      return addEventListener.mock.calls.flatMap(
         (call, index) =>
-          addEventListener.mock.contexts[index] === button
+          addEventListener.mock.contexts[index] === ownerWindow
           && call[0] === "keydown"
+          && call[2] === true
+          && typeof call[1] === "function"
+            ? [call[1] as EventListener]
+            : [],
+      );
+    };
+    const listenerRemovals = (listener: EventListener) => {
+      const removeEventListener = vi.mocked(EventTarget.prototype.removeEventListener);
+      return removeEventListener.mock.calls.filter(
+        (call, index) =>
+          removeEventListener.mock.contexts[index] === ownerWindow
+          && call[0] === "keydown"
+          && call[1] === listener
           && call[2] === true,
       ).length;
     };
-    const initialListenerAdds = listenerAdds();
+    const initialListeners = publicationListeners();
+    const predecessorListener = initialListeners.at(-1);
+    if (!predecessorListener) throw new Error("Publish Window listener was not attached");
+    const predecessorRemovals = listenerRemovals(predecessorListener);
 
     act(() => {
       ref(null);
     });
-    expect(listenerAdds()).toBe(initialListenerAdds);
+    expect(publicationListeners()).toHaveLength(initialListeners.length);
+    expect(listenerRemovals(predecessorListener)).toBe(predecessorRemovals + 1);
+    ownerWindow.addEventListener("keydown", predecessorListener, true);
     button.focus();
     const partial = publishArrow("ArrowDown");
+    ownerWindow.removeEventListener("keydown", predecessorListener, true);
     expect(partial.defaultPrevented).toBe(false);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
 
     act(() => {
       ref(button);
     });
-    await waitFor(() => expect(listenerAdds()).toBe(initialListenerAdds + 1));
+    await waitFor(() =>
+      expect(publicationListeners()).toHaveLength(initialListeners.length + 1));
     await act(async () => Promise.resolve());
+    const successorListener = publicationListeners().at(-1);
+    if (!successorListener) throw new Error("Publish successor listener was not attached");
+    expect(successorListener).not.toBe(predecessorListener);
+    ownerWindow.removeEventListener("keydown", successorListener, true);
+    button.ownerDocument.addEventListener("keydown", successorListener, true);
+    button.focus();
+    const wrongReceiver = publishArrow("ArrowDown");
+    button.ownerDocument.removeEventListener("keydown", successorListener, true);
+    ownerWindow.addEventListener("keydown", successorListener, true);
+    expect(wrongReceiver.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
     const observe = vi.spyOn(window.MutationObserver.prototype, "observe");
     composedPath.mockClear();
     preventDefault.mockClear();
     let nativeDelivery: null | {
+      readonly receiver: EventTarget;
       readonly currentTarget: EventTarget | null;
       readonly eventPhase: number;
       readonly path: readonly EventTarget[];
       readonly view: Window | null;
     } = null;
-    button.addEventListener("keydown", (current) => {
+    ownerWindow.addEventListener("keydown", function (current) {
       const keyboard = current as globalThis.KeyboardEvent;
       nativeDelivery = {
+        receiver: this,
         currentTarget: current.currentTarget,
         eventPhase: current.eventPhase,
         path: current.composedPath(),
@@ -1527,33 +1563,22 @@ describe("editor header Publish options directional focus", () => {
       preventDefault.mock.contexts.filter((context) => context === event).length;
 
     const expectedPath: EventTarget[] = [];
-    const ownerWindow = button.ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
     for (let current: Node | null = button; current; current = current.parentNode) {
       expectedPath.push(current);
       if (current === button.ownerDocument) break;
     }
     expect(nativeDelivery).not.toBeNull();
     expect(ownerWindow).toBe(window);
-    expect(nativeDelivery!.currentTarget).toBe(button);
-    expect(nativeDelivery!.eventPhase).toBe(window.Event.AT_TARGET);
+    expect(nativeDelivery!.receiver).not.toBe(ownerWindow);
+    expect(nativeDelivery!.currentTarget).toBe(nativeDelivery!.receiver);
+    expect(nativeDelivery!.eventPhase).toBe(window.Event.CAPTURING_PHASE);
     expect(nativeDelivery!.path).toHaveLength(expectedPath.length + 1);
     expect(
       nativeDelivery!.path.slice(0, -1)
         .findIndex((entry, index) => entry !== expectedPath[index]),
     ).toBe(-1);
     const pathTerminal = nativeDelivery!.path.at(-1);
-    const terminalWindow = pathTerminal as Window & typeof globalThis;
-    expect(pathTerminal).not.toBe(ownerWindow);
-    expect(pathTerminal).toBeInstanceOf(ownerWindow.Window);
-    expect(Object.getPrototypeOf(pathTerminal)).toBe(ownerWindow.Window.prototype);
-    expect(terminalWindow.document).toBe(button.ownerDocument);
-    expect(terminalWindow.window).toBe(pathTerminal);
-    expect(terminalWindow.self).toBe(pathTerminal);
-    expect(terminalWindow.Window).toBe(ownerWindow.Window);
-    expect(terminalWindow.Object).toBe(ownerWindow.Object);
-    expect(terminalWindow.Event).toBe(ownerWindow.Event);
-    expect(terminalWindow.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+    expect(pathTerminal).toBe(nativeDelivery!.receiver);
     expect(nativeDelivery!.view).toBe(event.view);
     expect(Object.getPrototypeOf(event)).toBe(window.KeyboardEvent.prototype);
     expect(event.isTrusted).toBe(true);
@@ -1564,6 +1589,63 @@ describe("editor header Publish options directional focus", () => {
     expect(observe).toHaveBeenCalled();
     expect(preventionCalls()).toBe(1);
     expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+    expect(listenerRemovals(successorListener)).toBe(1);
+    const openListener = publicationListeners().at(-1);
+    if (!openListener || openListener === successorListener) {
+      throw new Error("Open Publish publication listener was not attached");
+    }
+    const openListenerRemovals = listenerRemovals(openListener);
+    await act(async () => view.root.unmount());
+    const viewIndex = views.findIndex((candidate) => candidate.root === view.root);
+    if (viewIndex >= 0) views.splice(viewIndex, 1);
+    view.host.remove();
+    expect(listenerRemovals(openListener)).toBe(openListenerRemovals + 1);
+  });
+
+  it("rejects a structural Window terminal before accepting the exact listener terminal", async () => {
+    const nativeComposedPath = window.Event.prototype.composedPath;
+    let terminal: EventTarget | null = null;
+    vi.spyOn(window.Event.prototype, "composedPath").mockImplementation(function () {
+      const path = nativeComposedPath.call(this);
+      return terminal ? [...path.slice(0, -1), terminal] : path;
+    });
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props));
+    const button = publishTrigger();
+    const ownerWindow = button.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+    const structuralTerminal = Object.create(
+      ownerWindow.Window.prototype,
+    ) as Window & typeof globalThis;
+    Object.defineProperties(structuralTerminal, {
+      window: { configurable: true, value: structuralTerminal },
+      self: { configurable: true, value: structuralTerminal },
+      document: { configurable: true, value: button.ownerDocument },
+      Window: { configurable: true, value: ownerWindow.Window },
+      Object: { configurable: true, value: ownerWindow.Object },
+      Event: { configurable: true, value: ownerWindow.Event },
+      KeyboardEvent: { configurable: true, value: ownerWindow.KeyboardEvent },
+    });
+    expect(Object.getPrototypeOf(structuralTerminal)).toBe(ownerWindow.Window.prototype);
+    expect(structuralTerminal.document).toBe(button.ownerDocument);
+    expect(structuralTerminal.Window).toBe(ownerWindow.Window);
+    expect(structuralTerminal.Object).toBe(ownerWindow.Object);
+    expect(structuralTerminal.Event).toBe(ownerWindow.Event);
+    expect(structuralTerminal.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+    terminal = structuralTerminal;
+    button.focus();
+
+    const rejected = publishArrow("ArrowDown");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(props.onPublish).not.toHaveBeenCalled();
+    expect(props.onDownload).not.toHaveBeenCalled();
+    terminal = null;
+    const accepted = publishArrow("ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
     await waitFor(() =>
       expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
   });
