@@ -100,18 +100,37 @@ describe("slashMenuPlugin", () => {
     });
     if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
   };
-  const key = async (k: string, init: KeyboardEventInit = {}) => {
-    const ownerWindow = view.dom.ownerDocument.defaultView;
+  const jsdomKeyboardEventViewInput = (ownerDocument: Document): Window => {
+    const implementationSymbol = Object.getOwnPropertySymbols(
+      ownerDocument,
+    ).find((symbol) => String(symbol) === "Symbol(impl)");
+    if (!implementationSymbol) {
+      throw new Error("Document implementation slot was not available");
+    }
+    return (
+      ownerDocument as unknown as Record<
+        symbol,
+        { _globalObject: Window }
+      >
+    )[implementationSymbol]._globalObject;
+  };
+  const keyboardEvent = (k: string, init: KeyboardEventInit = {}) => {
+    const ownerDocument = view.dom.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
     if (!ownerWindow) throw new Error("Editor owner window was unavailable");
     const event = new ownerWindow.KeyboardEvent("keydown", {
       key: k,
       code: k,
       bubbles: true,
       cancelable: true,
-      view: ownerWindow,
       ...init,
+      view: jsdomKeyboardEventViewInput(ownerDocument),
     });
     if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
+    return event;
+  };
+  const key = async (k: string, init: KeyboardEventInit = {}) => {
+    const event = keyboardEvent(k, init);
     markJsdomEventTrusted(event);
     view.dom.dispatchEvent(event);
     await Promise.resolve();
@@ -230,25 +249,12 @@ describe("slashMenuPlugin", () => {
     ]) {
       expect((await key("End", init)).defaultPrevented).toBe(false);
     }
-    const ownerWindow = view.dom.ownerDocument.defaultView!;
-    const untrusted = new ownerWindow.KeyboardEvent("keydown", {
-      key: "End",
-      code: "End",
-      bubbles: true,
-      cancelable: true,
-      view: ownerWindow,
-    });
+    const untrusted = keyboardEvent("End");
     view.dom.dispatchEvent(untrusted);
     await Promise.resolve();
     expect(untrusted.defaultPrevented).toBe(false);
 
-    const accepted = new ownerWindow.KeyboardEvent("keydown", {
-      key: "End",
-      code: "End",
-      bubbles: true,
-      cancelable: true,
-      view: ownerWindow,
-    });
+    const accepted = keyboardEvent("End");
     markJsdomEventTrusted(accepted);
     view.dom.focus();
     view.dom.dispatchEvent(accepted);

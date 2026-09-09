@@ -208,6 +208,21 @@ function jsdomKeyboardEventImplementation(
   return implementation;
 }
 
+function jsdomKeyboardEventViewInput(ownerDocument: Document): Window {
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  return (
+    ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window }
+    >
+  )[implementationSymbol]._globalObject;
+}
+
 function makeIntegratedVisit(): IntegratedVisit {
   const controller = createSlashMenuController();
   const state = EditorState.create({
@@ -251,15 +266,16 @@ async function dispatchIntegratedKey(
   key: string,
   init: KeyboardEventInit = {},
 ) {
-  const ownerWindow = view.dom.ownerDocument.defaultView;
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Editor owner window was unavailable");
   const event = new ownerWindow.KeyboardEvent("keydown", {
     key,
     code: key,
     bubbles: true,
     cancelable: true,
-    view: ownerWindow,
     ...init,
+    view: jsdomKeyboardEventViewInput(ownerDocument),
   });
   if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
   markJsdomEventTrusted(event);
@@ -282,8 +298,11 @@ async function dispatchRejectedNativeViewKey(
     code: "End",
     bubbles: true,
     cancelable: true,
-    view: nativeView,
+    view: nativeView
+      ? jsdomKeyboardEventViewInput(nativeView.document)
+      : null,
   });
+  if (event.view !== nativeView) throw new Error("Rejected keyboard event lost its requested public view");
   markJsdomEventTrusted(event);
   await act(async () => {
     view.dom.dispatchEvent(event);
@@ -305,8 +324,9 @@ async function dispatchStructuralWindowLookalikeKey(
     code: key,
     bubbles: true,
     cancelable: true,
-    view: ownerWindow,
+    view: jsdomKeyboardEventViewInput(ownerDocument),
   });
+  if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
   markJsdomEventTrusted(event);
   const implementation = jsdomKeyboardEventImplementation(event);
   const lookalike = new Proxy(
@@ -320,16 +340,28 @@ async function dispatchStructuralWindowLookalikeKey(
         configurable: true,
         value: ownerWindow.MutationObserver,
       },
-    },
+    }),
     {},
   );
   implementation.view = lookalike;
+  expect(event.isTrusted).toBe(true);
+  expect(event.view).toBe(lookalike);
+  expect(lookalike).not.toBe(ownerWindow);
+  expect(Object.getPrototypeOf(lookalike)).toBe(
+    Object.getPrototypeOf(ownerWindow),
+  );
+  expect(lookalike.document).toBe(ownerDocument);
+  expect(lookalike.Event).toBe(ownerWindow.Event);
+  expect(lookalike.UIEvent).toBe(ownerWindow.UIEvent);
+  expect(lookalike.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+  expect(lookalike.Document).toBe(ownerWindow.Document);
+  expect(lookalike.MutationObserver).toBe(ownerWindow.MutationObserver);
   await act(async () => {
     view.dom.dispatchEvent(event);
     await Promise.resolve();
     await Promise.resolve();
   });
-  return { event, lookalike, ownerWindow };
+  return event;
 }
 
 function makeSession(): CollabSession {
@@ -830,31 +862,19 @@ describe("slash-menu native keyboard publication", () => {
         visit.view,
         foreignWindow,
       );
-      const { event: rejected, lookalike, ownerWindow } =
-        await dispatchStructuralWindowLookalikeKey(
-          visit.view,
-          "End",
-        );
+      const rejected = await dispatchStructuralWindowLookalikeKey(
+        visit.view,
+        "End",
+      );
 
       expect(nullView.isTrusted).toBe(true);
       expect(nullView.view).toBeNull();
       expect(nullView.defaultPrevented).toBe(false);
       expect(foreignView.isTrusted).toBe(true);
       expect(foreignView.view).toBe(foreignWindow);
-      expect(foreignView.view).not.toBe(ownerWindow);
+      expect(foreignView.view).not.toBe(visit.view.dom.ownerDocument.defaultView);
       expect(foreignView.defaultPrevented).toBe(false);
       expect(rejected.isTrusted).toBe(true);
-      expect(rejected.view).toBe(lookalike);
-      expect(lookalike).not.toBe(ownerWindow);
-      expect(Object.getPrototypeOf(lookalike)).toBe(
-        Object.getPrototypeOf(ownerWindow),
-      );
-      expect(lookalike.document).toBe(ownerWindow.document);
-      expect(lookalike.Event).toBe(ownerWindow.Event);
-      expect(lookalike.UIEvent).toBe(ownerWindow.UIEvent);
-      expect(lookalike.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
-      expect(lookalike.Document).toBe(ownerWindow.Document);
-      expect(lookalike.MutationObserver).toBe(ownerWindow.MutationObserver);
       expect(rejected.defaultPrevented).toBe(false);
       expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
         "aria-selected",
