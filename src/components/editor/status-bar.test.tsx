@@ -537,8 +537,10 @@ function useExactWindowListenerRealm() {
   const exposedWindow = document.defaultView;
   if (!exposedWindow) throw new Error("Document default view was unavailable");
   let listenerReceiver: Window | null = null;
-  const observeReceiver = function (this: Window) {
-    listenerReceiver = this;
+  const observeReceiver = (event: Event) => {
+    if (!(event.currentTarget instanceof exposedWindow.Window))
+      throw new Error("Window listener current target was unavailable");
+    listenerReceiver = event.currentTarget;
   };
   exposedWindow.addEventListener("status-bar-window-probe", observeReceiver, {
     once: true,
