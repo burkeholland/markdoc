@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useMemo,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
@@ -64,7 +65,19 @@ type ActivityGroupFacts = Readonly<{
 }>;
 
 type ActivityContentMode = "loading" | "empty" | "list" | "none";
-type ActivityActionKind = "close" | "refresh" | "retry" | "load-more";
+type ActivityClickActionKind = "close" | "refresh" | "retry" | "load-more";
+type ActivityHeaderControlKind = "refresh" | "close";
+type ActivityActionKind =
+  | ActivityClickActionKind
+  | "navigate-refresh"
+  | "navigate-close";
+type ActivityHeaderNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
 
 interface ActivitySourceFacts {
   readonly stateVisit: ActivityVisit;
@@ -100,10 +113,130 @@ interface ActivityPresentation {
   readonly contentMode: ActivityContentMode;
 }
 
+interface ActivityHeaderControl {
+  readonly kind: ActivityHeaderControlKind;
+  readonly index: number;
+  readonly element: HTMLButtonElement;
+}
+
+interface ActivityCapturedIntrinsic {
+  readonly isCurrent: () => boolean;
+}
+
+interface ActivityCapturedGetter<Value> extends ActivityCapturedIntrinsic {
+  readonly read: (target: object) => Value;
+}
+
+interface ActivityCapturedMethod<Args extends readonly unknown[], Result>
+  extends ActivityCapturedIntrinsic {
+  readonly invoke: (target: object, ...args: Args) => Result;
+}
+
+interface ActivityTrustedGetter extends ActivityCapturedIntrinsic {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+}
+
+/**
+ * Owner-realm event and focus intrinsics captured when the header is published. `isCurrent`
+ * retains its history: one replaced descriptor retires this authority for good, so restoring
+ * the descriptor cannot revive it — only a fresh publication captures a clean authority.
+ */
+interface ActivityKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof globalThis.Event;
+  readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
+  readonly Node: typeof globalThis.Node;
+  readonly eventType: ActivityCapturedGetter<string>;
+  readonly eventTarget: ActivityCapturedGetter<EventTarget | null>;
+  readonly eventCurrentTarget: ActivityCapturedGetter<EventTarget | null>;
+  readonly eventPhase: ActivityCapturedGetter<number>;
+  readonly eventBubbles: ActivityCapturedGetter<boolean>;
+  readonly eventCancelable: ActivityCapturedGetter<boolean>;
+  readonly eventDefaultPrevented: ActivityCapturedGetter<boolean>;
+  readonly eventCancelBubble: ActivityCapturedGetter<boolean>;
+  readonly eventPath: ActivityCapturedMethod<readonly [], EventTarget[]>;
+  readonly eventPreventDefault: ActivityCapturedMethod<readonly [], void>;
+  readonly eventView: ActivityCapturedGetter<Window | null>;
+  readonly key: ActivityCapturedGetter<string>;
+  readonly code: ActivityCapturedGetter<string>;
+  readonly repeat: ActivityCapturedGetter<boolean>;
+  readonly composing: ActivityCapturedGetter<boolean>;
+  readonly altKey: ActivityCapturedGetter<boolean>;
+  readonly ctrlKey: ActivityCapturedGetter<boolean>;
+  readonly metaKey: ActivityCapturedGetter<boolean>;
+  readonly shiftKey: ActivityCapturedGetter<boolean>;
+  readonly activeElement: ActivityCapturedGetter<Element | null>;
+  readonly documentView: ActivityCapturedGetter<Window | null>;
+  readonly focus: ActivityCapturedMethod<readonly [FocusOptions?], void>;
+  readonly listen: ActivityCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
+  readonly unlisten: ActivityCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
+  readonly trusted: ActivityTrustedGetter;
+  readonly isCurrent: () => boolean;
+}
+
+type ActivityHeaderKeyPhase = "capture" | "bubble";
+
+interface ActivityHeaderKeyFacts {
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly key: ActivityHeaderNavigationKey;
+  readonly delegationTarget: Node;
+}
+
+/**
+ * The live native keydown as the publication's own owner-realm capture listener first saw it,
+ * before any other listener could reach it.
+ */
+interface ActivityNativeKeySnapshot {
+  readonly event: globalThis.KeyboardEvent;
+  readonly publication: ActivityPublication;
+  readonly control: ActivityHeaderControl;
+  readonly key: ActivityHeaderNavigationKey;
+  readonly code: string;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly view: Window | null;
+}
+
+/**
+ * Provenance ledger for one native keydown. Only React's own capture and bubble deliveries at the
+ * delegation root can fill it, and the panel crossing has to separate them; anything else — a
+ * fabricated wrapper handed to a control handler by an earlier native listener, a replay, a crossed
+ * control, a partially staged pair — poisons the ledger so the whole dispatch does no work.
+ */
+interface ActivityNativeKeyDelivery {
+  readonly snapshot: ActivityNativeKeySnapshot;
+  delegationTarget: Node | null;
+  crossedPanel: boolean;
+  captureInvalid: boolean;
+  captureRootCount: number;
+  captureRootEvent: ReactKeyboardEvent<HTMLElement> | null;
+  captureCount: number;
+  captureEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
+  bubbleInvalid: boolean;
+  bubbleCount: number;
+  bubbleEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
+  bubbleRootCount: number;
+  bubbleRootEvent: ReactKeyboardEvent<HTMLElement> | null;
+}
+
 interface ActivityPublication {
   readonly identity: symbol;
   readonly presentation: ActivityPresentation;
   readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly panel: HTMLElement;
+  readonly header: HTMLDivElement;
+  readonly headerControls: readonly ActivityHeaderControl[];
+  readonly keyboard: ActivityKeyboardAuthority | null;
   readonly dom: ActivityDomSnapshot;
   readonly placement: ActivityPlacement;
   readonly retire: () => boolean;
@@ -129,11 +262,38 @@ interface ActivityPublicationSet {
   readonly close: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly retry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly loadMore: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly navigateFromRefresh: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly navigateFromClose: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly navigateCaptureFromRefresh: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly navigateCaptureFromClose: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly navigateCaptureFromHeader: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly navigateFromHeader: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
 }
 
 interface ActivityPublicationRuntime {
   readonly publication: ActivityPublication;
   readonly publish: () => boolean;
+  readonly stageHeaderKey: (
+    kind: ActivityHeaderControlKind,
+    phase: ActivityHeaderKeyPhase,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly stageHeaderRootKey: (
+    phase: ActivityHeaderKeyPhase,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly noteRef: (
@@ -205,6 +365,7 @@ class ActivityPublicationCoordinator {
   #claimedPublications = new WeakSet<ActivityPublication>();
   #claimedActions = new WeakSet<ActivityAction>();
   #claimedEvents = new WeakSet<object>();
+  #claimedControls = new WeakMap<ActivityPublication, Set<HTMLElement>>();
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -272,15 +433,19 @@ class ActivityPublicationCoordinator {
     visit: ActivityVisit,
     publication: ActivityPublication,
     action: ActivityAction,
-    event: object,
+    events: readonly object[],
     nativeEvent: Event,
+    controls: readonly HTMLElement[] = [],
   ) {
+    const claimedControls = this.#claimedControls.get(publication);
     return (
       this.#claimedVisits.get(visit) === publication ||
       this.#claimedPublications.has(publication) ||
       this.#claimedActions.has(action) ||
-      this.#claimedEvents.has(event) ||
-      this.#claimedEvents.has(nativeEvent)
+      events.some((event) => this.#claimedEvents.has(event)) ||
+      this.#claimedEvents.has(nativeEvent) ||
+      (claimedControls !== undefined &&
+        controls.some((control) => claimedControls.has(control)))
     );
   }
 
@@ -288,20 +453,25 @@ class ActivityPublicationCoordinator {
     visit: ActivityVisit,
     publication: ActivityPublication,
     action: ActivityAction,
-    event: object,
+    events: readonly object[],
     nativeEvent: Event,
+    controls: readonly HTMLElement[] = [],
   ) {
     if (
       !this.isCurrent(publication) ||
-      this.hasClaimed(visit, publication, action, event, nativeEvent)
+      this.hasClaimed(visit, publication, action, events, nativeEvent, controls)
     ) {
       return false;
     }
     this.#claimedVisits.set(visit, publication);
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(action);
-    this.#claimedEvents.add(event);
+    for (const event of events) this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
+    const claimedControls =
+      this.#claimedControls.get(publication) ?? new Set<HTMLElement>();
+    for (const control of controls) claimedControls.add(control);
+    this.#claimedControls.set(publication, claimedControls);
     return true;
   }
 }
@@ -898,6 +1068,554 @@ function replayAllowsActivityPublication(
   return exactReplay;
 }
 
+function activityDescriptorMatches(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureActivityGetter<Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): ActivityCapturedGetter<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const holder = owner;
+    const descriptor = getOwnPropertyDescriptor(holder, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (target: object) => apply(getter, target, []) as Value,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          activityDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(holder) as object | null;
+  }
+  return null;
+}
+
+function captureActivityMethod<Args extends readonly unknown[], Result>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): ActivityCapturedMethod<Args, Result> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const holder = owner;
+    const descriptor = getOwnPropertyDescriptor(holder, property);
+    if (descriptor) {
+      if (typeof descriptor.value !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        invoke: (target: object, ...args: Args) =>
+          apply(method, target, args) as Result,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          activityDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(holder) as object | null;
+  }
+  return null;
+}
+
+function captureActivityTrustedGetter(
+  ownerWindow: Window & typeof globalThis,
+): ActivityTrustedGetter | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("activity-header-trust-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function"
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get;
+  const matches = (event: object) =>
+    activityDescriptorMatches(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    read: (event: object) => apply(getter, event, []) as boolean,
+    matches,
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+/**
+ * The owner realm's own window for a document: `defaultView` read through the getter the realm
+ * published on the prototype rather than as a property of the document. An own `defaultView`
+ * installed on the document itself would otherwise substitute a structural stand-in for the exact
+ * window the document's own events propagate to, and every later owner-realm proof — the capture
+ * listener's target, the event path's terminus and `view` parity — would be measured against a
+ * window that never appears in a dispatch.
+ */
+function activityDocumentView(
+  document: Document,
+): (Window & typeof globalThis) | null {
+  try {
+    let owner: object | null = Object.getPrototypeOf(document) as object | null;
+    while (owner) {
+      const descriptor = Object.getOwnPropertyDescriptor(owner, "defaultView");
+      if (descriptor) {
+        const getter = descriptor.get;
+        if (typeof getter !== "function") return null;
+        const view: unknown = Reflect.apply(getter, document, []);
+        return view && typeof view === "object"
+          ? (view as Window & typeof globalThis)
+          : null;
+      }
+      owner = Object.getPrototypeOf(owner) as object | null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function captureActivityKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): ActivityKeyboardAuthority | null {
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const NodeConstructor = ownerWindow.Node;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const EventTargetConstructor = ownerWindow.EventTarget;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const htmlElementPrototype = HTMLElementConstructor.prototype;
+  const eventTargetPrototype = EventTargetConstructor.prototype;
+  const eventType = captureActivityGetter<string>(ownerWindow, eventPrototype, "type");
+  const eventTarget = captureActivityGetter<EventTarget | null>(ownerWindow, eventPrototype, "target");
+  const eventCurrentTarget = captureActivityGetter<EventTarget | null>(ownerWindow, eventPrototype, "currentTarget");
+  const eventPhase = captureActivityGetter<number>(ownerWindow, eventPrototype, "eventPhase");
+  const eventBubbles = captureActivityGetter<boolean>(ownerWindow, eventPrototype, "bubbles");
+  const eventCancelable = captureActivityGetter<boolean>(ownerWindow, eventPrototype, "cancelable");
+  const eventDefaultPrevented = captureActivityGetter<boolean>(ownerWindow, eventPrototype, "defaultPrevented");
+  const eventCancelBubble = captureActivityGetter<boolean>(ownerWindow, eventPrototype, "cancelBubble");
+  const eventPath = captureActivityMethod<readonly [], EventTarget[]>(ownerWindow, eventPrototype, "composedPath");
+  const eventPreventDefault = captureActivityMethod<readonly [], void>(ownerWindow, eventPrototype, "preventDefault");
+  const eventView = captureActivityGetter<Window | null>(ownerWindow, uiEventPrototype, "view");
+  const key = captureActivityGetter<string>(ownerWindow, keyboardPrototype, "key");
+  const code = captureActivityGetter<string>(ownerWindow, keyboardPrototype, "code");
+  const repeat = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "repeat");
+  const composing = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "isComposing");
+  const altKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "altKey");
+  const ctrlKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "ctrlKey");
+  const metaKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "metaKey");
+  const shiftKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "shiftKey");
+  const activeElement = captureActivityGetter<Element | null>(ownerWindow, documentPrototype, "activeElement");
+  const documentView = captureActivityGetter<Window | null>(ownerWindow, documentPrototype, "defaultView");
+  const focus = captureActivityMethod<readonly [FocusOptions?], void>(ownerWindow, htmlElementPrototype, "focus");
+  const listen = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "addEventListener");
+  const unlisten = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "removeEventListener");
+  const trusted = captureActivityTrustedGetter(ownerWindow);
+  if (
+    !eventType ||
+    !eventTarget ||
+    !eventCurrentTarget ||
+    !eventPhase ||
+    !eventBubbles ||
+    !eventCancelable ||
+    !eventDefaultPrevented ||
+    !eventCancelBubble ||
+    !eventPath ||
+    !eventPreventDefault ||
+    !eventView ||
+    !key ||
+    !code ||
+    !repeat ||
+    !composing ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !activeElement ||
+    !documentView ||
+    !focus ||
+    !listen ||
+    !unlisten ||
+    !trusted ||
+    documentView.read(ownerDocument) !== ownerWindow ||
+    !(ownerWindow instanceof EventTargetConstructor)
+  ) {
+    return null;
+  }
+  const captured: readonly ActivityCapturedIntrinsic[] = Object.freeze([
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventView,
+    key,
+    code,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    documentView,
+    focus,
+    listen,
+    unlisten,
+    trusted,
+  ]);
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerWindow.Event === EventConstructor &&
+      ownerWindow.UIEvent === UIEventConstructor &&
+      ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+      ownerWindow.Node === NodeConstructor &&
+      ownerWindow.Document === DocumentConstructor &&
+      ownerWindow.HTMLElement === HTMLElementConstructor &&
+      ownerWindow.EventTarget === EventTargetConstructor &&
+      EventConstructor.prototype === eventPrototype &&
+      UIEventConstructor.prototype === uiEventPrototype &&
+      KeyboardEventConstructor.prototype === keyboardPrototype &&
+      DocumentConstructor.prototype === documentPrototype &&
+      HTMLElementConstructor.prototype === htmlElementPrototype &&
+      EventTargetConstructor.prototype === eventTargetPrototype &&
+      captured.every((intrinsic) => intrinsic.isCurrent()) &&
+      documentView.read(ownerDocument) === ownerWindow;
+    return historyIsClean;
+  };
+  if (!isCurrent()) return null;
+  return Object.freeze({
+    ownerWindow,
+    Event: EventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Node: NodeConstructor,
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventView,
+    key,
+    code,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    documentView,
+    focus,
+    listen,
+    unlisten,
+    trusted,
+    isCurrent,
+  });
+}
+
+function isActivityHeaderNavigationKey(
+  key: string,
+): key is ActivityHeaderNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+/** Published header order, without wrapping: an absent or already focused destination is inert. */
+function activityHeaderDestination(
+  key: ActivityHeaderNavigationKey,
+  current: number,
+  count: number,
+): number | null {
+  if (current < 0 || current >= count) return null;
+  const destination =
+    key === "ArrowRight" || key === "ArrowDown"
+      ? current + 1
+      : key === "ArrowLeft" || key === "ArrowUp"
+        ? current - 1
+        : key === "Home"
+          ? 0
+          : count - 1;
+  if (destination < 0 || destination >= count || destination === current) {
+    return null;
+  }
+  return destination;
+}
+
+function activityHeaderControlsMatch(
+  published: readonly ActivityHeaderControl[],
+  current: readonly ActivityHeaderControl[],
+) {
+  return (
+    published.length === current.length &&
+    published.every((control, index) => {
+      const candidate = current[index];
+      return Boolean(
+        candidate &&
+          control.index === index &&
+          candidate.index === index &&
+          control.kind === candidate.kind &&
+          control.element === candidate.element,
+      );
+    })
+  );
+}
+
+function activityControlIsEnabled(element: HTMLButtonElement) {
+  if (
+    element.disabled ||
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (
+    let node: HTMLElement | null = element;
+    node;
+    node = node.parentElement
+  ) {
+    if (
+      node.hasAttribute("inert") ||
+      node.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The live native keydown still agrees, field for field, with the snapshot the publication's own
+ * capture listener took: nothing was replaced, prevented or stopped between the two readings.
+ */
+function activityNativeKeySnapshotMatches(
+  keyboard: ActivityKeyboardAuthority,
+  delivery: ActivityNativeKeyDelivery,
+) {
+  const { snapshot } = delivery;
+  const { event } = snapshot;
+  if (!keyboard.isCurrent()) return false;
+  try {
+    const path = keyboard.eventPath.invoke(event);
+    const view = keyboard.eventView.read(event);
+    return (
+      keyboard.trusted.matches(event) &&
+      keyboard.trusted.read(event) &&
+      keyboard.eventType.read(event) === "keydown" &&
+      keyboard.key.read(event) === snapshot.key &&
+      keyboard.code.read(event) === snapshot.code &&
+      keyboard.eventTarget.read(event) === snapshot.target &&
+      keyboard.eventBubbles.read(event) === snapshot.bubbles &&
+      keyboard.eventCancelable.read(event) === snapshot.cancelable &&
+      Object.is(view, snapshot.view) &&
+      !keyboard.eventDefaultPrevented.read(event) &&
+      !keyboard.eventCancelBubble.read(event) &&
+      !keyboard.repeat.read(event) &&
+      !keyboard.composing.read(event) &&
+      !keyboard.altKey.read(event) &&
+      !keyboard.ctrlKey.read(event) &&
+      !keyboard.metaKey.read(event) &&
+      !keyboard.shiftKey.read(event) &&
+      path.length === snapshot.path.length &&
+      path.every((entry, index) => entry === snapshot.path[index])
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** The React wrapper's own claim about which native event it carries, without trusting it. */
+function activityWrapperNativeEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+): object | null {
+  try {
+    const nativeEvent: unknown = event.nativeEvent;
+    return nativeEvent && typeof nativeEvent === "object" ? nativeEvent : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One genuine trusted React/native keydown pair on the exact focused header control, read through
+ * the publication's captured owner-realm intrinsics rather than the event's own properties. The
+ * native event has to be standing at the requested React delegation phase, so the returned
+ * delegation target is the node React itself was dispatching from.
+ */
+function exactActivityHeaderKey<Element extends HTMLElement>(
+  event: ReactKeyboardEvent<Element>,
+  publication: ActivityPublication,
+  source: HTMLButtonElement,
+  reactCurrentTarget: Element,
+  phase: ActivityHeaderKeyPhase,
+): ActivityHeaderKeyFacts | null {
+  const keyboard = publication.keyboard;
+  if (!event || typeof event !== "object" || !keyboard || !keyboard.isCurrent()) {
+    return null;
+  }
+  const nativeEvent = event.nativeEvent;
+  const reactEvent = event as ReactKeyboardEvent<Element> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  if (
+    !nativeEvent ||
+    typeof nativeEvent !== "object" ||
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    if (!isActivityHeaderNavigationKey(key)) return null;
+    const code = keyboard.code.read(nativeEvent);
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const currentTarget = keyboard.eventCurrentTarget.read(nativeEvent);
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const nativePhase = keyboard.eventPhase.read(nativeEvent);
+    const bubbles = keyboard.eventBubbles.read(nativeEvent);
+    const cancelable = keyboard.eventCancelable.read(nativeEvent);
+    const defaultPrevented = keyboard.eventDefaultPrevented.read(nativeEvent);
+    const cancelBubble = keyboard.eventCancelBubble.read(nativeEvent);
+    const trusted = keyboard.trusted.read(nativeEvent);
+    const repeat = keyboard.repeat.read(nativeEvent);
+    const composing = keyboard.composing.read(nativeEvent);
+    const altKey = keyboard.altKey.read(nativeEvent);
+    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
+    const metaKey = keyboard.metaKey.read(nativeEvent);
+    const shiftKey = keyboard.shiftKey.read(nativeEvent);
+    const nativeView = keyboard.eventView.read(nativeEvent);
+    return keyboard.eventType.read(nativeEvent) === "keydown" &&
+      nativePhase ===
+        (phase === "capture"
+          ? keyboard.Event.CAPTURING_PHASE
+          : keyboard.Event.BUBBLING_PHASE) &&
+      bubbles &&
+      cancelable &&
+      !defaultPrevented &&
+      !cancelBubble &&
+      trusted &&
+      !repeat &&
+      !composing &&
+      !altKey &&
+      !ctrlKey &&
+      !metaKey &&
+      !shiftKey &&
+      (nativeView === null || nativeView === keyboard.ownerWindow) &&
+      target === source &&
+      target instanceof keyboard.Node &&
+      target.ownerDocument === publication.ownerDocument &&
+      currentTarget instanceof keyboard.Node &&
+      (currentTarget === publication.ownerDocument ||
+        currentTarget.ownerDocument === publication.ownerDocument) &&
+      currentTarget.contains(publication.panel) &&
+      path[0] === source &&
+      path.filter((entry) => entry === source).length === 1 &&
+      path.includes(currentTarget) &&
+      path.includes(publication.header) &&
+      path.includes(publication.panel) &&
+      path[path.length - 1] === keyboard.ownerWindow &&
+      keyboard.activeElement.read(publication.ownerDocument) === source &&
+      event.type === "keydown" &&
+      event.currentTarget === reactCurrentTarget &&
+      event.target === target &&
+      event.nativeEvent === nativeEvent &&
+      event.key === key &&
+      event.code === code &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === bubbles &&
+      event.cancelable === cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.eventPhase === nativePhase &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, nativeView) &&
+      reactEvent._reactName === "onKeyDown" &&
+      typeof reactEvent.isDefaultPrevented === "function" &&
+      reactEvent.isDefaultPrevented() === defaultPrevented &&
+      typeof reactEvent.isPropagationStopped === "function" &&
+      reactEvent.isPropagationStopped() === cancelBubble &&
+      typeof reactEvent.persist === "function"
+      ? Object.freeze({ nativeEvent, key, delegationTarget: currentTarget })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function createActivityPublication({
   presentation,
   coordinator,
@@ -933,6 +1651,14 @@ function createActivityPublication({
     "load-more": Object.freeze({
       identity: Symbol("activity-load-more"),
       kind: "load-more",
+    }),
+    "navigate-refresh": Object.freeze({
+      identity: Symbol("activity-navigate-refresh"),
+      kind: "navigate-refresh",
+    }),
+    "navigate-close": Object.freeze({
+      identity: Symbol("activity-navigate-close"),
+      kind: "navigate-close",
     }),
   });
   const retireForElementChange = (
@@ -1016,6 +1742,28 @@ function createActivityPublication({
       current.loadMore(visit) === source.loadMore &&
       Boolean(source.loadMore) === presentation.loadingMore
     );
+  };
+
+  /** Header child index of a control in the published DOM: label, optional Refresh, then Close. */
+  const headerDomIndex = (kind: ActivityHeaderControlKind) =>
+    kind === "refresh" ? 1 : presentation.refreshAvailable ? 2 : 1;
+
+  /** Currently available and enabled header controls, in exact published DOM order. */
+  const currentHeaderControls = (): readonly ActivityHeaderControl[] | null => {
+    const closeElement = close.element();
+    const refreshElement = manualRefresh.element();
+    if (!closeElement) return null;
+    const controls: ActivityHeaderControl[] = [];
+    if (presentation.refreshAvailable && !presentation.refreshing) {
+      if (!refreshElement) return null;
+      controls.push({ kind: "refresh", index: 0, element: refreshElement });
+    }
+    controls.push({
+      kind: "close",
+      index: controls.length,
+      element: closeElement,
+    });
+    return Object.freeze(controls.map((control) => Object.freeze(control)));
   };
 
   const exactDomIsCurrent = () => {
@@ -1213,7 +1961,7 @@ function createActivityPublication({
   };
 
   const claim = (
-    kind: ActivityActionKind,
+    kind: ActivityClickActionKind,
     event: ReactMouseEvent<HTMLButtonElement>,
   ): ActivityPublication | null => {
     const runtime = currentRuntime;
@@ -1286,7 +2034,7 @@ function createActivityPublication({
         presentation.visit,
         publication,
         action,
-        event,
+        [event],
         nativeEvent,
       )
     ) {
@@ -1298,10 +2046,27 @@ function createActivityPublication({
   const createRuntime = (): ActivityPublicationRuntime | null => {
     type Retirement = "element" | "layout" | "other";
     const panelElement = panel.element();
+    const headerElement = header.element();
+    const ownerWindow = panelElement
+      ? activityDocumentView(panelElement.ownerDocument)
+      : null;
+    const headerControls = currentHeaderControls();
     const placement = panelElement
       ? captureActivityPlacement(panelElement)
       : null;
-    if (!panelElement || !placement) return null;
+    if (
+      !panelElement ||
+      !placement ||
+      !headerElement ||
+      !ownerWindow ||
+      !headerControls
+    ) {
+      return null;
+    }
+    const keyboard = captureActivityKeyboardAuthority(
+      panelElement.ownerDocument,
+      ownerWindow,
+    );
     const dom = snapshotActivityDom(panelElement);
     let retired = false;
     let retirement: Retirement | null = null;
@@ -1309,6 +2074,10 @@ function createActivityPublication({
     let invalidReplay = false;
     let replayRefs: ActivityRefReplay[] = [];
     let domGuard: ActivityDomGuard | null = null;
+    let listening = false;
+    const nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
+    const seenNativeKeys = new WeakSet<object>();
+    const nativeBubbleTargets = new Set<EventTarget>();
     const publishedDomMatches = () =>
       Boolean(
         domGuard &&
@@ -1319,10 +2088,25 @@ function createActivityPublication({
         activityPlacementMatches(panelElement, placement) &&
         activityDomMatches(dom)
       );
+    const removeListeners = () => {
+      if (!listening || !keyboard) return;
+      listening = false;
+      try {
+        keyboard.unlisten.invoke(ownerWindow, "keydown", captureNative, true);
+        keyboard.unlisten.invoke(panelElement, "keydown", crossNativePanel, false);
+        for (const target of nativeBubbleTargets) {
+          keyboard.unlisten.invoke(target, "keydown", finalizeNative, false);
+        }
+      } catch {
+        /* A replaced listener intrinsic cannot be undone; the retired publication stays inert. */
+      }
+      nativeBubbleTargets.clear();
+    };
     const retire = (reason: Retirement) => {
       if (retired) return false;
       retired = true;
       retirement = reason;
+      removeListeners();
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
       queueMicrotask(() => {
@@ -1334,6 +2118,11 @@ function createActivityPublication({
       identity: Symbol("activity-publication"),
       presentation,
       ownerDocument: panelElement.ownerDocument,
+      ownerWindow,
+      panel: panelElement,
+      header: headerElement,
+      headerControls,
+      keyboard,
       dom,
       placement,
       retire: () => retire("other"),
@@ -1357,6 +2146,476 @@ function createActivityPublication({
             (entry.detached && entry.reattached)) &&
           entry.owner.element() === entry.element,
       );
+
+    /**
+     * The publication's own owner-realm capture listener on the window: the first listener that can
+     * see a trusted header keydown, and the only place a delivery ledger is ever opened. One native
+     * event is snapshotted at most once, so a re-dispatched event can never open a second ledger.
+     */
+    function captureNative(nativeEvent: Event) {
+      if (
+        retired ||
+        !keyboard ||
+        !keyboard.isCurrent() ||
+        !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+        Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
+        seenNativeKeys.has(nativeEvent)
+      ) {
+        return;
+      }
+      seenNativeKeys.add(nativeEvent);
+      if (!coordinator.isCurrent(publication)) return;
+      try {
+        if (
+          !keyboard.trusted.matches(nativeEvent) ||
+          !keyboard.trusted.read(nativeEvent) ||
+          keyboard.eventType.read(nativeEvent) !== "keydown" ||
+          keyboard.eventCurrentTarget.read(nativeEvent) !== ownerWindow ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.CAPTURING_PHASE
+        ) {
+          return;
+        }
+        const key = keyboard.key.read(nativeEvent);
+        const target = keyboard.eventTarget.read(nativeEvent);
+        const control =
+          headerControls.find((entry) => entry.element === target) ?? null;
+        if (!isActivityHeaderNavigationKey(key) || !control) return;
+        const delivery: ActivityNativeKeyDelivery = {
+          snapshot: Object.freeze({
+            event: nativeEvent,
+            publication,
+            control,
+            key,
+            code: keyboard.code.read(nativeEvent),
+            target,
+            path: Object.freeze([...keyboard.eventPath.invoke(nativeEvent)]),
+            bubbles: keyboard.eventBubbles.read(nativeEvent),
+            cancelable: keyboard.eventCancelable.read(nativeEvent),
+            view: keyboard.eventView.read(nativeEvent),
+          }),
+          delegationTarget: null,
+          crossedPanel: false,
+          captureInvalid: false,
+          captureRootCount: 0,
+          captureRootEvent: null,
+          captureCount: 0,
+          captureEvent: null,
+          bubbleInvalid: false,
+          bubbleCount: 0,
+          bubbleEvent: null,
+          bubbleRootCount: 0,
+          bubbleRootEvent: null,
+        };
+        nativeDeliveries.set(nativeEvent, delivery);
+        queueMicrotask(() => {
+          queueMicrotask(() => {
+            if (nativeDeliveries.get(nativeEvent) === delivery) {
+              nativeDeliveries.delete(nativeEvent);
+            }
+          });
+        });
+      } catch {
+        nativeDeliveries.delete(nativeEvent);
+      }
+    }
+
+    /** The published panel's own bubble listener: proof the native event really left the header. */
+    function crossNativePanel(nativeEvent: Event) {
+      const delivery = nativeDeliveries.get(nativeEvent);
+      if (retired || !keyboard || !delivery) return;
+      if (delivery.snapshot.publication !== publication) return;
+      try {
+        if (
+          keyboard.eventCurrentTarget.read(nativeEvent) !== panelElement ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE
+        ) {
+          return;
+        }
+      } catch {
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.crossedPanel = true;
+      if (
+        delivery.captureInvalid ||
+        delivery.captureCount !== 1 ||
+        !delivery.captureEvent ||
+        !delivery.delegationTarget ||
+        !activityNativeKeySnapshotMatches(keyboard, delivery)
+      ) {
+        delivery.captureInvalid = true;
+      }
+    }
+
+    const listenOnDelegationTarget = (target: Node) => {
+      if (!keyboard || !listening) return false;
+      if (nativeBubbleTargets.has(target)) return true;
+      try {
+        keyboard.listen.invoke(target, "keydown", finalizeNative, false);
+      } catch {
+        return false;
+      }
+      nativeBubbleTargets.add(target);
+      return true;
+    };
+
+    const stageHeaderRootKey = (
+      phase: ActivityHeaderKeyPhase,
+      event: ReactKeyboardEvent<HTMLDivElement>,
+    ) => {
+      if (retired || !keyboard || !event || typeof event !== "object") return;
+      const carried = activityWrapperNativeEvent(event);
+      const delivery = carried ? nativeDeliveries.get(carried) : undefined;
+      if (!delivery || delivery.snapshot.publication !== publication) return;
+      const staged = delivery.snapshot;
+      const controls = currentHeaderControls();
+      const source =
+        controls?.find((control) => control.kind === staged.control.kind) ?? null;
+      const liveHeader = header.element();
+      const action =
+        actions[
+          staged.control.kind === "refresh"
+            ? "navigate-refresh"
+            : "navigate-close"
+        ];
+      const facts =
+        source && liveHeader
+          ? exactActivityHeaderKey(
+              event,
+              publication,
+              source.element,
+              liveHeader,
+              phase,
+            )
+          : null;
+      if (
+        !facts ||
+        !controls ||
+        !source ||
+        !liveHeader ||
+        liveHeader !== publication.header ||
+        source.index !== staged.control.index ||
+        source.element !== staged.control.element ||
+        !activityHeaderControlsMatch(publication.headerControls, controls) ||
+        !coordinator.isCurrent(publication) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !publication.publishedDomMatches()
+      ) {
+        if (phase === "capture") delivery.captureInvalid = true;
+        else delivery.bubbleInvalid = true;
+        return;
+      }
+      if (phase === "capture") {
+        if (
+          delivery.crossedPanel ||
+          delivery.captureInvalid ||
+          delivery.captureRootCount !== 0 ||
+          delivery.captureRootEvent !== null ||
+          delivery.captureCount !== 0 ||
+          delivery.captureEvent !== null ||
+          delivery.delegationTarget !== null ||
+          facts.delegationTarget === panelElement ||
+          !staged.path.includes(facts.delegationTarget) ||
+          coordinator.hasClaimed(
+            presentation.visit,
+            publication,
+            action,
+            [event],
+            facts.nativeEvent,
+            [source.element],
+          ) ||
+          !listenOnDelegationTarget(facts.delegationTarget)
+        ) {
+          delivery.captureInvalid = true;
+          return;
+        }
+        delivery.captureRootCount += 1;
+        delivery.captureRootEvent = event;
+        delivery.delegationTarget = facts.delegationTarget;
+        return;
+      }
+      const rootEvent: ReactKeyboardEvent<HTMLElement> = event;
+      if (
+        !delivery.delegationTarget ||
+        delivery.delegationTarget !== facts.delegationTarget ||
+        !delivery.crossedPanel ||
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureRootCount !== 1 ||
+        !delivery.captureRootEvent ||
+        delivery.captureCount !== 1 ||
+        !delivery.captureEvent ||
+        delivery.bubbleCount !== 1 ||
+        delivery.bubbleEvent !== rootEvent ||
+        delivery.bubbleRootCount !== 0 ||
+        delivery.bubbleRootEvent !== null ||
+        coordinator.hasClaimed(
+          presentation.visit,
+          publication,
+          action,
+          [delivery.captureRootEvent, event],
+          facts.nativeEvent,
+          [source.element],
+        )
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleRootCount += 1;
+      delivery.bubbleRootEvent = event;
+    };
+
+    /**
+     * Stages one React delivery of a header key. The header and control must receive the same
+     * capture wrapper and the same distinct bubble wrapper. This binds the committed callback
+     * chain as well as the native dispatch, so replacing a control callback cannot authenticate a
+     * fabricated wrapper by withholding React's genuine one.
+     */
+    const stageHeaderKey = (
+      kind: ActivityHeaderControlKind,
+      phase: ActivityHeaderKeyPhase,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      if (retired || !keyboard || !event || typeof event !== "object") return;
+      const controls = currentHeaderControls();
+      const owned = kind === "refresh" ? manualRefresh.element() : close.element();
+      const source = controls?.find((control) => control.kind === kind) ?? null;
+      const liveHeader = header.element();
+      const action =
+        actions[kind === "refresh" ? "navigate-refresh" : "navigate-close"];
+      if (
+        !controls ||
+        !source ||
+        !owned ||
+        !liveHeader ||
+        publication.presentation !== presentation ||
+        keyboard.ownerWindow !== publication.ownerWindow ||
+        keyboard.documentView.read(publication.ownerDocument) !==
+          publication.ownerWindow ||
+        liveHeader !== publication.header ||
+        source.element !== owned ||
+        !activityHeaderControlsMatch(publication.headerControls, controls) ||
+        !coordinator.isCurrent(publication) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !publication.publishedDomMatches()
+      ) {
+        return;
+      }
+      const facts = exactActivityHeaderKey(
+        event,
+        publication,
+        source.element,
+        source.element,
+        phase,
+      );
+      const carried = facts?.nativeEvent ?? activityWrapperNativeEvent(event);
+      const delivery = carried ? nativeDeliveries.get(carried) : undefined;
+      if (!delivery || delivery.snapshot.publication !== publication) return;
+      if (!facts) {
+        if (phase === "capture") delivery.captureInvalid = true;
+        else delivery.bubbleInvalid = true;
+        return;
+      }
+      const staged = delivery.snapshot;
+      const exactSource =
+        staged.key === facts.key &&
+        staged.control.kind === source.kind &&
+        staged.control.index === source.index &&
+        staged.control.element === source.element;
+      if (phase === "capture") {
+        if (
+          delivery.crossedPanel ||
+          delivery.captureInvalid ||
+          delivery.captureRootCount !== 1 ||
+          delivery.captureRootEvent !== event ||
+          delivery.captureCount !== 0 ||
+          delivery.captureEvent !== null ||
+          delivery.delegationTarget !== facts.delegationTarget ||
+          !exactSource ||
+          !activityNativeKeySnapshotMatches(keyboard, delivery) ||
+          coordinator.hasClaimed(
+            presentation.visit,
+            publication,
+            action,
+            [event],
+            facts.nativeEvent,
+            [source.element],
+          )
+        ) {
+          delivery.captureInvalid = true;
+          return;
+        }
+        delivery.captureCount += 1;
+        if (delivery.captureCount !== 1) {
+          delivery.captureInvalid = true;
+          return;
+        }
+        delivery.captureEvent = event;
+        return;
+      }
+      if (
+        !delivery.delegationTarget ||
+        delivery.delegationTarget !== facts.delegationTarget
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      const captureEvent = delivery.captureEvent;
+      if (
+        !delivery.crossedPanel ||
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureCount !== 1 ||
+        !captureEvent ||
+        captureEvent === event ||
+        delivery.bubbleEvent !== null ||
+        delivery.bubbleRootCount !== 0 ||
+        delivery.bubbleRootEvent !== null ||
+        !exactSource ||
+        !activityNativeKeySnapshotMatches(keyboard, delivery) ||
+        coordinator.hasClaimed(
+          presentation.visit,
+          publication,
+          action,
+          [captureEvent, event],
+          facts.nativeEvent,
+          [source.element],
+        )
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleCount += 1;
+      if (delivery.bubbleCount !== 1) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleEvent = event;
+    };
+
+    /**
+     * The publication's own bubble listener on the delegation root, registered while React was
+     * dispatching the capture pass and therefore invoked after React's own delivery. Nothing is
+     * prevented or focused until the publication, the movement, both exact wrapper identities, the
+     * native event, the source and the destination have all been claimed together.
+     */
+    function finalizeNative(nativeEvent: Event) {
+      const delivery = nativeDeliveries.get(nativeEvent);
+      if (retired || !keyboard || !delivery) return;
+      if (delivery.snapshot.publication !== publication) return;
+      const staged = delivery.snapshot;
+      const captureEvent = delivery.captureEvent;
+      const bubbleEvent = delivery.bubbleEvent;
+      const controls = currentHeaderControls();
+      const source =
+        controls?.find((control) => control.kind === staged.control.kind) ?? null;
+      const liveHeader = header.element();
+      const action =
+        actions[
+          staged.control.kind === "refresh"
+            ? "navigate-refresh"
+            : "navigate-close"
+        ];
+      try {
+        if (
+          keyboard.eventCurrentTarget.read(nativeEvent) !==
+            delivery.delegationTarget ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE ||
+          !delivery.crossedPanel ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          delivery.captureRootCount !== 1 ||
+          delivery.captureCount !== 1 ||
+          delivery.bubbleCount !== 1 ||
+          delivery.bubbleRootCount !== 1 ||
+          !delivery.captureRootEvent ||
+          !captureEvent ||
+          !bubbleEvent ||
+          !delivery.bubbleRootEvent ||
+          delivery.captureRootEvent !== captureEvent ||
+          delivery.bubbleRootEvent !== bubbleEvent ||
+          captureEvent === bubbleEvent ||
+          !controls ||
+          !source ||
+          !liveHeader ||
+          liveHeader !== publication.header ||
+          source.index !== staged.control.index ||
+          source.element !== staged.control.element ||
+          !activityHeaderControlsMatch(publication.headerControls, controls) ||
+          keyboard.activeElement.read(publication.ownerDocument) !==
+            source.element ||
+          !activityNativeKeySnapshotMatches(keyboard, delivery) ||
+          !coordinator.isCurrent(publication) ||
+          !factsAreCurrent() ||
+          !exactDomIsCurrent() ||
+          !publication.publishedDomMatches()
+        ) {
+          return;
+        }
+        const destinationIndex = activityHeaderDestination(
+          staged.key,
+          source.index,
+          controls.length,
+        );
+        const destination =
+          destinationIndex === null ? null : (controls[destinationIndex] ?? null);
+        if (
+          destinationIndex === null ||
+          !destination ||
+          destination.element === source.element ||
+          publication.headerControls[destinationIndex]?.element !==
+            destination.element ||
+          destination.element.ownerDocument !== publication.ownerDocument ||
+          !destination.element.isConnected ||
+          destination.element.parentElement !== liveHeader ||
+          liveHeader.children.item(headerDomIndex(destination.kind)) !==
+            destination.element ||
+          !activityControlIsEnabled(destination.element) ||
+          !coordinator.claim(
+            presentation.visit,
+            publication,
+            action,
+            [captureEvent, bubbleEvent],
+            nativeEvent,
+            [source.element, destination.element],
+          )
+        ) {
+          return;
+        }
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        nativeDeliveries.delete(nativeEvent);
+        keyboard.eventPreventDefault.invoke(nativeEvent);
+        if (keyboard.eventDefaultPrevented.read(nativeEvent)) {
+          keyboard.focus.invoke(destination.element, { preventScroll: true });
+        }
+      } catch {
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      requestPublicationSuccessor();
+    }
+
+    const attachListeners = () => {
+      if (!keyboard || !keyboard.isCurrent() || listening) return false;
+      listening = true;
+      try {
+        keyboard.listen.invoke(ownerWindow, "keydown", captureNative, true);
+        keyboard.listen.invoke(panelElement, "keydown", crossNativePanel, false);
+      } catch {
+        removeListeners();
+        return false;
+      }
+      return true;
+    };
+
     const runtime: ActivityPublicationRuntime = Object.freeze({
       publication,
       publish: () => {
@@ -1375,8 +2634,11 @@ function createActivityPublication({
           domGuard?.release();
           return false;
         }
+        attachListeners();
         return true;
       },
+      stageHeaderRootKey,
+      stageHeaderKey,
       retireForElement: () => {
         retire("element");
       },
@@ -1441,6 +2703,29 @@ function createActivityPublication({
           : null,
     });
     return runtime;
+  };
+
+  /**
+   * Moves focus between the current enabled header controls. Only the exact React capture and
+   * bubble deliveries React itself makes for one native dispatch may stage the movement; the
+   * publication's own listener on that delegation root finalizes it.
+   */
+  const navigate = (
+    kind: ActivityHeaderControlKind,
+    phase: ActivityHeaderKeyPhase,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.publication.isRetired()) return;
+    runtime.stageHeaderKey(kind, phase, event);
+  };
+  const navigateHeader = (
+    phase: ActivityHeaderKeyPhase,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.publication.isRetired()) return;
+    runtime.stageHeaderRootKey(phase, event);
   };
 
   return Object.freeze({
@@ -1518,6 +2803,30 @@ function createActivityPublication({
     loadMore: (event: ReactMouseEvent<HTMLButtonElement>) => {
       if (!claim("load-more", event) || !presentation.nextBefore) return;
       requestMore(presentation.visit, presentation.nextBefore);
+    },
+    navigateFromRefresh: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      navigate("refresh", "bubble", event);
+    },
+    navigateFromClose: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      navigate("close", "bubble", event);
+    },
+    navigateCaptureFromRefresh: (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      navigate("refresh", "capture", event);
+    },
+    navigateCaptureFromClose: (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      navigate("close", "capture", event);
+    },
+    navigateCaptureFromHeader: (
+      event: ReactKeyboardEvent<HTMLDivElement>,
+    ) => {
+      navigateHeader("capture", event);
+    },
+    navigateFromHeader: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      navigateHeader("bubble", event);
     },
   });
 }
@@ -1780,13 +3089,19 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
     close,
     retry,
     loadMore: requestMore,
+    navigateFromRefresh,
+    navigateFromClose,
+    navigateCaptureFromRefresh,
+    navigateCaptureFromClose,
+    navigateCaptureFromHeader,
+    navigateFromHeader,
   } = publicationSet;
 
   useLayoutEffect(() => establish(), [establish]);
 
   return (
     <aside ref={capturePanel} className="flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2" data-testid="activity-panel">
-      <div ref={captureHeader} className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2">
+      <div ref={captureHeader} className="flex h-12 items-center justify-between border-b border-line pl-4 pr-2" onKeyDownCapture={navigateCaptureFromHeader} onKeyDown={navigateFromHeader}>
         <span className="pane-label">Activity</span>
         {presentation.refreshAvailable && (
           <button
@@ -1794,6 +3109,8 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
             type="button"
             className="icon-btn ml-auto h-8 w-8"
             onClick={manualRefresh}
+            onKeyDownCapture={navigateCaptureFromRefresh}
+            onKeyDown={navigateFromRefresh}
             disabled={presentation.refreshing}
             aria-label={
               presentation.refreshing
@@ -1807,7 +3124,7 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
             />
           </button>
         )}
-        <button ref={captureClose} type="button" className="icon-btn h-8 w-8" onClick={close} aria-label="Close activity">
+        <button ref={captureClose} type="button" className="icon-btn h-8 w-8" onClick={close} onKeyDownCapture={navigateCaptureFromClose} onKeyDown={navigateFromClose} aria-label="Close activity">
           <X size={16} />
         </button>
       </div>
