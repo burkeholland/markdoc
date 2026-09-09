@@ -654,7 +654,6 @@ beforeEach(() => {
   controlled.sessionValue = { text: "# Status bar", tree: {} };
   controlled.themePreference = "system";
   controlled.themeSetter.mockReset();
-  useExactWindowListenerRealm();
 });
 
 afterEach(async () => {
@@ -768,6 +767,7 @@ describe("status bar Strict Mode controls", () => {
   ] as const)(
     "opens the %s menu from closed with %s and focuses %s once without actions or scroll",
     async (compact, layout, key, selector, label) => {
+      useExactWindowListenerRealm();
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
       const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
@@ -897,6 +897,8 @@ describe("status bar Strict Mode controls", () => {
 });
 
 describe("status bar directional menu authority", () => {
+  beforeEach(useExactWindowListenerRealm);
+
   it.each(["ArrowDown", "ArrowUp"] as const)(
     "rejects untrusted, modified, repeated, composing, malformed, unfocused, and crossed %s input",
     async (key) => {
@@ -1509,6 +1511,7 @@ describe("status bar nested StatsPopover reconciliation", () => {
   });
 
   it("accepts the split Escape close emitted by the browser", async () => {
+    useExactWindowListenerRealm();
     const current = callbacks();
     await renderStatus(statusProps(current));
     const trigger = screen.getByTestId("stats-button");
