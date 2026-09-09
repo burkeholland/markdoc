@@ -60,11 +60,10 @@ vi.mock("@/components/ui/primitives", async () => {
       }
       const child = children as React.ReactElement<{
         disabled?: boolean;
-        onKeyDown?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+        onKeyDownCapture?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
         onPointerDown?: (event: React.PointerEvent<HTMLButtonElement>) => void;
       }>;
       const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-        child.props.onKeyDown?.(event);
         onTriggerKeyDown?.(event);
         if (event.defaultPrevented || child.props.disabled) return;
         if (event.key === "Enter" || event.key === " ") {
@@ -81,7 +80,6 @@ vi.mock("@/components/ui/primitives", async () => {
         }
       };
       Object.assign(onKeyDown, {
-        captureHandler: child.props.onKeyDown,
         actionHandler: onTriggerKeyDown,
       });
       return React.cloneElement(child, {
@@ -321,17 +319,20 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
 }
 
 function headingKeyHandlers(element: HTMLButtonElement) {
+  const capture = reactHandler<HeadingKeyHandler>(
+    element,
+    "onKeyDownCapture",
+  );
   const handler = reactHandler<
     HeadingKeyHandler & {
-      captureHandler?: HeadingKeyHandler;
       actionHandler?: HeadingKeyHandler;
     }
   >(element, "onKeyDown");
-  if (!handler.captureHandler || !handler.actionHandler) {
+  if (!handler.actionHandler) {
     throw new Error("Text style did not retain its cross-boundary key handlers");
   }
   return {
-    capture: handler.captureHandler,
+    capture,
     action: handler.actionHandler,
   };
 }
@@ -750,10 +751,16 @@ function dispatchHeadingKey(
   return event;
 }
 
-function dispatchHeadingKeyWithHandler(
+function dispatchHeadingKeyWithHandlers(
   trigger: HTMLButtonElement,
   event: KeyboardEvent,
-  onKeyDown: HeadingKeyHandler,
+  {
+    capture,
+    bubble,
+  }: {
+    capture: HeadingKeyHandler;
+    bubble: HeadingKeyHandler;
+  },
 ) {
   const propsKey = Object.keys(trigger).find((key) =>
     key.startsWith("__reactProps$"),
@@ -766,7 +773,11 @@ function dispatchHeadingKeyWithHandler(
     Record<string, unknown>
   >;
   const props = properties[propsKey];
-  const replacement = { ...props, onKeyDown };
+  const replacement = {
+    ...props,
+    onKeyDownCapture: capture,
+    onKeyDown: bubble,
+  };
   properties[propsKey] = replacement;
   try {
     act(() => {
@@ -917,27 +928,33 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
 
-    dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
-      const prototype = Object.getPrototypeOf(reactEvent);
-      const constructor = prototype?.constructor;
-      if (typeof constructor !== "function") {
-        throw new Error("Synthetic event had no constructor");
-      }
-      const descriptor = Object.getOwnPropertyDescriptor(constructor, "name");
-      if (!descriptor?.configurable) {
-        throw new Error("Synthetic constructor name was not configurable");
-      }
-      Object.defineProperty(constructor, "name", {
-        ...descriptor,
-        value: "a",
+    let constructor: Function | null = null;
+    let descriptor: PropertyDescriptor | null = null;
+    try {
+      dispatchHeadingKeyWithHandlers(trigger, event, {
+        capture: (reactEvent) => {
+          const prototype = Object.getPrototypeOf(reactEvent);
+          constructor = prototype?.constructor;
+          if (typeof constructor !== "function") {
+            throw new Error("Synthetic event had no constructor");
+          }
+          descriptor = Object.getOwnPropertyDescriptor(constructor, "name") ?? null;
+          if (!descriptor?.configurable) {
+            throw new Error("Synthetic constructor name was not configurable");
+          }
+          Object.defineProperty(constructor, "name", {
+            ...descriptor,
+            value: "a",
+          });
+          handlers.capture(reactEvent);
+        },
+        bubble: handlers.action,
       });
-      try {
-        handlers.capture(reactEvent);
-        handlers.action(reactEvent);
-      } finally {
+    } finally {
+      if (constructor && descriptor) {
         Object.defineProperty(constructor, "name", descriptor);
       }
-    });
+    }
 
     expect(event.defaultPrevented).toBe(true);
     expect(textStyle()).toHaveAttribute("aria-expanded", "true");
@@ -1228,8 +1245,9 @@ describe("Toolbar Text style trusted arrows", () => {
     focus.mockClear();
     preventDefault.mockClear();
     const captureOnly = headingKeyEvent(trigger, "ArrowDown");
-    dispatchHeadingKeyWithHandler(trigger, captureOnly, (event) => {
-      handlers.capture(event);
+    dispatchHeadingKeyWithHandlers(trigger, captureOnly, {
+      capture: handlers.capture,
+      bubble: () => undefined,
     });
     expect(captureOnly.defaultPrevented).toBe(false);
     expect(preventDefault).not.toHaveBeenCalled();
@@ -1237,8 +1255,9 @@ describe("Toolbar Text style trusted arrows", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     const bubbleOnly = headingKeyEvent(trigger, "ArrowDown");
-    dispatchHeadingKeyWithHandler(trigger, bubbleOnly, (event) => {
-      handlers.action(event);
+    dispatchHeadingKeyWithHandlers(trigger, bubbleOnly, {
+      capture: () => undefined,
+      bubble: handlers.action,
     });
     expect(bubbleOnly.defaultPrevented).toBe(false);
     expect(preventDefault).not.toHaveBeenCalled();
@@ -1279,9 +1298,9 @@ describe("Toolbar Text style trusted arrows", () => {
       preventDefault.mockClear();
       const event = headingKeyEvent(trigger, "ArrowDown");
       const crossedNative = headingKeyEvent(trigger, "ArrowDown");
-      dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
-        handlers.capture(reactEvent);
-        handlers.action(
+      dispatchHeadingKeyWithHandlers(trigger, event, {
+        capture: handlers.capture,
+        bubble: (reactEvent) => handlers.action(
           new Proxy(reactEvent, {
             get(target, current, receiver) {
               if (current !== property) {
@@ -1293,13 +1312,40 @@ describe("Toolbar Text style trusted arrows", () => {
               return foreign;
             },
           }),
-        );
+        ),
       });
       expect(event.defaultPrevented).toBe(false);
       expect(preventDefault).not.toHaveBeenCalled();
       expect(focus).not.toHaveBeenCalled();
       expect(textStyle()).toHaveAttribute("aria-expanded", "false");
     }
+
+    const captureAsBubble = headingKeyEvent(trigger, "ArrowDown");
+    let captureWrapper: Parameters<HeadingKeyHandler>[0] | null = null;
+    dispatchHeadingKeyWithHandlers(trigger, captureAsBubble, {
+      capture: (event) => {
+        captureWrapper = event;
+        handlers.capture(event);
+      },
+      bubble: () => {
+        if (captureWrapper) handlers.action(captureWrapper);
+      },
+    });
+    expect(captureAsBubble.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+
+    const bubbleAsCapture = headingKeyEvent(trigger, "ArrowDown");
+    dispatchHeadingKeyWithHandlers(trigger, bubbleAsCapture, {
+      capture: handlers.capture,
+      bubble: (event) => {
+        handlers.capture(event);
+        handlers.action(event);
+      },
+    });
+    expect(bubbleAsCapture.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
 
     const forged = headingKeyEvent(trigger, "ArrowDown");
     Object.defineProperty(forged, "key", {
@@ -1323,12 +1369,14 @@ describe("Toolbar Text style trusted arrows", () => {
       if (activeReactEvent) handlers.action(activeReactEvent);
       Reflect.apply(nativePreventDefault, this, []);
     });
-    dispatchHeadingKeyWithHandler(trigger, accepted, (event) => {
-      handlers.capture(event);
-      activeReactEvent = event;
-      handlers.action(event);
-      handlers.action(event);
-      activeReactEvent = null;
+    dispatchHeadingKeyWithHandlers(trigger, accepted, {
+      capture: handlers.capture,
+      bubble: (event) => {
+        activeReactEvent = event;
+        handlers.action(event);
+        handlers.action(event);
+        activeReactEvent = null;
+      },
     });
     expect(accepted.defaultPrevented).toBe(true);
     expect(preventDefault).toHaveBeenCalledOnce();
@@ -1385,9 +1433,9 @@ describe("Toolbar Text style trusted arrows", () => {
     focus.mockClear();
     const staleOpen = headingKeyEvent(trigger, "ArrowUp");
     const currentOpenHandlers = headingKeyHandlers(trigger);
-    dispatchHeadingKeyWithHandler(trigger, staleOpen, (event) => {
-      currentOpenHandlers.capture(event);
-      staleClosedHandlers.action(event);
+    dispatchHeadingKeyWithHandlers(trigger, staleOpen, {
+      capture: currentOpenHandlers.capture,
+      bubble: staleClosedHandlers.action,
     });
     expect(staleOpen.defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
@@ -1494,10 +1542,12 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
 
-    dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
-      handlers.capture(reactEvent);
-      ref(null);
-      handlers.action(reactEvent);
+    dispatchHeadingKeyWithHandlers(trigger, event, {
+      capture: handlers.capture,
+      bubble: (reactEvent) => {
+        ref(null);
+        handlers.action(reactEvent);
+      },
     });
     expect(event.defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();

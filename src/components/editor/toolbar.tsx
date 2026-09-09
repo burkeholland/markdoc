@@ -200,6 +200,7 @@ interface ToolbarKeyboardIntrinsics {
   readonly ownerWindow: Window & typeof globalThis;
   readonly keyboardPrototype: object;
   readonly objectPrototype: object;
+  readonly capturingPhase: number;
   readonly bubblingPhase: number;
   readonly apply: typeof Reflect.apply;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
@@ -271,7 +272,6 @@ interface HeadingKeyPublication {
   readonly reactEvent: KeyboardEvent<HTMLButtonElement>;
   readonly nativeEvent: globalThis.KeyboardEvent;
   readonly snapshot: ToolbarKeyboardSnapshot;
-  readonly preventDefault: KeyboardEvent<HTMLButtonElement>["preventDefault"];
 }
 
 interface HeadingCloseVisit {
@@ -694,6 +694,7 @@ function captureToolbarKeyboardIntrinsics(
     ownerWindow,
     keyboardPrototype,
     objectPrototype,
+    capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
     apply,
     getPrototypeOf,
@@ -798,15 +799,13 @@ function toolbarKeyboardPathMatches(
   );
 }
 
-function toolbarKeyboardSnapshotsMatch(
+function toolbarKeyboardFactsMatch(
   captured: ToolbarKeyboardSnapshot,
   current: ToolbarKeyboardSnapshot,
 ): boolean {
   return (
     captured.type === current.type &&
     captured.target === current.target &&
-    captured.currentTarget === current.currentTarget &&
-    captured.eventPhase === current.eventPhase &&
     captured.bubbles === current.bubbles &&
     captured.cancelable === current.cancelable &&
     captured.defaultPrevented === current.defaultPrevented &&
@@ -1326,12 +1325,18 @@ function createToolbarPublication({
     consumed = true;
     return true;
   };
-  const claimHeadingKey = (event: object, nativeEvent: Event) => {
+  const claimHeadingKey = (
+    captureEvent: object,
+    event: object,
+    nativeEvent: Event,
+  ) => {
     const publication = identity.current;
     if (
       !publication ||
+      captureEvent === event ||
       claimedHeadingPublications.has(publication) ||
       claimed.has(headingKeyAction) ||
+      claimedReactEvents.has(captureEvent) ||
       claimedReactEvents.has(event) ||
       claimedEvents.has(nativeEvent)
     ) {
@@ -1339,6 +1344,7 @@ function createToolbarPublication({
     }
     claimedHeadingPublications.add(publication);
     claimed.add(headingKeyAction);
+    claimedReactEvents.add(captureEvent);
     claimedReactEvents.add(event);
     claimedEvents.add(nativeEvent);
     consumed = true;
@@ -2073,7 +2079,6 @@ function createToolbarPublication({
       keyboard && nativeEvent
         ? readToolbarKeyboardEvent(nativeEvent, keyboard)
         : null;
-    const preventDefault = event.preventDefault;
     if (
       !source ||
       !keyboard ||
@@ -2084,7 +2089,7 @@ function createToolbarPublication({
       !headingReactEventMatches(event, nativeEvent, snapshot, trigger) ||
       snapshot.target !== trigger ||
       snapshot.currentTarget === null ||
-      snapshot.eventPhase !== keyboard.bubblingPhase ||
+      snapshot.eventPhase !== keyboard.capturingPhase ||
       !snapshot.bubbles ||
       !snapshot.cancelable ||
       snapshot.defaultPrevented ||
@@ -2111,7 +2116,6 @@ function createToolbarPublication({
         trigger.ownerDocument,
         [],
       ) !== trigger ||
-      typeof preventDefault !== "function" ||
       !keyboard.isCurrent()
     ) {
       if (keyboard && !keyboard.isCurrent()) retire("other");
@@ -2122,7 +2126,6 @@ function createToolbarPublication({
       reactEvent: event,
       nativeEvent,
       snapshot,
-      preventDefault,
     });
   };
   const onHeadingKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -2149,6 +2152,7 @@ function createToolbarPublication({
           ? headingItems.at(-1)
           : null;
     const destinationElement = destination?.control.element();
+    const preventDefault = event.preventDefault;
     if (keyboard && !keyboard.isCurrent()) {
       retire("other");
       return;
@@ -2160,10 +2164,9 @@ function createToolbarPublication({
       !trigger ||
       !captured ||
       captured.source !== identity.current ||
-      captured.reactEvent !== event ||
+      captured.reactEvent === event ||
       captured.nativeEvent !== nativeEvent ||
-      captured.preventDefault !== event.preventDefault ||
-      !toolbarKeyboardSnapshotsMatch(captured.snapshot, snapshot) ||
+      !toolbarKeyboardFactsMatch(captured.snapshot, snapshot) ||
       active.current !== identity.current ||
       !ownsControl(buttons.heading) ||
       (authority.headingOpen &&
@@ -2198,14 +2201,15 @@ function createToolbarPublication({
         trigger.ownerDocument,
         [],
       ) !== trigger ||
+      typeof preventDefault !== "function" ||
       !keyboard.isCurrent() ||
-      !claimHeadingKey(event, nativeEvent) ||
+      !claimHeadingKey(captured.reactEvent, event, nativeEvent) ||
       !ownsControl(buttons.heading)
     ) {
       if (keyboard && !keyboard.isCurrent()) retire("other");
       return;
     }
-    keyboard.apply(captured.preventDefault, event, []);
+    keyboard.apply(preventDefault, event, []);
     if (!keyboard.isCurrent()) {
       retire("other");
       return;
@@ -2526,7 +2530,7 @@ export const Toolbar = memo(function Toolbar({
               className="icon-btn w-auto gap-1 px-2.5 font-semibold"
               disabled={dis}
               onMouseDown={onHeadingMouseDown}
-              onKeyDown={onHeadingKeyCapture}
+              onKeyDownCapture={onHeadingKeyCapture}
               aria-label="Text style"
               data-testid="heading-menu"
             >
