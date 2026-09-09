@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, createElement, useEffect, useLayoutEffect, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { StrictMode, createElement, useEffect, useLayoutEffect, type KeyboardEvent as ReactKeyboardEvent, type RefCallback } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
@@ -225,6 +225,56 @@ function requestModeHandler(element: HTMLButtonElement) {
 
 function commentMenuHandler(element: HTMLButtonElement) {
   return reactProperty<CommentMenuKeyHandler>(element, "onKeyDown");
+}
+
+function commentMenuCaptureHandler(element: HTMLButtonElement) {
+  return reactProperty<CommentMenuKeyHandler>(element, "onKeyDownCapture");
+}
+
+function commentMenuItemRef(element: HTMLElement) {
+  const fiberKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactFiber$"),
+  );
+  if (!fiberKey) throw new Error("React fiber was not attached to the menu item");
+  const ref = (
+    element as unknown as Record<
+      string,
+      { ref?: RefCallback<HTMLElement> | null }
+    >
+  )[fiberKey]?.ref;
+  if (typeof ref !== "function") {
+    throw new Error("React did not publish the composed menu item ref");
+  }
+  return ref;
+}
+
+function fabricatedCommentMenuWrapper(
+  element: HTMLButtonElement,
+  nativeEvent: KeyboardEvent,
+) {
+  return {
+    _reactName: "onKeyDown",
+    type: nativeEvent.type,
+    nativeEvent,
+    target: element,
+    currentTarget: element,
+    key: nativeEvent.key,
+    code: nativeEvent.code,
+    eventPhase: nativeEvent.eventPhase,
+    repeat: nativeEvent.repeat,
+    altKey: nativeEvent.altKey,
+    ctrlKey: nativeEvent.ctrlKey,
+    metaKey: nativeEvent.metaKey,
+    shiftKey: nativeEvent.shiftKey,
+    bubbles: nativeEvent.bubbles,
+    cancelable: nativeEvent.cancelable,
+    defaultPrevented: nativeEvent.defaultPrevented,
+    isTrusted: nativeEvent.isTrusted,
+    view: nativeEvent.view,
+    isDefaultPrevented: () => nativeEvent.defaultPrevented,
+    isPropagationStopped: () => nativeEvent.cancelBubble,
+    persist: () => undefined,
+  } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
 }
 
 interface CapturedReviewMouseEvent {
@@ -3071,6 +3121,10 @@ describe("CommentsPanel", () => {
     }[] = [];
     const directSessions: CollabSession[] = [];
 
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockClear();
+    });
+
     const mountMenus = async ({
       moderator = false,
       role = "owner",
@@ -3198,6 +3252,93 @@ describe("CommentsPanel", () => {
       },
     );
 
+    it.each(["Comment actions", "Reply actions"] as const)(
+      "authenticates distinct real capture and bubble wrappers for %s once",
+      async (name) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const view = await mountMenus();
+        const trigger = view.trigger(name);
+        const capture = commentMenuCaptureHandler(trigger);
+        const bubble = commentMenuHandler(trigger);
+        const captures: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+        const bubbles: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+        const restore = replaceReactProperties(trigger, {
+          onKeyDownCapture: (
+            event: ReactKeyboardEvent<HTMLButtonElement>,
+          ) => {
+            captures.push(event);
+            capture(event);
+          },
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+            bubbles.push(event);
+            bubble(event);
+          },
+        });
+        trigger.focus();
+        focus.mockClear();
+        const nativeEvent = commentMenuKeyboardEvent(trigger, "ArrowDown");
+        const currentTargetGetter = Object.getOwnPropertyDescriptor(
+          Event.prototype,
+          "currentTarget",
+        )?.get;
+        const composedPath = Event.prototype.composedPath;
+        if (!currentTargetGetter) {
+          throw new Error("Event.currentTarget has no intrinsic getter");
+        }
+        let nativeDelivery: {
+          event: Event;
+          receiver: EventTarget;
+          currentTarget: EventTarget | null;
+          terminal: EventTarget | undefined;
+        } | null = null;
+        const observeNativeReceiver = function (
+          this: EventTarget,
+          event: Event,
+        ) {
+          if (event !== nativeEvent) return;
+          nativeDelivery = {
+            event,
+            receiver: this,
+            currentTarget: Reflect.apply(
+              currentTargetGetter,
+              event,
+              [],
+            ) as EventTarget | null,
+            terminal: Reflect.apply(composedPath, event, []).at(-1),
+          };
+        };
+        window.addEventListener("keydown", observeNativeReceiver, true);
+
+        try {
+          act(() => trigger.dispatchEvent(nativeEvent));
+        } finally {
+          window.removeEventListener("keydown", observeNativeReceiver, true);
+        }
+        restore();
+
+        const item = await screen.findByRole("menuitem", { name: "Edit" });
+        if (!nativeDelivery) {
+          throw new Error("The genuine native window delivery was not observed");
+        }
+        expect(captures).toHaveLength(1);
+        expect(bubbles).toHaveLength(1);
+        expect(captures[0]).not.toBe(bubbles[0]);
+        expect(captures[0]!.nativeEvent).toBe(nativeEvent);
+        expect(bubbles[0]!.nativeEvent).toBe(nativeEvent);
+        expect(nativeDelivery.event).toBe(nativeEvent);
+        expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+        expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+        expect(nativeEvent.defaultPrevented).toBe(true);
+        expect(view.trigger(name)).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getAllByRole("menu")).toHaveLength(1);
+        expect(document.activeElement).toBe(item);
+        expect(
+          focus.mock.instances.filter((instance) => instance === item),
+        ).toHaveLength(1);
+        expect(api.documents.comment).not.toHaveBeenCalled();
+      },
+    );
+
     it.each([
       ["Comment actions", "ArrowDown", "Delete thread"],
       ["Comment actions", "ArrowUp", "Delete thread"],
@@ -3315,6 +3456,181 @@ describe("CommentsPanel", () => {
       frame.remove();
     });
 
+    it("rejects a fully shaped fabricated bubble wrapper during a genuine native dispatch", async () => {
+      const view = await mountMenus();
+      const trigger = view.trigger("Comment actions");
+      const bubble = commentMenuHandler(trigger);
+      trigger.focus();
+      const event = commentMenuKeyboardEvent(trigger, "ArrowDown");
+      trigger.addEventListener(
+        "keydown",
+        (nativeEvent) => {
+          bubble(
+            fabricatedCommentMenuWrapper(
+              trigger,
+              nativeEvent as KeyboardEvent,
+            ),
+          );
+          nativeEvent.stopPropagation();
+        },
+        { once: true },
+      );
+
+      act(() => trigger.dispatchEvent(event));
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      await act(async () => Promise.resolve());
+      trigger.focus();
+      act(() => commentMenuKey(trigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
+    it("requires both exact React dispatch phases before disclosure", async () => {
+      const view = await mountMenus();
+      const trigger = view.trigger("Comment actions");
+      trigger.focus();
+      const captureOnly = commentMenuKeyboardEvent(trigger, "ArrowDown");
+      trigger.addEventListener(
+        "keydown",
+        (event) => event.stopPropagation(),
+        { once: true },
+      );
+      act(() => trigger.dispatchEvent(captureOnly));
+      expect(captureOnly.defaultPrevented).toBe(false);
+
+      await act(async () => Promise.resolve());
+      const restore = replaceReactProperties(trigger, {
+        onKeyDownCapture: () => undefined,
+      });
+      const bubbleOnly = commentMenuKeyboardEvent(trigger, "ArrowDown");
+      act(() => trigger.dispatchEvent(bubbleOnly));
+      restore();
+
+      expect(bubbleOnly.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      trigger.focus();
+      act(() => commentMenuKey(trigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
+    it("rejects the same wrapper at capture and bubble before a clean successor", async () => {
+      const view = await mountMenus();
+      const trigger = view.trigger("Comment actions");
+      const capture = commentMenuCaptureHandler(trigger);
+      const bubble = commentMenuHandler(trigger);
+      const restore = replaceReactProperties(trigger, {
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          capture(event);
+          bubble(event);
+          event.stopPropagation();
+        },
+      });
+      trigger.focus();
+      const rejected = commentMenuKeyboardEvent(trigger, "ArrowDown");
+
+      act(() => trigger.dispatchEvent(rejected));
+      restore();
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      await act(async () => Promise.resolve());
+      trigger.focus();
+      act(() => commentMenuKey(trigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
+    it("rejects crossed capture and bubble wrappers before a clean successor", async () => {
+      const view = await mountMenus();
+      const trigger = view.trigger("Comment actions");
+      const capture = commentMenuCaptureHandler(trigger);
+      const bubble = commentMenuHandler(trigger);
+      const crossed = commentMenuKeyboardEvent(trigger, "ArrowDown");
+      let firstCapture = true;
+      const restore = replaceReactProperties(trigger, {
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          if (!firstCapture) return;
+          firstCapture = false;
+          capture(event);
+          event.stopPropagation();
+          trigger.dispatchEvent(crossed);
+        },
+        onKeyDown: bubble,
+      });
+      trigger.focus();
+      const source = commentMenuKeyboardEvent(trigger, "ArrowDown");
+
+      act(() => trigger.dispatchEvent(source));
+      restore();
+
+      expect(source.defaultPrevented).toBe(false);
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      await act(async () => Promise.resolve());
+      trigger.focus();
+      act(() => commentMenuKey(trigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
+    it("rejects a same-prototype owner-window path terminal with exact realm facts", async () => {
+      const nativePath = Event.prototype.composedPath;
+      const windowLike = Object.create(
+        Object.getPrototypeOf(window),
+      ) as Window & Record<string, unknown>;
+      Object.defineProperties(windowLike, {
+        document: { configurable: true, value: document },
+        window: { configurable: true, value: windowLike },
+        self: { configurable: true, value: windowLike },
+        Window: { configurable: true, value: window.Window },
+        Event: { configurable: true, value: window.Event },
+        KeyboardEvent: { configurable: true, value: window.KeyboardEvent },
+        Node: { configurable: true, value: window.Node },
+        Object: { configurable: true, value: window.Object },
+        Reflect: { configurable: true, value: window.Reflect },
+      });
+      expect(windowLike).toBeInstanceOf(window.Window);
+      expect(windowLike.document).toBe(document);
+      expect(windowLike.KeyboardEvent).toBe(window.KeyboardEvent);
+      const path = vi
+        .spyOn(Event.prototype, "composedPath")
+        .mockImplementation(function (this: Event) {
+          const actual = nativePath.call(this);
+          return actual.length >= 1
+            ? [...actual.slice(0, -1), windowLike]
+            : actual;
+        });
+      const stale = await mountMenus();
+      const trigger = stale.trigger("Comment actions");
+      trigger.focus();
+
+      const rejected = commentMenuKey(trigger, "ArrowDown");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(api.documents.comment).not.toHaveBeenCalled();
+      path.mockRestore();
+
+      const successor = await mountMenus();
+      const successorTrigger = successor.trigger("Comment actions");
+      successorTrigger.focus();
+      act(() => commentMenuKey(successorTrigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
     it.each([
       ["wrong key", { code: "KeyA", key: "a" }],
       ["wrong code", { code: "ArrowUp", key: "ArrowDown" }],
@@ -3422,35 +3738,110 @@ describe("CommentsPanel", () => {
     });
 
     it("does no work after cleanup and a clean instance recovers", async () => {
-      const stale = await mountMenus();
-      const staleTrigger = stale.trigger("Comment actions");
-      const staleHandler = commentMenuHandler(staleTrigger);
-      act(() => stale.root.unmount());
-      directViews.splice(
-        directViews.findIndex((candidate) => candidate.root === stale.root),
-        1,
+      const addEventListener = vi.spyOn(
+        EventTarget.prototype,
+        "addEventListener",
       );
-      stale.host.remove();
-      const afterCleanup = commentMenuKeyboardEvent(staleTrigger, "ArrowDown");
-      const fabricated = {
-        type: "keydown",
-        currentTarget: staleTrigger,
-        target: staleTrigger,
-        nativeEvent: afterCleanup,
-      } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
-
-      act(() => staleHandler(fabricated));
-
-      expect(afterCleanup.defaultPrevented).toBe(false);
-      expect(screen.queryByRole("menu")).toBeNull();
-
-      const clean = await mountMenus();
-      const cleanTrigger = clean.trigger("Comment actions");
-      cleanTrigger.focus();
-      act(() => commentMenuKey(cleanTrigger, "ArrowDown"));
-      expect(document.activeElement).toBe(
-        await screen.findByRole("menuitem", { name: "Edit" }),
+      const removeEventListener = vi.spyOn(
+        EventTarget.prototype,
+        "removeEventListener",
       );
+      try {
+        const stale = await mountMenus();
+        const staleTrigger = stale.trigger("Comment actions");
+        const staleCapture = commentMenuCaptureHandler(staleTrigger);
+        const staleHandler = commentMenuHandler(staleTrigger);
+        const windowKeyListeners = (
+          spy: typeof addEventListener | typeof removeEventListener,
+        ) =>
+          spy.mock.calls.flatMap((call, index) =>
+            spy.mock.contexts[index] === window &&
+            call[0] === "keydown" &&
+            call[2] === true &&
+            typeof call[1] === "function"
+              ? [call[1] as EventListener]
+              : [],
+          );
+        const added = windowKeyListeners(addEventListener);
+        const alreadyRemoved = windowKeyListeners(removeEventListener);
+        const staleListeners = added.filter(
+          (listener) => !alreadyRemoved.includes(listener),
+        );
+        expect(staleListeners.length).toBeGreaterThanOrEqual(2);
+        for (const listener of staleListeners) {
+          expect(
+            added.filter((candidate) => candidate === listener),
+          ).toHaveLength(1);
+        }
+
+        act(() => stale.root.unmount());
+        directViews.splice(
+          directViews.findIndex((candidate) => candidate.root === stale.root),
+          1,
+        );
+        stale.host.remove();
+        const afterCleanup = commentMenuKeyboardEvent(
+          staleTrigger,
+          "ArrowDown",
+        );
+        const fabricated = {
+          type: "keydown",
+          currentTarget: staleTrigger,
+          target: staleTrigger,
+          nativeEvent: afterCleanup,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+
+        act(() => staleHandler(fabricated));
+
+        expect(afterCleanup.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        const removed = windowKeyListeners(removeEventListener);
+        for (const listener of staleListeners) {
+          expect(
+            removed.filter((candidate) => candidate === listener),
+          ).toHaveLength(1);
+        }
+
+        const clean = await mountMenus();
+        const cleanTrigger = clean.trigger("Comment actions");
+        const restore = replaceReactProperties(cleanTrigger, {
+          onKeyDownCapture: staleCapture,
+          onKeyDown: staleHandler,
+        });
+        const replayStaleReceivers = function (
+          this: EventTarget,
+          event: Event,
+        ) {
+          staleListeners.forEach((listener) => listener.call(this, event));
+        };
+        window.addEventListener("keydown", replayStaleReceivers, true);
+        const staleReplay = commentMenuKeyboardEvent(
+          cleanTrigger,
+          "ArrowDown",
+        );
+        cleanTrigger.focus();
+        try {
+          act(() => cleanTrigger.dispatchEvent(staleReplay));
+        } finally {
+          window.removeEventListener(
+            "keydown",
+            replayStaleReceivers,
+            true,
+          );
+          restore();
+        }
+
+        expect(staleReplay.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        cleanTrigger.focus();
+        act(() => commentMenuKey(cleanTrigger, "ArrowDown"));
+        expect(document.activeElement).toBe(
+          await screen.findByRole("menuitem", { name: "Edit" }),
+        );
+      } finally {
+        addEventListener.mockRestore();
+        removeEventListener.mockRestore();
+      }
     });
 
     it("retires stale permission facts until a clean render successor", async () => {
@@ -3600,6 +3991,111 @@ describe("CommentsPanel", () => {
       },
     );
 
+    it("rejects a selector-compatible replacement item ref before prevention", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = await mountMenus();
+      const readComments = view.session.comments.list.bind(
+        view.session.comments,
+      );
+      let replaced = false;
+      vi.spyOn(view.session.comments, "list").mockImplementation(() => {
+        const item = document.querySelector<HTMLElement>(
+          '[role="menuitem"]',
+        );
+        if (item && !replaced) {
+          replaced = true;
+          const ref = commentMenuItemRef(item);
+          const replacement = item.cloneNode(true) as HTMLElement;
+          ref(replacement);
+          ref(item);
+        }
+        return readComments();
+      });
+      const trigger = view.trigger("Comment actions");
+      trigger.focus();
+      focus.mockClear();
+
+      const rejected = commentMenuKey(trigger, "ArrowDown");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+      expect(replaced).toBe(true);
+      expect(
+        focus.mock.instances.some(
+          (instance) =>
+            instance instanceof HTMLElement &&
+            instance.getAttribute("role") === "menuitem",
+        ),
+      ).toBe(false);
+      expect(api.documents.comment).not.toHaveBeenCalled();
+
+      vi.mocked(view.session.comments.list).mockRestore();
+      const successor = await mountMenus();
+      const successorTrigger = successor.trigger("Comment actions");
+      successorTrigger.focus();
+      act(() => commentMenuKey(successorTrigger, "ArrowDown"));
+      expect(document.activeElement).toBe(
+        await screen.findByRole("menuitem", { name: "Edit" }),
+      );
+    });
+
+    it.each(["replace-restore", "reorder-restore"] as const)(
+      "retains menu item %s history before prevention",
+      async (mutation) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const view = await mountMenus();
+        const readComments = view.session.comments.list.bind(
+          view.session.comments,
+        );
+        let mutated = false;
+        vi.spyOn(view.session.comments, "list").mockImplementation(() => {
+          const item = document.querySelector<HTMLElement>(
+            '[role="menuitem"]',
+          );
+          if (item && !mutated) {
+            mutated = true;
+            const parent = item.parentElement!;
+            const next = item.nextSibling;
+            if (mutation === "replace-restore") {
+              const replacement = item.cloneNode(true);
+              parent.replaceChild(replacement, item);
+              parent.replaceChild(item, replacement);
+            } else {
+              parent.append(item);
+              parent.insertBefore(item, next);
+            }
+          }
+          return readComments();
+        });
+        const trigger = view.trigger("Comment actions");
+        trigger.focus();
+        focus.mockClear();
+
+        const rejected = commentMenuKey(trigger, "ArrowUp");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+        expect(mutated).toBe(true);
+        expect(
+          focus.mock.instances.some(
+            (instance) =>
+              instance instanceof HTMLElement &&
+              instance.getAttribute("role") === "menuitem",
+          ),
+        ).toBe(false);
+        expect(api.documents.comment).not.toHaveBeenCalled();
+
+        vi.mocked(view.session.comments.list).mockRestore();
+        const successor = await mountMenus();
+        const successorTrigger = successor.trigger("Comment actions");
+        successorTrigger.focus();
+        act(() => commentMenuKey(successorTrigger, "ArrowUp"));
+        expect(document.activeElement).toBe(
+          await screen.findByRole("menuitem", { name: "Delete thread" }),
+        );
+      },
+    );
+
     it("retains portal mutation history through failed autofocus and a clean successor", async () => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const view = await mountMenus();
@@ -3621,7 +4117,7 @@ describe("CommentsPanel", () => {
 
       const rejected = commentMenuKey(trigger, "ArrowDown");
 
-      expect(rejected.defaultPrevented).toBe(true);
+      expect(rejected.defaultPrevented).toBe(false);
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
       await waitFor(() => expect(view.trigger("Comment actions")).toHaveFocus());
       expect(mutated).toBe(true);
