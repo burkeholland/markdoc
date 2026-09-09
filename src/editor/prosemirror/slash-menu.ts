@@ -637,20 +637,7 @@ function eventViewMatchesOwnerRealm(
   ownerDocument: Document,
   ownerWindow: Window & typeof globalThis,
 ): nativeView is Window & typeof globalThis {
-  if (!nativeView) return false;
-  const eventWindow = nativeView as Window & typeof globalThis;
-  try {
-    return (
-      eventWindow.document === ownerDocument &&
-      eventWindow.Event === ownerWindow.Event &&
-      eventWindow.UIEvent === ownerWindow.UIEvent &&
-      eventWindow.KeyboardEvent === ownerWindow.KeyboardEvent &&
-      eventWindow.Document === ownerWindow.Document &&
-      eventWindow.MutationObserver === ownerWindow.MutationObserver
-    );
-  } catch {
-    return false;
-  }
+  return nativeView === ownerWindow && ownerDocument.defaultView === ownerWindow;
 }
 
 function isHandledSlashKey(key: string): key is SlashKey {
