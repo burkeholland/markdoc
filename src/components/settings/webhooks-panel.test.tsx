@@ -2184,8 +2184,12 @@ describe("Settings → Webhooks: exact committed controls", () => {
       const iframe = document.createElement("iframe");
       const foreignForm = document.createElement("form");
       foreignRoot.append(iframe, foreignForm);
-      const foreignKeyboardEvent = iframe.contentWindow?.KeyboardEvent;
-      if (!foreignKeyboardEvent) throw new Error("The foreign document has no KeyboardEvent constructor");
+      const foreignWindow = iframe.contentWindow;
+      const foreignRealm = foreignWindow?.document.defaultView;
+      if (!foreignWindow || foreignRealm !== foreignWindow) {
+        throw new Error("The foreign document has no current window");
+      }
+      const foreignKeyboardEvent = foreignRealm.KeyboardEvent;
 
       const rejected: Array<{
         label: string;
@@ -2363,6 +2367,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
         parent.insertBefore(url, next);
       } else if (history === "replace and restore a control") {
         const replacement = url.cloneNode(true);
+        const ownerWindow = url.ownerDocument.defaultView;
+        if (
+          !ownerWindow ||
+          !(replacement instanceof ownerWindow.HTMLInputElement)
+        ) {
+          throw new Error("The cloned URL control was not an input");
+        }
         url.replaceWith(replacement);
         replacement.replaceWith(url);
       } else {
