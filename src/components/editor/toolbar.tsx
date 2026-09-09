@@ -853,7 +853,6 @@ function headingReactEventMatches(
       event.metaKey === snapshot.metaKey &&
       event.shiftKey === snapshot.shiftKey &&
       event.repeat === snapshot.repeat &&
-      event.isComposing === snapshot.isComposing &&
       Object.is(event.view, snapshot.view)
     );
   } catch {

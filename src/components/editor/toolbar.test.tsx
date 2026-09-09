@@ -1127,6 +1127,11 @@ describe("Toolbar Text style trusted arrows", () => {
     const f = fixture();
     strictRenderToolbar(f.props);
     let trigger = textStyle();
+    const composing = headingKeyEvent(trigger, "ArrowDown", {
+      isComposing: true,
+    });
+    expect(composing.isTrusted).toBe(true);
+    expect(composing.isComposing).toBe(true);
     const rejected = [
       headingKeyEvent(trigger, "PageDown"),
       headingKeyEvent(trigger, "ArrowDown", { ctrlKey: true }),
@@ -1134,7 +1139,7 @@ describe("Toolbar Text style trusted arrows", () => {
       headingKeyEvent(trigger, "ArrowDown", { metaKey: true }),
       headingKeyEvent(trigger, "ArrowDown", { shiftKey: true }),
       headingKeyEvent(trigger, "ArrowDown", { repeat: true }),
-      headingKeyEvent(trigger, "ArrowDown", { isComposing: true }),
+      composing,
       headingKeyEvent(trigger, "ArrowDown", { bubbles: false }),
       headingKeyEvent(trigger, "ArrowDown", { cancelable: false }),
       headingKeyEvent(trigger, "ArrowDown", {}, false),
