@@ -846,13 +846,7 @@ describe("status bar Strict Mode controls", () => {
       trigger.focus();
 
       fireEvent.keyDown(trigger, { key });
-      await expectFocusedMenuItem(
-        trigger,
-        key === "ArrowDown"
-          ? '[role="menuitemradio"]'
-          : '[role="menuitemcheckbox"]',
-        key === "ArrowDown" ? "Code and preview" : "Sync scrolling",
-      );
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
       fireEvent.keyDown(screen.getByTestId("status-menu-content"), {
         key: "Escape",
       });
@@ -970,7 +964,13 @@ describe("status bar directional menu authority", () => {
           trigger.dispatchEvent(valid);
           await Promise.resolve();
         });
-        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        await expectFocusedMenuItem(
+          trigger,
+          key === "ArrowDown"
+            ? '[role="menuitemradio"]'
+            : '[role="menuitemcheckbox"]',
+          key === "ArrowDown" ? "Code and preview" : "Sync scrolling",
+        );
         expect(
           preventDefault.mock.contexts.filter((context) => context === valid),
         ).toHaveLength(1);
