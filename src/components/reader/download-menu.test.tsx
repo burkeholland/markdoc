@@ -2,7 +2,6 @@
 import {
   StrictMode,
   useLayoutEffect,
-  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -232,9 +231,7 @@ function dispatchToggleKey(
 function dispatchToggleKeyWithHandler(
   element: HTMLButtonElement,
   event: KeyboardEvent,
-  onKeyDown: (
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) => void,
+  onKeyDown: (event: Parameters<ToggleKey>[0]) => void,
 ) {
   const propsKey = Object.keys(element).find((key) =>
     key.startsWith("__reactProps$"),
@@ -810,9 +807,7 @@ describe("DownloadMenu trusted toggle directions", () => {
     focus.mockClear();
     preventDefault.mockClear();
     const accepted = toggleKeyEvent(toggle, "ArrowUp");
-    let activeReactEvent:
-      | ReactKeyboardEvent<HTMLButtonElement>
-      | null = null;
+    let activeReactEvent: Parameters<ToggleKey>[0] | null = null;
     preventDefault.mockImplementation(function (this: Event) {
       if (activeReactEvent) handler(activeReactEvent);
       Reflect.apply(nativePreventDefault, this, []);

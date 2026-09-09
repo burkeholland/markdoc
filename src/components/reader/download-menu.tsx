@@ -1242,7 +1242,7 @@ function createDownloadPublication({
       event.metaKey !== snapshot.metaKey ||
       event.shiftKey !== snapshot.shiftKey ||
       event.repeat !== snapshot.repeat ||
-      event.view !== snapshot.view ||
+      !Object.is(event.view, snapshot.view) ||
       proof._reactName !== "onKeyDown" ||
       typeof event.isDefaultPrevented !== "function" ||
       event.isDefaultPrevented() ||
