@@ -59,6 +59,7 @@ type ActionFacts = Readonly<{
   route: string | null;
 }>;
 
+type CreateControlFacts = readonly [create: ActionFacts, cancel: ActionFacts];
 type ListOperationIntent = "refresh" | "retry";
 type ListRequestAuthority = Readonly<{ identity: symbol }>;
 type ListRequestCallback = (operation: ListOperation) => void;
@@ -188,6 +189,7 @@ type PanelPresentation = Readonly<{
   refresh: ActionFacts;
   create: ActionFacts | null;
   cancel: ActionFacts | null;
+  createControls: CreateControlFacts | null;
   retry: ActionFacts | null;
   copy: ActionFacts | null;
   copyLabel: string;
@@ -350,6 +352,18 @@ type FormKeyboardMethodAuthority<Method> = Readonly<{
   isCurrent: () => boolean;
 }>;
 
+type FormNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+type FormKeyboardFocus = (
+  this: HTMLElement,
+  options?: FocusOptions,
+) => void;
+
 type FormKeyboardTrustedAuthority = Readonly<{
   matches: (event: object) => boolean;
   read: (event: object) => boolean;
@@ -374,6 +388,7 @@ type FormKeyboardAuthority = Readonly<{
   activeElement: FormKeyboardNativeGetter;
   composedPath: Event["composedPath"];
   preventDefault: Event["preventDefault"];
+  focus: FormKeyboardFocus;
   trusted: FormKeyboardTrustedAuthority;
   apply: typeof Reflect.apply;
   prototypeOf: typeof Object.getPrototypeOf;
@@ -1377,6 +1392,15 @@ function actionFactsMatch(
         left.route === right.route;
 }
 
+function createControlsAreExact(presentation: PanelPresentation) {
+  const controls = presentation.createControls;
+  return controls === null
+    ? presentation.create === null && presentation.cancel === null
+    : controls.length === 2 &&
+        controls[0] === presentation.create &&
+        controls[1] === presentation.cancel;
+}
+
 function panelPresentationsMatch(
   left: PanelPresentation,
   right: PanelPresentation,
@@ -1403,6 +1427,9 @@ function panelPresentationsMatch(
     left.list.kind !== right.list.kind ||
     left.copyLabel !== right.copyLabel ||
     left.copied !== right.copied ||
+    !createControlsAreExact(left) ||
+    !createControlsAreExact(right) ||
+    (left.createControls === null) !== (right.createControls === null) ||
     !actionFactsMatch(left.add, right.add) ||
     !actionFactsMatch(left.refresh, right.refresh) ||
     !actionFactsMatch(left.create, right.create) ||
@@ -1718,13 +1745,19 @@ function captureFormKeyboardAuthority(
     eventPrototype,
     "preventDefault",
   );
+  const focus = captureFormKeyboardMethod<FormKeyboardFocus>(
+    getOwnPropertyDescriptor,
+    HTMLElementConstructor.prototype,
+    "focus",
+  );
   if (
     !eventGetters ||
     !keyboardGetters ||
     !uiGetters ||
     !documentGetters ||
     !composedPath ||
-    !preventDefault
+    !preventDefault ||
+    !focus
   ) {
     return null;
   }
@@ -1767,6 +1800,7 @@ function captureFormKeyboardAuthority(
         documentGetters.isCurrent() &&
         composedPath.isCurrent() &&
         preventDefault.isCurrent() &&
+        focus.isCurrent() &&
         trusted.isCurrent()
       );
     } catch {
@@ -1817,6 +1851,7 @@ function captureFormKeyboardAuthority(
     activeElement: documentGetters.getters.activeElement,
     composedPath: composedPath.method,
     preventDefault: preventDefault.method,
+    focus: focus.method,
     trusted,
     apply,
     prototypeOf,
@@ -1830,6 +1865,17 @@ function formKeyboardNativeValue<Value>(
   target: object,
 ): Value {
   return authority.apply(getter, target, []) as Value;
+}
+
+function isFormNavigationKey(key: string): key is FormNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
 }
 
 function captureFormKeyboardEvent(
@@ -1953,8 +1999,8 @@ function captureFormKeyboardEvent(
       !cancelable ||
       defaultPrevented ||
       cancelBubble ||
-      key !== "Escape" ||
-      code !== "Escape" ||
+      (key !== "Escape" && !isFormNavigationKey(key)) ||
+      code !== key ||
       repeat ||
       composing ||
       ctrlKey ||
@@ -2660,6 +2706,27 @@ export function WebhooksPanel() {
       createOperation === null &&
       rowOperations.size === 0 &&
       listOperation === null;
+    const createAction = adding
+      ? Object.freeze<ActionFacts>({
+          kind: "create",
+          eligible:
+            createOperation === null &&
+            url.trim().length > 0 &&
+            choices.length > 0,
+          route: "/api/webhooks",
+        })
+      : null;
+    const cancelAction = adding
+      ? Object.freeze<ActionFacts>({
+          kind: "cancel",
+          eligible: createOperation === null,
+          route: null,
+        })
+      : null;
+    const createControls =
+      createAction && cancelAction
+        ? Object.freeze([createAction, cancelAction] as const)
+        : null;
     return Object.freeze({
       identity: Symbol("webhooks-presentation"),
       revision: publicationRevision,
@@ -2687,16 +2754,9 @@ export function WebhooksPanel() {
           listOperationEligible,
         route: "/api/webhooks",
       }),
-      create: adding
-        ? Object.freeze({
-            kind: "create",
-            eligible: createOperation === null && url.trim().length > 0 && choices.length > 0,
-            route: "/api/webhooks",
-          })
-        : null,
-      cancel: adding
-        ? Object.freeze({ kind: "cancel", eligible: createOperation === null, route: null })
-        : null,
+      create: createAction,
+      cancel: cancelAction,
+      createControls,
       retry: listError
         ? Object.freeze({
             kind: "retry",
@@ -3149,6 +3209,10 @@ export function WebhooksPanel() {
       facts.actionError !== error ||
       facts.copyLabel !== copyLabel ||
       facts.copied !== copied ||
+      !createControlsAreExact(facts) ||
+      (facts.adding
+        ? facts.createControls === null
+        : facts.createControls !== null) ||
       !createdMatchesSnapshot(created, facts.created) ||
       (createOperation
         ? createOwner.current !== createOperation || createOperation.generation !== mountGeneration
@@ -3275,7 +3339,11 @@ export function WebhooksPanel() {
       return null;
     }
     const native = captureFormKeyboardEvent(authority, event.nativeEvent);
-    if (!native || !reactKeyboardEventMatches(event, authority, native)) {
+    if (
+      !native ||
+      native.key !== "Escape" ||
+      !reactKeyboardEventMatches(event, authority, native)
+    ) {
       return null;
     }
     publicationCoordinator.prepareControlClaim(candidate);
@@ -3298,6 +3366,124 @@ export function WebhooksPanel() {
       return null;
     }
     return Object.freeze({ authority, nativeEvent: native.event });
+  };
+
+  const claimPublishedCreateNavigation = (
+    candidate: PanelPublication,
+    event: ReactKeyboardEvent<HTMLFormElement>,
+  ): Readonly<{
+    authority: FormKeyboardAuthority;
+    nativeEvent: KeyboardEvent;
+    destination: HTMLButtonElement;
+  }> | null => {
+    const authority = candidate.keyboard;
+    const controls = candidate.presentation.createControls;
+    if (
+      !authority ||
+      !controls ||
+      !createControlsAreExact(candidate.presentation) ||
+      candidate.keyboardSuspended ||
+      candidate.keyboardReplay
+    ) {
+      return null;
+    }
+    const native = captureFormKeyboardEvent(authority, event.nativeEvent);
+    if (
+      !native ||
+      !isFormNavigationKey(native.key) ||
+      !reactKeyboardEventMatches(event, authority, native)
+    ) {
+      return null;
+    }
+    const owners = [candidate.create, candidate.cancel] as const;
+    const elements = [owners[0].element, owners[1].element] as const;
+    const sourceIndex = elements.findIndex(
+      (element) => element === native.target,
+    );
+    const controlIsEnabled = (index: number) => {
+      const action = controls[index];
+      const owner = owners[index];
+      const element = elements[index];
+      return Boolean(
+        action &&
+          owner &&
+          element &&
+          action.eligible &&
+          owner.element === element &&
+          element.isConnected &&
+          !element.disabled,
+      );
+    };
+    if (sourceIndex < 0 || !controlIsEnabled(sourceIndex)) return null;
+
+    let destinationIndex: number | null = null;
+    if (native.key === "ArrowLeft" || native.key === "ArrowUp") {
+      for (let index = sourceIndex - 1; index >= 0; index -= 1) {
+        if (controlIsEnabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    } else if (native.key === "ArrowRight" || native.key === "ArrowDown") {
+      for (let index = sourceIndex + 1; index < elements.length; index += 1) {
+        if (controlIsEnabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    } else if (native.key === "Home") {
+      destinationIndex = elements.findIndex((_, index) =>
+        controlIsEnabled(index));
+    } else {
+      for (let index = elements.length - 1; index >= 0; index -= 1) {
+        if (controlIsEnabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    }
+    if (
+      destinationIndex === null ||
+      destinationIndex < 0 ||
+      destinationIndex === sourceIndex
+    ) {
+      return null;
+    }
+    const source = elements[sourceIndex];
+    const destination = elements[destinationIndex];
+    if (!source || !destination || source === destination) return null;
+
+    publicationCoordinator.prepareControlClaim(candidate);
+    if (
+      candidate.keyboard !== authority ||
+      candidate.form.element !== authority.form ||
+      candidate.card.element !== authority.root ||
+      candidate.presentation.createControls !== controls ||
+      controls[0] !== candidate.presentation.create ||
+      controls[1] !== candidate.presentation.cancel ||
+      elements[0] !== candidate.create.element ||
+      elements[1] !== candidate.cancel.element ||
+      native.target !== source ||
+      !controlIsEnabled(sourceIndex) ||
+      !controlIsEnabled(destinationIndex) ||
+      !formKeyboardEventMatches(authority, native) ||
+      !reactKeyboardEventMatches(event, authority, native) ||
+      !ownsPanel(candidate) ||
+      !publicationCoordinator.claim(
+        candidate,
+        null,
+        controls,
+        event,
+        native.event,
+      )
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      authority,
+      nativeEvent: native.event,
+      destination,
+    });
   };
 
   useLayoutEffect(() => {
@@ -3402,6 +3588,24 @@ export function WebhooksPanel() {
           tabIndex={-1}
           aria-busy={presentation.createOperation !== null || undefined}
           onKeyDown={(event) => {
+            const movement = claimPublishedCreateNavigation(
+              publication,
+              event,
+            );
+            if (movement) {
+              movement.authority.apply(
+                movement.authority.preventDefault,
+                movement.nativeEvent,
+                [],
+              );
+              movement.authority.apply(
+                movement.authority.focus,
+                movement.destination,
+                [{ preventScroll: true }],
+              );
+              requestPublicationSuccessor();
+              return;
+            }
             const action = presentation.cancel;
             if (!action) return;
             const claim = claimPublishedEscape(publication, action, event);

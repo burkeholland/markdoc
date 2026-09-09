@@ -94,6 +94,13 @@ type ClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type InputChangeHandler = (event: ChangeEvent<HTMLInputElement>) => void;
 type SubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
 type KeyDownHandler = (event: ReactKeyboardEvent<HTMLFormElement>) => void;
+type CreateNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
 
 function setNativeProvenance(event: Event, target: EventTarget) {
   const path: EventTarget[] = [];
@@ -354,9 +361,10 @@ function createDispatchedKeyboardEvent(
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The keyboard target has no owner window");
+  const key = init.key ?? "Escape";
   const event = new ownerWindow.KeyboardEvent("keydown", {
-    key: "Escape",
-    code: "Escape",
+    key,
+    code: init.code ?? key,
     bubbles: true,
     cancelable: true,
     view: ownerWindow,
@@ -411,6 +419,30 @@ function dispatchKeyboardWithReactMutation(
   properties[propsKey] = wrapped;
   try {
     return dispatchKeyboardEvent(target, init, trusted);
+  } finally {
+    if (properties[propsKey] === wrapped) properties[propsKey] = props;
+  }
+}
+
+function dispatchKeyboardToHandler(
+  form: HTMLFormElement,
+  target: HTMLElement,
+  handler: KeyDownHandler,
+  init: KeyboardEventInit,
+) {
+  const propsKey = Object.keys(form).find((key) =>
+    key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the form");
+  const properties = form as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  if (!props) throw new Error("The form has no current React props");
+  const wrapped = { ...props, onKeyDown: handler };
+  properties[propsKey] = wrapped;
+  try {
+    return dispatchKeyboardEvent(target, init);
   } finally {
     if (properties[propsKey] === wrapped) properties[propsKey] = props;
   }
@@ -2900,6 +2932,582 @@ describe("Settings → Webhooks: exact committed controls", () => {
       expect(preventDefault).not.toHaveBeenCalled();
       expect(successorPreventDefault).toHaveBeenCalledTimes(1);
       expect(within(successor.host).queryByTestId("webhook-form")).toBeNull();
+    });
+  });
+
+  describe("Settings → Webhooks: create-control keyboard navigation", () => {
+    function trackCreateNavigationEffects(
+      ownerWindow: Window & typeof globalThis,
+    ) {
+      const nativePreventDefault =
+        ownerWindow.Event.prototype.preventDefault;
+      const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+      const focusCalls: Array<{
+        target: HTMLElement;
+        options: FocusOptions | undefined;
+      }> = [];
+      const preventDefault = vi
+        .spyOn(ownerWindow.Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          Reflect.apply(nativePreventDefault, this, []);
+        });
+      const focus = vi
+        .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+        .mockImplementation(function (
+          this: HTMLElement,
+          options?: FocusOptions,
+        ) {
+          focusCalls.push({ target: this, options });
+          Reflect.apply(
+            nativeFocus,
+            this,
+            options === undefined ? [] : [options],
+          );
+        });
+      const scrollTo = vi
+        .spyOn(ownerWindow, "scrollTo")
+        .mockImplementation(() => undefined);
+      const scrollBy = vi
+        .spyOn(ownerWindow, "scrollBy")
+        .mockImplementation(() => undefined);
+      return {
+        preventDefault,
+        focus,
+        focusCalls,
+        scrollTo,
+        scrollBy,
+      };
+    }
+
+    function navigationInit(key: CreateNavigationKey): KeyboardEventInit {
+      return { key, code: key };
+    }
+
+    it.each([
+      ["Create", "Cancel", "ArrowRight"],
+      ["Create", "Cancel", "ArrowDown"],
+      ["Create", "Cancel", "End"],
+      ["Cancel", "Create", "ArrowLeft"],
+      ["Cancel", "Create", "ArrowUp"],
+      ["Cancel", "Create", "Home"],
+    ] as const)(
+      "moves from %s to %s with %s exactly once and does no form work",
+      async (sourceName, destinationName, key) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          trackCreateNavigationEffects,
+        );
+        const effects = view.setup;
+        await within(view.host).findByTestId("webhooks-empty");
+        await settle();
+        fireEvent.click(within(view.host).getByTestId("webhook-add"));
+        fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+          target: { value: "https://receiver.example/keyboard" },
+        });
+        fireEvent.change(within(view.host).getByTestId("webhook-docs"), {
+          target: { value: "doc-keyboard" },
+        });
+        fireEvent.click(
+          within(view.host).getByTestId("webhook-event-content.changed"),
+        );
+        await settle();
+
+        const form = within(view.host)
+          .getByTestId("webhook-form") as HTMLFormElement;
+        const create = within(view.host)
+          .getByTestId("webhook-create") as HTMLButtonElement;
+        const cancel = within(view.host)
+          .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+        const source = sourceName === "Create" ? create : cancel;
+        const destination =
+          destinationName === "Create" ? create : cancel;
+        const callsBefore = fetchMock.mock.calls.length;
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        effects.scrollTo.mockClear();
+        effects.scrollBy.mockClear();
+
+        const event = dispatchKeyboardEvent(
+          source,
+          navigationInit(key),
+        );
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: destination,
+          options: { preventScroll: true },
+        }]);
+        expect(destination).toHaveFocus();
+        expect(effects.scrollTo).not.toHaveBeenCalled();
+        expect(effects.scrollBy).not.toHaveBeenCalled();
+        expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+        expect(within(view.host).getByTestId("webhook-url"))
+          .toHaveValue("https://receiver.example/keyboard");
+        expect(within(view.host).getByTestId("webhook-docs"))
+          .toHaveValue("doc-keyboard");
+        expect(within(view.host)
+          .getByTestId("webhook-event-content.changed")).toBeChecked();
+        expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+        expect(fetchMock.mock.calls.filter(([, init]) =>
+          init?.method === "POST")).toHaveLength(0);
+      },
+    );
+
+    it("leaves disabled, boundary, and activation keys unclaimed", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+
+      const form = within(view.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      const disabledCreate = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      expect(disabledCreate).toBeDisabled();
+      cancel.focus();
+      for (const key of ["ArrowLeft", "ArrowUp", "Home"] as const) {
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        const event = dispatchKeyboardEvent(cancel, navigationInit(key));
+        expect(event.defaultPrevented, key).toBe(false);
+        expect(effects.preventDefault, key).not.toHaveBeenCalled();
+        expect(effects.focus, key).not.toHaveBeenCalled();
+        expect(cancel, key).toHaveFocus();
+      }
+
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/boundary" },
+      });
+      await settle();
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const currentCancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      const boundaries: Array<{
+        source: HTMLButtonElement;
+        key: CreateNavigationKey | "Tab" | "Enter" | " ";
+        code: string;
+      }> = [
+        { source: create, key: "ArrowLeft", code: "ArrowLeft" },
+        { source: create, key: "ArrowUp", code: "ArrowUp" },
+        { source: create, key: "Home", code: "Home" },
+        { source: currentCancel, key: "ArrowRight", code: "ArrowRight" },
+        { source: currentCancel, key: "ArrowDown", code: "ArrowDown" },
+        { source: currentCancel, key: "End", code: "End" },
+        { source: create, key: "Tab", code: "Tab" },
+        { source: create, key: "Enter", code: "Enter" },
+        { source: currentCancel, key: " ", code: "Space" },
+      ];
+      const callsBefore = fetchMock.mock.calls.length;
+      for (const { source, key, code } of boundaries) {
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        const event = dispatchKeyboardEvent(source, { key, code });
+        expect(event.defaultPrevented, key).toBe(false);
+        expect(effects.preventDefault, key).not.toHaveBeenCalled();
+        expect(effects.focus, key).not.toHaveBeenCalled();
+        expect(source, key).toHaveFocus();
+      }
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+      expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    it("rejects replay, admits a clean successor, and retains Create and Cancel", async () => {
+      fetchMock.mockImplementation((url, init) =>
+        url === "/api/webhooks" && init?.method === "POST"
+          ? Promise.resolve(response({
+              error: "Keyboard activation reached Create",
+            }, 422))
+          : Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/recovery" },
+      });
+      await settle();
+
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      create.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const first = dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+      expect(cancel).toHaveFocus();
+      fireEvent(create, first);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toHaveLength(1);
+
+      const second = dispatchKeyboardEvent(
+        cancel,
+        navigationInit("ArrowLeft"),
+      );
+      expect(second.defaultPrevented).toBe(true);
+      expect(create).toHaveFocus();
+      expect(effects.preventDefault).toHaveBeenCalledTimes(2);
+      expect(effects.focusCalls).toHaveLength(2);
+      const callsBeforeCreate = fetchMock.mock.calls.length;
+      fireEvent.click(create);
+      expect(await within(view.host).findByTestId("webhook-action-error"))
+        .toHaveTextContent("Keyboard activation reached Create");
+      expect(fetchMock).toHaveBeenCalledTimes(callsBeforeCreate + 1);
+
+      const currentCreate = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const currentCancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      currentCreate.focus();
+      dispatchKeyboardEvent(
+        currentCreate,
+        navigationInit("ArrowRight"),
+      );
+      fireEvent.click(currentCancel);
+      expect(within(view.host).queryByTestId("webhook-form")).toBeNull();
+      expect(fetchMock.mock.calls.filter(([, init]) =>
+        init?.method === "POST")).toHaveLength(1);
+    });
+
+    it("requires exact native, React, realm, focus, and method authority", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/authority" },
+      });
+      await settle();
+
+      const form = within(view.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      const docs = within(view.host)
+        .getByTestId("webhook-docs") as HTMLInputElement;
+      const keyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      const callsBefore = fetchMock.mock.calls.length;
+      const rejected: Array<{
+        label: string;
+        init: KeyboardEventInit;
+        trusted?: boolean;
+      }> = [
+        { label: "Alt", init: { ...navigationInit("ArrowRight"), altKey: true } },
+        { label: "Control", init: { ...navigationInit("ArrowRight"), ctrlKey: true } },
+        { label: "Meta", init: { ...navigationInit("ArrowRight"), metaKey: true } },
+        { label: "Shift", init: { ...navigationInit("ArrowRight"), shiftKey: true } },
+        { label: "repeat", init: { ...navigationInit("ArrowRight"), repeat: true } },
+        { label: "composition", init: { ...navigationInit("ArrowRight"), isComposing: true } },
+        { label: "wrong code", init: { key: "ArrowRight", code: "ArrowLeft" } },
+        { label: "untrusted", init: navigationInit("ArrowRight"), trusted: false },
+      ];
+      for (const { label, init, trusted = true } of rejected) {
+        create.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        const event = dispatchKeyboardEvent(create, init, trusted);
+        expect(event.defaultPrevented, label).toBe(false);
+        expect(effects.preventDefault, label).not.toHaveBeenCalled();
+        expect(effects.focus, label).not.toHaveBeenCalled();
+        expect(create, label).toHaveFocus();
+      }
+
+      docs.focus();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      expect(dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      ).defaultPrevented).toBe(false);
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(docs).toHaveFocus();
+
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      expect(dispatchKeyboardEvent(
+        docs,
+        navigationInit("ArrowRight"),
+      ).defaultPrevented).toBe(false);
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      create.focus();
+      const prevented = createDispatchedKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+      prevented.preventDefault();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      fireEvent(create, prevented);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      const fabricated = keyboardEvent(form, create, {
+        key: "ArrowRight",
+        code: "ArrowRight",
+      });
+      act(() => keyDown(fabricated.event));
+      expect(fabricated.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      const reactDrift = dispatchKeyboardWithReactMutation(
+        form,
+        create,
+        (event) => {
+          Object.defineProperty(event, "key", {
+            configurable: true,
+            value: "ArrowLeft",
+          });
+        },
+        navigationInit("ArrowRight"),
+      );
+      expect(reactDrift.defaultPrevented).toBe(false);
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      const ownerWindow = create.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The controls have no owner window");
+      const focusDescriptor = Object.getOwnPropertyDescriptor(
+        ownerWindow.HTMLElement.prototype,
+        "focus",
+      );
+      if (!focusDescriptor || typeof focusDescriptor.value !== "function") {
+        throw new Error("HTMLElement.focus has no native method");
+      }
+      Object.defineProperty(ownerWindow.HTMLElement.prototype, "focus", {
+        ...focusDescriptor,
+        value: vi.fn(),
+      });
+      try {
+        const changedMethod = dispatchKeyboardEvent(
+          create,
+          navigationInit("ArrowRight"),
+        );
+        expect(changedMethod.defaultPrevented).toBe(false);
+      } finally {
+        Object.defineProperty(
+          ownerWindow.HTMLElement.prototype,
+          "focus",
+          focusDescriptor,
+        );
+      }
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      const publicFocus = vi.fn();
+      Object.defineProperty(cancel, "focus", {
+        configurable: true,
+        value: publicFocus,
+      });
+      const accepted = dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: cancel,
+        options: { preventScroll: true },
+      }]);
+      expect(publicFocus).not.toHaveBeenCalled();
+      expect(cancel).toHaveFocus();
+      expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+    });
+
+    it("retires stale facts and restored DOM history, then recovers cleanly", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/stale" },
+      });
+      await settle();
+
+      const form = within(view.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      const staleKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
+      fireEvent.change(within(view.host).getByTestId("webhook-docs"), {
+        target: { value: "new-facts" },
+      });
+      await settle();
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const stale = dispatchKeyboardToHandler(
+        form,
+        cancel,
+        staleKeyDown,
+        navigationInit("ArrowLeft"),
+      );
+      expect(stale.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      const current = dispatchKeyboardEvent(
+        cancel,
+        navigationInit("ArrowLeft"),
+      );
+      expect(current.defaultPrevented).toBe(true);
+      expect(create).toHaveFocus();
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      fireEvent(cancel, current);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+
+      const controls = create.parentElement;
+      if (!controls) throw new Error("Create has no controls parent");
+      controls.append(create);
+      controls.insertBefore(create, cancel);
+      const restored = dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+      expect(restored.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      expect(within(view.host).getByTestId("webhook-form")).toBe(form);
+
+      act(() => view.root.render(
+        <StrictMode><BoundaryHarness cardKey={2} /></StrictMode>,
+      ));
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/current" },
+      });
+      await settle();
+      const cleanCreate = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cleanCancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      cleanCreate.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const clean = dispatchKeyboardEvent(
+        cleanCreate,
+        navigationInit("ArrowRight"),
+      );
+      expect(clean.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: cleanCancel,
+        options: { preventScroll: true },
+      }]);
+    });
+
+    it("releases navigation on cleanup and leaves a fresh Strict root usable", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const retired = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      await within(retired.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(retired.host).getByTestId("webhook-add"));
+      fireEvent.change(within(retired.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/retired" },
+      });
+      await settle();
+      const retiredForm = within(retired.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      const retiredCreate = within(retired.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const retiredKeyDown =
+        reactProp<KeyDownHandler>(retiredForm, "onKeyDown");
+      const fabricatedAfterCleanup = keyboardEvent(
+        retiredForm,
+        retiredCreate,
+        { key: "ArrowRight", code: "ArrowRight" },
+      );
+      const callsAtCleanup = fetchMock.mock.calls.length;
+      act(() => retired.root.unmount());
+      act(() => retiredKeyDown(fabricatedAfterCleanup.event));
+      expect(retired.setup.preventDefault).not.toHaveBeenCalled();
+      expect(retired.setup.focus).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(callsAtCleanup);
+      expect(retired.host).toBeEmptyDOMElement();
+
+      const successor = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      await within(successor.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(successor.host).getByTestId("webhook-add"));
+      fireEvent.change(within(successor.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/successor" },
+      });
+      await settle();
+      const create = within(successor.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(successor.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      create.focus();
+      successor.setup.preventDefault.mockClear();
+      successor.setup.focus.mockClear();
+      successor.setup.focusCalls.length = 0;
+      const accepted = dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(successor.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(successor.setup.focusCalls).toEqual([{
+        target: cancel,
+        options: { preventScroll: true },
+      }]);
     });
   });
 
