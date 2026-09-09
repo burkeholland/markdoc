@@ -88,6 +88,20 @@ function captureKeyDown(element: HTMLButtonElement) {
   return reactHandler<UpdateKeyDown>(element, "onKeyDown");
 }
 
+function captureKeyDownCapture(element: HTMLButtonElement) {
+  return reactHandler<UpdateKeyDown>(
+    element,
+    "onKeyDownCapture",
+  );
+}
+
+function updateKeyHandlers(element: HTMLButtonElement) {
+  return {
+    capture: captureKeyDownCapture(element),
+    bubble: captureKeyDown(element),
+  };
+}
+
 function captureRef<T extends HTMLElement>(element: T) {
   return reactHandler<RefCallback<T>>(element, "ref");
 }
@@ -183,6 +197,86 @@ function dispatchUpdateKeyWithHandler(
     if (properties[propsKey] === replacement) {
       properties[propsKey] = props;
     }
+  }
+}
+
+function dispatchUpdateKeyWithHandlers(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  {
+    capture,
+    bubble,
+  }: {
+    capture: UpdateKeyDown;
+    bubble: UpdateKeyDown;
+  },
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error(
+      "React props were not attached to the update control",
+    );
+  }
+  const properties = element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  const replacement = {
+    ...props,
+    onKeyDownCapture: capture,
+    onKeyDown: bubble,
+  };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) {
+      properties[propsKey] = props;
+    }
+  }
+}
+
+function replaceJsdomPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray(
+        (candidate as { _path?: unknown })._path,
+      );
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error(
+      "Unable to replace jsdom's keyboard path terminal",
+    );
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error(
+      "The jsdom keyboard path terminal did not update",
+    );
   }
 }
 
@@ -2097,6 +2191,340 @@ describe("UpdatePill polling", () => {
   });
 
   describe("keyboard navigation", () => {
+    it("authenticates distinct React capture and bubble wrappers for one native delivery", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const current = controls(host);
+        const handlers = updateKeyHandlers(current.button);
+        const wrappers: ReactKeyboardEvent<HTMLButtonElement>[] =
+          [];
+        current.button.focus();
+        focus.mockClear();
+        const event = updateKeyEvent(
+          current.button,
+          "ArrowRight",
+        );
+
+        dispatchUpdateKeyWithHandlers(current.button, event, {
+          capture: (wrapper) => {
+            wrappers.push(wrapper);
+            handlers.capture(wrapper);
+          },
+          bubble: (wrapper) => {
+            wrappers.push(wrapper);
+            handlers.bubble(wrapper);
+          },
+        });
+
+        expect(wrappers).toHaveLength(2);
+        expect(wrappers[0]).not.toBe(wrappers[1]);
+        expect(wrappers[0]?.nativeEvent).toBe(event);
+        expect(wrappers[1]?.nativeEvent).toBe(event);
+        expect(wrappers[0]?.isDefaultPrevented).toBe(
+          wrappers[1]?.isDefaultPrevented,
+        );
+        expect(wrappers[0]?.isPropagationStopped).toBe(
+          wrappers[1]?.isPropagationStopped,
+        );
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(current.dismissButton).toHaveFocus();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("uses the genuine Window callback receiver as current target and path terminal", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const current = controls(host);
+        const ownerWindow = current.button.ownerDocument.defaultView;
+        if (!ownerWindow) {
+          throw new Error("The update control has no owner window");
+        }
+        let currentTarget: EventTarget | null | undefined;
+        let pathTerminal: EventTarget | undefined;
+        const observer = vi.fn(function (
+          this: EventTarget,
+          event: Event,
+        ) {
+          currentTarget = event.currentTarget;
+          pathTerminal = event.composedPath().at(-1);
+        });
+        ownerWindow.addEventListener("keydown", observer, {
+          capture: true,
+          once: true,
+        });
+        current.button.focus();
+        focus.mockClear();
+
+        const event = dispatchUpdateKey(
+          current.button,
+          "ArrowRight",
+        );
+
+        if (!pathTerminal) {
+          throw new Error("The keyboard path had no Window terminal");
+        }
+        expect(observer.mock.contexts).toEqual([pathTerminal]);
+        expect(currentTarget).toBe(pathTerminal);
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(current.dismissButton).toHaveFocus();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("rejects a structural Window terminal before clean recovery", async () => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const ownerWindow = window;
+      const structural = Object.create(
+        ownerWindow.Window.prototype,
+      ) as EventTarget;
+      Object.defineProperties(structural, {
+        document: { value: document },
+        Window: { value: ownerWindow.Window },
+        Event: { value: ownerWindow.Event },
+        EventTarget: { value: ownerWindow.EventTarget },
+        KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+        Object: { value: ownerWindow.Object },
+        Reflect: { value: ownerWindow.Reflect },
+        window: { value: structural },
+        self: { value: structural },
+      });
+      const observation: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        originalTerminal?: EventTarget;
+      } = {};
+      const stageTerminal = vi.fn(function (
+        this: EventTarget,
+        event: Event,
+      ) {
+        observation.receiver = this;
+        observation.currentTarget = event.currentTarget;
+        observation.originalTerminal =
+          event.composedPath().at(-1);
+        replaceJsdomPathTerminal(event, structural);
+      });
+      ownerWindow.addEventListener("keydown", stageTerminal, {
+        capture: true,
+        once: true,
+      });
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const current = controls(host);
+        current.button.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = dispatchUpdateKey(
+          current.button,
+          "ArrowRight",
+        );
+
+        expect(stageTerminal).toHaveBeenCalledOnce();
+        expect(observation.receiver).toBe(
+          observation.currentTarget,
+        );
+        expect(observation.receiver).toBe(
+          observation.originalTerminal,
+        );
+        expect(observation.receiver).not.toBe(structural);
+        expect(rejected.composedPath()).toEqual([]);
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(current.button).toHaveFocus();
+
+        preventDefault.mockClear();
+        const recovered = dispatchUpdateKey(
+          current.button,
+          "ArrowRight",
+        );
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(current.dismissButton).toHaveFocus();
+      } finally {
+        ownerWindow.removeEventListener(
+          "keydown",
+          stageTerminal,
+          true,
+        );
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("rejects React cancellation method identity drift between phases", async () => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const current = controls(host);
+        const handlers = updateKeyHandlers(current.button);
+        for (const property of [
+          "isDefaultPrevented",
+          "isPropagationStopped",
+        ] as const) {
+          current.button.focus();
+          focus.mockClear();
+          preventDefault.mockClear();
+          const event = updateKeyEvent(
+            current.button,
+            "ArrowRight",
+          );
+          dispatchUpdateKeyWithHandlers(current.button, event, {
+            capture: handlers.capture,
+            bubble: (wrapper) => {
+              Object.defineProperty(wrapper, property, {
+                configurable: true,
+                value: () => false,
+              });
+              handlers.bubble(wrapper);
+            },
+          });
+          expect(event.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(current.button).toHaveFocus();
+        }
+
+        const recovered = dispatchUpdateKey(
+          current.button,
+          "ArrowRight",
+        );
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(current.dismissButton).toHaveFocus();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("requires both React phases and rejects one wrapper reused across them", async () => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        const current = controls(host);
+        const handlers = updateKeyHandlers(current.button);
+        let captureWrapper:
+          | ReactKeyboardEvent<HTMLButtonElement>
+          | null = null;
+        const attempts: Array<{
+          capture: UpdateKeyDown;
+          bubble: UpdateKeyDown;
+        }> = [
+          { capture: handlers.capture, bubble: () => undefined },
+          { capture: () => undefined, bubble: handlers.bubble },
+          {
+            capture: (wrapper) => {
+              captureWrapper = wrapper;
+              handlers.capture(wrapper);
+            },
+            bubble: () => {
+              if (captureWrapper) {
+                handlers.bubble(captureWrapper);
+              }
+            },
+          },
+        ];
+        for (const attempt of attempts) {
+          current.button.focus();
+          focus.mockClear();
+          preventDefault.mockClear();
+          const event = updateKeyEvent(
+            current.button,
+            "ArrowRight",
+          );
+          dispatchUpdateKeyWithHandlers(
+            current.button,
+            event,
+            attempt,
+          );
+          expect(event.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(current.button).toHaveFocus();
+        }
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("removes the exact owned Window key listener on cleanup", async () => {
+      const active = new Set<
+        EventListenerOrEventListenerObject
+      >();
+      const add = window.addEventListener.bind(window);
+      const remove = window.removeEventListener.bind(window);
+      vi.spyOn(window, "addEventListener").mockImplementation(
+        (type, listener, options) => {
+          if (type === "keydown" && listener) active.add(listener);
+          add(type, listener, options);
+        },
+      );
+      vi.spyOn(window, "removeEventListener").mockImplementation(
+        (type, listener, options) => {
+          if (type === "keydown" && listener) {
+            active.delete(listener);
+          }
+          remove(type, listener, options);
+        },
+      );
+      fetchMock.mockResolvedValue(response("hash-after"));
+      const { host, root } = await mountDirectStrict();
+      try {
+        await advance(0);
+        expect(active.size).toBe(1);
+
+        await act(async () => root.unmount());
+
+        expect(active.size).toBe(0);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
     it.each([
       ["Refresh", "ArrowRight", "Dismiss"] as const,
       ["Refresh", "ArrowDown", "Dismiss"] as const,
