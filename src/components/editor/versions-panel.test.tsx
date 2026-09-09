@@ -587,6 +587,36 @@ function normalizeVersionsToolbarOwnerWindowBoundary(
   });
 }
 
+function replaceVersionsJsdomPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's version-row path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The jsdom version-row path terminal did not update");
+  }
+}
+
 function createVersionDiffView(
   preview = versionDiffPreview(),
   current = VERSION_DIFF_CURRENT,
@@ -3372,7 +3402,6 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
 
   beforeEach(() => {
     versions.mockReset().mockResolvedValue({ versions: rowVersions });
-    normalizeVersionsToolbarOwnerWindowBoundary(window);
   });
 
   it.each([
@@ -3740,6 +3769,109 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
     } finally {
       await act(async () => root.unmount());
       outside.remove();
+      host.remove();
+    }
+  });
+
+  it("binds the real Window receiver and rejects a structural path terminal before clean recovery", async () => {
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Version rows had no owner window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: document },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    const listenerObservation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      originalPathTerminal?: EventTarget;
+    } = {};
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      listenerObservation.receiver = this;
+      listenerObservation.currentTarget = event.currentTarget;
+      listenerObservation.originalPathTerminal = event.composedPath().at(-1);
+      replaceVersionsJsdomPathTerminal(event, structural);
+    });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-window-receiver"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      ownerWindow.addEventListener("keydown", stageTerminal, {
+        capture: true,
+        once: true,
+      });
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = versions.mock.calls.length;
+
+      const rejected = await dispatchVersionsToolbarKey(
+        source,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(stageTerminal).toHaveBeenCalledOnce();
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.currentTarget,
+      );
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.originalPathTerminal,
+      );
+      expect(listenerObservation.receiver).not.toBe(structural);
+      expect(rejected.composedPath()).toEqual([]);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+
+      const current = versionRowSelects(host)[0];
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
       host.remove();
     }
   });

@@ -1069,6 +1069,38 @@ function panelToolbarPathMatches(
   );
 }
 
+function panelRowEventPath(ownerDocument: Document, target: Node) {
+  const path: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    path.push(current);
+    current = current.parentNode;
+  }
+  return path.at(-1) === ownerDocument ? Object.freeze(path) : null;
+}
+
+function panelRowPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+) {
+  return (
+    actual.length === expected.length + 1 &&
+    actual.at(-2) === expected.at(-1) &&
+    actual.at(-1) != null &&
+    expected.every((target, index) => actual[index] === target)
+  );
+}
+
+function panelRowExactPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+) {
+  return (
+    actual.length === expected.length &&
+    actual.every((target, index) => target === expected[index])
+  );
+}
+
 function panelToolbarStop(
   requested: PanelToolbarControl,
   refreshEnabled: boolean,
@@ -2938,9 +2970,7 @@ function createPanelRowKeyboardRuntime(
     for (let groupOrder = 0; groupOrder < group.rows.length; groupOrder++) {
       const row = group.rows[groupOrder];
       const element = runtime.rows[row.index]?.select ?? null;
-      const path = element
-        ? panelToolbarEventPath(ownerDocument, ownerWindow, element)
-        : null;
+      const path = element ? panelRowEventPath(ownerDocument, element) : null;
       if (
         !list ||
         !element ||
@@ -3082,6 +3112,7 @@ function createPanelRowKeyboardRuntime(
     }
     const key = authority.keyboardKey.read(event);
     const destination = panelRowDestination(publication.entries, entry, key);
+    const path = authority.eventPath.call(event);
     if (
       !destination ||
       publication.entries[destination.order] !== destination ||
@@ -3104,11 +3135,7 @@ function createPanelRowKeyboardRuntime(
       entry.action.publicationIdentity !== publication.identity ||
       entry.action.entryIdentity !== entry.identity ||
       entry.action.rowId !== entry.row.id ||
-      !panelToolbarPathMatches(
-        entry.path,
-        authority.eventPath.call(event),
-        publication.ownerWindow,
-      ) ||
+      !panelRowPathMatches(entry.path, path) ||
       authority.getOwnPropertyDescriptor(event, "stopPropagation") ||
       authority.getOwnPropertyDescriptor(event, "stopImmediatePropagation")
     ) {
@@ -3144,7 +3171,7 @@ function createPanelRowKeyboardRuntime(
       action: entry.action,
       event: event as globalThis.KeyboardEvent,
       target: entry.element,
-      path: entry.path,
+      path: Object.freeze([...path]),
       key,
       destination,
       trusted: true,
@@ -3357,24 +3384,21 @@ function createPanelRowKeyboardRuntime(
     }
     requestCurrentSuccessor();
   };
-  function onNativeWindowBubble(event: Event) {
+  function onNativeWindowBubble(this: EventTarget, event: Event) {
+    const currentTarget = keyboardAuthority.eventCurrentTarget.read(event);
+    const path = keyboardAuthority.eventPath.call(event);
     if (
       !terminal ||
       terminal.native.event !== event ||
-      !panelToolbarIsOwnerWindow(
-        keyboardAuthority.eventCurrentTarget.read(event),
-        publication.ownerWindow,
-      ) ||
+      currentTarget !== this ||
       keyboardAuthority.eventPhase.read(event) !==
         windowAuthority.Event.BUBBLING_PHASE ||
       keyboardAuthority.eventDefaultPrevented.read(event) ||
       keyboardAuthority.eventCancelBubble.read(event) ||
       terminal.native.propagationStopped() ||
-      !panelToolbarPathMatches(
-        terminal.native.path,
-        keyboardAuthority.eventPath.call(event),
-        publication.ownerWindow,
-      )
+      terminal.native.path.at(-1) !== this ||
+      path.at(-1) !== this ||
+      !panelRowExactPathMatches(terminal.native.path, path)
     ) {
       return;
     }
@@ -3396,7 +3420,7 @@ function createPanelRowKeyboardRuntime(
       return;
     }
     const authenticated = authenticateTerminal(proof);
-    if (!authenticated || proof.path.at(-1) !== ownerWindow) return;
+    if (!authenticated) return;
     terminal = authenticated;
     windowListenerActive = true;
     authority.addWindowEventListener.call(
