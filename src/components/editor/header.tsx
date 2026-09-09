@@ -9227,7 +9227,6 @@ interface PublishMenuPresentation {
   readonly captureContent: React.RefCallback<HTMLDivElement>;
   readonly captureActions: Readonly<Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>>;
   readonly establish: () => (() => void) | undefined;
-  readonly establishAtRefCommit: () => (() => void) | undefined;
   readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
@@ -11220,7 +11219,11 @@ function createPublishMenuPresentation({
     commitOpen(Object.freeze({ visit: render.visit, open }));
   };
   const onOpenAutoFocus = (event: Event) => {
-    const publication = currentPublication();
+    let publication = currentPublication();
+    if (!publication) {
+      establish();
+      publication = currentPublication();
+    }
     if (!publication) return;
     const ready = coordinator.consumeOpen(publication, event);
     if (!ready) return;
@@ -11301,7 +11304,6 @@ function createPublishMenuPresentation({
       ) as Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>,
     ),
     establish,
-    establishAtRefCommit: () => runtimeState.last ? undefined : establish(),
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -11362,43 +11364,11 @@ function PublishMenu({ props }: { props: HeaderProps }) {
     owners,
     commitOpen: setStoredState,
   });
-  const presentationRef = useRef(presentation);
-  presentationRef.current = presentation;
-  const commitRefs = useMemo(() => {
-    function commit<T extends HTMLElement>(
-      captureFor: (current: PublishMenuPresentation) => React.RefCallback<T>,
-    ): React.RefCallback<T> {
-      return (element) => {
-        const current = presentationRef.current;
-        const capture = captureFor(current);
-        capture(element);
-        if (!element) return;
-        const release = current.establishAtRefCommit();
-        return () => {
-          capture(null);
-          release?.();
-        };
-      };
-    }
-    const action = (name: PublishMenuActionName) =>
-      commit<HTMLDivElement>((current) => current.captureActions[name]);
-    return Object.freeze({
-      content: commit<HTMLDivElement>((current) => current.captureContent),
-      actions: Object.freeze({
-        publish: action("publish"),
-        pull: action("pull"),
-        sync: action("sync"),
-        open: action("open"),
-        change: action("change"),
-        connect: action("connect"),
-        download: action("download"),
-        share: action("share"),
-      }),
-    });
-  }, []);
   useLayoutEffect(() => presentation.establish(), [presentation]);
   const {
     captureTrigger,
+    captureContent,
+    captureActions,
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -11435,7 +11405,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
       </div>
       {state.open && (
         <MenuContent
-          ref={commitRefs.content}
+          ref={captureContent}
           align="end"
           className="w-72"
           {...openAutoFocusProps}
@@ -11446,24 +11416,24 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
               {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
             </MenuLabel>
-            <MenuItem ref={commitRefs.actions.publish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+            <MenuItem ref={captureActions.publish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
               {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
             </MenuItem>
-            <MenuItem ref={commitRefs.actions.pull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+            <MenuItem ref={captureActions.pull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
               Pull latest from GitHub
             </MenuItem>
-            <MenuItem ref={commitRefs.actions.sync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+            <MenuItem ref={captureActions.sync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
               Sync…
             </MenuItem>
             {doc.githubUrl && (
-              <MenuItem ref={commitRefs.actions.open} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem ref={captureActions.open} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
                 Open on GitHub
               </MenuItem>
             )}
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem ref={commitRefs.actions.change} icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                <MenuItem ref={captureActions.change} icon={<Link2 size={15} />} onSelect={props.onPublish}>
                   Change connection…
                 </MenuItem>
               </>
@@ -11473,7 +11443,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             <>
             <MenuLabel>Publish to GitHub</MenuLabel>
             <MenuItem
-              ref={commitRefs.actions.connect}
+              ref={captureActions.connect}
               icon={<GitHubIcon size={15} />}
               onSelect={props.onPublish}
               disabled={!props.isOwner || !githubConfigured}
@@ -11483,10 +11453,10 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
             </MenuItem>
             <MenuSeparator />
-            <MenuItem ref={commitRefs.actions.download} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+            <MenuItem ref={captureActions.download} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
               Download Markdown
             </MenuItem>
-            <MenuItem ref={commitRefs.actions.share} icon={<Share2 size={15} />} onSelect={props.onShare}>
+            <MenuItem ref={captureActions.share} icon={<Share2 size={15} />} onSelect={props.onShare}>
               Share link…
             </MenuItem>
             </>
