@@ -1,6 +1,16 @@
 "use client";
 
-import { memo, useCallback, useLayoutEffect, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useLayoutEffect,
+  useState,
+  type Dispatch,
+  type FocusEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type SetStateAction,
+} from "react";
 import {
   Bold,
   Italic,
@@ -31,6 +41,18 @@ import { TOOLBAR_BOX } from "./chrome-classes";
 
 type ToolbarPermission = "edit" | "undo" | "redo" | "comment" | "current";
 type HeadingLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+
+interface HeadingDisclosure {
+  readonly mount: object;
+  readonly destination: HeadingLevel;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+}
+
+interface HeadingState {
+  readonly mount: object;
+  readonly open: boolean;
+  readonly disclosure: HeadingDisclosure | null;
+}
 
 type ToolbarControl<T extends HTMLElement = HTMLButtonElement> = Readonly<{
   id: string;
@@ -91,6 +113,8 @@ type ToolbarPublication = Readonly<{
   isRetired: () => boolean;
   onFocus: (event: FocusEvent<HTMLDivElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
+  onHeadingKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  onHeadingOpenChange: (open: boolean) => void;
   onHeadingClose: (event: Event) => void;
 }>;
 
@@ -159,6 +183,80 @@ interface RefReplay {
   reattached: boolean;
 }
 
+interface ToolbarTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface ToolbarKeyboardIntrinsics {
+  readonly keyboardPrototype: object;
+  readonly objectPrototype: object;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: ToolbarTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: globalThis.KeyboardEvent) => string;
+    code: (this: globalThis.KeyboardEvent) => string;
+    location: (this: globalThis.KeyboardEvent) => number;
+    altKey: (this: globalThis.KeyboardEvent) => boolean;
+    ctrlKey: (this: globalThis.KeyboardEvent) => boolean;
+    metaKey: (this: globalThis.KeyboardEvent) => boolean;
+    shiftKey: (this: globalThis.KeyboardEvent) => boolean;
+    repeat: (this: globalThis.KeyboardEvent) => boolean;
+    isComposing: (this: globalThis.KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+}
+
+interface ToolbarKeyboardSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+type HeadingReactKeyEvent = KeyboardEvent<HTMLButtonElement> & {
+  readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
+};
+
+interface HeadingCloseVisit {
+  readonly source: ToolbarPublication;
+  readonly content: HTMLDivElement;
+}
+
 const TRANSIENT_BUTTON_ATTRIBUTES = new Set([
   "aria-controls",
   "aria-describedby",
@@ -166,12 +264,320 @@ const TRANSIENT_BUTTON_ATTRIBUTES = new Set([
   "data-state",
 ]);
 
+const TRANSIENT_HEADING_ATTRIBUTES = new Set([
+  "data-align",
+  "data-highlighted",
+  "data-orientation",
+  "data-side",
+  "style",
+  "tabindex",
+]);
+const PREVENT_SCROLL = Object.freeze({ preventScroll: true });
+
 function isTransientToolbarAttribute(node: Node, name: string | null): boolean {
+  if (!name || node.nodeType !== 1) return false;
+  const element = node as Element;
+  if (element.tagName === "BUTTON" && TRANSIENT_BUTTON_ATTRIBUTES.has(name)) return true;
   return Boolean(
-    name &&
-      node.nodeType === 1 &&
-      (node as Element).tagName === "BUTTON" &&
-      TRANSIENT_BUTTON_ATTRIBUTES.has(name),
+    TRANSIENT_HEADING_ATTRIBUTES.has(name) &&
+      (element.hasAttribute("data-toolbar-heading-content") ||
+        element.hasAttribute("data-toolbar-heading") ||
+        element.closest("[data-toolbar-heading-content]")),
+  );
+}
+
+function toolbarGetter<This extends object, Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = ownerWindow.Object.getOwnPropertyDescriptor(prototype, property)?.get;
+  return typeof getter === "function" ? (getter as (this: This) => Value) : null;
+}
+
+function toolbarDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
+function captureToolbarTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): ToolbarTrustedAuthority | null {
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("toolbar-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    toolbarDescriptorsMatch(getOwnPropertyDescriptor(event, "isTrusted"), expected);
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureToolbarKeyboardIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): ToolbarKeyboardIntrinsics | null {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiEventPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const trusted = captureToolbarTrustedAuthority(ownerWindow);
+  const type = toolbarGetter<Event, string>(ownerWindow, eventPrototype, "type");
+  const target = toolbarGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "target",
+  );
+  const currentTarget = toolbarGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = toolbarGetter<Event, number>(
+    ownerWindow,
+    eventPrototype,
+    "eventPhase",
+  );
+  const bubbles = toolbarGetter<Event, boolean>(ownerWindow, eventPrototype, "bubbles");
+  const cancelable = toolbarGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelable",
+  );
+  const defaultPrevented = toolbarGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = toolbarGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelBubble",
+  );
+  const key = toolbarGetter<globalThis.KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "key",
+  );
+  const code = toolbarGetter<globalThis.KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "code",
+  );
+  const location = toolbarGetter<globalThis.KeyboardEvent, number>(
+    ownerWindow,
+    keyboardPrototype,
+    "location",
+  );
+  const altKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "altKey",
+  );
+  const ctrlKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "ctrlKey",
+  );
+  const metaKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "metaKey",
+  );
+  const shiftKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "shiftKey",
+  );
+  const repeat = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "repeat",
+  );
+  const isComposing = toolbarGetter<globalThis.KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "isComposing",
+  );
+  const view = toolbarGetter<UIEvent, Window | null>(
+    ownerWindow,
+    uiEventPrototype,
+    "view",
+  );
+  const activeElement = toolbarGetter<Document, Element | null>(
+    ownerWindow,
+    documentPrototype,
+    "activeElement",
+  );
+  const composedPath = eventPrototype.composedPath;
+  const focus = htmlElementPrototype.focus;
+  const apply = ownerWindow.Reflect.apply;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof focus !== "function" ||
+    typeof apply !== "function" ||
+    typeof getPrototypeOf !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    keyboardPrototype,
+    objectPrototype: ownerWindow.Object.prototype,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    apply,
+    getPrototypeOf,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+  });
+}
+
+function readToolbarKeyboardEvent(
+  event: Event,
+  intrinsics: ToolbarKeyboardIntrinsics,
+): ToolbarKeyboardSnapshot | null {
+  try {
+    if (
+      !intrinsics.apply(intrinsics.isPrototypeOf, intrinsics.keyboardPrototype, [event]) ||
+      !intrinsics.trusted.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: intrinsics.apply(intrinsics.event.type, event, []),
+      target: intrinsics.apply(intrinsics.event.target, event, []),
+      currentTarget: intrinsics.apply(intrinsics.event.currentTarget, event, []),
+      eventPhase: intrinsics.apply(intrinsics.event.eventPhase, event, []),
+      bubbles: intrinsics.apply(intrinsics.event.bubbles, event, []),
+      cancelable: intrinsics.apply(intrinsics.event.cancelable, event, []),
+      defaultPrevented: intrinsics.apply(
+        intrinsics.event.defaultPrevented,
+        event,
+        [],
+      ),
+      cancelBubble: intrinsics.apply(intrinsics.event.cancelBubble, event, []),
+      path: Object.freeze(
+        intrinsics.apply(intrinsics.event.composedPath, event, []),
+      ),
+      key: intrinsics.apply(intrinsics.keyboard.key, event, []),
+      code: intrinsics.apply(intrinsics.keyboard.code, event, []),
+      location: intrinsics.apply(intrinsics.keyboard.location, event, []),
+      altKey: intrinsics.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: intrinsics.apply(intrinsics.keyboard.ctrlKey, event, []),
+      metaKey: intrinsics.apply(intrinsics.keyboard.metaKey, event, []),
+      shiftKey: intrinsics.apply(intrinsics.keyboard.shiftKey, event, []),
+      repeat: intrinsics.apply(intrinsics.keyboard.repeat, event, []),
+      isComposing: intrinsics.apply(intrinsics.keyboard.isComposing, event, []),
+      isTrusted: intrinsics.trusted.read(event),
+      view: intrinsics.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function toolbarKeyboardPathMatches(
+  path: readonly EventTarget[],
+  trigger: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = trigger;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    (terminal === ownerWindow ||
+      (typeof terminal === "object" &&
+        terminal !== null &&
+        "document" in terminal &&
+        terminal.document === ownerDocument))
   );
 }
 
@@ -220,11 +626,24 @@ function toolbarDomMatches(snapshot: ToolbarDomSnapshot): boolean {
 function captureToolbarPlacement(root: HTMLDivElement): ToolbarPlacement | null {
   const parent = root.parentNode;
   if (!parent) return null;
+  const adjacentSibling = (
+    start: Node | null,
+    direction: "previousSibling" | "nextSibling",
+  ) => {
+    let sibling = start;
+    while (
+      sibling?.nodeType === 1 &&
+      (sibling as Element).hasAttribute("data-radix-focus-guard")
+    ) {
+      sibling = sibling[direction];
+    }
+    return sibling;
+  };
   return Object.freeze({
     document: root.ownerDocument,
     parent,
-    previousSibling: root.previousSibling,
-    nextSibling: root.nextSibling,
+    previousSibling: adjacentSibling(root.previousSibling, "previousSibling"),
+    nextSibling: adjacentSibling(root.nextSibling, "nextSibling"),
   });
 }
 
@@ -281,6 +700,12 @@ function createToolbarPublication({
   replay,
   last,
   claimedEvents,
+  claimedReactEvents,
+  claimedHeadingPublications,
+  focusedHeadings,
+  pendingHeadingClose,
+  headingState,
+  setHeadingState,
   requestSuccessor,
   session,
   actions,
@@ -299,6 +724,12 @@ function createToolbarPublication({
   replay: CurrentCell<ToolbarReplay | null>;
   last: CurrentCell<HTMLButtonElement | null>;
   claimedEvents: WeakSet<Event>;
+  claimedReactEvents: WeakSet<object>;
+  claimedHeadingPublications: WeakSet<ToolbarPublication>;
+  focusedHeadings: WeakSet<HeadingDisclosure>;
+  pendingHeadingClose: CurrentCell<HeadingCloseVisit | null>;
+  headingState: HeadingState;
+  setHeadingState: Dispatch<SetStateAction<HeadingState>>;
   requestSuccessor: () => void;
   session: CollabSession;
   actions: EditorActions;
@@ -351,6 +782,12 @@ function createToolbarPublication({
     onComment,
     onImage,
     onTable,
+    headingState,
+    headingOpen: headingState.open,
+    headingDisclosure: headingState.disclosure,
+    headingFocusPublished: headingState.disclosure
+      ? focusedHeadings.has(headingState.disclosure)
+      : false,
   });
   let retired = false;
   let established = false;
@@ -362,9 +799,16 @@ function createToolbarPublication({
   let stableOwners = new Set<ElementOwnerView>();
   let domSnapshot: ToolbarDomSnapshot | null = null;
   let placementSnapshot: ToolbarPlacement | null = null;
+  let headingDomSnapshot: ToolbarDomSnapshot | null = null;
+  let headingPlacementSnapshot: ToolbarPlacement | null = null;
   let domChanged = false;
   let domObserver: MutationObserver | null = null;
   let guardExpiryQueued = false;
+  let headingFocusClaimed = false;
+  let headingOpenChanged = false;
+  let blockedRadixOpen: object | null = null;
+  let keyboard: ToolbarKeyboardIntrinsics | null = null;
+  let establishmentDeferred = false;
   const claimed = new Set<symbol>();
   const identity = new PublicationIdentity();
   const owners: ElementOwnerView[] = [];
@@ -375,7 +819,20 @@ function createToolbarPublication({
     previous: HTMLElement | null,
     prior: HTMLElement | null,
   ) => {
-    if (!established) return;
+    if (!established) {
+      if (
+        establishmentDeferred &&
+        authority.headingOpen &&
+        !successorRequested &&
+        authorityOwned() &&
+        exactHeadingStructure() &&
+        buttonOrder.every((control) => control.element()?.isConnected)
+      ) {
+        successorRequested = true;
+        requestSuccessor();
+      }
+      return;
+    }
     const proof = replayRefs.find((entry) => entry.owner === owner);
     if (!proof) {
       invalidReplay = true;
@@ -419,10 +876,31 @@ function createToolbarPublication({
     headingContent.capture(element);
   };
 
+  const headingFocusFactsMatch = () => {
+    const disclosure = authority.headingDisclosure;
+    return disclosure
+      ? focusedHeadings.has(disclosure) ===
+          (authority.headingFocusPublished || headingFocusClaimed)
+      : !authority.headingFocusPublished && !headingFocusClaimed;
+  };
   const authorityOwned = () => {
     const values = authority.formatValues;
     const current = authority.format;
     return (
+      Object.isFrozen(authority.headingState) &&
+      authority.headingState.mount === mount &&
+      authority.headingOpen === authority.headingState.open &&
+      authority.headingDisclosure === authority.headingState.disclosure &&
+      authority.headingOpen === Boolean(
+        authority.headingOpen || authority.headingDisclosure,
+      ) &&
+      (!authority.headingDisclosure ||
+        (Object.isFrozen(authority.headingDisclosure) &&
+          authority.headingDisclosure.mount === mount &&
+          (authority.headingDisclosure.destination === 0 ||
+            authority.headingDisclosure.destination === 6) &&
+          typeof authority.headingDisclosure.focus === "function")) &&
+      headingFocusFactsMatch() &&
       authority.session.canEdit === authority.canEdit &&
       authority.session.canUndo === authority.canUndo &&
       authority.session.canRedo === authority.canRedo &&
@@ -467,6 +945,42 @@ function createToolbarPublication({
         return true;
     }
   };
+  const exactHeadingStructure = () => {
+    const ownedRoot = root.element();
+    const content = headingContent.element();
+    const elements = headingItems.map(({ control }) => control.element());
+    if (!content) {
+      return !authority.headingOpen && elements.every((element) => element === null);
+    }
+    const placement = captureToolbarPlacement(content);
+    const ordered = [
+      ...content.querySelectorAll<HTMLElement>("[data-toolbar-heading]"),
+    ];
+    return Boolean(
+      ownedRoot &&
+        content.isConnected &&
+        content.ownerDocument === ownedRoot.ownerDocument &&
+        content.getAttribute("role") === "menu" &&
+        content.dataset.toolbarHeadingContent === "" &&
+        placement &&
+        ordered.length === headingItems.length &&
+        elements.every((element, index) => {
+          const level = headingItems[index]?.level;
+          return Boolean(
+            element &&
+              element.isConnected &&
+              element.ownerDocument === ownedRoot.ownerDocument &&
+              ordered[index] === element &&
+              content.contains(element) &&
+              element.getAttribute("role") === "menuitemradio" &&
+              element.dataset.toolbarHeading === String(level) &&
+              (authority.canEdit
+                ? isEffectivelyEnabled(element)
+                : element.getAttribute("aria-disabled")?.toLowerCase() === "true"),
+          );
+        }),
+    );
+  };
   const ownsControl = (control: OwnedToolbarControl, requireEnabled = true) => {
     if (
       retired ||
@@ -481,6 +995,22 @@ function createToolbarPublication({
     if (!ownedRoot || !element) return false;
     if (!ownedRoot.isConnected || !element.isConnected) return false;
     if (control.rootButton && !ownedRoot.contains(element)) return false;
+    if (
+      control === buttons.heading &&
+      (element.tagName !== "BUTTON" ||
+        (element as HTMLButtonElement).type !== "button" ||
+        (element as HTMLButtonElement).disabled !== !authority.canEdit ||
+        element.getAttribute("aria-label") !== "Text style" ||
+        element.getAttribute("aria-haspopup") !== "menu" ||
+        element.getAttribute("aria-expanded") !== String(authority.headingOpen) ||
+        element.getAttribute("data-state") !==
+          (authority.headingOpen ? "open" : "closed") ||
+        (authority.headingOpen
+          ? !element.getAttribute("aria-controls")
+          : element.hasAttribute("aria-controls")))
+    ) {
+      return false;
+    }
     if (!control.rootButton) {
       const content = headingContent.element();
       const itemIndex = headingItems.findIndex(({ control: item }) => item === control);
@@ -488,6 +1018,7 @@ function createToolbarPublication({
         ? [...content.querySelectorAll<HTMLElement>("[data-toolbar-heading]")]
         : [];
       if (
+        !exactHeadingStructure() ||
         !content ||
         !content.isConnected ||
         content.ownerDocument !== ownedRoot.ownerDocument ||
@@ -511,6 +1042,22 @@ function createToolbarPublication({
   const claimEvent = (event: Event) => {
     if (claimedEvents.has(event)) return false;
     claimedEvents.add(event);
+    consumed = true;
+    return true;
+  };
+  const claimHeadingKey = (event: object, nativeEvent: Event) => {
+    const publication = identity.current;
+    if (
+      !publication ||
+      claimedHeadingPublications.has(publication) ||
+      claimedReactEvents.has(event) ||
+      claimedEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    claimedHeadingPublications.add(publication);
+    claimedReactEvents.add(event);
+    claimedEvents.add(nativeEvent);
     consumed = true;
     return true;
   };
@@ -700,8 +1247,27 @@ function createToolbarPublication({
     return owned?.filter(({ control, element }) => control.enabled && !element.disabled) ?? [];
   };
   const mutationIsRelevant = (record: MutationRecord, allowTabStops = false) => {
-    const ownedRoot = root.element();
+    const ownedRoot =
+      root.element() ??
+      (domSnapshot?.node instanceof HTMLElement
+        ? (domSnapshot.node as HTMLDivElement)
+        : null);
+    const content =
+      headingContent.element() ??
+      (headingDomSnapshot?.node instanceof HTMLElement
+        ? (headingDomSnapshot.node as HTMLDivElement)
+        : null);
     if (!ownedRoot) return true;
+    if (
+      record.type === "childList" &&
+      [...record.addedNodes, ...record.removedNodes].every(
+        (node) =>
+          node.nodeType === 1 &&
+          (node as Element).hasAttribute("data-radix-focus-guard"),
+      )
+    ) {
+      return false;
+    }
     if (
       record.type === "attributes" &&
       (isTransientToolbarAttribute(record.target, record.attributeName) ||
@@ -712,6 +1278,9 @@ function createToolbarPublication({
       return false;
     }
     if (record.target === ownedRoot || ownedRoot.contains(record.target)) return true;
+    if (content && (record.target === content || content.contains(record.target))) {
+      return true;
+    }
     if (
       record.type === "attributes" &&
       (record.attributeName === "disabled" ||
@@ -720,7 +1289,11 @@ function createToolbarPublication({
     ) {
       return record.target.contains(ownedRoot);
     }
-    return record.type === "childList" && record.target === placementSnapshot?.parent;
+    return (
+      record.type === "childList" &&
+      (record.target === placementSnapshot?.parent ||
+        record.target === headingPlacementSnapshot?.parent)
+    );
   };
   const recordMutations = (records: readonly MutationRecord[], allowTabStops = false) => {
     if (!domChanged && records.some((record) => mutationIsRelevant(record, allowTabStops))) {
@@ -737,6 +1310,17 @@ function createToolbarPublication({
   const publishedDomMatches = () => {
     if (domObserver) recordMutations(domObserver.takeRecords());
     const ownedRoot = root.element();
+    const content = headingContent.element();
+    const headingMatches = headingDomSnapshot
+      ? Boolean(
+          content &&
+            headingPlacementSnapshot &&
+            content === headingDomSnapshot.node &&
+            content.isConnected &&
+            toolbarPlacementMatches(content, headingPlacementSnapshot) &&
+            toolbarDomMatches(headingDomSnapshot),
+        )
+      : !authority.headingOpen && content === null;
     return Boolean(
       !domChanged &&
         domSnapshot &&
@@ -745,7 +1329,9 @@ function createToolbarPublication({
         ownedRoot === domSnapshot.node &&
         ownedRoot.isConnected &&
         toolbarPlacementMatches(ownedRoot, placementSnapshot) &&
-        toolbarDomMatches(domSnapshot),
+        toolbarDomMatches(domSnapshot) &&
+        headingMatches &&
+        exactHeadingStructure(),
     );
   };
   const replayDomUnchanged = () => {
@@ -757,7 +1343,18 @@ function createToolbarPublication({
         placementSnapshot &&
         domSnapshot.node.isConnected &&
         toolbarPlacementMatches(domSnapshot.node as HTMLDivElement, placementSnapshot) &&
-        toolbarDomMatches(domSnapshot),
+        toolbarDomMatches(domSnapshot) &&
+        (headingDomSnapshot
+          ? Boolean(
+              headingPlacementSnapshot &&
+                headingDomSnapshot.node.isConnected &&
+                toolbarPlacementMatches(
+                  headingDomSnapshot.node as HTMLDivElement,
+                  headingPlacementSnapshot,
+                ) &&
+                toolbarDomMatches(headingDomSnapshot),
+            )
+          : !authority.headingOpen),
     );
   };
   const syncTabStops = (commit = false) => {
@@ -798,33 +1395,35 @@ function createToolbarPublication({
     authorityOwned() &&
     replayDomUnchanged() &&
     successorOf.current === publication;
-  const authorityMatches = (source: ToolbarPublication) => {
-    const previous = (source as ToolbarPublication & { authority?: typeof authority }).authority;
-    if (!previous) return false;
+  type ToolbarAuthority = typeof authority;
+  const editorAuthorityMatches = (
+    previous: ToolbarAuthority,
+    current: ToolbarAuthority,
+  ) => {
     const left = previous.formatValues;
-    const right = authority.formatValues;
+    const right = current.formatValues;
     return (
-      previous.mount === authority.mount &&
-      previous.session === authority.session &&
-      previous.actions === authority.actions &&
-      previous.format === authority.format &&
-      previous.canEdit === authority.canEdit &&
-      previous.canUndo === authority.canUndo &&
-      previous.canRedo === authority.canRedo &&
-      previous.canComment === authority.canComment &&
-      previous.onComment === authority.onComment &&
-      previous.onImage === authority.onImage &&
-      previous.onTable === authority.onTable &&
-      previous.methods.toggleMark === authority.methods.toggleMark &&
-      previous.methods.openLinkDialog === authority.methods.openLinkDialog &&
-      previous.methods.toggleCodeBlock === authority.methods.toggleCodeBlock &&
-      previous.methods.toggleList === authority.methods.toggleList &&
-      previous.methods.toggleQuote === authority.methods.toggleQuote &&
-      previous.methods.horizontalRule === authority.methods.horizontalRule &&
-      previous.methods.undo === authority.methods.undo &&
-      previous.methods.redo === authority.methods.redo &&
-      previous.methods.setHeading === authority.methods.setHeading &&
-      previous.methods.focus === authority.methods.focus &&
+      previous.mount === current.mount &&
+      previous.session === current.session &&
+      previous.actions === current.actions &&
+      previous.format === current.format &&
+      previous.canEdit === current.canEdit &&
+      previous.canUndo === current.canUndo &&
+      previous.canRedo === current.canRedo &&
+      previous.canComment === current.canComment &&
+      previous.onComment === current.onComment &&
+      previous.onImage === current.onImage &&
+      previous.onTable === current.onTable &&
+      previous.methods.toggleMark === current.methods.toggleMark &&
+      previous.methods.openLinkDialog === current.methods.openLinkDialog &&
+      previous.methods.toggleCodeBlock === current.methods.toggleCodeBlock &&
+      previous.methods.toggleList === current.methods.toggleList &&
+      previous.methods.toggleQuote === current.methods.toggleQuote &&
+      previous.methods.horizontalRule === current.methods.horizontalRule &&
+      previous.methods.undo === current.methods.undo &&
+      previous.methods.redo === current.methods.redo &&
+      previous.methods.setHeading === current.methods.setHeading &&
+      previous.methods.focus === current.methods.focus &&
       left.strong === right.strong &&
       left.em === right.em &&
       left.code === right.code &&
@@ -839,6 +1438,45 @@ function createToolbarPublication({
       left.hasSelection === right.hasSelection &&
       left.tablePos === right.tablePos &&
       left.tableAlign === right.tableAlign
+    );
+  };
+  const authorityMatches = (source: ToolbarPublication) => {
+    const previous = (source as ToolbarPublication & { authority?: ToolbarAuthority }).authority;
+    return Boolean(
+      previous &&
+        editorAuthorityMatches(previous, authority) &&
+        previous.headingState === authority.headingState &&
+        previous.headingOpen === authority.headingOpen &&
+        previous.headingDisclosure === authority.headingDisclosure &&
+        previous.headingFocusPublished === authority.headingFocusPublished,
+    );
+  };
+  const focusHeadingDisclosure = () => {
+    const disclosure = authority.headingDisclosure;
+    if (!disclosure || authority.headingFocusPublished) return true;
+    const destination = headingItems.find(
+      ({ level }) => level === disclosure.destination,
+    )?.control;
+    const element = destination?.element();
+    if (
+      !keyboard ||
+      !destination ||
+      !element ||
+      !authority.headingOpen ||
+      !ownsControl(destination) ||
+      focusedHeadings.has(disclosure)
+    ) {
+      return false;
+    }
+    focusedHeadings.add(disclosure);
+    headingFocusClaimed = true;
+    keyboard.apply(disclosure.focus, element, [PREVENT_SCROLL]);
+    return Boolean(
+      keyboard.apply(
+        keyboard.activeElement,
+        element.ownerDocument,
+        [],
+      ) === element && ownsControl(destination),
     );
   };
   const requestReplaySuccessor = () => {
@@ -866,10 +1504,25 @@ function createToolbarPublication({
       return undefined;
     }
     const ownedRoot = root.element();
-    if (!authorityOwned() || !ownedRoot || !ownedRoot.isConnected || buttonOrder.some((control) => {
-      const element = control.element();
-      return !element || !element.isConnected || !ownedRoot.contains(element);
-    })) return undefined;
+    const ownerWindow = ownedRoot?.ownerDocument.defaultView;
+    if (
+      !authorityOwned() ||
+      !ownedRoot ||
+      !ownedRoot.isConnected ||
+      !ownerWindow ||
+      buttonOrder.some((control) => {
+        const element = control.element();
+        return !element || !element.isConnected || !ownedRoot.contains(element);
+      })
+    ) {
+      return undefined;
+    }
+    if (!exactHeadingStructure()) {
+      establishmentDeferred = authority.headingOpen;
+      return undefined;
+    }
+    keyboard = captureToolbarKeyboardIntrinsics(ownerWindow);
+    if (!keyboard) return undefined;
     const placement = captureToolbarPlacement(ownedRoot);
     if (!placement) return undefined;
     const pendingReplay = replay.current;
@@ -905,6 +1558,15 @@ function createToolbarPublication({
     }));
     placementSnapshot = placement;
     domSnapshot = snapshotToolbarDom(ownedRoot);
+    const content = headingContent.element();
+    headingPlacementSnapshot = content
+      ? captureToolbarPlacement(content)
+      : null;
+    headingDomSnapshot = content ? snapshotToolbarDom(content) : null;
+    if (content && !headingPlacementSnapshot) {
+      retire("other");
+      return undefined;
+    }
     const MutationObserverConstructor = ownedRoot.ownerDocument.defaultView?.MutationObserver;
     if (!MutationObserverConstructor) {
       retire("other");
@@ -919,6 +1581,10 @@ function createToolbarPublication({
       childList: true,
       subtree: true,
     });
+    if (!focusHeadingDisclosure()) {
+      retire("other");
+      return undefined;
+    }
     return retireForLayout;
   };
   const scheduleGuardExpiry = () => {
@@ -991,17 +1657,27 @@ function createToolbarPublication({
     type: "menu.itemSelect" | "focusScope.autoFocusOnUnmount",
   ) => {
     const ownedRoot = root.element();
-    const ownerWindow = ownedRoot?.ownerDocument.defaultView;
+    const ownerDocument = ownedRoot?.ownerDocument;
     return Boolean(
-      ownedRoot &&
+      ownerDocument &&
         source &&
-        ownerWindow &&
+        source.ownerDocument === ownerDocument &&
+        exactCustomEventFromSource(event, source, type),
+    );
+  };
+  const exactCustomEventFromSource = (
+    event: Event,
+    source: HTMLElement,
+    type: "menu.itemSelect" | "focusScope.autoFocusOnUnmount",
+  ) => {
+    const ownerWindow = source.ownerDocument.defaultView;
+    return Boolean(
+      ownerWindow &&
         event instanceof ownerWindow.CustomEvent &&
         event.type === type &&
         event.eventPhase !== ownerWindow.Event.NONE &&
         event.currentTarget === source &&
         event.target === source &&
-        source.ownerDocument === ownedRoot.ownerDocument &&
         (type !== "focusScope.autoFocusOnUnmount" ||
           source.dataset.toolbarHeadingContent === "") &&
         event.composedPath().includes(source) &&
@@ -1076,7 +1752,203 @@ function createToolbarPublication({
     event.preventDefault();
     items[next]?.element.focus();
   };
+  const onHeadingKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (!event || typeof event !== "object") return;
+    if (event.key === "ArrowDown") {
+      blockedRadixOpen = event;
+      queueMicrotask(() => {
+        if (blockedRadixOpen === event) blockedRadixOpen = null;
+      });
+    }
+    const trigger = buttons.heading.element();
+    const nativeEvent = event.nativeEvent;
+    const snapshot =
+      keyboard && nativeEvent
+        ? readToolbarKeyboardEvent(nativeEvent, keyboard)
+        : null;
+    const destination =
+      snapshot?.key === "ArrowDown"
+        ? headingItems[0]
+        : snapshot?.key === "ArrowUp"
+          ? headingItems.at(-1)
+          : null;
+    const destinationElement = destination?.control.element();
+    const proof = event as HeadingReactKeyEvent;
+    const reactPrototype =
+      keyboard && event ? keyboard.getPrototypeOf(event) : null;
+    if (
+      !keyboard ||
+      !snapshot ||
+      !destination ||
+      !trigger ||
+      active.current !== identity.current ||
+      !ownsControl(buttons.heading) ||
+      (authority.headingOpen &&
+        (!destinationElement ||
+          !ownsControl(destination.control))) ||
+      !reactPrototype ||
+      reactPrototype === keyboard.objectPrototype ||
+      reactPrototype.constructor?.name !== "SyntheticBaseEvent" ||
+      event.type !== snapshot.type ||
+      event.type !== "keydown" ||
+      event.nativeEvent !== nativeEvent ||
+      event.currentTarget !== trigger ||
+      event.target !== trigger ||
+      event.eventPhase !== snapshot.eventPhase ||
+      event.bubbles !== snapshot.bubbles ||
+      event.cancelable !== snapshot.cancelable ||
+      event.defaultPrevented ||
+      event.isTrusted !== snapshot.isTrusted ||
+      event.key !== snapshot.key ||
+      event.code !== snapshot.code ||
+      event.location !== snapshot.location ||
+      event.altKey !== snapshot.altKey ||
+      event.ctrlKey !== snapshot.ctrlKey ||
+      event.metaKey !== snapshot.metaKey ||
+      event.shiftKey !== snapshot.shiftKey ||
+      event.repeat !== snapshot.repeat ||
+      !Object.is(event.view, snapshot.view) ||
+      proof._reactName !== "onKeyDown" ||
+      typeof event.isDefaultPrevented !== "function" ||
+      event.isDefaultPrevented() ||
+      typeof event.isPropagationStopped !== "function" ||
+      event.isPropagationStopped() ||
+      typeof proof.isPersistent !== "function" ||
+      !proof.isPersistent() ||
+      typeof event.persist !== "function" ||
+      typeof event.preventDefault !== "function" ||
+      typeof event.stopPropagation !== "function" ||
+      snapshot.target !== trigger ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== keyboard.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== trigger.ownerDocument.defaultView) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !toolbarKeyboardPathMatches(
+        snapshot.path,
+        trigger,
+        trigger.ownerDocument,
+        trigger.ownerDocument.defaultView!,
+      ) ||
+      keyboard.apply(
+        keyboard.activeElement,
+        trigger.ownerDocument,
+        [],
+      ) !== trigger ||
+      !claimHeadingKey(event, nativeEvent) ||
+      !ownsControl(buttons.heading)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (
+      !event.defaultPrevented ||
+      !event.isDefaultPrevented() ||
+      !keyboard.apply(
+        keyboard.event.defaultPrevented,
+        nativeEvent,
+        [],
+      ) ||
+      keyboard.apply(
+        keyboard.activeElement,
+        trigger.ownerDocument,
+        [],
+      ) !== trigger ||
+      !ownsControl(buttons.heading)
+    ) {
+      return;
+    }
+    blockedRadixOpen = null;
+    const disclosure = Object.freeze({
+      mount,
+      destination: destination.level,
+      focus: keyboard.focus,
+    });
+    const next = Object.freeze({
+      mount,
+      open: true,
+      disclosure,
+    });
+    setHeadingState((current) =>
+      current === authority.headingState ? next : current,
+    );
+  };
+  const onHeadingOpenChange = (open: boolean) => {
+    if (open && blockedRadixOpen) {
+      blockedRadixOpen = null;
+      return;
+    }
+    if (
+      open === authority.headingOpen ||
+      headingOpenChanged ||
+      active.current !== identity.current ||
+      !authorityOwned() ||
+      !publishedDomMatches() ||
+      !ownsControl(buttons.heading, !open)
+    ) {
+      return;
+    }
+    const content = headingContent.element() ?? lastHeadingContent;
+    if (!open && content) {
+      pendingHeadingClose.current = Object.freeze({
+        source: publication,
+        content,
+      });
+    } else if (open) {
+      pendingHeadingClose.current = null;
+    }
+    headingOpenChanged = true;
+    consumed = true;
+    const next = Object.freeze({
+      mount,
+      open,
+      disclosure: null,
+    });
+    setHeadingState((current) =>
+      current === authority.headingState ? next : current,
+    );
+  };
   const onHeadingClose = (event: Event) => {
+    const closeVisit = pendingHeadingClose.current;
+    const current = active.current as
+      | (ToolbarPublication & { authority?: ToolbarAuthority })
+      | null;
+    const sourceAuthority = closeVisit
+      ? (closeVisit.source as ToolbarPublication & {
+          authority?: ToolbarAuthority;
+        }).authority
+      : null;
+    const currentAuthority = current?.authority;
+    if (
+      closeVisit &&
+      sourceAuthority &&
+      currentAuthority &&
+      sourceAuthority.headingOpen &&
+      !currentAuthority.headingOpen &&
+      editorAuthorityMatches(sourceAuthority, currentAuthority) &&
+      exactCustomEventFromSource(
+        event,
+        closeVisit.content,
+        "focusScope.autoFocusOnUnmount",
+      ) &&
+      claimEvent(event)
+    ) {
+      pendingHeadingClose.current = null;
+      event.preventDefault();
+      sourceAuthority.methods.focus.call(sourceAuthority.actions);
+      return;
+    }
     const source = headingContent.element() ?? lastHeadingContent;
     if (
       !source ||
@@ -1100,6 +1972,8 @@ function createToolbarPublication({
     isRetired: () => retired,
     onFocus,
     onKeyDown,
+    onHeadingKeyDown,
+    onHeadingOpenChange,
     onHeadingClose,
   } as ToolbarPublication & { authority: typeof authority });
   identity.current = publication;
@@ -1195,6 +2069,17 @@ export const Toolbar = memo(function Toolbar({
   const [replay] = useState(() => new CurrentCell<ToolbarReplay | null>(null));
   const [last] = useState(() => new CurrentCell<HTMLButtonElement | null>(null));
   const [claimedEvents] = useState(() => new WeakSet<Event>());
+  const [claimedReactEvents] = useState(() => new WeakSet<object>());
+  const [claimedHeadingPublications] = useState(
+    () => new WeakSet<ToolbarPublication>(),
+  );
+  const [focusedHeadings] = useState(() => new WeakSet<HeadingDisclosure>());
+  const [pendingHeadingClose] = useState(
+    () => new CurrentCell<HeadingCloseVisit | null>(null),
+  );
+  const [headingState, setHeadingState] = useState<HeadingState>(() =>
+    Object.freeze({ mount, open: false, disclosure: null }),
+  );
   const [, setPublicationRevision] = useState(0);
   const requestSuccessor = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
@@ -1206,6 +2091,12 @@ export const Toolbar = memo(function Toolbar({
     replay,
     last,
     claimedEvents,
+    claimedReactEvents,
+    claimedHeadingPublications,
+    focusedHeadings,
+    pendingHeadingClose,
+    headingState,
+    setHeadingState,
     requestSuccessor,
     session,
     actions,
@@ -1224,6 +2115,8 @@ export const Toolbar = memo(function Toolbar({
     captureHeadingContent,
     onFocus: onToolbarFocus,
     onKeyDown: onToolbarKeyDown,
+    onHeadingKeyDown,
+    onHeadingOpenChange,
     onHeadingClose,
     headingItems,
     buttons,
@@ -1266,7 +2159,7 @@ export const Toolbar = memo(function Toolbar({
       onKeyDown={onToolbarKeyDown}
     >
       <Group>
-        <Menu>
+        <Menu open={headingState.open} onOpenChange={onHeadingOpenChange}>
           <MenuTrigger asChild>
             <button
               ref={captureHeading}
@@ -1274,6 +2167,7 @@ export const Toolbar = memo(function Toolbar({
               className="icon-btn w-auto gap-1 px-2.5 font-semibold"
               disabled={dis}
               onMouseDown={onHeadingMouseDown}
+              onKeyDown={onHeadingKeyDown}
               aria-label="Text style"
               data-testid="heading-menu"
             >

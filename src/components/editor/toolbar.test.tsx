@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, within } from "@testing-library/react";
+import { act, fireEvent, within } from "@testing-library/react";
 import {
   StrictMode,
   useEffect,
@@ -14,75 +14,229 @@ import { createRoot, type Root } from "react-dom/client";
 import type { CollabSession } from "@/editor/collab/session";
 import type { EditorActions, FormatState } from "./actions";
 
-vi.mock("@/components/ui/primitives", () => ({
-  Tip: ({ children }: { children: ReactNode }) => children,
-  Menu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  MenuTrigger: ({ children }: { children: ReactNode }) => children,
-  MenuContent: ({
-    children,
-    onCloseAutoFocus,
-    ref,
-    ...props
-  }: {
-    children: ReactNode;
-    onCloseAutoFocus?: (event: { preventDefault: () => void }) => void;
-    ref?: Ref<HTMLDivElement>;
-    [key: string]: unknown;
-  }) => (
-    <div ref={ref} role="menu" data-testid="heading-content" onBlur={onCloseAutoFocus} {...props}>
-      {children}
-    </div>
-  ),
-  MenuRadioGroup: ({
-    children,
-  }: {
-    children: ReactNode;
-  }) => (
-    <div role="radiogroup">
-      {children}
-    </div>
-  ),
-  MenuRadioItem: ({
-    children,
-    value,
-    className,
-    ref,
-    disabled,
-    onSelect,
-    ...props
-  }: {
-    children: ReactNode;
-    value: string;
-    className?: string;
-    ref?: Ref<HTMLDivElement>;
-    disabled?: boolean;
-    onSelect?: (event: Event) => void;
-    [key: string]: unknown;
-  }) => (
-    <div
-      ref={ref}
-      role="menuitemradio"
-      aria-checked="false"
-      aria-disabled={disabled ? "true" : undefined}
-      data-value={value}
-      className={className}
-      onClick={(event) => {
-        if (!onSelect) return;
-        const CustomEventConstructor = event.currentTarget.ownerDocument.defaultView?.CustomEvent;
-        if (!CustomEventConstructor) throw new Error("Heading item has no owner-document CustomEvent");
-        const nativeEvent = new CustomEventConstructor("menu.itemSelect", {
-          bubbles: true,
-          cancelable: true,
-        });
-        event.currentTarget.addEventListener("menu.itemSelect", onSelect, { once: true });
-        event.currentTarget.dispatchEvent(nativeEvent);
-      }}
-      {...props}
-    >
-      {children}
-    </div>
-  ),
-}));
+const menuMockState = vi.hoisted(() => ({ deferPortal: false }));
+
+vi.mock("@/components/ui/primitives", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  const MenuContext = React.createContext<{
+    open: boolean;
+    change: (open: boolean) => void;
+  } | null>(null);
+  return {
+    Tip: ({ children }: { children: ReactNode }) => children,
+    Menu: ({
+      children,
+      open: controlledOpen,
+      defaultOpen = false,
+      onOpenChange,
+    }: {
+      children: ReactNode;
+      open?: boolean;
+      defaultOpen?: boolean;
+      onOpenChange?: (open: boolean) => void;
+    }) => {
+      const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen);
+      const open = controlledOpen ?? uncontrolledOpen;
+      const change = (next: boolean) => {
+        if (controlledOpen === undefined) setUncontrolledOpen(next);
+        onOpenChange?.(next);
+      };
+      return (
+        <MenuContext.Provider value={{ open, change }}>
+          <div>{children}</div>
+        </MenuContext.Provider>
+      );
+    },
+    MenuTrigger: ({ children }: { children: ReactNode }) => {
+      const context = React.useContext(MenuContext);
+      if (!context || !React.isValidElement<Record<string, unknown>>(children)) {
+        return children;
+      }
+      const child = children as React.ReactElement<{
+        disabled?: boolean;
+        onKeyDown?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+        onPointerDown?: (event: React.PointerEvent<HTMLButtonElement>) => void;
+      }>;
+      const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+        child.props.onKeyDown?.(event);
+        if (event.defaultPrevented || child.props.disabled) return;
+        if (event.key === "Enter" || event.key === " ") {
+          context.change(!context.open);
+        } else if (event.key === "ArrowDown") {
+          context.change(true);
+        }
+        if (
+          event.key === "Enter" ||
+          event.key === " " ||
+          event.key === "ArrowDown"
+        ) {
+          event.preventDefault();
+        }
+      };
+      Object.assign(onKeyDown, { childHandler: child.props.onKeyDown });
+      return React.cloneElement(child, {
+        "aria-haspopup": "menu",
+        "aria-expanded": context.open,
+        "aria-controls": context.open ? "heading-content" : undefined,
+        "data-state": context.open ? "open" : "closed",
+        onPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => {
+          child.props.onPointerDown?.(event);
+          if (
+            !event.defaultPrevented &&
+            !child.props.disabled &&
+            event.button === 0 &&
+            !event.ctrlKey
+          ) {
+            context.change(!context.open);
+            if (!context.open) event.preventDefault();
+          }
+        },
+        onKeyDown,
+      } as React.HTMLAttributes<HTMLButtonElement>);
+    },
+    MenuContent: ({
+      children,
+      onCloseAutoFocus,
+      ref,
+      ...props
+    }: {
+      children: ReactNode;
+      onCloseAutoFocus?: (event: Event) => void;
+      ref?: Ref<HTMLDivElement>;
+      [key: string]: unknown;
+    }) => {
+      const context = React.useContext(MenuContext);
+      const localRef = React.useRef<HTMLDivElement | null>(null);
+      const wasOpen = React.useRef(Boolean(context?.open));
+      const [portalReady, setPortalReady] = React.useState(
+        !menuMockState.deferPortal,
+      );
+      React.useLayoutEffect(() => {
+        if (menuMockState.deferPortal) {
+          setPortalReady(Boolean(context?.open));
+        }
+      }, [context?.open]);
+      React.useEffect(() => {
+        const open = Boolean(context?.open);
+        const element = localRef.current;
+        if (wasOpen.current && !open && element && onCloseAutoFocus) {
+          const CustomEventConstructor =
+            element.ownerDocument.defaultView?.CustomEvent;
+          if (!CustomEventConstructor) {
+            throw new Error("Heading content has no owner-document CustomEvent");
+          }
+          const event = new CustomEventConstructor(
+            "focusScope.autoFocusOnUnmount",
+            { bubbles: true, cancelable: true },
+          );
+          element.addEventListener(
+            "focusScope.autoFocusOnUnmount",
+            onCloseAutoFocus,
+            { once: true },
+          );
+          element.dispatchEvent(event);
+        }
+        wasOpen.current = open;
+      }, [context?.open, onCloseAutoFocus]);
+      React.useEffect(() => {
+        const element = localRef.current;
+        if (!context?.open || !element) return;
+        const onPointerDown = (event: PointerEvent) => {
+          const target = event.target;
+          const trigger = element.ownerDocument.querySelector(
+            '[data-testid="heading-menu"]',
+          );
+          if (
+            target instanceof Node &&
+            !element.contains(target) &&
+            target !== trigger
+          ) {
+            context.change(false);
+          }
+        };
+        element.ownerDocument.addEventListener("pointerdown", onPointerDown);
+        return () =>
+          element.ownerDocument.removeEventListener("pointerdown", onPointerDown);
+      }, [context]);
+      if (menuMockState.deferPortal && (!context?.open || !portalReady)) {
+        return null;
+      }
+      return (
+        <div
+          ref={(element) => {
+            localRef.current = element;
+            if (typeof ref === "function") ref(element);
+            else if (ref) ref.current = element;
+          }}
+          id="heading-content"
+          role="menu"
+          data-testid="heading-content"
+          data-state={context?.open ? "open" : "closed"}
+          onBlur={onCloseAutoFocus as unknown as React.FocusEventHandler<HTMLDivElement>}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") context?.change(false);
+          }}
+          {...props}
+        >
+          {children}
+        </div>
+      );
+    },
+    MenuRadioGroup: ({ children }: { children: ReactNode }) => (
+      <div role="radiogroup">{children}</div>
+    ),
+    MenuRadioItem: ({
+      children,
+      value,
+      className,
+      ref,
+      disabled,
+      onSelect,
+      ...props
+    }: {
+      children: ReactNode;
+      value: string;
+      className?: string;
+      ref?: Ref<HTMLDivElement>;
+      disabled?: boolean;
+      onSelect?: (event: Event) => void;
+      [key: string]: unknown;
+    }) => {
+      const context = React.useContext(MenuContext);
+      return (
+        <div
+          ref={ref}
+          role="menuitemradio"
+          tabIndex={-1}
+          aria-checked="false"
+          aria-disabled={disabled ? "true" : undefined}
+          data-value={value}
+          className={className}
+          onClick={(event) => {
+            if (!onSelect) return;
+            const CustomEventConstructor =
+              event.currentTarget.ownerDocument.defaultView?.CustomEvent;
+            if (!CustomEventConstructor) {
+              throw new Error("Heading item has no owner-document CustomEvent");
+            }
+            const nativeEvent = new CustomEventConstructor("menu.itemSelect", {
+              bubbles: true,
+              cancelable: true,
+            });
+            event.currentTarget.addEventListener("menu.itemSelect", onSelect, {
+              once: true,
+            });
+            event.currentTarget.dispatchEvent(nativeEvent);
+            if (!nativeEvent.defaultPrevented) context?.change(false);
+          }}
+          {...props}
+        >
+          {children}
+        </div>
+      );
+    },
+  };
+});
 
 import { Toolbar } from "./toolbar";
 
@@ -100,6 +254,7 @@ type ClickHandler = (event: ControlEvent) => void;
 type MouseDownHandler = (event: ControlEvent) => void;
 type HeadingClickHandler = (event: { currentTarget: HTMLDivElement }) => void;
 type CloseHandler = (event: Event) => void;
+type HeadingKeyHandler = NonNullable<ComponentProps<"button">["onKeyDown"]>;
 type FocusHandler = (event: {
   type: "focus";
   currentTarget: HTMLDivElement;
@@ -153,6 +308,16 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
   return handler as T;
+}
+
+function headingChildKeyHandler(element: HTMLButtonElement) {
+  const handler = reactHandler<
+    HeadingKeyHandler & { childHandler?: HeadingKeyHandler }
+  >(element, "onKeyDown");
+  if (!handler.childHandler) {
+    throw new Error("Text style did not retain its child key handler");
+  }
+  return handler.childHandler;
 }
 
 function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
@@ -508,13 +673,678 @@ function setNativeProvenance(event: Event, target: EventTarget) {
   });
 }
 
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function headingKeyEvent(
+  trigger: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const KeyboardEventConstructor =
+    trigger.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) {
+    throw new Error("Text style has no owner-realm KeyboardEvent");
+  }
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchHeadingKey(
+  trigger: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event =
+    typeof keyOrEvent === "string"
+      ? headingKeyEvent(trigger, keyOrEvent, init)
+      : keyOrEvent;
+  act(() => {
+    trigger.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchHeadingKeyWithHandler(
+  trigger: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: HeadingKeyHandler,
+) {
+  const propsKey = Object.keys(trigger).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to Text style");
+  }
+  const properties = trigger as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      trigger.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
+}
+
+function strictRenderToolbar(toolbar: ToolbarProps) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mounted.push({ root, host });
+  const update = (next: ToolbarProps, publicationKey = 0) => {
+    act(() => {
+      root.render(
+        <StrictMode>
+          <Toolbar key={publicationKey} {...next} />
+        </StrictMode>,
+      );
+    });
+  };
+  update(toolbar);
+  return { host, root, update };
+}
+
+function textStyle() {
+  return screen.getByRole("button", {
+    name: "Text style",
+  }) as HTMLButtonElement;
+}
+
+function headingItem(name: string) {
+  return screen.getByRole("menuitemradio", { name }) as HTMLDivElement;
+}
+
+function actionCalls(actions: ReturnType<typeof instrumentActions>) {
+  return [
+    actions.toggleMark,
+    actions.openLinkDialog,
+    actions.toggleCodeBlock,
+    actions.toggleList,
+    actions.toggleQuote,
+    actions.horizontalRule,
+    actions.undo,
+    actions.redo,
+    actions.setHeading,
+    actions.focus,
+  ].reduce((total, spy) => total + spy.mock.calls.length, 0);
+}
+
 afterEach(() => {
   for (const entry of mounted.splice(0)) {
     act(() => entry.root.unmount());
     entry.host.remove();
   }
   vi.restoreAllMocks();
+  menuMockState.deferPortal = false;
   document.body.replaceChildren();
+});
+
+describe("Toolbar Text style trusted arrows", () => {
+  it("waits for Radix's deferred portal before focusing the requested item", () => {
+    menuMockState.deferPortal = true;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    const trigger = textStyle();
+    expect(screen.queryByTestId("heading-content")).toBeNull();
+    trigger.focus();
+    focus.mockClear();
+
+    const event = dispatchHeadingKey(trigger, "ArrowUp");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(textStyle()).toHaveAttribute("aria-expanded", "true");
+    expect(headingItem("Heading 6")).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it("keeps an exact Strict replay current across unrelated document mutations", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    mounted.push({ root, host });
+    const title = document.title;
+    let probeMounted = false;
+    let probeCleanups = 0;
+    const probe = (element: HTMLSpanElement | null) => {
+      if (element) {
+        probeMounted = true;
+      } else if (probeMounted && probeCleanups++ === 0) {
+        document.title = "Unrelated editor update";
+        document.title = title;
+      }
+    };
+    act(() => {
+      root.render(
+        <StrictMode>
+          <Toolbar {...f.props} />
+          <span ref={probe} />
+        </StrictMode>,
+      );
+    });
+    expect(probeCleanups).toBeGreaterThan(0);
+
+    const trigger = textStyle();
+    trigger.focus();
+    focus.mockClear();
+    const event = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
+  });
+
+  it("retains open authority when Radix installs its focus guards", () => {
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    const trigger = textStyle();
+    trigger.focus();
+    dispatchHeadingKey(trigger, "ArrowDown");
+    const start = document.createElement("span");
+    const end = document.createElement("span");
+    start.dataset.radixFocusGuard = "";
+    end.dataset.radixFocusGuard = "";
+    document.body.prepend(start);
+    document.body.append(end);
+
+    fireEvent.click(headingItem("Heading 2"));
+
+    expect(f.actions.setHeading.mock.calls).toEqual([[2]]);
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+    expect(f.actions.focus).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["closed", "ArrowDown", "Paragraph"],
+    ["closed", "ArrowUp", "Heading 6"],
+    ["open", "ArrowDown", "Paragraph"],
+    ["open", "ArrowUp", "Heading 6"],
+  ] as const)(
+    "opens from a %s trigger with %s and focuses %s exactly once",
+    (initial, key, label) => {
+      const f = fixture();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      strictRenderToolbar(f.props);
+      let trigger = textStyle();
+      if (initial === "open") {
+        fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+        trigger = textStyle();
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+      }
+      trigger.focus();
+      focus.mockClear();
+      const transitions = new MutationObserver(() => undefined);
+      transitions.observe(trigger, {
+        attributes: true,
+        attributeFilter: ["aria-expanded"],
+      });
+      const selection = document.getSelection();
+      const removeAllRanges = selection
+        ? vi.spyOn(selection, "removeAllRanges")
+        : null;
+      const beforeScroll = { x: window.scrollX, y: window.scrollY };
+
+      const event = dispatchHeadingKey(trigger, key);
+
+      const currentTrigger = textStyle();
+      const destination = headingItem(label);
+      expect(event.isTrusted).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(currentTrigger).toBe(trigger);
+      expect(currentTrigger).toHaveAttribute("aria-expanded", "true");
+      expect(currentTrigger).toHaveAttribute("data-state", "open");
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(
+        transitions
+          .takeRecords()
+          .filter(({ attributeName }) => attributeName === "aria-expanded"),
+      ).toHaveLength(initial === "closed" ? 1 : 0);
+      transitions.disconnect();
+      expect(actionCalls(f.actions)).toBe(0);
+      expect(removeAllRanges).not.toHaveBeenCalled();
+      expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+    },
+  );
+
+  it("retains pointer, Enter, Space, item activation, Escape, toggle, and outside close behavior", () => {
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    let trigger = textStyle();
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(f.actions.setHeading).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(f.actions.focus).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(screen.getByTestId("heading-content"), { key: "Escape" });
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(f.actions.focus).toHaveBeenCalledTimes(2);
+
+    fireEvent.keyDown(trigger, { key: " " });
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    fireEvent.pointerDown(outside);
+    trigger = textStyle();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(f.actions.focus).toHaveBeenCalledTimes(3);
+
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(headingItem("Heading 2"));
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+    expect(f.actions.setHeading.mock.calls).toEqual([[2]]);
+    expect(f.actions.focus).toHaveBeenCalledTimes(4);
+  });
+
+  it("rejects altered key facts, cancellation, missing focus, and disabled permissions before recovery", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    let trigger = textStyle();
+    const rejected = [
+      headingKeyEvent(trigger, "PageDown"),
+      headingKeyEvent(trigger, "ArrowDown", { ctrlKey: true }),
+      headingKeyEvent(trigger, "ArrowDown", { altKey: true }),
+      headingKeyEvent(trigger, "ArrowDown", { metaKey: true }),
+      headingKeyEvent(trigger, "ArrowDown", { shiftKey: true }),
+      headingKeyEvent(trigger, "ArrowDown", { repeat: true }),
+      headingKeyEvent(trigger, "ArrowDown", { isComposing: true }),
+      headingKeyEvent(trigger, "ArrowDown", { bubbles: false }),
+      headingKeyEvent(trigger, "ArrowDown", { cancelable: false }),
+      headingKeyEvent(trigger, "ArrowDown", {}, false),
+    ];
+    for (const event of rejected) {
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      dispatchHeadingKey(trigger, event);
+      expect(focus).not.toHaveBeenCalled();
+      expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+    }
+
+    const prevented = headingKeyEvent(trigger, "ArrowDown");
+    Reflect.apply(nativePreventDefault, prevented, []);
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchHeadingKey(trigger, prevented);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+
+    const stopped = headingKeyEvent(trigger, "ArrowDown");
+    stopped.stopPropagation();
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchHeadingKey(trigger, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const unfocused = dispatchHeadingKey(trigger, "ArrowDown");
+    expect(unfocused.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => f.session.set({ canEdit: false }));
+    trigger = textStyle();
+    expect(trigger).toBeDisabled();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const disabled = dispatchHeadingKey(trigger, "ArrowDown");
+    expect(disabled.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => f.session.set({ canEdit: true }));
+    trigger = textStyle();
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it("rejects fabricated, foreign, crossed, replayed, and reentrant pairs before successor recovery", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    let trigger = textStyle();
+    const handler = headingChildKeyHandler(trigger);
+    const fabricatedPreventDefault = vi.fn();
+    handler({
+      key: "ArrowDown",
+      currentTarget: trigger,
+      target: trigger,
+      preventDefault: fabricatedPreventDefault,
+    } as unknown as Parameters<HeadingKeyHandler>[0]);
+    expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignEvent = iframe.contentDocument?.createEvent("KeyboardEvent");
+    if (!foreignEvent) throw new Error("The iframe has no KeyboardEvent");
+    foreignEvent.initKeyboardEvent(
+      "keydown",
+      true,
+      true,
+      iframe.contentWindow,
+      "ArrowDown",
+    );
+    handler({
+      key: "ArrowDown",
+      currentTarget: trigger,
+      target: trigger,
+      nativeEvent: foreignEvent,
+      preventDefault: fabricatedPreventDefault,
+    } as unknown as Parameters<HeadingKeyHandler>[0]);
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    const foreign = document.createElement("button");
+    document.body.append(foreign);
+    for (const property of [
+      "currentTarget",
+      "target",
+      "nativeEvent",
+      "isTrusted",
+      "isDefaultPrevented",
+    ] as const) {
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = headingKeyEvent(trigger, "ArrowDown");
+      const crossedNative = headingKeyEvent(trigger, "ArrowDown");
+      dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
+        handler(
+          new Proxy(reactEvent, {
+            get(target, current, receiver) {
+              if (current !== property) {
+                return Reflect.get(target, current, receiver);
+              }
+              if (property === "nativeEvent") return crossedNative;
+              if (property === "isDefaultPrevented") return () => true;
+              if (property === "isTrusted") return false;
+              return foreign;
+            },
+          }),
+        );
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+    }
+
+    const forged = headingKeyEvent(trigger, "ArrowDown");
+    Object.defineProperty(forged, "key", {
+      configurable: true,
+      value: "ArrowUp",
+    });
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchHeadingKey(trigger, forged);
+    expect(forged.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = headingKeyEvent(trigger, "ArrowUp");
+    let activeReactEvent: Parameters<HeadingKeyHandler>[0] | null = null;
+    preventDefault.mockImplementation(function (this: Event) {
+      if (activeReactEvent) handler(activeReactEvent);
+      Reflect.apply(nativePreventDefault, this, []);
+    });
+    dispatchHeadingKeyWithHandler(trigger, accepted, (event) => {
+      activeReactEvent = event;
+      handler(event);
+      handler(event);
+      activeReactEvent = null;
+    });
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
+
+    trigger = textStyle();
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchHeadingKey(trigger, accepted);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const successor = dispatchHeadingKey(trigger, "ArrowDown");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Paragraph")).toHaveFocus();
+    expect(actionCalls(f.actions)).toBe(0);
+    iframe.remove();
+  });
+
+  it("rejects stale editor, format, and open-state publications before a distinct current recovery", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    const view = strictRenderToolbar(f.props);
+    let trigger = textStyle();
+
+    f.currentFormat.heading = 3;
+    trigger.focus();
+    focus.mockClear();
+    const staleFormat = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(staleFormat.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    f.currentFormat.heading = 0;
+
+    f.session.mutate({ canEdit: false });
+    const staleEditor = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(staleEditor.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    f.session.mutate({ canEdit: true });
+
+    view.update(f.props, 1);
+    trigger = textStyle();
+    const staleClosedHandler = headingChildKeyHandler(trigger);
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    trigger = textStyle();
+    trigger.focus();
+    focus.mockClear();
+    const staleOpen = headingKeyEvent(trigger, "ArrowUp");
+    dispatchHeadingKeyWithHandler(trigger, staleOpen, staleClosedHandler);
+    expect(staleOpen.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    const current = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(current.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it.each([
+    "partial ref replay",
+    "root detach and reinsert",
+    "trigger replacement and restore",
+    "content replacement and restore",
+    "item reorder and restore",
+    "item detach and reinsert",
+    "item mutation and restore",
+  ] as const)(
+    "permanently rejects trusted arrows after %s and lets a fresh mount recover",
+    (change) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const f = fixture();
+      const view = strictRenderToolbar(f.props);
+      let trigger = textStyle();
+      const toolbar = screen.getByTestId("toolbar");
+      const content = screen.getByTestId("heading-content");
+      const first = headingItem("Paragraph");
+
+      if (change === "partial ref replay") {
+        const ref = reactRef(trigger);
+        act(() => {
+          ref(null);
+          ref(trigger);
+        });
+      } else if (change === "root detach and reinsert") {
+        const parent = toolbar.parentNode;
+        const next = toolbar.nextSibling;
+        if (!parent) throw new Error("Toolbar had no parent");
+        toolbar.remove();
+        parent.insertBefore(toolbar, next);
+      } else if (change === "trigger replacement and restore") {
+        const replacement = trigger.cloneNode(true) as HTMLButtonElement;
+        trigger.replaceWith(replacement);
+        replacement.replaceWith(trigger);
+      } else if (change === "content replacement and restore") {
+        const replacement = content.cloneNode(true) as HTMLDivElement;
+        content.replaceWith(replacement);
+        replacement.replaceWith(content);
+      } else if (change === "item reorder and restore") {
+        const group = first.parentNode;
+        const second = first.nextSibling;
+        if (!group || !second) throw new Error("Heading items had no order");
+        group.append(first);
+        group.insertBefore(first, second);
+      } else if (change === "item detach and reinsert") {
+        const parent = first.parentNode;
+        const next = first.nextSibling;
+        if (!parent) throw new Error("Paragraph had no parent");
+        first.remove();
+        parent.insertBefore(first, next);
+      } else {
+        const original = first.className;
+        first.className = `${original} changed`;
+        first.className = original;
+      }
+
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const stale = dispatchHeadingKey(trigger, "ArrowUp");
+      expect(stale.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+      expect(actionCalls(f.actions)).toBe(0);
+
+      view.update(f.props, 1);
+      trigger = textStyle();
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = dispatchHeadingKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(headingItem("Heading 6")).toHaveFocus();
+    },
+  );
+
+  it("rejects a genuine pair after ref cleanup and recovers on a fresh mount", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    const view = strictRenderToolbar(f.props);
+    let trigger = textStyle();
+    const handler = headingChildKeyHandler(trigger);
+    const ref = reactRef(trigger);
+    const event = headingKeyEvent(trigger, "ArrowUp");
+    trigger.focus();
+    focus.mockClear();
+
+    dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
+      ref(null);
+      handler(reactEvent);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(textStyle()).toHaveAttribute("aria-expanded", "false");
+    expect(actionCalls(f.actions)).toBe(0);
+
+    view.update(f.props, 1);
+    trigger = textStyle();
+    trigger.focus();
+    focus.mockClear();
+    const recovered = dispatchHeadingKey(trigger, "ArrowDown");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Paragraph")).toHaveFocus();
+  });
 });
 
 describe("Toolbar publication authority", () => {
