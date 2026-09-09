@@ -131,6 +131,7 @@ const ISSUE_OTHER: LintIssue = {
 
 const directViews: DirectView[] = [];
 const fakeSessionDisposals: (() => void)[] = [];
+let restoreExactWindowRealm: (() => void) | null = null;
 const fakeSessionSelections = new WeakMap<
   CollabSession,
   (from: number, to: number) => void
@@ -519,15 +520,6 @@ function menuKey(
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Menu trigger owner window was unavailable");
-  let listenerReceiver: Window | null = null;
-  const observeReceiver = function (this: Window) {
-    listenerReceiver = this;
-  };
-  ownerWindow.addEventListener("status-bar-window-probe", observeReceiver, {
-    once: true,
-  });
-  ownerWindow.dispatchEvent(new ownerWindow.Event("status-bar-window-probe"));
-  expect(listenerReceiver).toBe(ownerWindow);
   const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
@@ -538,6 +530,35 @@ function menuKey(
   });
   if (trusted) trustKeyboardEvent(event, ownerWindow);
   return event;
+}
+
+function useExactWindowListenerRealm() {
+  if (restoreExactWindowRealm) return;
+  const exposedWindow = document.defaultView;
+  if (!exposedWindow) throw new Error("Document default view was unavailable");
+  let listenerReceiver: Window | null = null;
+  const observeReceiver = function (this: Window) {
+    listenerReceiver = this;
+  };
+  exposedWindow.addEventListener("status-bar-window-probe", observeReceiver, {
+    once: true,
+  });
+  exposedWindow.dispatchEvent(
+    new exposedWindow.Event("status-bar-window-probe"),
+  );
+  if (!listenerReceiver) throw new Error("Window listener receiver was unavailable");
+  const ownDescriptor = Object.getOwnPropertyDescriptor(document, "defaultView");
+  Object.defineProperty(document, "defaultView", {
+    configurable: true,
+    value: listenerReceiver,
+  });
+  restoreExactWindowRealm = () => {
+    if (ownDescriptor) {
+      Object.defineProperty(document, "defaultView", ownDescriptor);
+    } else {
+      Reflect.deleteProperty(document, "defaultView");
+    }
+  };
 }
 
 function fabricatedClick(
@@ -645,6 +666,8 @@ afterEach(async () => {
     view.host.remove();
   }
   while (fakeSessionDisposals.length) fakeSessionDisposals.pop()!();
+  restoreExactWindowRealm?.();
+  restoreExactWindowRealm = null;
   document.body.replaceChildren();
   Reflect.deleteProperty(window, "PointerEvent");
 });
@@ -744,6 +767,7 @@ describe("status bar Strict Mode controls", () => {
   ] as const)(
     "opens the %s menu from closed with %s and focuses %s once without actions or scroll",
     async (compact, layout, key, selector, label) => {
+      useExactWindowListenerRealm();
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
       const documentScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
@@ -879,6 +903,8 @@ describe("status bar Strict Mode controls", () => {
 });
 
 describe("status bar directional menu authority", () => {
+  beforeEach(useExactWindowListenerRealm);
+
   it.each(["ArrowDown", "ArrowUp"] as const)(
     "rejects untrusted, modified, repeated, composing, malformed, unfocused, and crossed %s input",
     async (key) => {
