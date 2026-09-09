@@ -6,7 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -308,6 +308,23 @@ function elementWithText(selector: string, text: string) {
     .findLast((candidate) => candidate.textContent?.includes(text));
   if (!element) throw new Error(`${selector} containing "${text}" was not rendered`);
   return element;
+}
+
+async function focusedMenuItem(
+  trigger: HTMLElement,
+  selector: string,
+  text: string,
+) {
+  let item: HTMLElement | null = null;
+  await waitFor(() => {
+    const contents = screen.getAllByTestId("status-menu-content");
+    expect(contents).toHaveLength(1);
+    item = elementWithText(selector, text);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", contents[0]!.id);
+    expect(contents[0]).toContainElement(item);
+    expect(item).toHaveFocus();
+  });
 }
 
 function desktopShortcuts() {
@@ -761,10 +778,7 @@ describe("status bar Strict Mode controls", () => {
           await Promise.resolve();
         });
 
-        const destination = elementWithText(selector, label);
-        expect(trigger).toHaveAttribute("aria-expanded", "true");
-        expect(screen.getAllByTestId("status-menu-content")).toHaveLength(1);
-        expect(destination).toHaveFocus();
+        await focusedMenuItem(trigger, selector, label);
         expect(
           preventDefault.mock.contexts.filter((context) => context === event),
         ).toHaveLength(1);
@@ -924,7 +938,13 @@ describe("status bar directional menu authority", () => {
           trigger.dispatchEvent(valid);
           await Promise.resolve();
         });
-        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        await focusedMenuItem(
+          trigger,
+          key === "ArrowDown"
+            ? '[role="menuitemradio"]'
+            : '[role="menuitemcheckbox"]',
+          key === "ArrowDown" ? "Code and preview" : "Sync scrolling",
+        );
         expect(
           preventDefault.mock.contexts.filter((context) => context === valid),
         ).toHaveLength(1);
@@ -988,10 +1008,11 @@ describe("status bar directional menu authority", () => {
         await Promise.resolve();
       });
 
-      expect(trigger).toHaveAttribute("aria-expanded", "true");
-      expect(
-        elementWithText('[role="menuitemradio"]', "Code and preview"),
-      ).toHaveFocus();
+      await focusedMenuItem(
+        trigger,
+        '[role="menuitemradio"]',
+        "Code and preview",
+      );
       expect(
         preventDefault.mock.contexts.filter((context) => context === successor),
       ).toHaveLength(1);
@@ -1086,10 +1107,11 @@ describe("status bar directional menu authority", () => {
           await Promise.resolve();
         });
 
-        expect(currentTrigger).toHaveAttribute("aria-expanded", "true");
-        expect(
-          elementWithText('[role="menuitemradio"]', "Code and preview"),
-        ).toHaveFocus();
+        await focusedMenuItem(
+          currentTrigger,
+          '[role="menuitemradio"]',
+          "Code and preview",
+        );
         expect(
           preventDefault.mock.contexts.filter(
             (context) => context === successor,
@@ -1130,16 +1152,17 @@ describe("status bar directional menu authority", () => {
         await Promise.resolve();
       });
 
+      await focusedMenuItem(
+        trigger,
+        '[role="menuitemradio"]',
+        "Code and preview",
+      );
       expect(
         preventDefault.mock.contexts.filter((context) => context === accepted),
       ).toHaveLength(1);
       expect(
         preventDefault.mock.contexts.filter((context) => context === crossed),
       ).toHaveLength(0);
-      expect(trigger).toHaveAttribute("aria-expanded", "true");
-      expect(
-        elementWithText('[role="menuitemradio"]', "Code and preview"),
-      ).toHaveFocus();
       expect(focus).toHaveBeenCalledOnce();
 
       fireEvent.keyDown(screen.getByTestId("status-menu-content"), {
@@ -1168,10 +1191,11 @@ describe("status bar directional menu authority", () => {
         trigger.dispatchEvent(successor);
         await Promise.resolve();
       });
-      expect(trigger).toHaveAttribute("aria-expanded", "true");
-      expect(
-        elementWithText('[role="menuitemcheckbox"]', "Sync scrolling"),
-      ).toHaveFocus();
+      await focusedMenuItem(
+        trigger,
+        '[role="menuitemcheckbox"]',
+        "Sync scrolling",
+      );
       expect(
         preventDefault.mock.contexts.filter((context) => context === successor),
       ).toHaveLength(1);
@@ -1253,10 +1277,11 @@ describe("status bar directional menu authority", () => {
           currentTrigger.dispatchEvent(successor);
           await Promise.resolve();
         });
-        expect(currentTrigger).toHaveAttribute("aria-expanded", "true");
-        expect(
-          elementWithText('[role="menuitemradio"]', "Code and preview"),
-        ).toHaveFocus();
+        await focusedMenuItem(
+          currentTrigger,
+          '[role="menuitemradio"]',
+          "Code and preview",
+        );
         expect(focus).toHaveBeenCalledOnce();
         expect(scroll).not.toHaveBeenCalled();
       } finally {
