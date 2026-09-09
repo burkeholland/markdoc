@@ -103,6 +103,42 @@ function captureReactCallback<T>(element: Element, name: string): T {
   return callback as T;
 }
 
+function trustedKeyboardEvent(
+  element: HTMLElement,
+  key: string,
+): KeyboardEvent {
+  const KeyboardEventConstructor = element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) throw new Error("The control has no owner-realm KeyboardEvent");
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+  return event;
+}
+
 type TokenClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
 type TokenInputHandler = (event: ChangeEvent<HTMLInputElement>) => void;
 type TokenSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
@@ -1602,7 +1638,9 @@ describe("one-time lifecycle and setup", () => {
     expect(screen.getByRole("button", { name: `Rename ${token.name}` })).toBeVisible();
     const cli = screen.getByRole("tab", { name: "Copilot CLI" });
     cli.focus();
-    await user.keyboard("{ArrowRight}");
+    act(() => {
+      cli.dispatchEvent(trustedKeyboardEvent(cli, "ArrowRight"));
+    });
     expect(screen.getByRole("tab", { name: "VS Code" })).toHaveFocus();
     const config = JSON.parse(screen.getByTestId("agent-connect-config").textContent!);
     expect(config.servers.markdoc.url).toBe(`${window.location.origin}/api/mcp`);

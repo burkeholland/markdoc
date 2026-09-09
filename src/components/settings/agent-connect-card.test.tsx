@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type ComponentProps, type ReactNode } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -67,6 +74,29 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
   return handler as T;
+}
+
+interface ReactHostFiber {
+  alternate?: ReactHostFiber | null;
+  memoizedProps?: Record<string, unknown>;
+  refCleanup?: unknown;
+}
+
+function reactRefCleanup(element: HTMLElement): () => void {
+  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!fiberKey || !propsKey) throw new Error(`React internals were not attached to ${element.tagName}`);
+  const record = element as unknown as Record<string, ReactHostFiber | Record<string, unknown>>;
+  const fiber = record[fiberKey] as ReactHostFiber;
+  const props = record[propsKey] as Record<string, unknown>;
+  const alternate = fiber.alternate;
+  const current = alternate?.memoizedProps?.onKeyDown === props.onKeyDown
+    ? alternate
+    : fiber;
+  if (!current || typeof current.refCleanup !== "function") {
+    throw new Error(`React ref cleanup was not attached to ${element.tagName}`);
+  }
+  return current.refCleanup as () => void;
 }
 
 type ClickHandler = (event: { currentTarget: HTMLButtonElement }) => void;
@@ -289,6 +319,84 @@ function expectSelected(name: string) {
   const selected = screen.getAllByRole("tab").filter((element) => element.getAttribute("aria-selected") === "true");
   expect(selected).toEqual([tab(name)]);
   expect(tab(name)).toHaveAttribute("tabindex", "0");
+  expect(screen.getAllByRole("tab").filter((element) => element.tabIndex === 0)).toEqual([tab(name)]);
+}
+
+function tabKeyEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const KeyboardEventConstructor = element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) throw new Error("The tab has no owner-realm KeyboardEvent");
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function dispatchTabKeyWithHandler(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the Agent tab");
+  const properties = element as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
+}
+
+function dispatchTabKey(
+  element: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+): KeyboardEvent {
+  const event = typeof keyOrEvent === "string"
+    ? tabKeyEvent(element, keyOrEvent, init)
+    : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
 }
 
 function captureActions(): CapturedActions {
@@ -1870,6 +1978,557 @@ describe("Copilot permission exact copy control", () => {
   });
 });
 
+describe("AgentConnectCard automatic tab navigation", () => {
+  const labels = ["Copilot CLI", "VS Code", "Other MCP clients", "Copilot app"] as const;
+  const panelText = {
+    "Copilot CLI": "~/.copilot/mcp-config.json",
+    "VS Code": ".vscode/mcp.json",
+    "Other MCP clients": "your client's MCP configuration",
+    "Copilot app": "canvas extension",
+  } as const;
+  const arrowCases = labels.flatMap((from, index) => [
+    {
+      key: "ArrowDown",
+      from,
+      to: labels[(index + 1) % labels.length]!,
+    },
+    {
+      key: "ArrowUp",
+      from,
+      to: labels[(index - 1 + labels.length) % labels.length]!,
+    },
+  ]);
+
+  it.each(arrowCases)(
+    "moves $key from $from to $to once without scrolling or activating setup controls",
+    ({ key, from, to }) => {
+      const create = vi.fn();
+      const dismiss = vi.fn();
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const location = window.location.href;
+      renderDirect(
+        <StrictMode>
+          <AgentConnectCard
+            origin="https://markdoc.test"
+            scope="comment"
+            onCreateToken={create}
+            onDismiss={dismiss}
+          />
+        </StrictMode>,
+      );
+      expect(screen.getAllByRole("tab").map((item) => item.textContent)).toEqual(labels);
+      fireEvent.click(tab(from));
+      const source = tab(from);
+      const destination = tab(to);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const scroll = { x: window.scrollX, y: window.scrollY };
+
+      const event = dispatchTabKey(source, key);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(destination).toHaveFocus();
+      expectSelected(to);
+      expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
+      expect(screen.getByRole("tabpanel")).toHaveTextContent(panelText[to]);
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(create).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(window.location.href).toBe(location);
+    },
+  );
+
+  it.each([
+    ["Home", "Copilot app", "Copilot CLI"],
+    ["End", "Copilot CLI", "Copilot app"],
+  ] as const)("keeps the %s destination from %s at %s", (key, from, to) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    fireEvent.click(tab(from));
+    const source = tab(from);
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = dispatchTabKey(source, key);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(tab(to));
+    expectSelected(to);
+    expect(screen.getByRole("tabpanel")).toHaveTextContent(panelText[to]);
+  });
+
+  it("keeps native click activation and one roving tab stop", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+
+    for (const label of labels) {
+      focus.mockClear();
+      fireEvent.click(tab(label));
+      expectSelected(label);
+      expect(screen.getByRole("tabpanel")).toHaveTextContent(panelText[label]);
+      expect(focus).not.toHaveBeenCalled();
+    }
+    expect(copyText).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentConnectCard exact keyboard publication", () => {
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["composition", { isComposing: true }],
+    ["repeat", { repeat: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects a %s keydown without prevention, selection, or focus", (_name, init) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = dispatchTabKey(source, "ArrowDown", init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+    expect(source).toHaveFocus();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported, previously prevented, and propagation-stopped keydowns without consuming a clean event", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    source.focus();
+    focus.mockClear();
+
+    const unsupported = dispatchTabKey(source, "PageDown");
+    const prevented = tabKeyEvent(source, "ArrowDown");
+    prevented.preventDefault();
+    preventDefault.mockClear();
+    dispatchTabKey(source, prevented);
+    const stopped = tabKeyEvent(source, "ArrowDown");
+    stopped.stopPropagation();
+    dispatchTabKey(source, stopped);
+
+    expect(unsupported.defaultPrevented).toBe(false);
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+
+    const accepted = dispatchTabKey(source, "ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    expectSelected("VS Code");
+    expect(tab("VS Code")).toHaveFocus();
+  });
+
+  it("rejects fabricated, crossed, foreign-realm, and replayed events without consuming another action", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      <StrictMode>
+        <section data-testid="keyboard-card-a">
+          <AgentConnectCard origin="https://a.markdoc.test" hideTokenStep />
+        </section>
+        <section data-testid="keyboard-card-b">
+          <AgentConnectCard origin="https://b.markdoc.test" hideTokenStep />
+        </section>
+      </StrictMode>,
+    );
+    const cardA = within(view.host).getByTestId("keyboard-card-a");
+    const cardB = within(view.host).getByTestId("keyboard-card-b");
+    const source = within(cardA).getByRole("tab", { name: "Copilot CLI" }) as HTMLButtonElement;
+    const crossed = within(cardB).getByRole("tab", { name: "Copilot CLI" }) as HTMLButtonElement;
+    const handler = reactHandler<KeyHandler>(source, "onKeyDown");
+    const fabricatedPreventDefault = vi.fn();
+    const iframe = document.createElement("iframe");
+    view.host.append(iframe);
+    const foreignView = iframe.contentWindow;
+    const foreignEvent = iframe.contentDocument?.createEvent("KeyboardEvent");
+    if (!foreignEvent) throw new Error("The iframe has no keyboard event");
+    foreignEvent.initKeyboardEvent(
+      "keydown",
+      true,
+      true,
+      foreignView,
+      "ArrowDown",
+    );
+
+    act(() => {
+      handler({
+        key: "ArrowDown",
+        currentTarget: source,
+        preventDefault: fabricatedPreventDefault,
+      });
+      handler({
+        key: "ArrowDown",
+        currentTarget: crossed,
+        preventDefault: fabricatedPreventDefault,
+        nativeEvent: foreignEvent,
+      } as unknown as Parameters<KeyHandler>[0]);
+    });
+    expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(within(cardA).getByRole("tab", { name: "Copilot CLI" })).toHaveAttribute("aria-selected", "true");
+
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = tabKeyEvent(source, "ArrowDown");
+    dispatchTabKey(source, accepted);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(within(cardA).getByRole("tab", { name: "VS Code" })).toHaveFocus();
+
+    preventDefault.mockClear();
+    focus.mockClear();
+    dispatchTabKey(source, accepted);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(within(cardA).getByRole("tab", { name: "VS Code" })).toHaveAttribute("aria-selected", "true");
+    expect(copyText).not.toHaveBeenCalled();
+    iframe.remove();
+  });
+
+  it("uses the committed realm's active-element, prevention, and focus intrinsics", () => {
+    const activeElement = Object.getOwnPropertyDescriptor(
+      Document.prototype,
+      "activeElement",
+    )?.get;
+    if (!activeElement) throw new Error("The document has no activeElement getter");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    const destination = tab("VS Code");
+    source.focus();
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault")
+      .mockImplementation(() => {});
+    const focus = vi.spyOn(HTMLElement.prototype, "focus")
+      .mockImplementation(() => {});
+    vi.spyOn(Document.prototype, "activeElement", "get").mockReturnValue(null);
+
+    const event = dispatchTabKey(source, "ArrowDown");
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(Reflect.apply(activeElement, document, [])).toBe(destination);
+    expectSelected("VS Code");
+  });
+
+  it("reads canonical keyboard getters instead of forged event properties", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const event = tabKeyEvent(source, "ArrowDown");
+    Object.defineProperty(event, "key", {
+      configurable: true,
+      value: "ArrowUp",
+    });
+
+    dispatchTabKey(source, event);
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expectSelected("Copilot CLI");
+  });
+
+  it("rejects untrusted input and replaced React trust predicates before trusted recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    const handler = reactHandler<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(source, "onKeyDown");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const untrusted = tabKeyEvent(source, "ArrowDown", {}, false);
+    dispatchTabKey(source, untrusted);
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+
+    const replacedTrust = tabKeyEvent(source, "ArrowDown");
+    dispatchTabKeyWithHandler(source, replacedTrust, (event) => {
+      handler(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isTrusted") return false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+    });
+    expect(replacedTrust.defaultPrevented).toBe(false);
+
+    const replacedPredicate = tabKeyEvent(source, "ArrowDown");
+    dispatchTabKeyWithHandler(source, replacedPredicate, (event) => {
+      handler(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isDefaultPrevented") return () => true;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+    });
+    expect(replacedPredicate.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+    expect(source).toHaveFocus();
+    expect(copyText).not.toHaveBeenCalled();
+
+    const trusted = dispatchTabKey(source, "ArrowDown");
+    expect(trusted.isTrusted).toBe(true);
+    expect(trusted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expectSelected("VS Code");
+    expect(tab("VS Code")).toHaveFocus();
+  });
+
+  it("rejects an unfocused selected tab and a focused unselected tab", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const selected = tab("Copilot CLI");
+    const unselected = tab("VS Code");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const unfocused = dispatchTabKey(selected, "ArrowDown");
+    unselected.focus();
+    focus.mockClear();
+    const wrongSelection = dispatchTabKey(unselected, "ArrowDown");
+
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(wrongSelection.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+    expect(unselected).toHaveFocus();
+    outside.remove();
+  });
+
+  it.each([
+    "tab detach and restoration",
+    "tab reorder and restoration",
+    "tab replacement and restoration",
+    "tablist detach and restoration",
+    "selection mutation and restoration",
+  ] as const)("retires restored committed history after %s and recovers with a clean successor", (scenario) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const card = (
+      <AgentConnectCard
+        origin="https://markdoc.test"
+        scope="comment"
+        hideTokenStep
+      />
+    );
+    const view = renderDirect(<StrictMode>{card}</StrictMode>);
+    fireEvent.click(tab("VS Code"));
+    const source = tab("VS Code");
+    const list = screen.getByRole("tablist");
+
+    if (scenario === "tab detach and restoration") {
+      const next = source.nextSibling;
+      list.removeChild(source);
+      list.insertBefore(source, next);
+    } else if (scenario === "tab reorder and restoration") {
+      const first = list.firstChild;
+      if (!first) throw new Error("The tablist is empty");
+      list.append(first);
+      list.insertBefore(first, list.firstChild);
+    } else if (scenario === "tab replacement and restoration") {
+      const replacement = source.cloneNode(true);
+      const HTMLButtonElementConstructor =
+        source.ownerDocument.defaultView?.HTMLButtonElement;
+      if (
+        !HTMLButtonElementConstructor ||
+        !(replacement instanceof HTMLButtonElementConstructor)
+      ) {
+        throw new Error("The cloned tab is not an owner-realm button");
+      }
+      source.replaceWith(replacement);
+      replacement.replaceWith(source);
+    } else if (scenario === "tablist detach and restoration") {
+      const parent = list.parentNode;
+      const next = list.nextSibling;
+      if (!parent) throw new Error("The tablist has no parent");
+      parent.removeChild(list);
+      parent.insertBefore(list, next);
+    } else {
+      source.setAttribute("aria-selected", "false");
+      source.setAttribute("aria-selected", "true");
+    }
+
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rejected = dispatchTabKey(source, "ArrowDown");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("VS Code");
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <AgentConnectCard
+            key="fresh"
+            origin="https://markdoc.test"
+            scope="comment"
+            hideTokenStep
+          />
+        </StrictMode>,
+      );
+    });
+    const recovered = tab("Copilot CLI");
+    recovered.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchTabKey(recovered, "ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expectSelected("VS Code");
+  });
+
+  it("rejects partial ref replay and leaves no keyboard work after cleanup", async () => {
+    const realQueueMicrotask = globalThis.queueMicrotask.bind(globalThis);
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    await act(async () => {});
+    const initialSource = tab("Copilot CLI");
+    initialSource.focus();
+    vi.useFakeTimers();
+    const setTimeout = vi.spyOn(window, "setTimeout");
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
+    try {
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <AgentConnectCard origin="https://current.markdoc.test" hideTokenStep />
+          </StrictMode>,
+        );
+      });
+      const source = tab("Copilot CLI");
+      expect(source).toBe(initialSource);
+      expect(source).toHaveFocus();
+      expect(vi.getTimerCount()).toBe(0);
+      const staleHandler = reactHandler<KeyHandler>(source, "onKeyDown");
+      const sourceCleanup = reactRefCleanup(source);
+      focus.mockClear();
+      preventDefault.mockClear();
+      setTimeout.mockClear();
+      clearTimeout.mockClear();
+      let handle: unknown;
+      act(() => {
+        sourceCleanup();
+        expect(setTimeout).toHaveBeenCalledOnce();
+        expect(setTimeout.mock.calls[0]?.[1]).toBe(0);
+        handle = setTimeout.mock.results[0]?.value;
+      });
+      expect(handle).not.toBeUndefined();
+      expect(handle).not.toBeNull();
+      expect(vi.getTimerCount()).toBe(1);
+      staleHandler({
+        key: "ArrowDown",
+        currentTarget: source,
+        preventDefault,
+      });
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelected("Copilot CLI");
+      expect(copyText).not.toHaveBeenCalled();
+      expect(clearTimeout).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      clearTimeout.mockClear();
+      expect(vi.getTimerCount()).toBe(1);
+      await act(() => {
+        view.root.render(<StrictMode><div /></StrictMode>);
+      });
+      await new Promise<void>((resolve) => realQueueMicrotask(resolve));
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(source).toHaveAttribute("aria-selected", "true");
+      expect(clearTimeout).toHaveBeenCalledExactlyOnceWith(handle);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      setTimeout.mockRestore();
+      clearTimeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("AgentConnectCard exact control visits", () => {
   it.each(["callbacks", "origin", "scope", "hide-token"] as const)(
     "retires tab, keyboard, Create, and Dismiss handlers at the %s replacement layout boundary",
@@ -2075,20 +2734,29 @@ describe("AgentConnectCard exact control visits", () => {
 
       const current = captureActions();
       let stalePreventDefault!: ReturnType<typeof vi.fn>;
-      let currentPreventDefault!: ReturnType<typeof vi.fn>;
+      let currentEvent!: KeyboardEvent;
+      const invokeCurrent = () => {
+        act(() => {
+          current.click({ currentTarget: current.clickElement });
+        });
+        fireEvent.click(current.keyElement);
+        current.keyElement.focus();
+        focus.mockClear();
+        currentEvent = dispatchTabKey(current.keyElement, "ArrowRight");
+        act(() => {
+          current.create({ currentTarget: current.createElement });
+          current.dismiss({ currentTarget: current.dismissElement });
+        });
+      };
       if (order === "stale-before-current") {
         observer.takeRecords();
         act(() => {
           stalePreventDefault = invokeActions(stale);
         });
         expect(observer.takeRecords()).toHaveLength(0);
-        act(() => {
-          currentPreventDefault = invokeActions(current);
-        });
+        invokeCurrent();
       } else {
-        act(() => {
-          currentPreventDefault = invokeActions(current);
-        });
+        invokeCurrent();
         observer.takeRecords();
         act(() => {
           stalePreventDefault = invokeActions(stale);
@@ -2097,7 +2765,7 @@ describe("AgentConnectCard exact control visits", () => {
       }
 
       expect(stalePreventDefault).not.toHaveBeenCalled();
-      expect(currentPreventDefault).toHaveBeenCalledOnce();
+      expect(currentEvent.defaultPrevented).toBe(true);
       expect(focus).toHaveBeenCalledOnce();
       expect(focus.mock.contexts[0]).toBe(tab("Other MCP clients"));
       expectSelected("Other MCP clients");
@@ -2192,13 +2860,13 @@ describe("AgentConnectCard exact control visits", () => {
     ] as const) {
       const source = tab(from);
       const destination = tab(to);
-      const handler = reactHandler<KeyHandler>(source, "onKeyDown");
-      const preventDefault = vi.fn();
+      source.focus();
       focus.mockClear();
-      act(() => handler({ key, currentTarget: source, preventDefault }));
-      expect(preventDefault).toHaveBeenCalledOnce();
+      const event = dispatchTabKey(source, key);
+      expect(event.defaultPrevented).toBe(true);
       expect(focus).toHaveBeenCalledOnce();
       expect(focus.mock.contexts[0]).toBe(destination);
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
       expect(destination).toHaveFocus();
       expectSelected(to);
     }
@@ -2206,11 +2874,11 @@ describe("AgentConnectCard exact control visits", () => {
     const selected = tab("Copilot app");
     const selectedKey = reactHandler<KeyHandler>(selected, "onKeyDown");
     for (const key of ["PageDown", "End"]) {
-      const preventDefault = vi.fn();
+      selected.focus();
       observer.takeRecords();
       focus.mockClear();
-      act(() => selectedKey({ key, currentTarget: selected, preventDefault }));
-      expect(preventDefault).not.toHaveBeenCalled();
+      const event = dispatchTabKey(selected, key);
+      expect(event.defaultPrevented).toBe(false);
       expect(focus).not.toHaveBeenCalled();
       expect(observer.takeRecords()).toHaveLength(0);
       expectSelected("Copilot app");
