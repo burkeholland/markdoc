@@ -5897,7 +5897,11 @@ function createModeSwitcherPresentation({
   };
   const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const publication = currentPublication();
-    if (!publication) return;
+    const candidate = publication ?? runtimeState.last?.publication ?? null;
+    if (!publication) {
+      if (candidate) suppressPublishMenuRadixArrowDown(candidate, event);
+      return;
+    }
     const arrow = coordinator.claimReactArrow(publication, event);
     if (!arrow) {
       suppressModeSwitcherRadixArrowDown(publication, event);
@@ -8951,6 +8955,2161 @@ export function PublishStatusButton({
         {label}
       </span>
     </button>
+  );
+}
+
+type PublishMenuActionName =
+  | "publish"
+  | "pull"
+  | "sync"
+  | "open"
+  | "change"
+  | "connect"
+  | "download"
+  | "share";
+type PublishMenuArrowKey = "ArrowDown" | "ArrowUp";
+type PublishMenuNativeGetter = (this: object) => unknown;
+type PublishMenuNativeMethod = (this: object, ...args: unknown[]) => unknown;
+
+interface PublishMenuVisit {
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly document: DocumentDto;
+}
+
+interface PublishMenuState {
+  readonly visit: PublishMenuVisit;
+  readonly open: boolean;
+}
+
+interface PublishMenuAction {
+  readonly identity: object;
+  readonly name: PublishMenuActionName;
+  readonly enabled: boolean;
+  readonly label: string;
+  readonly callback: unknown;
+}
+
+interface PublishMenuRender {
+  readonly identity: object;
+  readonly visit: PublishMenuVisit;
+  readonly props: HeaderProps;
+  readonly session: CollabSession;
+  readonly document: DocumentDto;
+  readonly documentFields: readonly (readonly [string, unknown])[];
+  readonly sync: SyncStatusDto | null;
+  readonly syncFields: string | null;
+  readonly role: CollabSession["role"];
+  readonly linked: boolean;
+  readonly canEdit: boolean;
+  readonly isOwner: boolean;
+  readonly githubConfigured: boolean;
+  readonly publishing: boolean;
+  readonly open: boolean;
+  readonly actions: readonly PublishMenuAction[];
+  readonly enabledActions: readonly PublishMenuAction[];
+}
+
+interface PublishMenuDom {
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLDivElement | null;
+  readonly actions: Readonly<Record<PublishMenuActionName, HTMLDivElement | null>>;
+}
+
+interface PublishMenuCapturedDescriptor {
+  readonly owner: object;
+  readonly property: PropertyKey;
+  readonly descriptor: PropertyDescriptor;
+  readonly isCurrent: () => boolean;
+}
+
+interface PublishMenuTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface PublishMenuKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboardPrototype: object;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly set: typeof Reflect.set;
+  readonly trusted: PublishMenuTrustedAuthority;
+  readonly event: Readonly<{
+    type: PublishMenuNativeGetter;
+    target: PublishMenuNativeGetter;
+    currentTarget: PublishMenuNativeGetter;
+    eventPhase: PublishMenuNativeGetter;
+    bubbles: PublishMenuNativeGetter;
+    cancelable: PublishMenuNativeGetter;
+    defaultPrevented: PublishMenuNativeGetter;
+    cancelBubble: PublishMenuNativeGetter;
+    composed: PublishMenuNativeGetter;
+    timeStamp: PublishMenuNativeGetter;
+    composedPath: PublishMenuNativeMethod;
+    preventDefault: PublishMenuNativeMethod;
+  }>;
+  readonly keyboard: Readonly<{
+    key: PublishMenuNativeGetter;
+    code: PublishMenuNativeGetter;
+    location: PublishMenuNativeGetter;
+    altKey: PublishMenuNativeGetter;
+    ctrlKey: PublishMenuNativeGetter;
+    metaKey: PublishMenuNativeGetter;
+    shiftKey: PublishMenuNativeGetter;
+    repeat: PublishMenuNativeGetter;
+    isComposing: PublishMenuNativeGetter;
+  }>;
+  readonly ui: Readonly<{
+    detail: PublishMenuNativeGetter;
+    view: PublishMenuNativeGetter;
+  }>;
+  readonly activeElement: PublishMenuNativeGetter;
+  readonly focus: PublishMenuNativeMethod;
+  readonly addEventListener: PublishMenuNativeMethod;
+  readonly removeEventListener: PublishMenuNativeMethod;
+  readonly historyIsClean: () => boolean;
+}
+
+interface PublishMenuArrowAction {
+  readonly identity: object;
+  readonly publicationIdentity: object;
+  readonly key: PublishMenuArrowKey;
+  readonly destination: "first" | "last";
+  readonly target: PublishMenuAction | null;
+}
+
+interface PublishMenuNativeSnapshot {
+  readonly event: KeyboardEvent;
+  readonly publication: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly key: PublishMenuArrowKey;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly detail: number;
+  readonly view: Window | null;
+  readonly isTrusted: true;
+}
+
+interface PublishMenuReactProof {
+  readonly prototype: object;
+  readonly descriptors: readonly PublishMenuCapturedDescriptor[];
+  readonly preventDefault: PublishMenuNativeMethod;
+  readonly stopPropagation: PublishMenuNativeMethod;
+  readonly isDefaultPrevented: PublishMenuNativeMethod;
+  readonly isPropagationStopped: PublishMenuNativeMethod;
+  readonly persist: PublishMenuNativeMethod;
+  readonly isPersistent: PublishMenuNativeMethod;
+}
+
+interface PublishMenuKeyboardDelivery {
+  readonly snapshot: PublishMenuNativeSnapshot;
+  reactEvent: React.KeyboardEvent<HTMLButtonElement> | null;
+  reactProof: PublishMenuReactProof | null;
+  bubbleCurrentTarget: EventTarget | null;
+  reactCount: number;
+  invalid: boolean;
+}
+
+interface PublishMenuClaimedArrow {
+  readonly publication: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly authority: PublishMenuKeyboardAuthority;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly reactProof: PublishMenuReactProof;
+}
+
+interface PublishMenuOpenGuard {
+  readonly isExact: (successor: PublishMenuPublication) => boolean;
+  readonly dispose: () => void;
+}
+
+interface PublishMenuOpenIntent {
+  readonly source: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly authority: PublishMenuKeyboardAuthority;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly guard: PublishMenuOpenGuard;
+}
+
+interface PublishMenuReadyOpen extends PublishMenuOpenIntent {
+  readonly publication: PublishMenuPublication;
+  readonly target: HTMLDivElement;
+}
+
+interface PublishMenuPublication {
+  readonly identity: object;
+  readonly render: PublishMenuRender;
+  readonly document: Document;
+  readonly dom: PublishMenuDom;
+  readonly keyboardAuthority: PublishMenuKeyboardAuthority | null;
+  readonly keyboardEvents: Set<KeyboardEvent>;
+  readonly arrows: Readonly<Record<PublishMenuArrowKey, PublishMenuArrowAction>>;
+  readonly triggerSnapshot: ModeSwitcherDomSnapshot;
+  readonly contentSnapshot: ModeSwitcherDomSnapshot | null;
+  readonly placements: readonly ModeSwitcherPlacementSnapshot[];
+  readonly isExact: () => boolean;
+  readonly recordElementChange: (
+    owner: PublishMenuElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly retire: () => boolean;
+  readonly dispose: () => void;
+}
+
+interface PublishMenuPublicationRuntime {
+  readonly publication: PublishMenuPublication;
+  readonly retireForLayout: () => void;
+  readonly isExactLayoutReplay: () => boolean;
+}
+
+interface PublishMenuPresentation {
+  readonly captureTrigger: React.RefCallback<HTMLButtonElement>;
+  readonly captureContent: React.RefCallback<HTMLDivElement>;
+  readonly captureActions: Readonly<Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>>;
+  readonly establish: () => (() => void) | undefined;
+  readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onOpenAutoFocus: (event: Event) => void;
+}
+
+class PublishMenuElementOwner<T extends HTMLElement> {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly accepts: (element: T) => boolean,
+    private readonly allowsReplacement: () => boolean,
+    private readonly onChange: (
+      owner: PublishMenuElementOwner<T>,
+      element: T | null,
+      previous: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+
+  readonly capture: React.RefCallback<T> = (element) => {
+    if (this.#current === element) return;
+    if (
+      element
+      && (
+        !this.accepts(element)
+        || (this.#current !== null && this.#current !== element)
+        || (
+          this.#current === null
+          && this.#last !== null
+          && this.#last !== element
+          && !this.allowsReplacement()
+        )
+      )
+    ) {
+      return;
+    }
+    const previous = this.#current;
+    if (element === null) {
+      this.onChange(this, null, previous);
+      this.#current = null;
+      return;
+    }
+    this.#current = element;
+    this.#last = element;
+    this.onChange(this, element, previous);
+  };
+}
+
+interface PublishMenuElementOwnerHandle {
+  readonly element: () => HTMLElement | null;
+}
+
+interface PublishMenuOwners {
+  readonly trigger: PublishMenuElementOwner<HTMLButtonElement>;
+  readonly content: PublishMenuElementOwner<HTMLDivElement>;
+  readonly actions: Readonly<Record<PublishMenuActionName, PublishMenuElementOwner<HTMLDivElement>>>;
+}
+
+class PublishMenuPublicationCoordinator {
+  #active: PublishMenuPublication | null = null;
+  #successorOf: PublishMenuPublication | null = null;
+  #deliveries = new WeakMap<KeyboardEvent, PublishMenuKeyboardDelivery>();
+  #claimedNativeEvents = new WeakSet<Event>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedPublications = new WeakSet<PublishMenuPublication>();
+  #claimedDirections = new WeakSet<PublishMenuArrowAction>();
+  #openIntent: PublishMenuOpenIntent | null = null;
+  #readyOpen: PublishMenuReadyOpen | null = null;
+  #successorRequested = new WeakSet<PublishMenuPublication>();
+
+  constructor(private readonly requestSuccessor: () => void) {}
+
+  active() {
+    return this.#active;
+  }
+
+  allowsElementReplacement() {
+    return this.#active === null;
+  }
+
+  acceptsSuccessorOf(publication: PublishMenuPublication) {
+    return this.#active === null && this.#successorOf === publication;
+  }
+
+  publish(publication: PublishMenuPublication) {
+    const previous = this.#active ?? this.#successorOf;
+    this.#active = publication;
+    this.#successorOf = null;
+    const intent = this.#openIntent;
+    if (intent) {
+      const target = publishMenuOpenSuccessorTarget(intent, publication);
+      if (target) {
+        this.#readyOpen = Object.freeze({ ...intent, publication, target });
+      } else {
+        this.#clearOpenIntent(intent);
+      }
+    }
+    if (previous && previous !== publication) previous.dispose();
+  }
+
+  retire(publication: PublishMenuPublication) {
+    if (this.#active !== publication) return false;
+    this.#active = null;
+    this.#successorOf = publication;
+    queueMicrotask(() => {
+      if (this.#active !== null || this.#successorOf !== publication) return;
+      this.#successorOf = null;
+      if (this.#openIntent?.source === publication) this.#clearOpenIntent(this.#openIntent);
+      publication.dispose();
+    });
+    return true;
+  }
+
+  elementChanged(
+    owner: PublishMenuElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) {
+    const publication = this.#active;
+    if (!publication) return;
+    const exactBeforeChange = publication.isExact();
+    publication.recordElementChange(owner, element, previous);
+    if (
+      !this.#successorRequested.has(publication)
+      && this.acceptsSuccessorOf(publication)
+      && (exactBeforeChange || publication.isExactElementReplay())
+    ) {
+      this.#successorRequested.add(publication);
+      this.requestSuccessor();
+    }
+  }
+
+  clearKeyboardEvents(publication: PublishMenuPublication) {
+    for (const event of publication.keyboardEvents) this.#deliveries.delete(event);
+    publication.keyboardEvents.clear();
+  }
+
+  #clearKeyboardEvent(
+    publication: PublishMenuPublication,
+    event: KeyboardEvent,
+    delivery?: PublishMenuKeyboardDelivery,
+  ) {
+    const current = this.#deliveries.get(event);
+    if (!delivery || current === delivery) this.#deliveries.delete(event);
+    publication.keyboardEvents.delete(event);
+  }
+
+  stageNative(publication: PublishMenuPublication, event: Event) {
+    const authority = publication.keyboardAuthority;
+    if (
+      this.#active === publication
+      && (!publication.isExact() || (authority !== null && !authority.historyIsClean()))
+    ) {
+      publication.retire();
+      return;
+    }
+    if (
+      !authority
+      || !(event instanceof authority.ownerWindow.KeyboardEvent)
+      || this.#deliveries.has(event)
+      || this.#claimedNativeEvents.has(event)
+      || this.#claimedPublications.has(publication)
+      || this.#active !== publication
+    ) {
+      return;
+    }
+    const snapshot = readPublishMenuNativeEvent(publication, authority, event);
+    if (!snapshot || snapshot.currentTarget !== publication.dom.trigger) return;
+    const delivery: PublishMenuKeyboardDelivery = {
+      snapshot,
+      reactEvent: null,
+      reactProof: null,
+      bubbleCurrentTarget: null,
+      reactCount: 0,
+      invalid: false,
+    };
+    this.#deliveries.set(event, delivery);
+    publication.keyboardEvents.add(event);
+    queueMicrotask(() => this.#clearKeyboardEvent(publication, event, delivery));
+  }
+
+  stageReact(
+    publication: PublishMenuPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return;
+    const delivery = this.#deliveries.get(event.nativeEvent);
+    const proof = capturePublishMenuReactProof(event, publication.keyboardAuthority);
+    if (
+      !delivery
+      || delivery.invalid
+      || !proof
+      || delivery.snapshot.publication !== publication
+      || !publishMenuReactEventMatches(delivery, event, proof)
+    ) {
+      return;
+    }
+    delivery.reactCount += 1;
+    if (delivery.reactCount !== 1 || (delivery.reactEvent && delivery.reactEvent !== event)) {
+      delivery.invalid = true;
+      return;
+    }
+    delivery.reactEvent = event;
+    delivery.reactProof = proof;
+    delivery.bubbleCurrentTarget = publishMenuNativeValue<EventTarget | null>(
+      publication.keyboardAuthority!.event.currentTarget,
+      event.nativeEvent,
+      publication.keyboardAuthority!,
+    );
+  }
+
+  claim(
+    publication: PublishMenuPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ): PublishMenuClaimedArrow | null {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#deliveries.get(nativeEvent);
+    const snapshot = delivery?.snapshot;
+    const proof = delivery?.reactProof;
+    const authority = publication.keyboardAuthority;
+    if (
+      !delivery
+      || !snapshot
+      || !proof
+      || !authority
+      || delivery.invalid
+      || delivery.reactCount !== 1
+      || delivery.reactEvent !== event
+      || snapshot.publication !== publication
+      || this.#claimedPublications.has(publication)
+      || this.#claimedDirections.has(snapshot.action)
+      || this.#claimedNativeEvents.has(nativeEvent)
+      || this.#active !== publication
+      || !publishMenuReactEventMatches(delivery, event, proof)
+      || !publishMenuArrowIsCurrent(publication, snapshot.action)
+      || !publication.isExact()
+    ) {
+      return null;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedDirections.add(snapshot.action);
+    this.#claimedReactEvents.add(event);
+    this.#claimedNativeEvents.add(nativeEvent);
+    this.#clearKeyboardEvent(publication, nativeEvent, delivery);
+    return Object.freeze({
+      publication,
+      action: snapshot.action,
+      authority,
+      nativeEvent,
+      reactEvent: event,
+      reactProof: proof,
+    });
+  }
+
+  prepareOpen(claim: PublishMenuClaimedArrow) {
+    const publication = claim.publication;
+    if (
+      publication.render.open
+      || this.#active !== publication
+      || !this.#claimedPublications.has(publication)
+      || !this.#claimedDirections.has(claim.action)
+      || !publishMenuArrowIsCurrent(publication, claim.action)
+      || !publication.isExact()
+    ) {
+      return false;
+    }
+    const guard = createPublishMenuOpenGuard(publication);
+    if (!guard) return false;
+    if (this.#openIntent) this.#clearOpenIntent(this.#openIntent);
+    this.#openIntent = Object.freeze({
+      source: publication,
+      action: claim.action,
+      authority: claim.authority,
+      nativeEvent: claim.nativeEvent,
+      reactEvent: claim.reactEvent,
+      guard,
+    });
+    return true;
+  }
+
+  cancelOpen(publication: PublishMenuPublication) {
+    if (this.#openIntent?.source === publication) this.#clearOpenIntent(this.#openIntent);
+  }
+
+  consumeOpen(publication: PublishMenuPublication, event: Event) {
+    const ready = this.#readyOpen;
+    const authority = ready?.authority;
+    const content = publication.dom.content;
+    const ownerWindow = publication.document.defaultView;
+    if (
+      !ready
+      || ready.publication !== publication
+      || !authority
+      || !content
+      || !ownerWindow
+      || this.#active !== publication
+      || !(event instanceof ownerWindow.CustomEvent)
+      || event.type !== "focusScope.autoFocusOnMount"
+      || event.target !== content
+      || event.currentTarget !== content
+      || event.eventPhase !== ownerWindow.Event.AT_TARGET
+      || !event.cancelable
+      || event.defaultPrevented
+      || event.composedPath()[0] !== content
+      || !event.composedPath().includes(publication.document)
+      || event.composedPath().at(-1) !== ownerWindow
+      || publishMenuActiveElement(authority) !== publication.dom.trigger
+      || !publishMenuOpenSuccessorTarget(ready, publication)
+      || this.#claimedNativeEvents.has(event)
+    ) {
+      return null;
+    }
+    this.#claimedNativeEvents.add(event);
+    const result = Object.freeze({ authority, target: ready.target });
+    this.#clearOpenIntent(ready);
+    return result;
+  }
+
+  #clearOpenIntent(intent: PublishMenuOpenIntent) {
+    if (this.#openIntent === intent) this.#openIntent = null;
+    if (this.#readyOpen?.source === intent.source) this.#readyOpen = null;
+    intent.guard.dispose();
+  }
+}
+
+function publishMenuDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current
+    || current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+    || ("value" in current) !== ("value" in expected)
+    || ("writable" in current) !== ("writable" in expected)
+    || ("get" in current) !== ("get" in expected)
+    || ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function capturePublishMenuDescriptor(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+): PublishMenuCapturedDescriptor | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    owner,
+    property,
+    descriptor: expected,
+    isCurrent: () => publishMenuDescriptorsMatch(
+      getOwnPropertyDescriptor(owner, property),
+      expected,
+    ),
+  });
+}
+
+function capturePublishMenuGetter(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = capturePublishMenuDescriptor(owner, property, getOwnPropertyDescriptor);
+  const getter = capture?.descriptor.get;
+  return capture && typeof getter === "function" && !("value" in capture.descriptor)
+    ? Object.freeze({ capture, getter: getter as PublishMenuNativeGetter })
+    : null;
+}
+
+function capturePublishMenuMethod(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = capturePublishMenuDescriptor(owner, property, getOwnPropertyDescriptor);
+  const method = capture?.descriptor.value;
+  return capture && typeof method === "function"
+    ? Object.freeze({ capture, method: method as PublishMenuNativeMethod })
+    : null;
+}
+
+function capturePublishMenuTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
+): PublishMenuTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("publish-menu-keyboard-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    getPrototypeOf(probe) !== ownerWindow.KeyboardEvent.prototype
+    || !descriptor
+    || descriptor.configurable !== false
+    || descriptor.enumerable !== true
+    || typeof descriptor.get !== "function"
+    || descriptor.set !== undefined
+    || "value" in descriptor
+    || "writable" in descriptor
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get as PublishMenuNativeGetter;
+  const matches = (event: object) => publishMenuDescriptorsMatch(
+    getOwnPropertyDescriptor(event, "isTrusted"),
+    expected,
+  );
+  const read = (event: object) => apply(getter, event, []) as boolean;
+  try {
+    if (read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({
+    read,
+    matches,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function capturePublishMenuKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): PublishMenuKeyboardAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const set = ownerWindow.Reflect.set;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  const trusted = capturePublishMenuTrustedAuthority(
+    ownerWindow,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+  );
+  const captures = {
+    type: capturePublishMenuGetter(eventPrototype, "type", getOwnPropertyDescriptor),
+    target: capturePublishMenuGetter(eventPrototype, "target", getOwnPropertyDescriptor),
+    currentTarget: capturePublishMenuGetter(eventPrototype, "currentTarget", getOwnPropertyDescriptor),
+    eventPhase: capturePublishMenuGetter(eventPrototype, "eventPhase", getOwnPropertyDescriptor),
+    bubbles: capturePublishMenuGetter(eventPrototype, "bubbles", getOwnPropertyDescriptor),
+    cancelable: capturePublishMenuGetter(eventPrototype, "cancelable", getOwnPropertyDescriptor),
+    defaultPrevented: capturePublishMenuGetter(eventPrototype, "defaultPrevented", getOwnPropertyDescriptor),
+    cancelBubble: capturePublishMenuGetter(eventPrototype, "cancelBubble", getOwnPropertyDescriptor),
+    composed: capturePublishMenuGetter(eventPrototype, "composed", getOwnPropertyDescriptor),
+    timeStamp: capturePublishMenuGetter(eventPrototype, "timeStamp", getOwnPropertyDescriptor),
+    composedPath: capturePublishMenuMethod(eventPrototype, "composedPath", getOwnPropertyDescriptor),
+    preventDefault: capturePublishMenuMethod(eventPrototype, "preventDefault", getOwnPropertyDescriptor),
+    key: capturePublishMenuGetter(keyboardPrototype, "key", getOwnPropertyDescriptor),
+    code: capturePublishMenuGetter(keyboardPrototype, "code", getOwnPropertyDescriptor),
+    location: capturePublishMenuGetter(keyboardPrototype, "location", getOwnPropertyDescriptor),
+    altKey: capturePublishMenuGetter(keyboardPrototype, "altKey", getOwnPropertyDescriptor),
+    ctrlKey: capturePublishMenuGetter(keyboardPrototype, "ctrlKey", getOwnPropertyDescriptor),
+    metaKey: capturePublishMenuGetter(keyboardPrototype, "metaKey", getOwnPropertyDescriptor),
+    shiftKey: capturePublishMenuGetter(keyboardPrototype, "shiftKey", getOwnPropertyDescriptor),
+    repeat: capturePublishMenuGetter(keyboardPrototype, "repeat", getOwnPropertyDescriptor),
+    isComposing: capturePublishMenuGetter(keyboardPrototype, "isComposing", getOwnPropertyDescriptor),
+    detail: capturePublishMenuGetter(uiPrototype, "detail", getOwnPropertyDescriptor),
+    view: capturePublishMenuGetter(uiPrototype, "view", getOwnPropertyDescriptor),
+    activeElement: capturePublishMenuGetter(documentPrototype, "activeElement", getOwnPropertyDescriptor),
+    focus: capturePublishMenuMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor),
+    addEventListener: capturePublishMenuMethod(
+      eventTargetPrototype,
+      "addEventListener",
+      getOwnPropertyDescriptor,
+    ),
+    removeEventListener: capturePublishMenuMethod(
+      eventTargetPrototype,
+      "removeEventListener",
+      getOwnPropertyDescriptor,
+    ),
+  };
+  const values = Object.values(captures);
+  if (
+    !trusted
+    || values.some((capture) => capture === null)
+    || getPrototypeOf(keyboardPrototype) !== uiPrototype
+    || getPrototypeOf(uiPrototype) !== eventPrototype
+    || getPrototypeOf(eventPrototype) !== ownerWindow.Object.prototype
+  ) {
+    return null;
+  }
+  const descriptors = Object.freeze(values.map((capture) => capture!.capture));
+  let historyIsClean = true;
+  const checkHistory = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = Boolean(
+      ownerDocument.defaultView === ownerWindow
+      && ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+      && ownerWindow.Reflect.apply === apply
+      && ownerWindow.Reflect.set === set
+      && ownerWindow.Event.prototype === eventPrototype
+      && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
+      && ownerWindow.UIEvent.prototype === uiPrototype
+      && ownerWindow.Document.prototype === documentPrototype
+      && ownerWindow.HTMLElement.prototype === htmlElementPrototype
+      && ownerWindow.EventTarget.prototype === eventTargetPrototype
+      && getPrototypeOf(keyboardPrototype) === uiPrototype
+      && getPrototypeOf(uiPrototype) === eventPrototype
+      && getPrototypeOf(eventPrototype) === ownerWindow.Object.prototype
+      && trusted.isCurrent()
+      && descriptors.every((descriptor) => descriptor.isCurrent())
+    );
+    return historyIsClean;
+  };
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    keyboardPrototype,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+    set,
+    trusted,
+    event: Object.freeze({
+      type: captures.type!.getter,
+      target: captures.target!.getter,
+      currentTarget: captures.currentTarget!.getter,
+      eventPhase: captures.eventPhase!.getter,
+      bubbles: captures.bubbles!.getter,
+      cancelable: captures.cancelable!.getter,
+      defaultPrevented: captures.defaultPrevented!.getter,
+      cancelBubble: captures.cancelBubble!.getter,
+      composed: captures.composed!.getter,
+      timeStamp: captures.timeStamp!.getter,
+      composedPath: captures.composedPath!.method,
+      preventDefault: captures.preventDefault!.method,
+    }),
+    keyboard: Object.freeze({
+      key: captures.key!.getter,
+      code: captures.code!.getter,
+      location: captures.location!.getter,
+      altKey: captures.altKey!.getter,
+      ctrlKey: captures.ctrlKey!.getter,
+      metaKey: captures.metaKey!.getter,
+      shiftKey: captures.shiftKey!.getter,
+      repeat: captures.repeat!.getter,
+      isComposing: captures.isComposing!.getter,
+    }),
+    ui: Object.freeze({
+      detail: captures.detail!.getter,
+      view: captures.view!.getter,
+    }),
+    activeElement: captures.activeElement!.getter,
+    focus: captures.focus!.method,
+    addEventListener: captures.addEventListener!.method,
+    removeEventListener: captures.removeEventListener!.method,
+    historyIsClean: checkHistory,
+  });
+}
+
+function publishMenuNativeValue<Value>(
+  getter: PublishMenuNativeGetter,
+  value: object,
+  authority: PublishMenuKeyboardAuthority,
+): Value {
+  return authority.apply(getter, value, []) as Value;
+}
+
+function publishMenuNativeCall<Value>(
+  method: PublishMenuNativeMethod,
+  value: object,
+  args: readonly unknown[],
+  authority: PublishMenuKeyboardAuthority,
+): Value {
+  return authority.apply(method, value, args) as Value;
+}
+
+function publishMenuActiveElement(authority: PublishMenuKeyboardAuthority) {
+  return publishMenuNativeValue<Element | null>(
+    authority.activeElement,
+    authority.ownerDocument,
+    authority,
+  );
+}
+
+function publishMenuTriggerPathMatches(
+  path: readonly EventTarget[],
+  trigger: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+) {
+  const expected: EventTarget[] = [];
+  for (let current: Node | null = trigger; current; current = current.parentNode) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+  }
+  return (
+    expected.at(-1) === ownerDocument
+    && path.length === expected.length + 1
+    && expected.every((entry, index) => path[index] === entry)
+    && path.at(-1) === ownerWindow
+  );
+}
+
+function publishMenuArrowIsCurrent(
+  publication: PublishMenuPublication,
+  action: PublishMenuArrowAction,
+) {
+  const target = action.key === "ArrowDown"
+    ? publication.render.enabledActions.at(0)
+    : publication.render.enabledActions.at(-1);
+  return Boolean(
+    publication.arrows[action.key] === action
+    && Object.isFrozen(action)
+    && action.publicationIdentity === publication.identity
+    && action.destination === (action.key === "ArrowDown" ? "first" : "last")
+    && action.target === (target ?? null)
+    && Boolean(target?.enabled)
+  );
+}
+
+function readPublishMenuNativeEvent(
+  publication: PublishMenuPublication,
+  authority: PublishMenuKeyboardAuthority,
+  event: KeyboardEvent,
+): PublishMenuNativeSnapshot | null {
+  if (
+    publication.keyboardAuthority !== authority
+    || !authority.historyIsClean()
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    const type = publishMenuNativeValue<string>(authority.event.type, event, authority);
+    const target = publishMenuNativeValue<EventTarget | null>(authority.event.target, event, authority);
+    const currentTarget = publishMenuNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      event,
+      authority,
+    );
+    const eventPhase = publishMenuNativeValue<number>(
+      authority.event.eventPhase,
+      event,
+      authority,
+    );
+    const key = publishMenuNativeValue<string>(authority.keyboard.key, event, authority);
+    const path = Object.freeze([...publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    )]);
+    const view = publishMenuNativeValue<Window | null>(authority.ui.view, event, authority);
+    const action = key === "ArrowDown" || key === "ArrowUp" ? publication.arrows[key] : null;
+    const bubbles = publishMenuNativeValue<boolean>(authority.event.bubbles, event, authority);
+    const cancelable = publishMenuNativeValue<boolean>(authority.event.cancelable, event, authority);
+    const defaultPrevented = publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      event,
+      authority,
+    );
+    const cancelBubble = publishMenuNativeValue<boolean>(
+      authority.event.cancelBubble,
+      event,
+      authority,
+    );
+    if (
+      !action
+      || type !== "keydown"
+      || eventPhase !== authority.ownerWindow.Event.AT_TARGET
+      || target !== publication.dom.trigger
+      || currentTarget !== publication.dom.trigger
+      || !bubbles
+      || !cancelable
+      || defaultPrevented
+      || cancelBubble
+      || authority.trusted.read(event) !== true
+      || publishMenuNativeValue<boolean>(authority.keyboard.altKey, event, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.ctrlKey, event, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.metaKey, event, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.repeat, event, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.isComposing, event, authority)
+      || (view !== null && view !== authority.ownerWindow)
+      || publishMenuActiveElement(authority) !== publication.dom.trigger
+      || !publishMenuTriggerPathMatches(
+        path,
+        publication.dom.trigger,
+        publication.document,
+        authority.ownerWindow,
+      )
+      || !publishMenuArrowIsCurrent(publication, action)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      publication,
+      action,
+      path,
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed: publishMenuNativeValue<boolean>(authority.event.composed, event, authority),
+      timeStamp: publishMenuNativeValue<number>(authority.event.timeStamp, event, authority),
+      key: action.key,
+      code: publishMenuNativeValue<string>(authority.keyboard.code, event, authority),
+      location: publishMenuNativeValue<number>(authority.keyboard.location, event, authority),
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      detail: publishMenuNativeValue<number>(authority.ui.detail, event, authority),
+      view,
+      isTrusted: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function capturePublishMenuReactMethod(
+  value: object,
+  property: PropertyKey,
+  authority: PublishMenuKeyboardAuthority,
+) {
+  let current: object | null = value;
+  while (current && current !== authority.ownerWindow.Object.prototype) {
+    const capture = capturePublishMenuDescriptor(
+      current,
+      property,
+      authority.getOwnPropertyDescriptor,
+    );
+    if (capture) {
+      const method = capture.descriptor.value;
+      return typeof method === "function"
+        ? Object.freeze({ capture, method: method as PublishMenuNativeMethod })
+        : null;
+    }
+    current = authority.getPrototypeOf(current);
+  }
+  return null;
+}
+
+function capturePublishMenuReactProof(
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  authority: PublishMenuKeyboardAuthority | null,
+): PublishMenuReactProof | null {
+  if (!authority || !event || typeof event !== "object") return null;
+  const prototype = authority.getPrototypeOf(event);
+  if (!prototype || prototype === authority.ownerWindow.Object.prototype) return null;
+  const preventDefault = capturePublishMenuReactMethod(event, "preventDefault", authority);
+  const stopPropagation = capturePublishMenuReactMethod(event, "stopPropagation", authority);
+  const isDefaultPrevented = capturePublishMenuReactMethod(event, "isDefaultPrevented", authority);
+  const isPropagationStopped = capturePublishMenuReactMethod(
+    event,
+    "isPropagationStopped",
+    authority,
+  );
+  const persist = capturePublishMenuReactMethod(event, "persist", authority);
+  const isPersistent = capturePublishMenuReactMethod(event, "isPersistent", authority);
+  const methods = [
+    preventDefault,
+    stopPropagation,
+    isDefaultPrevented,
+    isPropagationStopped,
+    persist,
+    isPersistent,
+  ];
+  if (methods.some((method) => method === null)) return null;
+  return Object.freeze({
+    prototype,
+    descriptors: Object.freeze(methods.map((method) => method!.capture)),
+    preventDefault: preventDefault!.method,
+    stopPropagation: stopPropagation!.method,
+    isDefaultPrevented: isDefaultPrevented!.method,
+    isPropagationStopped: isPropagationStopped!.method,
+    persist: persist!.method,
+    isPersistent: isPersistent!.method,
+  });
+}
+
+function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
+  const { snapshot } = delivery;
+  const { event, publication } = snapshot;
+  const authority = publication.keyboardAuthority;
+  if (
+    !authority
+    || !authority.historyIsClean()
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+    || authority.trusted.read(event) !== true
+    || publishMenuActiveElement(authority) !== publication.dom.trigger
+  ) {
+    return false;
+  }
+  try {
+    const path = publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    );
+    const currentTarget = publishMenuNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      event,
+      authority,
+    );
+    return (
+      publishMenuNativeValue<string>(authority.event.type, event, authority) === snapshot.type
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+        authority,
+      ) === snapshot.target
+      && publishMenuNativeValue<number>(
+        authority.event.eventPhase,
+        event,
+        authority,
+      ) === authority.ownerWindow.Event.BUBBLING_PHASE
+      && currentTarget !== null
+      && path.includes(currentTarget)
+      && (!delivery.bubbleCurrentTarget || delivery.bubbleCurrentTarget === currentTarget)
+      && publishMenuNativeValue<boolean>(
+        authority.event.bubbles,
+        event,
+        authority,
+      ) === snapshot.bubbles
+      && publishMenuNativeValue<boolean>(
+        authority.event.cancelable,
+        event,
+        authority,
+      ) === snapshot.cancelable
+      && !publishMenuNativeValue<boolean>(authority.event.defaultPrevented, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.event.cancelBubble, event, authority)
+      && publishMenuNativeValue<boolean>(
+        authority.event.composed,
+        event,
+        authority,
+      ) === snapshot.composed
+      && publishMenuNativeValue<number>(
+        authority.event.timeStamp,
+        event,
+        authority,
+      ) === snapshot.timeStamp
+      && publishMenuNativeValue<string>(authority.keyboard.key, event, authority) === snapshot.key
+      && publishMenuNativeValue<string>(authority.keyboard.code, event, authority) === snapshot.code
+      && publishMenuNativeValue<number>(
+        authority.keyboard.location,
+        event,
+        authority,
+      ) === snapshot.location
+      && !publishMenuNativeValue<boolean>(authority.keyboard.altKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.ctrlKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.metaKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.repeat, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.isComposing, event, authority)
+      && publishMenuNativeValue<number>(authority.ui.detail, event, authority) === snapshot.detail
+      && publishMenuNativeValue<Window | null>(authority.ui.view, event, authority) === snapshot.view
+      && path.length === snapshot.path.length
+      && path.every((entry, index) => entry === snapshot.path[index])
+      && publishMenuArrowIsCurrent(publication, snapshot.action)
+      && publication.isExact()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function publishMenuReactEventMatches(
+  delivery: PublishMenuKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: PublishMenuReactProof,
+) {
+  const { snapshot } = delivery;
+  const authority = snapshot.publication.keyboardAuthority;
+  if (!authority) return false;
+  try {
+    return Boolean(
+      authority.getPrototypeOf(event) === proof.prototype
+      && proof.descriptors.every((descriptor) => descriptor.isCurrent())
+      && event.nativeEvent === snapshot.event
+      && event.type === snapshot.type
+      && event.currentTarget === snapshot.publication.dom.trigger
+      && event.target === snapshot.publication.dom.trigger
+      && event.eventPhase === authority.ownerWindow.Event.BUBBLING_PHASE
+      && event.bubbles === snapshot.bubbles
+      && event.cancelable === snapshot.cancelable
+      && !event.defaultPrevented
+      && event.isTrusted === snapshot.isTrusted
+      && event.timeStamp === snapshot.timeStamp
+      && event.key === snapshot.key
+      && event.code === snapshot.code
+      && event.location === snapshot.location
+      && event.altKey === snapshot.altKey
+      && event.ctrlKey === snapshot.ctrlKey
+      && event.metaKey === snapshot.metaKey
+      && event.shiftKey === snapshot.shiftKey
+      && event.repeat === snapshot.repeat
+      && event.detail === snapshot.detail
+      && Object.is(event.view, snapshot.view)
+      && publishMenuNativeCall<boolean>(
+        proof.isDefaultPrevented,
+        event,
+        [],
+        authority,
+      ) === false
+      && publishMenuNativeCall<boolean>(
+        proof.isPropagationStopped,
+        event,
+        [],
+        authority,
+      ) === false
+      && publishMenuNativeCall<boolean>(proof.isPersistent, event, [], authority) === true
+      && publishMenuNativeEventMatches(delivery)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function preventPublishMenuArrow(claim: PublishMenuClaimedArrow) {
+  const { authority, nativeEvent, reactEvent, reactProof } = claim;
+  const syntheticDefault = authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented");
+  if (
+    !authority.historyIsClean()
+    || !reactProof.descriptors.every((descriptor) => descriptor.isCurrent())
+    || publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    || !syntheticDefault
+    || !("value" in syntheticDefault)
+    || syntheticDefault.value !== false
+    || syntheticDefault.writable !== true
+  ) {
+    return false;
+  }
+  publishMenuNativeCall<void>(
+    authority.event.preventDefault,
+    nativeEvent,
+    [],
+    authority,
+  );
+  if (
+    !publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    || !authority.set(reactEvent, "defaultPrevented", true, reactEvent)
+  ) {
+    return false;
+  }
+  return authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented")?.value === true;
+}
+
+function suppressPublishMenuRadixArrowDown(
+  publication: PublishMenuPublication,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+) {
+  const authority = publication.keyboardAuthority;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !authority
+    || !(nativeEvent instanceof authority.ownerWindow.KeyboardEvent)
+    || authority.getPrototypeOf(nativeEvent) !== authority.keyboardPrototype
+    || event.type !== "keydown"
+    || event.currentTarget !== publication.dom.trigger
+  ) {
+    return false;
+  }
+  try {
+    const syntheticDefault = authority.getOwnPropertyDescriptor(event, "defaultPrevented");
+    if (
+      publishMenuNativeValue<string>(authority.event.type, nativeEvent, authority) !== "keydown"
+      || publishMenuNativeValue<string>(
+        authority.keyboard.key,
+        nativeEvent,
+        authority,
+      ) !== "ArrowDown"
+      || !syntheticDefault
+      || !("value" in syntheticDefault)
+      || syntheticDefault.value !== false
+      || syntheticDefault.writable !== true
+    ) {
+      return false;
+    }
+    return (
+      authority.set(event, "defaultPrevented", true, event)
+      && authority.getOwnPropertyDescriptor(event, "defaultPrevented")?.value === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function createPublishMenuOpenGuard(source: PublishMenuPublication): PublishMenuOpenGuard | null {
+  const MutationObserverConstructor = source.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor || !source.isExact()) return null;
+  const trigger = source.dom.trigger;
+  const records: MutationRecord[] = [];
+  const potentialGuards = new WeakSet<Node>();
+  let observer: MutationObserver | null = new MutationObserverConstructor((pending) => {
+    for (const record of pending) {
+      if (record.type === "attributes") {
+        if (
+          record.target === trigger
+          || (
+            record.target instanceof source.document.defaultView!.HTMLSpanElement
+            && (
+              potentialGuards.has(record.target)
+              || record.target.hasAttribute("data-radix-focus-guard")
+            )
+          )
+        ) {
+          records.push(record);
+        }
+        continue;
+      }
+      for (const node of [...record.addedNodes, ...record.removedNodes]) {
+        if (node instanceof source.document.defaultView!.HTMLSpanElement) {
+          potentialGuards.add(node);
+        }
+      }
+      records.push(record);
+    }
+  });
+  observer.observe(trigger, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (let ancestor = trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+    observer.observe(ancestor, {
+      attributeOldValue: ancestor === source.document.body,
+      attributes: ancestor === source.document.body,
+      childList: true,
+      subtree: ancestor === source.document.body,
+    });
+  }
+  let invalid = false;
+  return Object.freeze({
+    isExact: (successor: PublishMenuPublication) => {
+      if (observer) {
+        for (const record of observer.takeRecords()) {
+          if (record.type === "attributes") {
+            if (
+              record.target === trigger
+              || (
+                record.target instanceof source.document.defaultView!.HTMLSpanElement
+                && (
+                  potentialGuards.has(record.target)
+                  || record.target.hasAttribute("data-radix-focus-guard")
+                )
+              )
+            ) {
+              records.push(record);
+            }
+            continue;
+          }
+          for (const node of [...record.addedNodes, ...record.removedNodes]) {
+            if (node instanceof source.document.defaultView!.HTMLSpanElement) {
+              potentialGuards.add(node);
+            }
+          }
+          records.push(record);
+        }
+      }
+      const content = successor.dom.content;
+      const ownerWindow = source.document.defaultView;
+      if (
+        invalid
+        || !content
+        || !ownerWindow
+        || source.dom.trigger !== successor.dom.trigger
+        || source.document !== successor.document
+      ) {
+        invalid = true;
+        return false;
+      }
+      for (const record of records) {
+        if (record.type === "attributes" && record.target === trigger) {
+          const validTriggerChange =
+            (record.attributeName === "aria-expanded"
+              && record.oldValue === "false"
+              && trigger.getAttribute("aria-expanded") === "true")
+            || (record.attributeName === "data-state"
+              && record.oldValue === "closed"
+              && trigger.getAttribute("data-state") === "open")
+            || (record.attributeName === "aria-controls"
+              && record.oldValue === null
+              && trigger.getAttribute("aria-controls") === content.id)
+            || record.attributeName === "data-radix-popper-align"
+            || record.attributeName === "data-radix-popper-side";
+          if (!validTriggerChange) invalid = true;
+          continue;
+        }
+        if (record.type === "attributes") {
+          const element = record.target;
+          if (
+            !(element instanceof ownerWindow.HTMLSpanElement)
+            || !element.hasAttribute("data-radix-focus-guard")
+          ) {
+            invalid = true;
+          }
+          continue;
+        }
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        const expected = changed.every((node) =>
+          node.contains?.(content)
+          || (
+            node instanceof ownerWindow.HTMLSpanElement
+            && (
+              node.hasAttribute("data-radix-focus-guard")
+              || record.target === source.document.body
+            )
+          ));
+        if (!expected) invalid = true;
+      }
+      return !invalid;
+    },
+    dispose: () => {
+      observer?.disconnect();
+      observer = null;
+    },
+  });
+}
+
+function publishMenuRenderSuccessorMatches(
+  before: PublishMenuRender,
+  after: PublishMenuRender,
+) {
+  return (
+    after.visit === before.visit
+    && after.props === before.props
+    && after.session === before.session
+    && after.document === before.document
+    && after.role === before.role
+    && after.linked === before.linked
+    && after.canEdit === before.canEdit
+    && after.isOwner === before.isOwner
+    && after.githubConfigured === before.githubConfigured
+    && after.publishing === before.publishing
+    && after.sync === before.sync
+    && after.syncFields === before.syncFields
+    && after.actions.length === before.actions.length
+    && after.actions.every((action, index) => {
+      const previous = before.actions[index];
+      return Boolean(
+        previous
+        && action.name === previous.name
+        && action.enabled === previous.enabled
+        && action.label === previous.label
+        && action.callback === previous.callback
+      );
+    })
+  );
+}
+
+function publishMenuOpenSuccessorTarget(
+  intent: PublishMenuOpenIntent,
+  publication: PublishMenuPublication,
+) {
+  const { source, action, authority } = intent;
+  const currentAction = publication.render.actions.find(
+    (candidate) => candidate.name === action.target?.name,
+  );
+  const target = currentAction ? publication.dom.actions[currentAction.name] : null;
+  return (
+    !source.render.open
+    && publication.render.open
+    && source.document === publication.document
+    && source.dom.trigger === publication.dom.trigger
+    && authority.ownerDocument === publication.document
+    && authority.ownerWindow === publication.document.defaultView
+    && authority.historyIsClean()
+    && publishMenuArrowIsCurrent(source, action)
+    && publishMenuRenderSuccessorMatches(source.render, publication.render)
+    && currentAction?.enabled
+    && target?.ownerDocument === publication.document
+    && target.parentElement === publication.dom.content
+    && publication.isExact()
+    && intent.guard.isExact(publication)
+  )
+    ? target
+    : null;
+}
+
+function createPublishMenuOwners(
+  coordinator: PublishMenuPublicationCoordinator,
+): PublishMenuOwners {
+  const changed = <T extends HTMLElement>(
+    owner: PublishMenuElementOwner<T>,
+    element: T | null,
+    previous: T | null,
+  ) => coordinator.elementChanged(owner, element, previous);
+  const accepts = (tagName: string) => (element: HTMLElement) => element.tagName === tagName;
+  const replacement = () => coordinator.allowsElementReplacement();
+  const actionOwner = () =>
+    new PublishMenuElementOwner<HTMLDivElement>(accepts("DIV"), replacement, changed);
+  return Object.freeze({
+    trigger: new PublishMenuElementOwner<HTMLButtonElement>(
+      accepts("BUTTON"),
+      replacement,
+      changed,
+    ),
+    content: new PublishMenuElementOwner<HTMLDivElement>(accepts("DIV"), replacement, changed),
+    actions: Object.freeze({
+      publish: actionOwner(),
+      pull: actionOwner(),
+      sync: actionOwner(),
+      open: actionOwner(),
+      change: actionOwner(),
+      connect: actionOwner(),
+      download: actionOwner(),
+      share: actionOwner(),
+    }),
+  });
+}
+
+function publishMenuFactsAreCurrent(render: PublishMenuRender) {
+  const { document, props, session } = render;
+  const canEdit = session.role === "owner" || session.role === "editor";
+  const currentDocumentFields = snapshotMoreMenuDocument(document);
+  const actions = publishMenuActions(props, render.linked, canEdit);
+  return (
+    render.visit.session === session
+    && render.visit.document === document
+    && session.docId === document.id
+    && session.role === render.role
+    && document.storage !== "local" === render.linked
+    && canEdit === render.canEdit
+    && props.isOwner === render.isOwner
+    && props.githubConfigured === render.githubConfigured
+    && props.publishing === render.publishing
+    && props.sync === render.sync
+    && (props.sync ? JSON.stringify(props.sync) : null) === render.syncFields
+    && currentDocumentFields.length === render.documentFields.length
+    && currentDocumentFields.every((field, index) => {
+      const expected = render.documentFields[index];
+      return expected?.[0] === field[0] && Object.is(expected[1], field[1]);
+    })
+    && actions.length === render.actions.length
+    && actions.every((action, index) => {
+      const expected = render.actions[index];
+      return Boolean(
+        expected
+        && action.name === expected.name
+        && action.enabled === expected.enabled
+        && action.label === expected.label
+        && action.callback === expected.callback
+      );
+    })
+  );
+}
+
+function currentPublishMenuDom(
+  render: PublishMenuRender,
+  owners: PublishMenuOwners,
+): PublishMenuDom | null {
+  const trigger = owners.trigger.element();
+  const ownerDocument = trigger?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    !trigger
+    || !ownerDocument
+    || !ownerWindow
+    || !(trigger instanceof ownerWindow.HTMLButtonElement)
+    || !trigger.isConnected
+    || trigger.type !== "button"
+    || trigger.disabled
+    || trigger.dataset.testid !== "publish-menu"
+    || trigger.getAttribute("aria-label") !== "Publish options"
+    || trigger.className !==
+      "btn btn-primary rounded-l-none border-l border-white/20 px-1.5"
+    || trigger.getAttribute("aria-haspopup") !== "menu"
+    || trigger.getAttribute("aria-expanded") !== String(render.open)
+    || trigger.getAttribute("data-state") !== (render.open ? "open" : "closed")
+  ) {
+    return null;
+  }
+  const actions = Object.fromEntries(
+    Object.entries(owners.actions).map(([name, owner]) => [name, owner.element()]),
+  ) as Record<PublishMenuActionName, HTMLDivElement | null>;
+  const content = owners.content.element();
+  if (!render.open) {
+    if (content || Object.values(actions).some(Boolean)) return null;
+    return Object.freeze({
+      trigger,
+      content: null,
+      actions: Object.freeze(actions),
+    });
+  }
+  if (
+    !content
+    || !(content instanceof ownerWindow.HTMLDivElement)
+    || !content.isConnected
+    || content.ownerDocument !== ownerDocument
+    || content.getAttribute("role") !== "menu"
+    || content.getAttribute("data-state") !== "open"
+    || content.className !==
+      "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-72"
+  ) {
+    return null;
+  }
+  const publishedElements: HTMLDivElement[] = [];
+  for (const action of render.actions) {
+    const element = actions[action.name];
+    if (
+      !element
+      || !(element instanceof ownerWindow.HTMLDivElement)
+      || !element.isConnected
+      || element.ownerDocument !== ownerDocument
+      || element.parentElement !== content
+      || element.getAttribute("role") !== "menuitem"
+      || (element.getAttribute("aria-disabled") === "true") !== !action.enabled
+      || element.textContent !== action.label
+    ) {
+      return null;
+    }
+    publishedElements.push(element);
+  }
+  const actualElements = Array.from(content.children).filter(
+    (element): element is HTMLDivElement =>
+      element instanceof ownerWindow.HTMLDivElement
+      && element.getAttribute("role") === "menuitem",
+  );
+  if (
+    actualElements.length !== publishedElements.length
+    || actualElements.some((element, index) => element !== publishedElements[index])
+    || Object.entries(actions).some(([name, element]) =>
+      !render.actions.some((action) => action.name === name) && element !== null)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    trigger,
+    content,
+    actions: Object.freeze(actions),
+  });
+}
+
+function publishMenuDomIsSame(current: PublishMenuDom, published: PublishMenuDom) {
+  return (
+    current.trigger === published.trigger
+    && current.content === published.content
+    && Object.keys(current.actions).every((name) =>
+      current.actions[name as PublishMenuActionName]
+      === published.actions[name as PublishMenuActionName])
+  );
+}
+
+function publishMenuActions(
+  props: HeaderProps,
+  linked: boolean,
+  canEdit: boolean,
+): readonly PublishMenuAction[] {
+  const action = (
+    name: PublishMenuActionName,
+    enabled: boolean,
+    label: string,
+    callback: unknown,
+  ): PublishMenuAction => Object.freeze({
+    identity: Object.freeze({}),
+    name,
+    enabled,
+    label,
+    callback,
+  });
+  const { doc } = props;
+  return Object.freeze(linked
+    ? [
+        action(
+          "publish",
+          canEdit,
+          doc.storage === "gist" ? "Update gist" : "Commit to GitHub…",
+          props.onPublishNow,
+        ),
+        action(
+          "pull",
+          canEdit && props.sync?.status !== "remote-unreadable",
+          "Pull latest from GitHub",
+          props.onPull,
+        ),
+        action("sync", canEdit, "Sync…", props.onSync),
+        ...(doc.githubUrl
+          ? [action("open", true, "Open on GitHub", doc.githubUrl)]
+          : []),
+        ...(props.isOwner
+          ? [action("change", true, "Change connection…", props.onPublish)]
+          : []),
+      ]
+    : [
+        action(
+          "connect",
+          props.isOwner && props.githubConfigured,
+          `Gist or repository…${props.githubConfigured ? "" : GITHUB_NOT_CONFIGURED}`,
+          props.onPublish,
+        ),
+        action("download", true, "Download Markdown", props.onDownload),
+        action("share", true, "Share link…", props.onShare),
+      ]);
+}
+
+function createPublishMenuPresentation({
+  render,
+  coordinator,
+  owners,
+  commitOpen,
+}: {
+  render: PublishMenuRender;
+  coordinator: PublishMenuPublicationCoordinator;
+  owners: PublishMenuOwners;
+  commitOpen: (state: PublishMenuState) => void;
+}): PublishMenuPresentation {
+  const runtimeState: {
+    current: PublishMenuPublicationRuntime | null;
+    last: PublishMenuPublicationRuntime | null;
+  } = { current: null, last: null };
+
+  const createRuntime = (dom: PublishMenuDom): PublishMenuPublicationRuntime => {
+    type Retirement = "element" | "layout" | "mutation" | "other";
+    const triggerSnapshot = snapshotModeSwitcherDom(dom.trigger);
+    const contentSnapshot = dom.content ? snapshotModeSwitcherDom(dom.content) : null;
+    const placements = snapshotModeSwitcherPlacement(
+      dom.content ? [dom.trigger, dom.content] : [dom.trigger],
+    );
+    const placementNodes = new Set(placements.map(({ node }) => node));
+    const expectedOwners = new Map<PublishMenuElementOwnerHandle, HTMLElement>([
+      [owners.trigger, dom.trigger],
+    ]);
+    if (dom.content) {
+      expectedOwners.set(owners.content, dom.content);
+      for (const action of render.actions) {
+        const element = dom.actions[action.name];
+        if (element) expectedOwners.set(owners.actions[action.name], element);
+      }
+    }
+    const detached = new Set<PublishMenuElementOwnerHandle>();
+    const reattached = new Set<PublishMenuElementOwnerHandle>();
+    let replayInvalid = false;
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let mutationSeen = false;
+    const MutationObserverConstructor = dom.trigger.ownerDocument.defaultView?.MutationObserver;
+    let observer: MutationObserver | null = null;
+    const relevantMutation = (record: MutationRecord) => {
+      if (
+        record.type === "attributes"
+        && record.attributeName
+        && MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(record.attributeName)
+      ) {
+        return false;
+      }
+      const roots = dom.content ? [dom.trigger, dom.content] : [dom.trigger];
+      if (roots.some((root) => record.target === root || root.contains(record.target))) return true;
+      if (record.type !== "childList") return false;
+      return (
+        (record.previousSibling !== null && placementNodes.has(record.previousSibling))
+        || (record.nextSibling !== null && placementNodes.has(record.nextSibling))
+        || [...record.addedNodes, ...record.removedNodes].some((node) =>
+          roots.some((root) => node === root || node.contains?.(root)))
+      );
+    };
+    function inspectMutations(records: readonly MutationRecord[]) {
+      if (records.some(relevantMutation)) {
+        mutationSeen = true;
+        retire("mutation");
+      }
+    }
+    const mutationHistoryIsClean = () => {
+      if (observer) inspectMutations(observer.takeRecords());
+      return !mutationSeen;
+    };
+    const recordElementChange = (
+      owner: PublishMenuElementOwnerHandle,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+    ) => {
+      const expected = expectedOwners.get(owner);
+      if (!expected || replayInvalid) return;
+      if (!retired) retire("element");
+      if (retirement !== "element") return;
+      if (element === null) {
+        if (previous !== expected || detached.has(owner) || reattached.size > 0) {
+          replayInvalid = true;
+          return;
+        }
+        detached.add(owner);
+        return;
+      }
+      if (
+        previous !== null
+        || element !== expected
+        || detached.size !== expectedOwners.size
+        || !detached.has(owner)
+        || reattached.has(owner)
+      ) {
+        replayInvalid = true;
+        return;
+      }
+      reattached.add(owner);
+    };
+    const isExactElementReplay = () => (
+      retired
+      && retirement === "element"
+      && !replayInvalid
+      && detached.size === expectedOwners.size
+      && reattached.size === expectedOwners.size
+      && publication.isExact()
+    );
+    const publicationDocument = dom.trigger.ownerDocument;
+    const ownerWindow = publicationDocument.defaultView;
+    const keyboardAuthority = ownerWindow
+      ? capturePublishMenuKeyboardAuthority(
+          publicationDocument,
+          ownerWindow as Window & typeof globalThis,
+        )
+      : null;
+    const keyboardEvents = new Set<KeyboardEvent>();
+    const identity = Object.freeze({});
+    const first = render.enabledActions.at(0) ?? null;
+    const last = render.enabledActions.at(-1) ?? null;
+    const arrows: Readonly<Record<PublishMenuArrowKey, PublishMenuArrowAction>> = Object.freeze({
+      ArrowDown: Object.freeze({
+        identity: Object.freeze({}),
+        publicationIdentity: identity,
+        key: "ArrowDown",
+        destination: "first",
+        target: first,
+      }),
+      ArrowUp: Object.freeze({
+        identity: Object.freeze({}),
+        publicationIdentity: identity,
+        key: "ArrowUp",
+        destination: "last",
+        target: last,
+      }),
+    });
+    let keyboardListenerAttached = false;
+    const keyboardListener = (event: Event) => coordinator.stageNative(publication, event);
+    const publication: PublishMenuPublication = Object.freeze({
+      identity,
+      render,
+      document: publicationDocument,
+      dom,
+      keyboardAuthority,
+      keyboardEvents,
+      arrows,
+      triggerSnapshot,
+      contentSnapshot,
+      placements,
+      isExact: () => {
+        if (
+          !mutationHistoryIsClean()
+          || !keyboardAuthority?.historyIsClean()
+          || !publishMenuFactsAreCurrent(render)
+        ) {
+          return false;
+        }
+        const current = currentPublishMenuDom(render, owners);
+        return Boolean(
+          current
+          && publishMenuDomIsSame(current, dom)
+          && placements.every(modeSwitcherPlacementMatches)
+          && modeSwitcherDomSnapshotMatches(triggerSnapshot)
+          && (!contentSnapshot || modeSwitcherDomSnapshotMatches(contentSnapshot))
+        );
+      },
+      recordElementChange,
+      isExactElementReplay,
+      retire: () => retire("other"),
+      dispose: () => {
+        observer?.disconnect();
+        observer = null;
+        coordinator.clearKeyboardEvents(publication);
+        if (keyboardAuthority && keyboardListenerAttached) {
+          publishMenuNativeCall<void>(
+            keyboardAuthority.removeEventListener,
+            dom.trigger,
+            ["keydown", keyboardListener, true],
+            keyboardAuthority,
+          );
+          keyboardListenerAttached = false;
+        }
+      },
+    });
+    function retire(reason: Retirement) {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      coordinator.retire(publication);
+      if (runtimeState.current?.publication === publication) runtimeState.current = null;
+      return true;
+    }
+    const runtime: PublishMenuPublicationRuntime = Object.freeze({
+      publication,
+      retireForLayout: () => retire(mutationSeen ? "mutation" : "layout"),
+      isExactLayoutReplay: () => (
+        retired
+        && retirement === "layout"
+        && publication.isExact()
+      ),
+    });
+    if (keyboardAuthority) {
+      publishMenuNativeCall<void>(
+        keyboardAuthority.addEventListener,
+        dom.trigger,
+        ["keydown", keyboardListener, true],
+        keyboardAuthority,
+      );
+      keyboardListenerAttached = true;
+    }
+    if (MutationObserverConstructor) {
+      observer = new MutationObserverConstructor(inspectMutations);
+      observer.observe(dom.trigger, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      for (let ancestor: Node | null = dom.trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+        observer.observe(ancestor, { childList: true });
+      }
+      if (dom.content) {
+        observer.observe(dom.content, {
+          attributes: true,
+          characterData: true,
+          childList: true,
+          subtree: true,
+        });
+        for (let ancestor: Node | null = dom.content.parentNode; ancestor; ancestor = ancestor.parentNode) {
+          observer.observe(ancestor, { childList: true });
+        }
+      }
+    }
+    return runtime;
+  };
+
+  const currentPublication = () => {
+    const runtime = runtimeState.current;
+    const publication = runtime?.publication;
+    return runtime
+      && publication
+      && coordinator.active() === publication
+      && publication.render === render
+      && publication.isExact()
+      ? publication
+      : null;
+  };
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const publication = currentPublication();
+    if (publication) coordinator.stageReact(publication, event);
+  };
+  const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    if (!publication) return;
+    const claim = coordinator.claim(publication, event);
+    if (!claim) {
+      suppressPublishMenuRadixArrowDown(publication, event);
+      return;
+    }
+    if (!coordinator.prepareOpen(claim) || !preventPublishMenuArrow(claim)) {
+      coordinator.cancelOpen(publication);
+      suppressPublishMenuRadixArrowDown(publication, event);
+      return;
+    }
+    if (!publication.retire()) {
+      coordinator.cancelOpen(publication);
+      return;
+    }
+    commitOpen(Object.freeze({ visit: render.visit, open: true }));
+  };
+  const onOpenChange = (open: boolean) => {
+    if (render.open === open) return;
+    const publication = currentPublication();
+    if (publication) publication.retire();
+    commitOpen(Object.freeze({ visit: render.visit, open }));
+  };
+  const onOpenAutoFocus = (event: Event) => {
+    const publication = currentPublication();
+    if (!publication) return;
+    const ready = coordinator.consumeOpen(publication, event);
+    if (!ready) return;
+    publishMenuNativeCall<void>(
+      ready.authority.event.preventDefault,
+      event,
+      [],
+      ready.authority,
+    );
+    if (
+      !publishMenuNativeValue<boolean>(
+        ready.authority.event.defaultPrevented,
+        event,
+        ready.authority,
+      )
+      || !publication.isExact()
+    ) {
+      return;
+    }
+    publishMenuNativeCall<void>(
+      ready.authority.focus,
+      ready.target,
+      [{ preventScroll: true }],
+      ready.authority,
+    );
+  };
+  function establish() {
+    if (
+      (runtimeState.last && !runtimeState.last.isExactLayoutReplay())
+      || !publishMenuFactsAreCurrent(render)
+    ) {
+      return undefined;
+    }
+    const dom = currentPublishMenuDom(render, owners);
+    if (!dom) return undefined;
+    const runtime = createRuntime(dom);
+    runtimeState.current = runtime;
+    runtimeState.last = runtime;
+    coordinator.publish(runtime.publication);
+    return runtime.retireForLayout;
+  }
+  return Object.freeze({
+    captureTrigger: owners.trigger.capture,
+    captureContent: owners.content.capture,
+    captureActions: Object.freeze(
+      Object.fromEntries(
+        Object.entries(owners.actions).map(([name, owner]) => [name, owner.capture]),
+      ) as Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>,
+    ),
+    establish,
+    onTriggerKeyDown,
+    onTriggerArrowKeyDown,
+    onOpenChange,
+    onOpenAutoFocus,
+  });
+}
+
+function PublishMenuOpenCommit({ presentation }: { presentation: PublishMenuPresentation }) {
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  return null;
+}
+
+function PublishMenu({ props }: { props: HeaderProps }) {
+  const { doc, session, githubConfigured } = props;
+  const linked = doc.storage !== "local";
+  const canEdit = session.role === "owner" || session.role === "editor";
+  const [mount] = useState(() => Symbol("publish menu"));
+  const [, setPublicationRevision] = useState(0);
+  const [coordinator] = useState(
+    () => new PublishMenuPublicationCoordinator(
+      () => setPublicationRevision((revision) => revision + 1),
+    ),
+  );
+  const [owners] = useState(() => createPublishMenuOwners(coordinator));
+  const visit = useMemo<PublishMenuVisit>(
+    () => Object.freeze({ mount, session, document: doc }),
+    [doc, mount, session],
+  );
+  const initialState = useMemo<PublishMenuState>(
+    () => Object.freeze({ visit, open: false }),
+    [visit],
+  );
+  const [storedState, setStoredState] = useState(initialState);
+  const state = storedState.visit === visit ? storedState : initialState;
+  const actions = publishMenuActions(props, linked, canEdit);
+  const render: PublishMenuRender = Object.freeze({
+    identity: Object.freeze({}),
+    visit,
+    props,
+    session,
+    document: doc,
+    documentFields: snapshotMoreMenuDocument(doc),
+    sync: props.sync,
+    syncFields: props.sync ? JSON.stringify(props.sync) : null,
+    role: session.role,
+    linked,
+    canEdit,
+    isOwner: props.isOwner,
+    githubConfigured,
+    publishing: props.publishing,
+    open: state.open,
+    actions,
+    enabledActions: Object.freeze(actions.filter((action) => action.enabled)),
+  });
+  const presentation = createPublishMenuPresentation({
+    render,
+    coordinator,
+    owners,
+    commitOpen: setStoredState,
+  });
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  const {
+    captureTrigger,
+    captureContent,
+    captureActions,
+    onTriggerKeyDown,
+    onTriggerArrowKeyDown,
+    onOpenChange,
+    onOpenAutoFocus,
+  } = presentation;
+  const openAutoFocusProps = { onOpenAutoFocus };
+
+  return (
+    <Menu open={state.open} onOpenChange={onOpenChange}>
+      <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
+        {linked && canEdit && props.sync ? (
+          <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
+        ) : (
+          <MenuTrigger asChild>
+            <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+              {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
+              Publish
+            </button>
+          </MenuTrigger>
+        )}
+        <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
+          <button
+            ref={captureTrigger}
+            type="button"
+            className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5"
+            disabled={props.publishing}
+            aria-label="Publish options"
+            data-testid="publish-menu"
+            onKeyDown={onTriggerKeyDown}
+          >
+            <ChevronDown size={16} className="opacity-80" />
+          </button>
+        </MenuTrigger>
+      </div>
+      <MenuContent
+        ref={captureContent}
+        align="end"
+        className="w-72"
+        {...openAutoFocusProps}
+      >
+        {linked ? (
+          <>
+            <MenuLabel>
+              {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
+              {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
+            </MenuLabel>
+            <MenuItem ref={captureActions.publish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+              {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
+            </MenuItem>
+            <MenuItem ref={captureActions.pull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+              Pull latest from GitHub
+            </MenuItem>
+            <MenuItem ref={captureActions.sync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+              Sync…
+            </MenuItem>
+            {doc.githubUrl && (
+              <MenuItem ref={captureActions.open} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+                Open on GitHub
+              </MenuItem>
+            )}
+            {props.isOwner && (
+              <>
+                <MenuSeparator />
+                <MenuItem ref={captureActions.change} icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                  Change connection…
+                </MenuItem>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <MenuLabel>Publish to GitHub</MenuLabel>
+            <MenuItem
+              ref={captureActions.connect}
+              icon={<GitHubIcon size={15} />}
+              onSelect={props.onPublish}
+              disabled={!props.isOwner || !githubConfigured}
+              title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
+              data-testid="menu-publish-github"
+            >
+              <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
+            </MenuItem>
+            <MenuSeparator />
+            <MenuItem ref={captureActions.download} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+              Download Markdown
+            </MenuItem>
+            <MenuItem ref={captureActions.share} icon={<Share2 size={15} />} onSelect={props.onShare}>
+              Share link…
+            </MenuItem>
+          </>
+        )}
+        <PublishMenuOpenCommit presentation={presentation} />
+      </MenuContent>
+    </Menu>
   );
 }
 
@@ -12236,79 +14395,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MoreMenuOpenCommit presentation={moreMenuPresentation} />
           </MenuContent>
         </Menu>}
-        {!embed && !compact && (
-          <Menu>
-            <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
-              {linked && canEdit && props.sync ? (
-                <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
-              ) : (
-                <MenuTrigger asChild>
-                  <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
-                    {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
-                    Publish
-                  </button>
-                </MenuTrigger>
-              )}
-              <MenuTrigger asChild>
-                <button type="button" className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5" disabled={props.publishing} aria-label="Publish options" data-testid="publish-menu">
-                  <ChevronDown size={16} className="opacity-80" />
-                </button>
-              </MenuTrigger>
-            </div>
-            <MenuContent align="end" className="w-72">
-              {linked ? (
-                <>
-                  <MenuLabel>
-                    {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
-                    {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
-                  </MenuLabel>
-                  <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
-                    {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
-                  </MenuItem>
-                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
-                    Pull latest from GitHub
-                  </MenuItem>
-                  <MenuItem icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
-                    Sync…
-                  </MenuItem>
-                  {doc.githubUrl && (
-                    <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
-                      Open on GitHub
-                    </MenuItem>
-                  )}
-                  {props.isOwner && (
-                    <>
-                      <MenuSeparator />
-                      <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
-                        Change connection…
-                      </MenuItem>
-                    </>
-                  )}
-                </>
-              ) : (
-                <>
-                  <MenuLabel>Publish to GitHub</MenuLabel>
-                  <MenuItem
-                    icon={<GitHubIcon size={15} />}
-                    onSelect={props.onPublish}
-                    disabled={!props.isOwner || !githubConfigured}
-                    title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
-                    data-testid="menu-publish-github"
-                  >
-                    <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
-                  </MenuItem>
-                  <MenuSeparator />
-                  <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
-                    Download Markdown
-                  </MenuItem>
-                  <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
-                    Share link…
-                  </MenuItem>
-                </>
-              )}
-            </MenuContent>
-          </Menu>
-        )}
+        {!embed && !compact && <PublishMenu props={props} />}
       </div>
     </header>
   );

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { TooltipProvider } from "@/components/ui/primitives";
 import type { DocumentDto } from "@/server/dto";
+import type { SyncStatusDto } from "@/lib/api";
 
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
@@ -274,6 +275,88 @@ async function waitForOutsideListener() {
   await act(async () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   });
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function publishTrigger() {
+  return screen.getByTestId("publish-menu") as HTMLButtonElement;
+}
+
+function publishArrow(
+  key: "ArrowDown" | "ArrowUp",
+  init: Omit<KeyboardEventInit, "key"> = {},
+  trusted = true,
+) {
+  const button = publishTrigger();
+  const ownerWindow = button.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    key,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  act(() => button.dispatchEvent(event));
+  return event;
+}
+
+function linkedDocument(
+  githubUrl: string | null = "https://github.com/o/r/blob/main/doc.md",
+): DocumentDto {
+  return {
+    ...DOC,
+    storage: "repo",
+    repoOwner: "o",
+    repoName: "r",
+    repoBranch: "main",
+    repoPath: "doc.md",
+    publishedAt: "2026-09-08T01:00:00.000Z",
+    githubUrl,
+  };
+}
+
+function syncStatus(status: SyncStatusDto["status"] = "in-sync"): SyncStatusDto {
+  return {
+    status,
+    remote: {
+      sha: "abc123",
+      revision: "abc123",
+      url: "https://github.com/o/r/blob/main/doc.md",
+      updatedAt: null,
+    },
+    localChanged: false,
+    remoteChanged: status === "remote-unreadable",
+    lines: { local: 0, remote: 0 },
+    ...(status === "remote-unreadable"
+      ? { size: 3_000_000, limit: 2_097_152 }
+      : {}),
+  };
 }
 
 beforeEach(() => {
@@ -1365,5 +1448,210 @@ describe("editor header More menu authority", () => {
     fireEvent.click(item("delete"));
     expect(confirmDelete).toHaveBeenCalledTimes(2);
     expect(mutation).toHaveBeenCalledOnce();
+  });
+});
+
+describe("editor header Publish options directional focus", () => {
+  it.each([
+    ["ArrowDown", "Gist or repository…"],
+    ["ArrowUp", "Share link…"],
+  ] as const)("opens an unlinked owner menu with %s at %s", async (key, destination) => {
+    const props = headerProps(createSession(), createActions());
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    await renderStrict(header(props));
+    publishTrigger().focus();
+    focus.mockClear();
+
+    const event = publishArrow(key);
+
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: destination })).toHaveFocus());
+    expect(focus).toHaveBeenCalledOnce();
+    expect(props.onPublish).not.toHaveBeenCalled();
+    expect(props.onDownload).not.toHaveBeenCalled();
+    expect(props.onShare).not.toHaveBeenCalled();
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["owner without GitHub", "owner", true],
+    ["editor", "editor", false],
+    ["viewer", "viewer", false],
+  ] as const)(
+    "skips the disabled first action for an unlinked %s",
+    async (_name, role, isOwner) => {
+      const props = headerProps(createSession(DOC.id, role), createActions(), {
+        isOwner,
+        githubConfigured: false,
+      });
+      await renderStrict(header(props));
+      publishTrigger().focus();
+
+      publishArrow("ArrowDown");
+
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: "Download Markdown" })).toHaveFocus());
+      expect(screen.getByRole("menuitem", { name: /Gist or repository/ }))
+        .toHaveAttribute("aria-disabled", "true");
+      expect(props.onPublish).not.toHaveBeenCalled();
+      expect(props.onDownload).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["owner", "owner", true, "Commit to GitHub…", "Change connection…"],
+    ["editor", "editor", false, "Commit to GitHub…", "Open on GitHub"],
+    ["viewer", "viewer", false, "Open on GitHub", "Open on GitHub"],
+  ] as const)(
+    "uses exact linked %s enabled endpoints",
+    async (_name, role, isOwner, first, last) => {
+      const doc = linkedDocument();
+      const props = headerProps(createSession(doc.id, role), createActions(), {
+        doc,
+        sync: syncStatus(),
+        isOwner,
+      });
+      const view = await renderStrict(header(props));
+      publishTrigger().focus();
+      publishArrow("ArrowDown");
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: first })).toHaveFocus());
+      fireEvent.keyDown(screen.getByRole("menuitem", { name: first }), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      await view.render(header({ ...props }));
+      publishTrigger().focus();
+      publishArrow("ArrowUp");
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: last })).toHaveFocus());
+
+      expect(props.onPublishNow).not.toHaveBeenCalled();
+      expect(props.onPull).not.toHaveBeenCalled();
+      expect(props.onSync).not.toHaveBeenCalled();
+      expect(props.onPublish).not.toHaveBeenCalled();
+      expect(window.open).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips an unreadable Pull row and chooses the optional last action", async () => {
+    const doc = linkedDocument();
+    const props = headerProps(createSession(doc.id, "editor"), createActions(), {
+      doc,
+      sync: syncStatus("remote-unreadable"),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    publishArrow("ArrowUp");
+
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Open on GitHub" })).toHaveFocus());
+    expect(screen.getByRole("menuitem", { name: "Pull latest from GitHub" }))
+      .toHaveAttribute("aria-disabled", "true");
+    expect(props.onPull).not.toHaveBeenCalled();
+    expect(props.onSync).not.toHaveBeenCalled();
+  });
+
+  it("does no work when a linked viewer has no enabled current action", async () => {
+    const doc = linkedDocument(null);
+    const props = headerProps(createSession(doc.id, "viewer"), createActions(), {
+      doc,
+      sync: syncStatus(),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    const event = publishArrow("ArrowDown");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(props.onPublishNow).not.toHaveBeenCalled();
+    expect(props.onPull).not.toHaveBeenCalled();
+    expect(props.onSync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["untrusted", {}, false],
+    ["Alt-modified", { altKey: true }, true],
+    ["Control-modified", { ctrlKey: true }, true],
+    ["Meta-modified", { metaKey: true }, true],
+    ["Shift-modified", { shiftKey: true }, true],
+    ["repeating", { repeat: true }, true],
+    ["composing", { isComposing: true }, true],
+  ] as const)("rejects %s ArrowDown before accepting a clean successor", async (
+    _name,
+    init,
+    trusted,
+  ) => {
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    const rejected = publishArrow("ArrowDown", init, trusted);
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    const accepted = publishArrow("ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+  });
+
+  it.each(["attribute", "placement"] as const)(
+    "rejects restored trigger %s history and recovers in a distinct visit",
+    async (mutation) => {
+      const props = headerProps(createSession(), createActions());
+      const view = await renderStrict(<div key="first">{header(props)}</div>);
+      const current = publishTrigger();
+      if (mutation === "attribute") {
+        current.setAttribute("aria-label", "Changed");
+        current.setAttribute("aria-label", "Publish options");
+      } else {
+        const parent = current.parentNode!;
+        const next = current.nextSibling;
+        current.remove();
+        parent.insertBefore(current, next);
+      }
+      current.focus();
+
+      const rejected = publishArrow("ArrowDown");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      await view.render(<div key="second">{header(props)}</div>);
+      publishTrigger().focus();
+      publishArrow("ArrowDown");
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+    },
+  );
+
+  it("retains pointer, Enter, Space, item activation, Escape, and outside close", async () => {
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props, true));
+    const outside = screen.getByRole("button", { name: "Outside menu" });
+
+    fireEvent.pointerDown(publishTrigger(), {
+      bubbles: true,
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Download Markdown" }));
+    expect(props.onDownload).toHaveBeenCalledExactlyOnceWith("md", false);
+
+    publishTrigger().focus();
+    fireEvent.keyDown(publishTrigger(), { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(publishTrigger()).toHaveFocus());
+
+    fireEvent.keyDown(publishTrigger(), { key: " " });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    await waitForOutsideListener();
+    fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 });
