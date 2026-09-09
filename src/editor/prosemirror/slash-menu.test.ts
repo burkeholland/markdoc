@@ -100,23 +100,6 @@ describe("slashMenuPlugin", () => {
     });
     if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
   };
-  const jsdomKeyboardView = (
-    ownerWindow: Window & typeof globalThis,
-  ): Window & typeof globalThis => {
-    const probe = new ownerWindow.KeyboardEvent("slash-key-view-probe");
-    const implementation = Object.getOwnPropertySymbols(probe)
-      .map((symbol) => (probe as unknown as Record<symbol, unknown>)[symbol])
-      .find(
-        (candidate): candidate is {
-          _globalObject: Window & typeof globalThis;
-        } =>
-          typeof candidate === "object" &&
-          candidate !== null &&
-          "_globalObject" in candidate,
-      );
-    if (!implementation) throw new Error("jsdom keyboard event realm was unavailable");
-    return implementation._globalObject;
-  };
   const key = async (k: string, init: KeyboardEventInit = {}) => {
     const ownerWindow = view.dom.ownerDocument.defaultView;
     if (!ownerWindow) throw new Error("Editor owner window was unavailable");
@@ -125,9 +108,10 @@ describe("slashMenuPlugin", () => {
       code: k,
       bubbles: true,
       cancelable: true,
-      view: jsdomKeyboardView(ownerWindow),
+      view: ownerWindow,
       ...init,
     });
+    if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
     markJsdomEventTrusted(event);
     view.dom.dispatchEvent(event);
     await Promise.resolve();
@@ -247,13 +231,12 @@ describe("slashMenuPlugin", () => {
       expect((await key("End", init)).defaultPrevented).toBe(false);
     }
     const ownerWindow = view.dom.ownerDocument.defaultView!;
-    const eventView = jsdomKeyboardView(ownerWindow);
     const untrusted = new ownerWindow.KeyboardEvent("keydown", {
       key: "End",
       code: "End",
       bubbles: true,
       cancelable: true,
-      view: eventView,
+      view: ownerWindow,
     });
     view.dom.dispatchEvent(untrusted);
     await Promise.resolve();
@@ -264,7 +247,7 @@ describe("slashMenuPlugin", () => {
       code: "End",
       bubbles: true,
       cancelable: true,
-      view: eventView,
+      view: ownerWindow,
     });
     markJsdomEventTrusted(accepted);
     view.dom.focus();
