@@ -2,7 +2,14 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, within } from "@testing-library/react";
-import { StrictMode, useEffect, useLayoutEffect, type ReactNode, type RefObject } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { createRoot } from "react-dom/client";
 import type { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
@@ -257,6 +264,23 @@ interface CapturedControl {
   buttonRef: (element: HTMLButtonElement | null) => void;
 }
 
+type CapturedTableKeyDown = (
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+) => void;
+
+const TABLE_BUTTON_IDS = [
+  "table-row-before",
+  "table-row-after",
+  "table-col-before",
+  "table-col-after",
+  "table-delete-row",
+  "table-delete-col",
+  "table-align-left",
+  "table-align-center",
+  "table-align-right",
+  "table-delete",
+] as const;
+
 function reactHandler<T>(element: HTMLElement, name: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
@@ -264,6 +288,104 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   const handler = props?.[name];
   if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
   return handler as T;
+}
+
+function tableEventImplementation(event: Event) {
+  return Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean; view: Window | null } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && typeof candidate.isTrusted === "boolean"
+        && "view" in candidate,
+    );
+}
+
+function requiredTableEventImplementation(event: Event) {
+  const implementation = tableEventImplementation(event);
+  if (!implementation) throw new Error("The jsdom event implementation was unavailable");
+  return implementation;
+}
+
+function markTableEventTrusted(event: Event) {
+  const implementation = tableEventImplementation(event);
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+async function dispatchTableKey(
+  button: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const event = tableKeyboardEvent(button, key, init);
+  await act(async () => {
+    button.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function tableKeyboardEvent(
+  button: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = button.ownerDocument.defaultView!;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  const implementation = requiredTableEventImplementation(event);
+  implementation.view = ownerWindow;
+  if (trusted) markTableEventTrusted(event);
+  return event;
+}
+
+function tableButtons() {
+  return TABLE_BUTTON_IDS.map(
+    (testId) => screen.getByTestId(testId) as HTMLButtonElement,
+  );
+}
+
+function interceptTableKeyDown(
+  element: HTMLButtonElement,
+  intercept: (original: CapturedTableKeyDown, event: object) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the table control");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  const original = props.onKeyDown;
+  if (typeof original !== "function") throw new Error("The table key handler was unavailable");
+  const replacement = {
+    ...props,
+    onKeyDown: (event: object) => {
+      intercept(original as CapturedTableKeyDown, event);
+    },
+  };
+  record[propsKey] = replacement;
+  return () => {
+    if (record[propsKey] === replacement) record[propsKey] = props;
+  };
 }
 
 function captureControl(testId: string): CapturedControl {
@@ -873,6 +995,620 @@ describe("TableMenu geometry ownership", () => {
       expect(current.tableAction).toHaveBeenLastCalledWith("rowBefore");
     } finally {
       act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    ["ArrowRight", 0, 1],
+    ["ArrowDown", 1, 2],
+    ["ArrowLeft", 2, 1],
+    ["ArrowUp", 1, 0],
+    ["Home", 7, 0],
+    ["End", 0, 9],
+    ["ArrowRight", 9, 0],
+    ["ArrowLeft", 0, 9],
+  ] as const)(
+    "focuses the exact table control for %s from %s to %s without invoking an action",
+    async (key, sourceIndex, destinationIndex) => {
+      const order: string[] = [];
+      const nativePreventDefault = Event.prototype.preventDefault;
+      vi.spyOn(Event.prototype, "preventDefault").mockImplementation(function (this: Event) {
+        order.push("prevent");
+        nativePreventDefault.call(this);
+      });
+      const nativeFocus = HTMLElement.prototype.focus;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+        this: HTMLElement,
+        options?: FocusOptions,
+      ) {
+        order.push("focus");
+        nativeFocus.call(this, options);
+      });
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+        align: "center",
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(
+          <StrictMode>
+            <Boundary current={current} />
+          </StrictMode>,
+        ));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        expect(menu).toHaveAttribute("role", "toolbar");
+        expect(menu).toHaveAttribute("aria-label", "Table");
+        expect(menu).toHaveAttribute("aria-orientation", "horizontal");
+        expect(tableButtons().map((button) => button.dataset.testid)).toEqual(TABLE_BUTTON_IDS);
+        const source = tableButtons()[sourceIndex];
+        const destination = tableButtons()[destinationIndex];
+        source.focus();
+        focus.mockClear();
+        order.length = 0;
+
+        const event = await dispatchTableKey(source, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(focus.mock.instances[0]).toBe(destination);
+        expect(order).toEqual(["prevent", "focus"]);
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    ["Home", 0],
+    ["End", 9],
+    ["PageDown", 4],
+  ] as const)("leaves a no-op %s on control %s to native behavior", async (key, sourceIndex) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+      const source = tableButtons()[sourceIndex];
+      source.focus();
+      focus.mockClear();
+
+      const event = await dispatchTableKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("rejects untrusted, modified, repeated, composing, canceled, malformed, and wrong-focus keys", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+      const source = tableButtons()[0];
+      const rejected: Array<{
+        init?: KeyboardEventInit;
+        trusted?: boolean;
+        cancel?: boolean;
+        wrongView?: boolean;
+      }> = [
+        { trusted: false },
+        { init: { ctrlKey: true } },
+        { init: { metaKey: true } },
+        { init: { altKey: true } },
+        { init: { shiftKey: true } },
+        { init: { repeat: true } },
+        { init: { isComposing: true } },
+        { init: { bubbles: false } },
+        { init: { cancelable: false } },
+        { cancel: true },
+        { wrongView: true },
+      ];
+
+      for (const setup of rejected) {
+        source.focus();
+        focus.mockClear();
+        const event = tableKeyboardEvent(
+          source,
+          "ArrowRight",
+          setup.init,
+          setup.trusted ?? true,
+        );
+        if (setup.cancel) event.preventDefault();
+        if (setup.wrongView) {
+          const implementation = requiredTableEventImplementation(event);
+          implementation.view = null;
+        }
+        await act(async () => {
+          source.dispatchEvent(event);
+          await Promise.resolve();
+        });
+        if (!setup.cancel) expect(event.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+      }
+
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchTableKey(source, "ArrowRight");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      source.focus();
+      focus.mockClear();
+      const accepted = await dispatchTableKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      outside.remove();
+    }
+  });
+
+  it("uses captured owner-realm path, prevention, and focus intrinsics", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+      const source = tableButtons()[0];
+      const destination = tableButtons()[1];
+      const publicPath = vi.fn(() => []);
+      const publicPreventDefault = vi.fn();
+      const publicFocus = vi.fn();
+      const event = tableKeyboardEvent(source, "ArrowRight");
+      Object.defineProperties(event, {
+        composedPath: { configurable: true, value: publicPath },
+        preventDefault: { configurable: true, value: publicPreventDefault },
+      });
+      Object.defineProperty(destination, "focus", {
+        configurable: true,
+        value: publicFocus,
+      });
+      source.focus();
+      focus.mockClear();
+
+      await act(async () => {
+        source.dispatchEvent(event);
+        await Promise.resolve();
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(publicPath).not.toHaveBeenCalled();
+      expect(publicPreventDefault).not.toHaveBeenCalled();
+      expect(publicFocus).not.toHaveBeenCalled();
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("rejects a trusted foreign-realm key before a clean owner-realm successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    const frame = document.createElement("iframe");
+    document.body.append(host, frame);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(<Boundary current={current} />));
+      browser.flush();
+      const source = tableButtons()[0];
+      const foreignWindow = frame.contentWindow! as Window & typeof globalThis;
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      const implementation = requiredTableEventImplementation(foreign);
+      implementation.view = foreignWindow;
+      markTableEventTrusted(foreign);
+      source.focus();
+      focus.mockClear();
+
+      await act(async () => {
+        source.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      const accepted = await dispatchTableKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      frame.remove();
+    }
+  });
+
+  it("rejects fabricated and replaced wrappers, ignores stale callbacks and replayed events, then recovers", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+      const initial = tableButtons()[0];
+      const stale = reactHandler<CapturedTableKeyDown>(initial, "onKeyDown");
+      initial.focus();
+      focus.mockClear();
+      const fabricatedNative = tableKeyboardEvent(initial, "ArrowRight");
+      stale({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: fabricatedNative,
+        target: initial,
+        currentTarget: initial,
+        bubbles: true,
+        cancelable: true,
+        defaultPrevented: false,
+        isTrusted: true,
+        key: "ArrowRight",
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        shiftKey: false,
+        repeat: false,
+        isComposing: false,
+        view: window,
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      expect(fabricatedNative.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      const replaceWrapper = interceptTableKeyDown(initial, (original, event) => {
+        original(Object.create(
+          Object.getPrototypeOf(event),
+          Object.getOwnPropertyDescriptors(event),
+        ) as ReactKeyboardEvent<HTMLButtonElement>);
+      });
+      const replaced = await dispatchTableKey(initial, "ArrowRight");
+      replaceWrapper();
+      expect(replaced.defaultPrevented).toBe(false);
+      expect(initial).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      const afterWrapper = tableButtons()[0];
+      const replacePredicate = interceptTableKeyDown(afterWrapper, (original, event) => {
+        Object.defineProperty(event, "isDefaultPrevented", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: () => true,
+        });
+        original(event as ReactKeyboardEvent<HTMLButtonElement>);
+      });
+      afterWrapper.focus();
+      focus.mockClear();
+      const predicate = await dispatchTableKey(afterWrapper, "ArrowRight");
+      replacePredicate();
+      expect(predicate.defaultPrevented).toBe(false);
+      expect(afterWrapper).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = tableButtons()[0];
+      const recoveredHandler = reactHandler<CapturedTableKeyDown>(recovered, "onKeyDown");
+      expect(recoveredHandler).not.toBe(stale);
+      const combineStale = interceptTableKeyDown(recovered, (original, event) => {
+        stale(event as ReactKeyboardEvent<HTMLButtonElement>);
+        original(event as ReactKeyboardEvent<HTMLButtonElement>);
+      });
+      recovered.focus();
+      focus.mockClear();
+      const accepted = await dispatchTableKey(recovered, "ArrowRight");
+      combineStale();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+
+      focus.mockClear();
+      await act(async () => {
+        tableButtons()[1].dispatchEvent(accepted);
+        await Promise.resolve();
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("rejects reentrant native key delivery and accepts one clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(<Boundary current={current} />));
+      browser.flush();
+      const source = tableButtons()[0];
+      const outer = tableKeyboardEvent(source, "ArrowRight");
+      const inner = tableKeyboardEvent(source, "ArrowDown");
+      let reentered = false;
+      source.addEventListener("keydown", () => {
+        if (reentered) return;
+        reentered = true;
+        source.dispatchEvent(inner);
+      }, { capture: true, once: true });
+      source.focus();
+      focus.mockClear();
+
+      await act(async () => {
+        source.dispatchEvent(outer);
+        await Promise.resolve();
+      });
+
+      expect(outer.defaultPrevented).toBe(false);
+      expect(inner.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = tableButtons()[0];
+      recovered.focus();
+      focus.mockClear();
+      const accepted = await dispatchTableKey(recovered, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it.each([
+    "mutate and restore",
+    "detach and reinsert",
+    "reorder and restore",
+    "replace and restore",
+  ] as const)(
+    "retires keyboard DOM history after %s and accepts a distinct clean successor",
+    async (change) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(
+          <StrictMode>
+            <Boundary current={current} />
+          </StrictMode>,
+        ));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        const source = tableButtons()[0];
+        const stale = reactHandler<CapturedTableKeyDown>(source, "onKeyDown");
+        if (change === "mutate and restore") {
+          source.setAttribute("data-transient", "changed");
+          source.removeAttribute("data-transient");
+        } else if (change === "detach and reinsert") {
+          const parent = menu.parentNode!;
+          const next = menu.nextSibling;
+          menu.remove();
+          parent.insertBefore(menu, next);
+        } else if (change === "reorder and restore") {
+          const buttons = tableButtons();
+          buttons[9].before(buttons[0]);
+          buttons[1].before(buttons[0]);
+        } else {
+          const replacement = source.cloneNode(true) as HTMLButtonElement;
+          source.replaceWith(replacement);
+          replacement.replaceWith(source);
+        }
+        await act(async () => {});
+
+        const recovered = tableButtons()[0];
+        const recoveredHandler = reactHandler<CapturedTableKeyDown>(recovered, "onKeyDown");
+        expect(recoveredHandler).not.toBe(stale);
+        const combineStale = interceptTableKeyDown(recovered, (original, event) => {
+          stale(event as ReactKeyboardEvent<HTMLButtonElement>);
+          original(event as ReactKeyboardEvent<HTMLButtonElement>);
+        });
+        recovered.focus();
+        focus.mockClear();
+        const accepted = await dispatchTableKey(recovered, "ArrowRight");
+        combineStale();
+
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledTimes(1);
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it("retires old session, format, editor, and owner-realm authority before a clean recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <Boundary current={current} />
+        </StrictMode>,
+      ));
+      browser.flush();
+
+      const rejectDrift = async (change: () => void, restore: () => void) => {
+        const source = tableButtons()[0];
+        source.focus();
+        focus.mockClear();
+        const event = tableKeyboardEvent(source, "ArrowRight");
+        await act(async () => {
+          change();
+          source.dispatchEvent(event);
+          restore();
+          await Promise.resolve();
+        });
+        expect(event.defaultPrevented).toBe(false);
+        expect(focus).not.toHaveBeenCalled();
+      };
+
+      await rejectDrift(
+        () => {
+          current.format.tablePos = -1;
+        },
+        () => {
+          current.format.tablePos = 7;
+        },
+      );
+      await rejectDrift(
+        () => {
+          (current.session as unknown as { canEdit: boolean }).canEdit = false;
+        },
+        () => {
+          (current.session as unknown as { canEdit: boolean }).canEdit = true;
+        },
+      );
+      const foreignEditor = document.createElement("div");
+      await rejectDrift(
+        () => current.domRead.mockReturnValue(foreignEditor),
+        () => current.domRead.mockReturnValue(current.editor),
+      );
+
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) throw new Error("KeyboardEvent.key was unavailable");
+      await rejectDrift(
+        () => {
+          Object.defineProperty(KeyboardEvent.prototype, "key", {
+            ...keyDescriptor,
+            get: () => "End",
+          });
+        },
+        () => {
+          Object.defineProperty(KeyboardEvent.prototype, "key", keyDescriptor);
+        },
+      );
+      const keyboardParent = Object.getPrototypeOf(KeyboardEvent.prototype);
+      await rejectDrift(
+        () => {
+          Object.setPrototypeOf(
+            KeyboardEvent.prototype,
+            Object.create(keyboardParent),
+          );
+        },
+        () => {
+          Object.setPrototypeOf(KeyboardEvent.prototype, keyboardParent);
+        },
+      );
+
+      const recovered = tableButtons()[0];
+      recovered.focus();
+      focus.mockClear();
+      const accepted = await dispatchTableKey(recovered, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
     }
   });
 
