@@ -1478,7 +1478,13 @@ function mutationTouchesPresentation(runtime: SharePresentationRuntime, record: 
     return false;
   }
   if (runtime.loginControl?.contains(target) || runtime.agent?.contains(target)) {
-    return record.type === "attributes" && (target === runtime.loginControl || target === runtime.agent);
+    return record.type === "attributes" && (
+      target === runtime.loginControl ||
+      target === runtime.agent ||
+      target === runtime.agentCard ||
+      target === runtime.agentToggle ||
+      target === runtime.agentPanel
+    );
   }
   return ownedElements.some(
     (element) =>
@@ -3251,7 +3257,12 @@ export const ShareDialog = memo(function ShareDialog({
     }
     const ownerDocument = control.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
-    if (!ownerWindow) return null;
+    if (
+      !ownerWindow ||
+      Reflect.apply(intrinsics.activeElement, ownerDocument, []) !== control
+    ) {
+      return null;
+    }
     const action: Readonly<ShareAgentDirectionalAction> = Object.freeze({
       presentation: candidate,
       visit,
@@ -3287,6 +3298,12 @@ export const ShareDialog = memo(function ShareDialog({
     claimedControlEventsRef.current.add(event);
     claimedNativeControlEventsRef.current.add(nativeEvent);
     claimedControlElementsRef.current.set(control, action);
+    if (
+      Reflect.apply(intrinsics.activeElement, ownerDocument, []) !== control ||
+      !presentationIsCurrent(candidate)
+    ) {
+      return null;
+    }
     if (
       !preventShareDirectionalEvent(nativeEvent, intrinsics) ||
       Reflect.apply(intrinsics.activeElement, ownerDocument, []) !== control ||
@@ -4362,7 +4379,12 @@ export function AgentCollaborateCard({
         publication.ownerDocument,
         publication.ownerWindow,
         publication.intrinsics,
-      )
+      ) ||
+      Reflect.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control
     ) {
       return;
     }
@@ -4370,6 +4392,18 @@ export function AgentCollaborateCard({
     localClaimedActionsRef.current.add(action);
     localClaimedReactEventsRef.current.add(event);
     localClaimedNativeEventsRef.current.add(nativeEvent);
+    if (
+      localPublicationRef.current !== publication ||
+      Reflect.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control ||
+      !drainLocalAgentCardMutations(publication) ||
+      !localAgentCardDomIsExact(publication)
+    ) {
+      return;
+    }
     if (
       !preventShareDirectionalEvent(nativeEvent, publication.intrinsics) ||
       localPublicationRef.current !== publication ||
