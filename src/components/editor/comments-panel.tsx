@@ -2468,6 +2468,8 @@ function exactLazyMenuKey(
   ) {
     return null;
   }
+  const reactEventIdentity: object = event;
+  const nativeEventIdentity: object = nativeEvent;
   const listener = publication.listener.proofFor(nativeEvent, publication);
   if (!listener) return null;
   try {
@@ -2530,7 +2532,7 @@ function exactLazyMenuKey(
       publication.trigger.ownerDocument === publication.ownerDocument &&
       keyboard.activeElement.read(publication.ownerDocument) ===
         publication.trigger &&
-      event !== nativeEvent &&
+      reactEventIdentity !== nativeEventIdentity &&
       event.type === "keydown" &&
       event.currentTarget === publication.trigger &&
       event.target === target &&

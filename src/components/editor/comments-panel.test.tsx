@@ -3285,18 +3285,20 @@ describe("CommentsPanel", () => {
         if (!currentTargetGetter) {
           throw new Error("Event.currentTarget has no intrinsic getter");
         }
-        let nativeDelivery: {
-          event: Event;
-          receiver: EventTarget;
-          currentTarget: EventTarget | null;
-          terminal: EventTarget | undefined;
-        } | null = null;
+        const nativeDelivery: {
+          current: {
+            event: Event;
+            receiver: EventTarget;
+            currentTarget: EventTarget | null;
+            terminal: EventTarget | undefined;
+          } | null;
+        } = { current: null };
         const observeNativeReceiver = function (
           this: EventTarget,
           event: Event,
         ) {
           if (event !== nativeEvent) return;
-          nativeDelivery = {
+          nativeDelivery.current = {
             event,
             receiver: this,
             currentTarget: Reflect.apply(
@@ -3317,7 +3319,8 @@ describe("CommentsPanel", () => {
         restore();
 
         const item = await screen.findByRole("menuitem", { name: "Edit" });
-        if (!nativeDelivery) {
+        const observedDelivery = nativeDelivery.current;
+        if (!observedDelivery) {
           throw new Error("The genuine native window delivery was not observed");
         }
         expect(captures).toHaveLength(1);
@@ -3325,9 +3328,9 @@ describe("CommentsPanel", () => {
         expect(captures[0]).not.toBe(bubbles[0]);
         expect(captures[0]!.nativeEvent).toBe(nativeEvent);
         expect(bubbles[0]!.nativeEvent).toBe(nativeEvent);
-        expect(nativeDelivery.event).toBe(nativeEvent);
-        expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
-        expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+        expect(observedDelivery.event).toBe(nativeEvent);
+        expect(observedDelivery.receiver).toBe(observedDelivery.currentTarget);
+        expect(observedDelivery.receiver).toBe(observedDelivery.terminal);
         expect(nativeEvent.defaultPrevented).toBe(true);
         expect(view.trigger(name)).toHaveAttribute("aria-expanded", "true");
         expect(screen.getAllByRole("menu")).toHaveLength(1);
