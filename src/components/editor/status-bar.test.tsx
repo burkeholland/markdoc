@@ -493,7 +493,7 @@ function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
 
 function menuKey(
   target: HTMLElement,
-  key: "ArrowDown" | "ArrowUp",
+  key: string,
   init: KeyboardEventInit = {},
   trusted = true,
 ) {
@@ -937,6 +937,176 @@ describe("status bar directional menu authority", () => {
     },
   );
 
+  it("rejects a self-window-shaped public view and accepts a distinct exact-view successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      const current = callbacks();
+      await renderStatus(statusProps(current));
+      const trigger = screen.getByTestId("layout-menu");
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const lookalike: Record<string, unknown> = {
+        document: trigger.ownerDocument,
+      };
+      lookalike.window = lookalike;
+      const crossed = menuKey(trigger, "ArrowDown");
+      const intrinsicView = Object.getOwnPropertyDescriptor(
+        window.UIEvent.prototype,
+        "view",
+      )?.get;
+      if (!intrinsicView)
+        throw new Error("Owner-realm UIEvent view getter was unavailable");
+      const nativeView = intrinsicView.call(crossed);
+      Object.defineProperty(crossed, "view", {
+        configurable: true,
+        value: lookalike,
+      });
+
+      await act(async () => {
+        trigger.dispatchEvent(crossed);
+        await Promise.resolve();
+      });
+
+      expect(intrinsicView.call(crossed)).toBe(nativeView);
+      expect(crossed.view).toBe(lookalike);
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === crossed),
+      ).toHaveLength(0);
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(focus).not.toHaveBeenCalled();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(controlled.themeSetter).not.toHaveBeenCalled();
+
+      const successor = menuKey(trigger, "ArrowDown");
+      await act(async () => {
+        trigger.dispatchEvent(successor);
+        await Promise.resolve();
+      });
+
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+      expect(
+        elementWithText('[role="menuitemradio"]', "Code and preview"),
+      ).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === successor),
+      ).toHaveLength(1);
+      expect(focus).toHaveBeenCalledOnce();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      focus.mockRestore();
+      preventDefault.mockRestore();
+      scroll.mockRestore();
+    }
+  });
+
+  it.each([
+    ["keyboard getter", () => {
+      const prototype = window.KeyboardEvent.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, "key");
+      if (!descriptor?.get)
+        throw new Error("KeyboardEvent key getter was unavailable");
+      Object.defineProperty(prototype, "key", {
+        ...descriptor,
+        get(this: KeyboardEvent) {
+          return Reflect.apply(descriptor.get!, this, []);
+        },
+      });
+      return () => Object.defineProperty(prototype, "key", descriptor);
+    }],
+    ["focus method", () => {
+      const prototype = window.HTMLElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, "focus");
+      if (typeof descriptor?.value !== "function")
+        throw new Error("HTMLElement focus method was unavailable");
+      Object.defineProperty(prototype, "focus", {
+        ...descriptor,
+        value(this: HTMLElement, options?: FocusOptions) {
+          return Reflect.apply(descriptor.value, this, [options]);
+        },
+      });
+      return () => Object.defineProperty(prototype, "focus", descriptor);
+    }],
+  ] as const)(
+    "latches restored %s history before Arrow input and recovers only after a clean remount",
+    async (_name, replace) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+      let restore: (() => void) | null = null;
+      try {
+        const current = callbacks();
+        const props = statusProps(current);
+        const view = await renderStatus(props);
+        const trigger = screen.getByTestId("layout-menu");
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        restore = replace();
+        const historyProbe = menuKey(trigger, "F1");
+        await act(async () => {
+          trigger.dispatchEvent(historyProbe);
+          await Promise.resolve();
+        });
+        restore();
+        restore = null;
+        focus.mockClear();
+        preventDefault.mockClear();
+        scroll.mockClear();
+
+        const rejected = menuKey(trigger, "ArrowDown");
+        await act(async () => {
+          trigger.dispatchEvent(rejected);
+          await Promise.resolve();
+        });
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(
+          preventDefault.mock.contexts.filter((context) => context === rejected),
+        ).toHaveLength(0);
+        expect(trigger).toHaveAttribute("aria-expanded", "false");
+        expect(focus).not.toHaveBeenCalled();
+        expect(scroll).not.toHaveBeenCalled();
+        expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+        expect(controlled.themeSetter).not.toHaveBeenCalled();
+
+        await rerenderStatus(view, props, `clean-${_name}`);
+        const currentTrigger = screen.getByTestId("layout-menu");
+        currentTrigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const successor = menuKey(currentTrigger, "ArrowDown");
+        await act(async () => {
+          currentTrigger.dispatchEvent(successor);
+          await Promise.resolve();
+        });
+
+        expect(currentTrigger).toHaveAttribute("aria-expanded", "true");
+        expect(
+          elementWithText('[role="menuitemradio"]', "Code and preview"),
+        ).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === successor,
+          ),
+        ).toHaveLength(1);
+        expect(focus).toHaveBeenCalledOnce();
+        expect(scroll).not.toHaveBeenCalled();
+        expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+      } finally {
+        restore?.();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+        scroll.mockRestore();
+      }
+    },
+  );
+
   it("claims one native and React pair before reentry, rejects replay, and accepts a distinct successor", async () => {
     const nativePreventDefault = Event.prototype.preventDefault;
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -1040,6 +1210,8 @@ describe("status bar directional menu authority", () => {
     async (_name, mutate) => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const stopPropagation = vi.spyOn(Event.prototype, "stopPropagation");
+      const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
       try {
         const current = callbacks();
         const props = statusProps(current);
@@ -1060,8 +1232,14 @@ describe("status bar directional menu authority", () => {
         expect(
           preventDefault.mock.contexts.filter((context) => context === rejected),
         ).toHaveLength(0);
+        expect(
+          stopPropagation.mock.contexts.filter(
+            (context) => context === rejected,
+          ),
+        ).toHaveLength(1);
         expect(trigger).toHaveAttribute("aria-expanded", "false");
         expect(focus).not.toHaveBeenCalled();
+        expect(scroll).not.toHaveBeenCalled();
         expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
 
         await act(async () => {
@@ -1080,12 +1258,89 @@ describe("status bar directional menu authority", () => {
           elementWithText('[role="menuitemradio"]', "Code and preview"),
         ).toHaveFocus();
         expect(focus).toHaveBeenCalledOnce();
+        expect(scroll).not.toHaveBeenCalled();
       } finally {
         focus.mockRestore();
         preventDefault.mockRestore();
+        stopPropagation.mockRestore();
+        scroll.mockRestore();
       }
     },
   );
+
+  it("does not use retired propagation proof after a wrapper method is crossed", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    const firstStop = vi.fn();
+    const crossedStop = vi.fn();
+    let stopBeforeReact: ((event: Event) => void) | null = null;
+    try {
+      const current = callbacks();
+      const props = statusProps(current);
+      await renderStatus(props);
+      const trigger = screen.getByTestId("layout-menu");
+      const stale = captureKey(trigger);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      props.doc.repoPath = "MUTATED.md";
+      const nativeEvent = menuKey(trigger, "ArrowDown");
+      let stopReads = 0;
+      const wrapper = {
+        nativeEvent,
+        currentTarget: trigger,
+        target: trigger,
+        type: "keydown",
+        key: "ArrowDown",
+        eventPhase: Event.CAPTURING_PHASE,
+        defaultPrevented: false,
+        isPropagationStopped: () => false,
+        get stopPropagation() {
+          stopReads += 1;
+          return stopReads <= 2 ? firstStop : crossedStop;
+        },
+      } as unknown as ReactKeyboardEvent<HTMLElement>;
+      stopBeforeReact = (event) => {
+        event.stopPropagation();
+        Object.defineProperty(event, "code", {
+          configurable: true,
+          value: "Crossed",
+        });
+        stale.keyDown(wrapper);
+      };
+      window.addEventListener("keydown", stopBeforeReact, true);
+
+      await act(async () => {
+        trigger.dispatchEvent(nativeEvent);
+        props.doc.repoPath = "README.md";
+        await Promise.resolve();
+      });
+
+      expect(nativeEvent.defaultPrevented).toBe(false);
+      expect(
+        preventDefault.mock.contexts.filter(
+          (context) => context === nativeEvent,
+        ),
+      ).toHaveLength(0);
+      expect(firstStop).not.toHaveBeenCalled();
+      expect(crossedStop).not.toHaveBeenCalled();
+      expect(screen.getByTestId("layout-menu")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+      expect(focus).not.toHaveBeenCalled();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(controlled.themeSetter).not.toHaveBeenCalled();
+    } finally {
+      if (stopBeforeReact)
+        window.removeEventListener("keydown", stopBeforeReact, true);
+      focus.mockRestore();
+      preventDefault.mockRestore();
+      scroll.mockRestore();
+    }
+  });
 
   it("rejects fabricated and stale key handlers without preventing or opening", async () => {
     const current = callbacks();
