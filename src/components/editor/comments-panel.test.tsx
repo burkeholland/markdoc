@@ -5368,7 +5368,7 @@ describe("CommentsPanel", () => {
         expect(vi.mocked(api.documents.createRequest).mock.calls[0][1].mode).toBe("rewrite");
       });
 
-      it("uses captured owner-realm key, prevention and focus intrinsics", async () => {
+      it("uses captured owner-realm composedPath, preventDefault and focus intrinsics", async () => {
         const focus = vi.spyOn(HTMLElement.prototype, "focus");
         const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
         const view = await mountDirectRequestModes();
@@ -5378,11 +5378,11 @@ describe("CommentsPanel", () => {
         focus.mockClear();
         preventDefault.mockClear();
         const event = requestModeKeyboardEvent(suggest, "ArrowRight");
+        const publicComposedPath = vi.fn(() => []);
         const publicPreventDefault = vi.fn();
         const publicFocus = vi.fn();
         Object.defineProperties(event, {
-          key: { configurable: true, value: "End" },
-          composedPath: { configurable: true, value: vi.fn(() => []) },
+          composedPath: { configurable: true, value: publicComposedPath },
           preventDefault: { configurable: true, value: publicPreventDefault },
         });
         Object.defineProperty(comment, "focus", {
@@ -5397,8 +5397,41 @@ describe("CommentsPanel", () => {
         expect(comment).toHaveFocus();
         expect(preventDefault).toHaveBeenCalledTimes(1);
         expect(focus).toHaveBeenCalledTimes(1);
+        expect(publicComposedPath).not.toHaveBeenCalled();
         expect(publicPreventDefault).not.toHaveBeenCalled();
         expect(publicFocus).not.toHaveBeenCalled();
+      });
+
+      it("rejects a replaced public native key before accepting a fresh genuine pair", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const comment = view.radio("comment");
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const replaced = requestModeKeyboardEvent(suggest, "ArrowRight");
+        Object.defineProperty(replaced, "key", {
+          configurable: true,
+          value: "End",
+        });
+
+        act(() => suggest.dispatchEvent(replaced));
+
+        expect(replaced.defaultPrevented).toBe(false);
+        expect(suggest).toHaveFocus();
+        expect(suggest).toHaveAttribute("aria-checked", "true");
+        expect(comment).toHaveAttribute("aria-checked", "false");
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        act(() => requestModeKey(suggest, "ArrowRight"));
+
+        expect(comment).toHaveFocus();
+        expect(comment).toHaveAttribute("aria-checked", "true");
+        expect(preventDefault).toHaveBeenCalledTimes(1);
+        expect(focus).toHaveBeenCalledTimes(1);
       });
 
       it("rejects a replacement React wrapper predicate before accepting the genuine pair", async () => {
@@ -5515,7 +5548,7 @@ describe("CommentsPanel", () => {
         } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
         const frame = document.createElement("iframe");
         document.body.append(frame);
-        const foreignWindow = frame.contentWindow;
+        const foreignWindow = frame.contentDocument?.defaultView;
         if (!foreignWindow) throw new Error("The foreign request-mode realm did not mount");
         const foreign = new foreignWindow.KeyboardEvent("keydown", {
           key: "ArrowRight",
@@ -5665,6 +5698,10 @@ describe("CommentsPanel", () => {
           group.append(rewrite);
         } else if (mutation === "replaced and restored radio") {
           const replacement = suggest.cloneNode(true);
+          const Button = suggest.ownerDocument.defaultView?.HTMLButtonElement;
+          if (!Button || !(replacement instanceof Button)) {
+            throw new Error("The replacement request mode was not a button");
+          }
           suggest.replaceWith(replacement);
           replacement.replaceWith(suggest);
         } else {

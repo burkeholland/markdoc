@@ -93,7 +93,7 @@ export function filterMentionCandidates(candidates: MentionCandidate[], query: s
 }
 
 /** The agents a body mentions that the picker knows (`@owner/slug` matched case-insensitively), in order of first mention. */
-export function mentionedAgents(body: string, candidates: MentionCandidate[]): MentionCandidate[] {
+export function mentionedAgents(body: string, candidates: readonly MentionCandidate[]): MentionCandidate[] {
   const agents = candidates.filter((c) => c.agent);
   if (agents.length === 0) return [];
   const out: MentionCandidate[] = [];
@@ -2686,8 +2686,8 @@ interface RequestModeAuthority {
   readonly rowLabel: string;
   readonly busy: boolean;
   readonly rows: readonly RequestModeRowAuthority[];
-  readonly activeVisit: { readonly current: ComposerVisit | null };
-  readonly activeSubmission: { readonly current: ComposerSubmissionOwner | null };
+  readonly visitIsCurrent: () => boolean;
+  readonly submissionIsIdle: () => boolean;
   readonly setMode: (mode: AgentRequestMode) => void;
   readonly requestSuccessor: () => void;
 }
@@ -2829,6 +2829,12 @@ interface RequestModePresentation {
   readonly rows: readonly RequestModeRowPresentation[];
   readonly establish: () => void | (() => void);
 }
+
+const EMPTY_REQUEST_MODE_PRESENTATION: RequestModePresentation = Object.freeze({
+  captureRoot: () => undefined,
+  rows: Object.freeze([]),
+  establish: () => undefined,
+});
 
 interface RequestModeCells {
   readonly active: { current: RequestModePublication | null };
@@ -3285,8 +3291,8 @@ function requestModeAuthoritiesMatch(
     previous.effectiveMode === current.effectiveMode &&
     previous.rowLabel === current.rowLabel &&
     previous.busy === current.busy &&
-    previous.activeVisit === current.activeVisit &&
-    previous.activeSubmission === current.activeSubmission &&
+    previous.visitIsCurrent === current.visitIsCurrent &&
+    previous.submissionIsIdle === current.submissionIsIdle &&
     previous.setMode === current.setMode &&
     previous.requestSuccessor === current.requestSuccessor &&
     requestModeRowsMatch(previous.rows, current.rows)
@@ -3294,16 +3300,14 @@ function requestModeAuthoritiesMatch(
 }
 
 function requestModeFactsAreCurrent(authority: RequestModeAuthority) {
-  const visit = authority.activeVisit.current;
   const currentAgents = mentionedAgents(authority.value, authority.candidates);
   const expectedLabel =
     currentAgents.length === 1
       ? `How should ${requestModeAgentName(currentAgents[0]!, authority.viewerLogin)} answer?`
       : "How should the agents answer?";
   return (
-    !!visit &&
-    !visit.retired &&
-    authority.activeSubmission.current === null &&
+    authority.visitIsCurrent() &&
+    authority.submissionIsIdle() &&
     !authority.busy &&
     authority.request.canEdit === authority.canEdit &&
     authority.request.defaultMode === authority.defaultMode &&
@@ -3504,7 +3508,6 @@ function createRequestModeRuntime(
   let retired = false;
   let retirement: Retirement | null = null;
   let established = false;
-  let layoutRetired = false;
   let invalidReplay = false;
   let replayRefs: RequestModeRefReplay[] = [];
   let domGuard: RequestModeDomGuard | null = null;
@@ -3594,7 +3597,6 @@ function createRequestModeRuntime(
       retire("element");
     },
     retireForLayout: () => {
-      layoutRetired = true;
       retire("layout");
     },
     noteRef: (
@@ -3915,6 +3917,14 @@ function Composer<Result>({
   const ref = useRef<HTMLTextAreaElement>(null);
   const activeVisit = useRef<ComposerVisit | null>(null);
   const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
+  const requestModeVisitIsCurrent = useCallback(() => {
+    const visit = activeVisit.current;
+    return !!visit && !visit.retired;
+  }, []);
+  const requestModeSubmissionIsIdle = useCallback(
+    () => activeSubmission.current === null,
+    [],
+  );
   const operationSequence = useRef(0);
   const deferredOperationSequence = useRef(0);
   const caretActionSequence = useRef(0);
@@ -4123,8 +4133,10 @@ function Composer<Result>({
   /** An agent as this user sees it: their own by its plain name, anyone else's as "Drew's Copilot CLI". */
   const nameOf = (c: MentionCandidate) => (c.agent ? agentDisplayName({ name: c.name, ownerLogin: c.agent.ownerLogin, ownerName: c.agent.ownerName }, viewerLogin) : c.name);
   const rowLabel = agents.length === 1 ? `How should ${nameOf(agents[0])} answer?` : "How should the agents answer?";
+  // The publication stores these predicates for committed event delivery; it never invokes them during render.
   const requestModeAuthority = request && showRow
-    ? Object.freeze({
+    ? // eslint-disable-next-line react-hooks/refs
+      Object.freeze({
         mount: requestModeMount,
         revision: requestModeRevision,
         request,
@@ -4152,21 +4164,25 @@ function Composer<Result>({
             });
           }),
         ),
-        activeVisit,
-        activeSubmission,
+        visitIsCurrent: requestModeVisitIsCurrent,
+        submissionIsIdle: requestModeSubmissionIsIdle,
         setMode,
         requestSuccessor: requestRequestModeSuccessor,
       } satisfies RequestModeAuthority)
     : null;
-  const requestModePresentation = requestModeAuthority
+  const {
+    captureRoot: captureRequestModeRoot,
+    rows: requestModeRows,
+    establish: establishRequestModes,
+  } = requestModeAuthority
     ? requestModePresentationCache.resolve(
         requestModeAuthority,
         () => createRequestModePresentation(requestModeAuthority, requestModeCells),
       )
-    : null;
+    : EMPTY_REQUEST_MODE_PRESENTATION;
   useLayoutEffect(
-    () => requestModePresentation?.establish(),
-    [requestModePresentation],
+    () => establishRequestModes(),
+    [establishRequestModes],
   );
   // The request goes to the first agent mentioned (part A's `resolveAddressee`); when its owner has not opened it to
   // collaborators the composer says so and will not send, instead of letting the server answer 403 (#1296).
@@ -4428,15 +4444,15 @@ function Composer<Result>({
       {/* Mentioning an agent turns the comment into a request: this row chooses how it answers. Controls only — no
           hint text under the box (Burke); the question is the group's accessible name. It appears and goes with the
           mention and never takes focus: typing carries on in the box. */}
-      {showRow && requestModePresentation && (
+      {showRow && requestModeRows.length > 0 && (
         <div className="composer-agent-row" data-testid="composer-agent-row">
           <div
-            ref={requestModePresentation.captureRoot}
+            ref={captureRequestModeRoot}
             className="composer-modes"
             role="radiogroup"
             aria-label={rowLabel}
           >
-            {requestModePresentation.rows.map((rowPresentation) => {
+            {requestModeRows.map((rowPresentation) => {
               const m = rowPresentation.authority;
               const radio = (
                 <button
