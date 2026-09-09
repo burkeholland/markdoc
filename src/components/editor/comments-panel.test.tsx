@@ -161,6 +161,35 @@ function requestModeKey(
   return event;
 }
 
+function mentionKeyboardEvent(
+  element: HTMLTextAreaElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The mention composer has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markRequestModeEventTrusted(event);
+  return event;
+}
+
+function mentionKey(
+  element: HTMLTextAreaElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const event = mentionKeyboardEvent(element, key, init);
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
 function requestModeHandler(element: HTMLButtonElement) {
   return reactProperty<RequestModeKeyHandler>(element, "onKeyDown");
 }
@@ -192,6 +221,22 @@ function reactProperty<T>(element: HTMLElement, property: string): T {
   const value = props[property];
   if (!value) throw new Error(`React did not publish ${property}`);
   return value as T;
+}
+
+function replaceReactProperties(
+  element: HTMLElement,
+  replacements: Record<string, unknown>,
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) throw new Error("React props were not attached");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  record[propsKey] = { ...props, ...replacements };
+  return () => {
+    record[propsKey] = props;
+  };
 }
 
 function interceptReviewClick(
@@ -5188,6 +5233,78 @@ describe("CommentsPanel", () => {
       };
       return { box, group, host, radio, renderVisit, root };
     };
+    const mountDirectMentions = async (
+      opts: {
+        collaborators?: CollaboratorsResponse["collaborators"];
+        agents?: ListedAgent[];
+        expectedOptions?: number;
+      } = {},
+    ) => {
+      mockRequestModeScrollIntoView();
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      session = new CollabSession({
+        docId: "mention-keyboard-direct",
+        user,
+        role: "owner",
+        getToken: async () => "token",
+        autoConnect: false,
+      });
+      session.keepAlive();
+      session.synced = true;
+      session.ytext.insert(0, TEXT);
+      session.setPendingComment({ from: 16, to: 27 });
+      vi.mocked(api.documents.collaborators).mockResolvedValue({
+        owner: { login: "alice", name: "Alice", image: null },
+        collaborators: opts.collaborators ?? [
+          { login: "bob", name: "Bob", image: null },
+          { login: "carol", name: "Carol", image: null },
+        ],
+        agents: opts.agents ?? [AGENT],
+      } as unknown as CollaboratorsResponse);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const renderVisit = (visit: string) => {
+        act(() => root.render(directRequestModeTree(visit)));
+      };
+      directRequestModeViews.push({ host, root, renderVisit });
+      renderVisit("A");
+      const box = await waitFor(() => {
+        const element = host.querySelector<HTMLTextAreaElement>(
+          '[data-testid="comment-composer"]',
+        );
+        if (!element) throw new Error("The direct mention composer did not mount");
+        return element;
+      });
+      box.focus();
+      fireEvent.change(box, { target: { value: "@" } });
+      const list = await waitFor(() => {
+        const listId = box.getAttribute("aria-controls");
+        const element = listId
+          ? box.ownerDocument.getElementById(listId)
+          : null;
+        if (!(element instanceof HTMLUListElement)) {
+          throw new Error("The exact mention list did not mount");
+        }
+        return element;
+      });
+      const options = () =>
+        Array.from(
+          (box.getAttribute("aria-controls")
+            ? box.ownerDocument.getElementById(
+                box.getAttribute("aria-controls")!,
+              )
+            : null)?.children ?? [],
+        ).filter(
+          (element): element is HTMLLIElement =>
+            element instanceof HTMLLIElement &&
+            element.dataset.testid === "mention-option",
+        );
+      await waitFor(() =>
+        expect(options()).toHaveLength(opts.expectedOptions ?? 3),
+      );
+      return { box, host, list, options, renderVisit, root };
+    };
 
     afterEach(() => {
       for (const view of directRequestModeViews.splice(0)) {
@@ -5222,6 +5339,552 @@ describe("CommentsPanel", () => {
       // An agent the document does not know is not a request either (the row must never guess).
       fireEvent.change(box, { target: { value: "@carol/Some-Bot help" } });
       expect(screen.queryByTestId("composer-agent-row")).toBeNull();
+    });
+
+    describe("mention-suggestion keyboard authority", () => {
+      it.each([
+        ["Home", 0],
+        ["End", 2],
+      ] as const)(
+        "%s selects the exact boundary once and is inert there without focus, value, submit, format, or scroll work",
+        async (key, destination) => {
+          const preventDefault = vi.spyOn(
+            window.Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(
+            window.HTMLElement.prototype,
+            "focus",
+          );
+          const selection = vi.spyOn(
+            window.HTMLTextAreaElement.prototype,
+            "setSelectionRange",
+          );
+          const mounted = await mountDirectMentions();
+          const { box, options } = mounted;
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(box).toHaveAttribute(
+              "aria-activedescendant",
+              options()[1]!.id,
+            ),
+          );
+          const scrollIntoView = Element.prototype
+            .scrollIntoView as ReturnType<typeof vi.fn>;
+          const activeDescendantChanges: MutationRecord[] = [];
+          const observer = new MutationObserver((records) =>
+            activeDescendantChanges.push(...records),
+          );
+          observer.observe(box, {
+            attributes: true,
+            attributeFilter: ["aria-activedescendant"],
+          });
+          const beforeValue = box.value;
+          const beforeSelection = [box.selectionStart, box.selectionEnd];
+          preventDefault.mockClear();
+          focus.mockClear();
+          selection.mockClear();
+          scrollIntoView.mockClear();
+          vi.mocked(api.documents.comment).mockClear();
+          vi.mocked(api.documents.createRequest).mockClear();
+
+          const accepted = mentionKey(box, key);
+          activeDescendantChanges.push(...observer.takeRecords());
+
+          expect(accepted.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(options().filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([
+            options()[destination],
+          ]);
+          expect(box).toHaveAttribute(
+            "aria-activedescendant",
+            options()[destination]!.id,
+          );
+          expect(activeDescendantChanges).toHaveLength(1);
+          expect(box).toHaveFocus();
+          expect(box).toHaveValue(beforeValue);
+          expect([box.selectionStart, box.selectionEnd]).toEqual(beforeSelection);
+          expect(focus).not.toHaveBeenCalled();
+          expect(selection).not.toHaveBeenCalled();
+          expect(scrollIntoView).not.toHaveBeenCalled();
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          expect(api.documents.createRequest).not.toHaveBeenCalled();
+          expect(session!.comments.list()).toHaveLength(0);
+
+          activeDescendantChanges.length = 0;
+          preventDefault.mockClear();
+          const inert = mentionKey(box, key);
+          activeDescendantChanges.push(...observer.takeRecords());
+          observer.disconnect();
+
+          expect(inert.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(activeDescendantChanges).toHaveLength(0);
+          expect(box).toHaveAttribute(
+            "aria-activedescendant",
+            options()[destination]!.id,
+          );
+          expect(box).toHaveValue(beforeValue);
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          expect(api.documents.createRequest).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(["Enter", "Tab"] as const)(
+        "retains wrapped arrows and %s picking while Escape only closes the list",
+        async (pickKey) => {
+          const { box, options } = await mountDirectMentions();
+          const first = options()[0]!;
+          const last = options()[2]!;
+
+          expect(first).toHaveAttribute("aria-selected", "true");
+          mentionKey(box, "ArrowUp");
+          expect(last).toHaveAttribute("aria-selected", "true");
+          mentionKey(box, "ArrowDown");
+          expect(first).toHaveAttribute("aria-selected", "true");
+          mentionKey(box, "ArrowDown");
+          expect(options()[1]).toHaveAttribute("aria-selected", "true");
+
+          const picked = fireEvent.keyDown(box, { key: pickKey });
+          expect(picked).toBe(false);
+          expect(box).toHaveValue("@carol ");
+          expect(box).toHaveFocus();
+          expect(screen.queryByTestId("mention-suggestions")).toBeNull();
+          expect(session!.comments.list()).toHaveLength(0);
+        },
+      );
+
+      it("keeps a current publication across routine rerenders", async () => {
+        const { box, options, renderVisit } = await mountDirectMentions();
+        const originalRows = options();
+
+        renderVisit("A");
+
+        expect(options()).toEqual(originalRows);
+        const accepted = mentionKey(box, "End");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("keeps accepting wrapped arrows when the only suggestion remains selected", async () => {
+        const { box, options } = await mountDirectMentions({
+          collaborators: [
+            {
+              login: "bob",
+              role: "editor",
+              createdAt: "2026-09-08T00:00:00.000Z",
+              name: "Bob",
+              image: null,
+            },
+          ],
+          agents: [],
+          expectedOptions: 1,
+        });
+
+        expect(options()[0]).toHaveAttribute("aria-selected", "true");
+        for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"] as const) {
+          const accepted = mentionKey(box, key);
+          expect(accepted.defaultPrevented).toBe(true);
+          expect(options()[0]).toHaveAttribute("aria-selected", "true");
+        }
+      });
+
+      it("retains Escape close without cancelling the focused composer", async () => {
+        const { box } = await mountDirectMentions();
+        const escaped = fireEvent.keyDown(box, { key: "Escape" });
+        expect(escaped).toBe(false);
+        await waitFor(() =>
+          expect(screen.queryByTestId("mention-suggestions")).toBeNull(),
+        );
+        expect(box).toHaveValue("@");
+        expect(box).toHaveFocus();
+        expect(screen.getByTestId("pending-comment")).toBeInTheDocument();
+      });
+
+      it.each(["Home", "End"] as const)(
+        "%s rejects modified, repeated, composing, untrusted, fabricated, foreign, canceled, stopped, unfocused, and crossed input before a clean event",
+        async (key) => {
+          const iframe = document.createElement("iframe");
+          document.body.append(iframe);
+          const foreignWindow = iframe.contentWindow as
+            | (Window & typeof globalThis)
+            | null;
+          if (!foreignWindow) throw new Error("No foreign event realm");
+          const { box, options } = await mountDirectMentions();
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          const unchanged = () => {
+            expect(options()[1]).toHaveAttribute("aria-selected", "true");
+            expect(box).toHaveAttribute(
+              "aria-activedescendant",
+              options()[1]!.id,
+            );
+            expect(box).toHaveValue("@");
+            expect(session!.comments.list()).toHaveLength(0);
+          };
+          const reject = (init: KeyboardEventInit) => {
+            const event = mentionKey(box, key, init);
+            expect(event.defaultPrevented).toBe(false);
+            unchanged();
+          };
+
+          for (const init of [
+            { ctrlKey: true },
+            { altKey: true },
+            { metaKey: true },
+            { shiftKey: true },
+            { repeat: true },
+            { isComposing: true },
+            { cancelable: false },
+            { bubbles: false },
+          ] satisfies KeyboardEventInit[]) {
+            reject(init);
+          }
+
+          const untrusted = new window.KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+          });
+          act(() => {
+            box.dispatchEvent(untrusted);
+          });
+          expect(untrusted.defaultPrevented).toBe(false);
+          unchanged();
+
+          const canceled = mentionKeyboardEvent(box, key);
+          canceled.preventDefault();
+          act(() => {
+            box.dispatchEvent(canceled);
+          });
+          unchanged();
+
+          const stopped = mentionKeyboardEvent(box, key);
+          stopped.stopPropagation();
+          act(() => {
+            box.dispatchEvent(stopped);
+          });
+          expect(stopped.defaultPrevented).toBe(false);
+          unchanged();
+
+          const fabricatedPrevent = vi.fn();
+          const targetHandler = reactProperty<
+            (event: ReactKeyboardEvent<HTMLTextAreaElement>) => void
+          >(box, "onKeyDown");
+          act(() => {
+            targetHandler({
+              key,
+              currentTarget: box,
+              target: box,
+              preventDefault: fabricatedPrevent,
+            } as unknown as ReactKeyboardEvent<HTMLTextAreaElement>);
+          });
+          expect(fabricatedPrevent).not.toHaveBeenCalled();
+          unchanged();
+
+          const foreign = new foreignWindow.KeyboardEvent("keydown", {
+            key,
+            bubbles: true,
+            cancelable: true,
+          });
+          markRequestModeEventTrusted(foreign);
+          act(() => {
+            box.dispatchEvent(foreign);
+          });
+          expect(foreign.defaultPrevented).toBe(false);
+          unchanged();
+          iframe.remove();
+
+          const submit = screen.getByTestId("comment-submit");
+          submit.focus();
+          reject({});
+          box.focus();
+          fireEvent.change(box, { target: { value: "@b" } });
+          fireEvent.change(box, { target: { value: "@" } });
+          await waitFor(() => expect(options()).toHaveLength(3));
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          const rootCapture = reactProperty<
+            (event: ReactKeyboardEvent<HTMLDivElement>) => void
+          >(root, "onKeyDownCapture");
+          const crossedPrevent = vi.fn();
+          act(() => {
+            rootCapture({
+              key,
+              currentTarget: root,
+              target: box,
+              nativeEvent: mentionKeyboardEvent(box, key),
+              preventDefault: crossedPrevent,
+            } as unknown as ReactKeyboardEvent<HTMLDivElement>);
+            targetHandler({
+              key,
+              currentTarget: box,
+              target: box,
+              nativeEvent: mentionKeyboardEvent(box, key),
+              preventDefault: crossedPrevent,
+            } as unknown as ReactKeyboardEvent<HTMLTextAreaElement>);
+          });
+          expect(crossedPrevent).not.toHaveBeenCalled();
+          unchanged();
+
+          const clean = mentionKey(box, key);
+          expect(clean.defaultPrevented).toBe(true);
+          expect(options()[key === "Home" ? 0 : 2]).toHaveAttribute(
+            "aria-selected",
+            "true",
+          );
+        },
+      );
+
+      it("rejects a trusted owner-realm event whose public view is a self-window-shaped owner-document lookalike", async () => {
+        const preventDefault = vi.spyOn(
+          window.Event.prototype,
+          "preventDefault",
+        );
+        const { box, options } = await mountDirectMentions();
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const activeDescendant = box.getAttribute("aria-activedescendant");
+        const lookalike: Record<string, unknown> = {
+          document: box.ownerDocument,
+        };
+        lookalike.window = lookalike;
+        const crossed = mentionKeyboardEvent(box, "End");
+        Object.defineProperty(crossed, "view", {
+          configurable: true,
+          value: lookalike,
+        });
+        const intrinsicView = Object.getOwnPropertyDescriptor(
+          window.UIEvent.prototype,
+          "view",
+        )?.get;
+        if (!intrinsicView) throw new Error("No owner-realm UIEvent view getter");
+        expect(intrinsicView.call(crossed)).toBeNull();
+        expect(crossed.view).toBe(lookalike);
+        preventDefault.mockClear();
+
+        act(() => {
+          box.dispatchEvent(crossed);
+        });
+
+        expect(crossed.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(options()[1]).toHaveAttribute("aria-selected", "true");
+        expect(box).toHaveAttribute("aria-activedescendant", activeDescendant);
+
+        const clean = mentionKey(box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it.each(["Home", "End"] as const)(
+        "%s binds its exact highlight and React callbacks, claims replay once, and lets the current successor act",
+        async (key) => {
+          const { box, options } = await mountDirectMentions();
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          const staleRootCapture = reactProperty(root, "onKeyDownCapture");
+          const staleRootBubble = reactProperty(root, "onKeyDown");
+          const staleTextareaCapture = reactProperty(box, "onKeyDownCapture");
+          const staleTextareaBubble = reactProperty(box, "onKeyDown");
+
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          const restoreRoot = replaceReactProperties(root, {
+            onKeyDownCapture: staleRootCapture,
+            onKeyDown: staleRootBubble,
+          });
+          const restoreTextarea = replaceReactProperties(box, {
+            onKeyDownCapture: staleTextareaCapture,
+            onKeyDown: staleTextareaBubble,
+          });
+          const stale = mentionKey(box, key);
+          restoreTextarea();
+          restoreRoot();
+          expect(stale.defaultPrevented).toBe(false);
+          expect(options()[1]).toHaveAttribute("aria-selected", "true");
+
+          const accepted = mentionKeyboardEvent(box, key);
+          act(() => {
+            box.dispatchEvent(accepted);
+          });
+          expect(accepted.defaultPrevented).toBe(true);
+          const destination = key === "Home" ? 0 : 2;
+          expect(options()[destination]).toHaveAttribute(
+            "aria-selected",
+            "true",
+          );
+
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          act(() => {
+            box.dispatchEvent(accepted);
+          });
+          expect(options()[1]).toHaveAttribute("aria-selected", "true");
+          const current = mentionKey(box, key);
+          expect(current.defaultPrevented).toBe(true);
+          expect(options()[destination]).toHaveAttribute(
+            "aria-selected",
+            "true",
+          );
+        },
+      );
+
+      it.each([
+        [
+          "detached and restored row",
+          (list: HTMLUListElement, rows: HTMLLIElement[]) => {
+            const row = rows[1]!;
+            const next = row.nextSibling;
+            row.remove();
+            list.insertBefore(row, next);
+          },
+        ],
+        [
+          "reordered and restored rows",
+          (list: HTMLUListElement, rows: HTMLLIElement[]) => {
+            const first = rows[0]!;
+            const second = rows[1]!;
+            list.append(first);
+            list.insertBefore(first, second);
+          },
+        ],
+        [
+          "replaced and restored row",
+          (list: HTMLUListElement, rows: HTMLLIElement[]) => {
+            const row = rows[1]!;
+            const replacement = row.cloneNode(true);
+            list.replaceChild(replacement, row);
+            list.replaceChild(row, replacement);
+          },
+        ],
+        [
+          "detached and restored list",
+          (list: HTMLUListElement) => {
+            const parent = list.parentNode;
+            const next = list.nextSibling;
+            if (!parent) throw new Error("The mention list had no parent");
+            list.remove();
+            parent.insertBefore(list, next);
+          },
+        ],
+      ] as const)(
+        "rejects %s history and recovers only through a clean successor",
+        async (_label, mutate) => {
+          const { box, list, options } = await mountDirectMentions();
+          const originalRows = options();
+          mutate(list, originalRows);
+          expect(options()).toEqual(originalRows);
+
+          const restored = mentionKey(box, "End");
+          expect(restored.defaultPrevented).toBe(false);
+          expect(options()[0]).toHaveAttribute("aria-selected", "true");
+          expect(box).toHaveAttribute(
+            "aria-activedescendant",
+            options()[0]!.id,
+          );
+          expect(box).toHaveValue("@");
+          expect(session!.comments.list()).toHaveLength(0);
+
+          const successor = mentionKey(box, "End");
+          expect(successor.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+        },
+      );
+
+      it("retires owner-realm authority changes, pending submission, cleanup, and partial visit replacement before a clean composer recovers", async () => {
+        const pending = deferred<Awaited<ReturnType<typeof api.documents.createRequest>>>();
+        vi.mocked(api.documents.createRequest).mockReturnValue(pending.promise);
+        const mounted = await mountDirectMentions();
+        let { box } = mounted;
+        const keyDescriptor = Object.getOwnPropertyDescriptor(
+          window.KeyboardEvent.prototype,
+          "key",
+        );
+        if (!keyDescriptor) throw new Error("KeyboardEvent.key had no descriptor");
+        Object.defineProperty(window.KeyboardEvent.prototype, "key", {
+          ...keyDescriptor,
+          get: () => "End",
+        });
+        const poisoned = mentionKey(box, "End");
+        expect(poisoned.defaultPrevented).toBe(false);
+        Object.defineProperty(
+          window.KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+        fireEvent.mouseEnter(mounted.options()[1]);
+        const recoveredAuthority = mentionKey(box, "End");
+        expect(recoveredAuthority.defaultPrevented).toBe(true);
+
+        fireEvent.change(box, {
+          target: { value: "@alice/Copilot-CLI @" },
+        });
+        await waitFor(() =>
+          expect(box).toHaveAttribute("aria-expanded", "true"),
+        );
+        fireEvent.click(screen.getByTestId("comment-submit"));
+        await waitFor(() =>
+          expect(api.documents.createRequest).toHaveBeenCalledOnce(),
+        );
+        expect(box).toBeDisabled();
+        const pendingKey = mentionKey(box, "Home");
+        expect(pendingKey.defaultPrevented).toBe(false);
+
+        await act(async () => {
+          pending.resolve({ request: { id: "request" } } as never);
+          await pending.promise;
+        });
+        await waitFor(() =>
+          expect(screen.queryByTestId("pending-comment")).toBeNull(),
+        );
+        const retiredBox = box;
+        act(() => {
+          session!.setPendingComment({ from: 16, to: 27 });
+          mounted.renderVisit("B");
+        });
+        box = await waitFor(() => {
+          const element = mounted.host.querySelector<HTMLTextAreaElement>(
+            '[data-testid="comment-composer"]',
+          );
+          if (!element || element === retiredBox) {
+            throw new Error("The clean successor composer did not mount");
+          }
+          return element;
+        });
+        const retiredKey = mentionKeyboardEvent(retiredBox, "End");
+        act(() => {
+          retiredBox.dispatchEvent(retiredKey);
+        });
+        expect(retiredKey.defaultPrevented).toBe(false);
+
+        box.focus();
+        fireEvent.change(box, { target: { value: "@" } });
+        await waitFor(() =>
+          expect(box).toHaveAttribute("aria-expanded", "true"),
+        );
+        const clean = mentionKey(box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        const activeId = box.getAttribute("aria-activedescendant");
+        const active = activeId
+          ? box.ownerDocument.getElementById(activeId)
+          : null;
+        expect(active).toHaveAttribute("data-login", "alice/Copilot-CLI");
+      });
     });
 
     it("radios: click and arrow keys choose a mode; the choice is what the request is posted with", async () => {
