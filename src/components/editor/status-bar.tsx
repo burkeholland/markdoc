@@ -342,7 +342,7 @@ interface StatusBarGeneration {
   observers: StatusBarObserverPublication[];
   removeEventListeners: (() => void)[];
   keyboardAuthority: StatusBarKeyboardAuthority | null;
-  menuMutationObserved: boolean;
+  directionalMutationObserved: boolean;
   retired: boolean;
 }
 
@@ -356,6 +356,7 @@ interface StatusBarPublicationManager {
   directionalNativeEvents: WeakSet<Event>;
   directionalReactEvents: WeakSet<object>;
   directionalFocusEvents: WeakSet<Event>;
+  directionalDestinations: WeakSet<object>;
   successorRequested: boolean;
   requestSuccessor: () => void;
 }
@@ -387,6 +388,10 @@ interface StatusBarMenuFocusIntent {
   ownerDocument: Document;
   ownerWindow: Window & typeof globalThis;
   claimed: boolean;
+}
+
+interface StatusBarIssuesFocusIntent extends StatusBarMenuFocusIntent {
+  destination: StatusBarIssuePublication;
 }
 
 interface StatusBarDirectionalPropagationProof {
@@ -742,6 +747,7 @@ function createPublicationManager(
     directionalNativeEvents: new WeakSet(),
     directionalReactEvents: new WeakSet(),
     directionalFocusEvents: new WeakSet(),
+    directionalDestinations: new WeakSet(),
     successorRequested: false,
     requestSuccessor,
   };
@@ -843,16 +849,20 @@ function isStatusBarMenuItemSlot(slot: string) {
   );
 }
 
-function statusBarMenuAuthoritiesAreSuccessive(
+function statusBarAuthoritiesAreSuccessive(
   closed: StatusBarAuthority,
   open: StatusBarAuthority,
+  disclosure: "menu" | "issues",
 ) {
   return (
     Object.isFrozen(closed)
     && Object.isFrozen(open)
     && closed !== open
-    && !closed.menuOpen
-    && open.menuOpen
+    && (
+      disclosure === "menu"
+        ? !closed.menuOpen && open.menuOpen
+        : closed.menuOpen === open.menuOpen
+    )
     && closed.mount === open.mount
     && closed.publicationRevision === open.publicationRevision
     && closed.session === open.session
@@ -900,8 +910,26 @@ function statusBarMenuAuthoritiesAreSuccessive(
     && closed.themePreference === open.themePreference
     && closed.themeValues === open.themeValues
     && closed.setThemePreference === open.setThemePreference
-    && closed.issuesOpen === open.issuesOpen
+    && (
+      disclosure === "issues"
+        ? !closed.issuesOpen && open.issuesOpen
+        : closed.issuesOpen === open.issuesOpen
+    )
   );
+}
+
+function statusBarMenuAuthoritiesAreSuccessive(
+  closed: StatusBarAuthority,
+  open: StatusBarAuthority,
+) {
+  return statusBarAuthoritiesAreSuccessive(closed, open, "menu");
+}
+
+function statusBarIssuesAuthoritiesAreSuccessive(
+  closed: StatusBarAuthority,
+  open: StatusBarAuthority,
+) {
+  return statusBarAuthoritiesAreSuccessive(closed, open, "issues");
 }
 
 function statusBarEventPathIsExact(
@@ -1036,31 +1064,37 @@ function refreshNodeSeals(generation: StatusBarGeneration) {
     sealNode(generation.statsPortalRoot, generation.nodeSeals);
 }
 
-function mutationTouchesStatusBarMenu(
+function mutationTouchesStatusBarDirectionalDisclosure(
   generation: StatusBarGeneration,
   record: MutationRecord,
 ) {
-  const trigger = generation.controls.get("menu-trigger")?.control;
-  const boundary = generation.authority.menuOpen
-    ? generation.portalBoundaries.get("menu-content")
-    : undefined;
-  if (
-    !generation.authority.menuOpen
-    && record.type === "attributes"
-    && record.target === trigger
-    && record.attributeName
-    && ["data-radix-popper-side", "data-radix-popper-align"].includes(
-      record.attributeName,
+  const ownedNodes: HTMLElement[] = [];
+  for (const disclosure of ["menu", "issues"] as const) {
+    const trigger = generation.controls.get(`${disclosure}-trigger`)?.control;
+    const boundary = generation.authority[
+      disclosure === "menu" ? "menuOpen" : "issuesOpen"
+    ]
+      ? generation.portalBoundaries.get(`${disclosure}-content`)
+      : undefined;
+    if (
+      !boundary
+      && record.type === "attributes"
+      && record.target === trigger
+      && record.attributeName
+      && ["data-radix-popper-side", "data-radix-popper-align"].includes(
+        record.attributeName,
+      )
+      && record.oldValue !== null
+      && !trigger?.hasAttribute(record.attributeName)
     )
-    && record.oldValue !== null
-    && !trigger?.hasAttribute(record.attributeName)
-  )
-    return false;
-  const ownedNodes = [trigger, boundary?.content, boundary?.portal].filter(
-    (node): node is HTMLElement => Boolean(node),
-  );
+      continue;
+    ownedNodes.push(...[trigger, boundary?.content, boundary?.portal].filter(
+      (node): node is HTMLElement => Boolean(node),
+    ));
+  }
+  const uniqueOwnedNodes = [...new Set(ownedNodes)];
   if (
-    ownedNodes.some(
+    uniqueOwnedNodes.some(
       (node) =>
         record.target === node
         || node.contains(record.target),
@@ -1069,7 +1103,7 @@ function mutationTouchesStatusBarMenu(
     return true;
   if (record.type !== "childList") return false;
   return [...record.addedNodes, ...record.removedNodes].some((changed) =>
-    ownedNodes.some(
+    uniqueOwnedNodes.some(
       (node) =>
         changed === node
         || changed.contains(node)
@@ -1078,15 +1112,17 @@ function mutationTouchesStatusBarMenu(
   );
 }
 
-function retainStatusBarMenuMutationHistory(
+function retainStatusBarDirectionalMutationHistory(
   generation: StatusBarGeneration,
   records: readonly MutationRecord[],
 ) {
   if (
-    !generation.menuMutationObserved
-    && records.some((record) => mutationTouchesStatusBarMenu(generation, record))
+    !generation.directionalMutationObserved
+    && records.some((record) =>
+      mutationTouchesStatusBarDirectionalDisclosure(generation, record)
+    )
   )
-    generation.menuMutationObserved = true;
+    generation.directionalMutationObserved = true;
 }
 
 function validateGeneration(generation: StatusBarGeneration, drain = true): boolean {
@@ -1115,7 +1151,7 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
-      retainStatusBarMenuMutationHistory(generation, records);
+      retainStatusBarDirectionalMutationHistory(generation, records);
       const lease = generation.statsMutationLease;
       const deferredStatsClose = Boolean(
         records.length > 0
@@ -2178,7 +2214,7 @@ function observeGenerationTarget(
   statsPortal = false,
 ) {
   const observer = new MutationObserver((records) => {
-    retainStatusBarMenuMutationHistory(generation, records);
+    retainStatusBarDirectionalMutationHistory(generation, records);
     const lease = generation.statsMutationLease;
     if (
       records.length > 0
@@ -2736,7 +2772,7 @@ function activateGeneration(
     keyboardAuthority: ownerWindow
       ? captureStatusBarKeyboardAuthority(ownerWindow)
       : null,
-    menuMutationObserved: false,
+    directionalMutationObserved: false,
     retired: false,
   };
   for (const slot of ["menu-content", "issues-content"] as const) {
@@ -3182,6 +3218,16 @@ function isStatusBarMenuTriggerPublication(
   );
 }
 
+function isStatusBarIssuesTriggerPublication(
+  publication: StatusBarControlPublication,
+  ownerWindow: Window & typeof globalThis,
+): publication is StatusBarControlPublication<HTMLButtonElement> {
+  return (
+    publication.slot === "issues-trigger"
+    && publication.control instanceof ownerWindow.HTMLButtonElement
+  );
+}
+
 function statusBarDirectionalNativeIsExact(
   generation: StatusBarGeneration,
   publication: StatusBarControlPublication<HTMLButtonElement>,
@@ -3329,7 +3375,7 @@ function createStatusBarMenuFocusIntent(
     || generation !== manager.active
     || generation.authority !== authority
     || generation.retired
-    || generation.menuMutationObserved
+    || generation.directionalMutationObserved
     || !keyboardAuthority
     || !publication
     || !isStatusBarMenuTriggerPublication(publication, keyboardAuthority.ownerWindow)
@@ -3357,7 +3403,7 @@ function createStatusBarMenuFocusIntent(
       direction,
     )
     || !validateGeneration(generation)
-    || generation.menuMutationObserved
+    || generation.directionalMutationObserved
   )
     return null;
   return {
@@ -3367,6 +3413,88 @@ function createStatusBarMenuFocusIntent(
     interaction: intent,
     keyboardAuthority,
     direction,
+    native,
+    react,
+    trigger: publication.control,
+    root: generation.root,
+    ownerDocument: generation.ownerDocument,
+    ownerWindow,
+    claimed: false,
+  };
+}
+
+function createStatusBarIssuesFocusIntent(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  disclosure: StatusBarDisclosureIntent | null,
+  event: ReactKeyboardEvent<HTMLElement>,
+): StatusBarIssuesFocusIntent | null {
+  const direction = statusBarMenuFocusDirection(event);
+  const destination = direction === "first"
+    ? authority.issueRows[0]
+    : authority.issueRows.at(-1);
+  const intent = disclosure?.event;
+  const generation = intent?.generation;
+  const publication = intent?.publication;
+  const keyboardAuthority = generation?.keyboardAuthority;
+  const native = intent?.nativeEvents[0];
+  const react = intent?.reactEvents[0];
+  const ownerWindow = native?.ownerWindowCapture;
+  if (
+    !direction
+    || authority.compact
+    || authority.issuesOpen
+    || !destination
+    || disclosure?.authority !== authority
+    || !intent
+    || !generation
+    || generation !== manager.active
+    || generation.authority !== authority
+    || generation.retired
+    || generation.directionalMutationObserved
+    || !keyboardAuthority
+    || !publication
+    || !isStatusBarIssuesTriggerPublication(
+      publication,
+      keyboardAuthority.ownerWindow,
+    )
+    || generation.controls.get("issues-trigger") !== publication
+    || intent.nativeEvents.length !== 1
+    || intent.reactEvents.length !== 1
+    || !native
+    || !react
+    || !ownerWindow
+    || manager.directionalNativeEvents.has(native.event)
+    || manager.directionalReactEvents.has(react.event)
+    || manager.directionalDestinations.has(destination)
+    || !issuePublicationIsExact(authority, destination)
+    || !statusBarDirectionalNativeIsExact(
+      generation,
+      publication,
+      native,
+      keyboardAuthority,
+      direction,
+    )
+    || !statusBarDirectionalReactIsExact(
+      event,
+      react,
+      native,
+      publication,
+      keyboardAuthority,
+      direction,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  )
+    return null;
+  return {
+    authority,
+    generation,
+    publication,
+    interaction: intent,
+    keyboardAuthority,
+    direction,
+    destination,
     native,
     react,
     trigger: publication.control,
@@ -3523,6 +3651,41 @@ function statusBarMenuFocusPublications(
   return publications;
 }
 
+function statusBarIssuesFocusPublications(
+  generation: StatusBarGeneration,
+) {
+  const content = generation.controls.get("issues-content")?.control;
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (!ownerWindow || !(content instanceof ownerWindow.HTMLElement))
+    return null;
+  const publications: StatusBarControlPublication<HTMLButtonElement>[] = [];
+  for (const row of generation.authority.issueRows) {
+    const slot = `issue:${row.index}`;
+    const publication = generation.controls.get(slot);
+    if (
+      !publication
+      || publication.slot !== slot
+      || publication.authority !== generation.authority
+      || publication.root !== generation.root
+      || !(publication.control instanceof ownerWindow.HTMLButtonElement)
+      || !publication.control.isConnected
+      || !content.contains(publication.control)
+      || !issuePublicationIsExact(generation.authority, row)
+      || !publication.enabled
+      || !controlIsEnabled(publication.control)
+    )
+      return null;
+    publications.push(publication);
+  }
+  const renderedRows = [...content.querySelectorAll<HTMLButtonElement>("button")];
+  return arraysAreIdentical(
+    renderedRows,
+    publications.map(({ control }) => control),
+  )
+    ? publications
+    : null;
+}
+
 function exactStatusBarMenuAutoFocusEvent(
   event: Event,
   content: HTMLElement,
@@ -3591,7 +3754,7 @@ function completeStatusBarMenuFocus(
     || generation.keyboardAuthority.ownerWindow
       !== intent.keyboardAuthority.ownerWindow
     || !intent.keyboardAuthority.isCurrent()
-    || generation.menuMutationObserved
+    || generation.directionalMutationObserved
     || generation.actions.has("menu-direction-focus")
     || manager.directionalFocusEvents.has(event)
     || !contentPublication
@@ -3613,7 +3776,7 @@ function completeStatusBarMenuFocus(
       intent.ownerWindow,
     )
     || !validateGeneration(generation)
-    || generation.menuMutationObserved
+    || generation.directionalMutationObserved
   ) {
     if (focusIntentRef.current === intent) focusIntentRef.current = null;
     return;
@@ -3628,6 +3791,106 @@ function completeStatusBarMenuFocus(
   }
   intent.claimed = true;
   generation.actions.add("menu-direction-focus");
+  manager.directionalFocusEvents.add(event);
+  focusIntentRef.current = null;
+  intent.keyboardAuthority.eventPreventDefault.call(event);
+  intent.keyboardAuthority.focus.call(
+    destination.control,
+    { preventScroll: true },
+  );
+}
+
+function completeStatusBarIssuesFocus(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  focusIntentRef: MutableRefObject<StatusBarIssuesFocusIntent | null>,
+  contentPublicationRef: MutableRefObject<StatusBarControlPublication<HTMLDivElement> | null>,
+  event: Event,
+) {
+  const intent = focusIntentRef.current;
+  const generation = manager.active;
+  const contentPublication = contentPublicationRef.current;
+  const portalBoundary = generation?.portalBoundaries.get("issues-content");
+  const currentDestination = intent
+    ? authority.issueRows[intent.destination.index]
+    : undefined;
+  if (
+    !intent
+    || intent.claimed
+    || !generation
+    || generation.retired
+    || generation.authority !== authority
+    || !statusBarIssuesAuthoritiesAreSuccessive(intent.authority, authority)
+    || intent.generation === generation
+    || !intent.generation.retired
+    || intent.generation.manager !== manager
+    || intent.generation.authority !== intent.authority
+    || intent.generation.root !== intent.root
+    || intent.generation.controls.get("issues-trigger") !== intent.publication
+    || !intent.publication.claimed
+    || !intent.native.claimed
+    || !intent.react.claimed
+    || intent.trigger !== intent.publication.control
+    || intent.trigger.ownerDocument !== intent.ownerDocument
+    || intent.ownerDocument.defaultView !== intent.keyboardAuthority.ownerWindow
+    || intent.native.ownerWindowCapture !== intent.ownerWindow
+    || generation.root !== intent.root
+    || generation.ownerDocument !== intent.ownerDocument
+    || generation.keyboardAuthority === null
+    || generation.keyboardAuthority.ownerWindow
+      !== intent.keyboardAuthority.ownerWindow
+    || !intent.keyboardAuthority.isCurrent()
+    || generation.directionalMutationObserved
+    || generation.actions.has("issues-direction-focus")
+    || manager.directionalFocusEvents.has(event)
+    || !manager.directionalDestinations.has(intent.destination)
+    || !contentPublication
+    || generation.controls.get("issues-content") !== contentPublication
+    || contentPublication.authority !== authority
+    || event.currentTarget !== contentPublication.control
+    || !portalBoundary
+    || !statusBarPortalBoundaryIsExact(portalBoundary, true)
+    || contentPublication.control.getAttribute("data-align") !== "end"
+    || !contentPublication.control.getAttribute("data-side")
+    || intent.trigger.getAttribute("aria-expanded") !== "true"
+    || intent.trigger.getAttribute("aria-controls")
+      !== contentPublication.control.id
+    || keyboardAuthorityActiveElement(intent) !== intent.trigger
+    || !currentDestination
+    || currentDestination.issue !== intent.destination.issue
+    || currentDestination.index !== intent.destination.index
+    || currentDestination.line !== intent.destination.line
+    || currentDestination.column !== intent.destination.column
+    || currentDestination.offset !== intent.destination.offset
+    || currentDestination.message !== intent.destination.message
+    || currentDestination.rule !== intent.destination.rule
+    || currentDestination.severity !== intent.destination.severity
+    || !issuePublicationIsExact(authority, currentDestination)
+    || !exactStatusBarMenuAutoFocusEvent(
+      event,
+      contentPublication.control,
+      intent.keyboardAuthority,
+      intent.ownerWindow,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  ) {
+    if (focusIntentRef.current === intent) focusIntentRef.current = null;
+    return;
+  }
+  const publications = statusBarIssuesFocusPublications(generation);
+  const destination = intent.direction === "first"
+    ? publications?.[0]
+    : publications?.at(-1);
+  if (
+    !destination
+    || destination.slot !== `issue:${currentDestination.index}`
+  ) {
+    focusIntentRef.current = null;
+    return;
+  }
+  intent.claimed = true;
+  generation.actions.add("issues-direction-focus");
   manager.directionalFocusEvents.add(event);
   focusIntentRef.current = null;
   intent.keyboardAuthority.eventPreventDefault.call(event);
@@ -4217,12 +4480,14 @@ function StatusBarIssuesContent({
   rootRef,
   manager,
   intentRef,
+  focusIntentRef,
   children,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
   manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
+  focusIntentRef: MutableRefObject<StatusBarIssuesFocusIntent | null>;
   children: ReactNode;
 }) {
   const [setContent, createReactIntent, , publicationRef] = useStatusBarControl<HTMLDivElement>(
@@ -4246,6 +4511,16 @@ function StatusBarIssuesContent({
     if (intent && claimIntent(intent, "issues-disclosure"))
       intentRef.current = { authority, event: intent };
   }, [authority, intentRef, manager, publicationRef]);
+  const openAutoFocus = useCallback((event: Event) => {
+    completeStatusBarIssuesFocus(
+      manager,
+      authority,
+      focusIntentRef,
+      publicationRef,
+      event,
+    );
+  }, [authority, focusIntentRef, manager, publicationRef]);
+  const openAutoFocusProps = { onOpenAutoFocus: openAutoFocus };
 
   return (
     <PopoverContent
@@ -4259,6 +4534,7 @@ function StatusBarIssuesContent({
       onPointerDownOutside={authorizeOutside}
       onFocusOutside={authorizeOutside}
       onEscapeKeyDown={authorizeEscape}
+      {...openAutoFocusProps}
     >
       {children}
     </PopoverContent>
@@ -4391,6 +4667,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const menuIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
   const menuFocusIntentRef = useRef<StatusBarMenuFocusIntent | null>(null);
   const issuesIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
+  const issuesFocusIntentRef = useRef<StatusBarIssuesFocusIntent | null>(null);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -4409,6 +4686,16 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     )
       menuFocusIntentRef.current = null;
     if (issuesIntentRef.current?.authority !== authority) issuesIntentRef.current = null;
+    const issuesFocusIntent = issuesFocusIntentRef.current;
+    if (
+      issuesFocusIntent
+      && issuesFocusIntent.authority !== authority
+      && !statusBarIssuesAuthoritiesAreSuccessive(
+        issuesFocusIntent.authority,
+        authority,
+      )
+    )
+      issuesFocusIntentRef.current = null;
     return () => {
       if (menuIntentRef.current?.authority === authority) menuIntentRef.current = null;
       if (issuesIntentRef.current?.authority === authority) issuesIntentRef.current = null;
@@ -4452,6 +4739,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   }, [authority, createMenuIntent, manager]);
 
   const authorizeIssuesChange = useCallback((event: StatusBarReactEvent) => {
+    issuesFocusIntentRef.current = null;
     rememberReactEvent(manager, event);
     const intent = createIssuesIntent(event);
     if (intent) issuesIntentRef.current = { authority, event: intent };
@@ -4521,7 +4809,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     const intent = focusIntent.interaction;
     if (
       !claimIntent(intent, "menu-disclosure")
-      || focusIntent.generation.menuMutationObserved
+      || focusIntent.generation.directionalMutationObserved
       || !focusIntent.keyboardAuthority.isCurrent()
     ) {
       menuIntentRef.current = null;
@@ -4577,6 +4865,54 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     issuesIntentRef.current = null;
     setIssuesOpen(open);
   }, [authority, manager]);
+
+  const authorizeDirectionalIssuesOpen = useCallback((
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    if (!statusBarMenuFocusDirection(event)) return;
+    authorizeIssuesChange(event);
+    const disclosure = issuesIntentRef.current;
+    const focusIntent = createStatusBarIssuesFocusIntent(
+      manager,
+      authority,
+      disclosure,
+      event,
+    );
+    if (
+      !focusIntent
+      || !claimIntent(
+        focusIntent.interaction,
+        `issues-direction:${focusIntent?.direction ?? "rejected"}`,
+      )
+    ) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    const intent = focusIntent.interaction;
+    if (
+      !claimIntent(intent, "issues-disclosure")
+      || focusIntent.generation.directionalMutationObserved
+      || !focusIntent.keyboardAuthority.isCurrent()
+    ) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    manager.directionalDestinations.add(focusIntent.destination);
+    manager.directionalNativeEvents.add(focusIntent.native.event);
+    manager.directionalReactEvents.add(focusIntent.react.event);
+    focusIntent.keyboardAuthority.apply(
+      focusIntent.react.preventDefault,
+      event,
+      [],
+    );
+    if (!event.defaultPrevented || !event.isDefaultPrevented()) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    issuesIntentRef.current = { authority, event: intent };
+    issuesFocusIntentRef.current = focusIntent;
+    changeIssuesOpen(true);
+  }, [authority, authorizeIssuesChange, changeIssuesOpen, manager]);
 
   const document = authority.document;
   const storageLabel =
@@ -4654,6 +4990,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             type="button"
             className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 max-md:hidden", issues.length ? (errors ? "text-danger" : "text-warning") : "text-ink-3 hover:text-ink")}
             onClickCapture={authorizeIssuesChange}
+            onKeyDownCapture={authorizeDirectionalIssuesOpen}
             data-testid="issues-button"
           >
             {issues.length ? <AlertTriangle size={14} /> : <Check size={14} />}
@@ -4665,6 +5002,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           rootRef={rootRef}
           manager={manager}
           intentRef={issuesIntentRef}
+          focusIntentRef={issuesFocusIntentRef}
         >
           <div className="border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">Markdown issues</div>
           {issues.length === 0 ? (
