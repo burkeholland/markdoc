@@ -156,20 +156,32 @@ function reactProp<T>(element: Element, name: string): T {
   return value as T;
 }
 
-async function waitForCommittedReactProp<T>(
-  element: () => Element,
-  name: string,
-  previous: T,
+async function chooseFromCommittedSuccessor(
+  file: File,
+  settlingOnChange: ChangeEventHandler<HTMLInputElement>,
 ) {
-  let candidate: T | undefined;
+  let candidate:
+    | {
+        readonly input: HTMLInputElement;
+        readonly onChange: ChangeEventHandler<HTMLInputElement>;
+      }
+    | undefined;
   await waitFor(() => {
-    const current = reactProp<T>(element(), name);
-    if (current === previous || current !== candidate) {
-      candidate = current;
-      throw new Error(`Waiting for committed React ${name}`);
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const onChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      input,
+      "onChange",
+    );
+    if (
+      onChange === settlingOnChange ||
+      input !== candidate?.input ||
+      onChange !== candidate?.onChange
+    ) {
+      candidate = { input, onChange };
+      throw new Error("Waiting for committed React onChange");
     }
+    fireEvent.change(input, { target: { files: [file] } });
   });
-  return candidate as T;
 }
 
 function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
@@ -479,11 +491,21 @@ describe("ImageDialog upload lifecycle", () => {
       await renderStrictRoot(<Harness onUpload={onUpload} />);
 
       const input = screen.getByTestId("image-file") as HTMLInputElement;
-      const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      const initialOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
         input,
         "onChange",
       );
-      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const failedFile = new File(["failed"], "failed.png", {
+        type: "image/png",
+      });
+      choose(failedFile);
+      expect(onUpload).toHaveBeenCalledOnce();
+      expect(onUpload).toHaveBeenCalledWith(failedFile);
+      expect(onUpload.mock.results[0]?.value).toBe(failed.promise);
+      expect(screen.getByTestId("image-file")).toBe(input);
+      const settlingOnChange =
+        reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+      expect(settlingOnChange).not.toBe(initialOnChange);
       setInputValue(input, "failed-selection");
 
       if (getter === "error") {
@@ -528,18 +550,14 @@ describe("ImageDialog upload lifecycle", () => {
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(input.value).toBe("");
-      await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-        () => screen.getByTestId("image-file"),
-        "onChange",
-        oldOnChange,
-      );
 
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
       });
-      choose(retryFile);
+      await chooseFromCommittedSuccessor(retryFile, settlingOnChange);
       expect(onUpload).toHaveBeenCalledTimes(2);
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
       await act(async () => {
         retry.resolve({ url: "/api/assets/retry" });
         await retry.promise;
@@ -566,29 +584,36 @@ describe("ImageDialog upload lifecycle", () => {
       .mockReturnValueOnce(retry.promise);
     await renderStrictRoot(<Harness onUpload={onUpload} />);
 
-    const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
-      screen.getByTestId("image-file"),
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const initialOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      input,
       "onChange",
     );
-    choose(new File(["hostile"], "hostile.png", { type: "image/png" }));
+    const hostileFile = new File(["hostile"], "hostile.png", {
+      type: "image/png",
+    });
+    choose(hostileFile);
+    expect(onUpload).toHaveBeenCalledOnce();
+    expect(onUpload).toHaveBeenCalledWith(hostileFile);
+    expect(onUpload.mock.results[0]?.value).toBe(hostile);
+    expect(screen.getByTestId("image-file")).toBe(input);
+    const settlingOnChange =
+      reactProp<ChangeEventHandler<HTMLInputElement>>(input, "onChange");
+    expect(settlingOnChange).not.toBe(initialOnChange);
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
         "Upload then getter failed",
       ),
     );
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-      () => screen.getByTestId("image-file"),
-      "onChange",
-      oldOnChange,
-    );
 
     const retryFile = new File(["retry"], "retry.png", {
       type: "image/png",
     });
-    choose(retryFile);
+    await chooseFromCommittedSuccessor(retryFile, settlingOnChange);
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
     await act(async () => {
       retry.resolve({ url: "/api/assets/retry" });
       await retry.promise;

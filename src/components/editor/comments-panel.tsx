@@ -1,7 +1,8 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
+import { Children, cloneElement, createContext, isValidElement, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
+import { composeRefs, useComposedRefs } from "radix-ui/internal";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -1711,14 +1712,977 @@ function EditedMarker({ at }: { at?: number | null }) {
   );
 }
 
-/**
- * Mounts a Radix Popover/DropdownMenu root only once the user reaches for its trigger. A Radix root is
- * ~20 fibers (Popper, Presence, DismissableLayer, FocusScope…) even while closed; the comments panel has
- * one menu and one reaction picker per thread and per reply — 150 roots for Burke's 15 threads, which
- * was most of the panel-open time (task #487). Until armed, `trigger` is rendered as a plain button
- * that arms on hover and arms-and-opens on pointer down / Enter / Space / ArrowDown, so the first
- * interaction behaves exactly like the Radix trigger. Once armed it stays mounted (focus return, etc.).
- */
+type LazyMenuDirection = "first" | "last";
+
+interface LazyMenuItemFacts {
+  readonly id: "edit" | "delete";
+  readonly label: string;
+  readonly disabled: boolean;
+  readonly onSelect: () => void;
+}
+
+interface LazyMenuOwnerFacts {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly thread: CommentThread;
+  readonly reply: CommentReply | null;
+  readonly targetIdentity: CommentTargetIdentity;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly viewerId: string;
+  readonly authorId: string;
+  readonly moderator: boolean;
+  readonly suggestionState: CommentThread["suggestionState"] | null;
+  readonly triggerDisabled: boolean;
+  readonly deleteDisabled: boolean;
+  readonly items: readonly LazyMenuItemFacts[];
+}
+
+interface LazyMenuKeyboardAuthority extends RequestModeKeyboardAuthority {
+  readonly eventCurrentTarget: RequestModeCapturedGetter<EventTarget | null>;
+  readonly code: RequestModeCapturedGetter<string>;
+  readonly addEventListener: LazyMenuWindowMethod<
+    Window["addEventListener"]
+  >;
+  readonly removeEventListener: LazyMenuWindowMethod<
+    Window["removeEventListener"]
+  >;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+}
+
+interface LazyMenuWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface LazyMenuRenderAuthority {
+  readonly mount: symbol;
+  readonly owner: LazyMenuOwnerFacts;
+  readonly trigger: React.ReactElement<React.ComponentProps<"button">>;
+  readonly children: React.ReactNode;
+  readonly items: readonly LazyMenuItemBinding[];
+  readonly armed: boolean;
+  readonly open: boolean;
+}
+
+interface LazyMenuItemBinding {
+  readonly fact: LazyMenuItemFacts;
+  readonly capture: React.RefCallback<HTMLElement>;
+  readonly element: () => HTMLElement | null;
+  readonly isCurrent: (content: HTMLElement) => boolean;
+  readonly release: () => void;
+}
+
+interface LazyMenuPreparedItems {
+  readonly bindings: readonly LazyMenuItemBinding[];
+  readonly children: React.ReactNode;
+}
+
+interface LazyMenuPublication {
+  readonly identity: symbol;
+  readonly authority: LazyMenuRenderAuthority;
+  readonly trigger: HTMLButtonElement;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboard: LazyMenuKeyboardAuthority;
+  readonly listener: LazyMenuListenerRegistration;
+  readonly dom: RequestModeDomSnapshot;
+  readonly placement: RequestModePlacement;
+  readonly history: RequestModeDomGuard;
+  readonly isRetired: () => boolean;
+  readonly retire: () => void;
+}
+
+interface LazyMenuListenerProof {
+  readonly identity: symbol;
+  readonly registration: LazyMenuListenerRegistration;
+  readonly publication: LazyMenuPublication;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface LazyMenuListenerRegistration {
+  readonly identity: symbol;
+  readonly listener: EventListener;
+  readonly activate: (publication: LazyMenuPublication) => boolean;
+  readonly proofFor: (
+    nativeEvent: globalThis.KeyboardEvent,
+    publication: LazyMenuPublication,
+  ) => LazyMenuListenerProof | null;
+  readonly claim: (
+    proof: LazyMenuListenerProof,
+    publication: LazyMenuPublication,
+  ) => boolean;
+  readonly retains: (
+    proof: LazyMenuListenerProof,
+    publication: LazyMenuPublication,
+  ) => boolean;
+  readonly release: (publication: LazyMenuPublication) => void;
+}
+
+interface LazyMenuPendingOpen {
+  readonly publication: LazyMenuPublication;
+  readonly direction: LazyMenuDirection;
+  readonly action: object;
+  readonly destination: LazyMenuItemBinding;
+  readonly capture: LazyMenuReactKey;
+  readonly bubble: LazyMenuReactKey;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly listener: LazyMenuListenerProof;
+}
+
+interface LazyMenuReactKey {
+  readonly event: object;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly listener: LazyMenuListenerProof;
+  readonly direction: LazyMenuDirection;
+  readonly dispatchTarget: EventTarget;
+  readonly prototype: object | null;
+  readonly phase: number;
+  readonly target: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly trusted: boolean;
+  readonly view: Window | null;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}
+
+class LazyMenuCell<Value> {
+  constructor(private value: Value) {}
+
+  read() {
+    return this.value;
+  }
+
+  write(value: Value) {
+    this.value = value;
+  }
+}
+
+interface LazyMenuCells {
+  readonly active: LazyMenuCell<LazyMenuPublication | null>;
+  readonly openHistory: LazyMenuCell<RequestModeDomGuard | null>;
+  readonly claimedPublications: WeakSet<LazyMenuPublication>;
+  readonly claimedDirections: WeakSet<object>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedListenerProofs: WeakSet<LazyMenuListenerProof>;
+  readonly claimedDestinations: WeakSet<LazyMenuItemBinding>;
+}
+
+const claimedLazyMenuReactEvents = new WeakSet<object>();
+const claimedLazyMenuNativeEvents = new WeakSet<Event>();
+const claimedLazyMenuListenerProofs = new WeakSet<LazyMenuListenerProof>();
+const claimedLazyMenuDestinations = new WeakSet<LazyMenuItemBinding>();
+
+function createLazyMenuCells(): LazyMenuCells {
+  return {
+    active: new LazyMenuCell(null),
+    openHistory: new LazyMenuCell(null),
+    claimedPublications: new WeakSet(),
+    claimedDirections: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    claimedListenerProofs: new WeakSet(),
+    claimedDestinations: new WeakSet(),
+  };
+}
+
+function lazyMenuItemsMatch(
+  previous: readonly LazyMenuItemFacts[],
+  current: readonly LazyMenuItemFacts[],
+) {
+  return (
+    previous.length === current.length &&
+    previous.every((item, index) => {
+      const next = current[index];
+      return Boolean(
+        next &&
+          item === next &&
+          item.id === next.id &&
+          item.label === next.label &&
+          item.disabled === next.disabled &&
+          item.onSelect === next.onSelect,
+      );
+    })
+  );
+}
+
+function lazyMenuOwnersMatch(previous: LazyMenuOwnerFacts, current: LazyMenuOwnerFacts) {
+  return (
+    previous === current &&
+    previous.session === current.session &&
+    previous.documentId === current.documentId &&
+    previous.visit === current.visit &&
+    previous.coordinator === current.coordinator &&
+    previous.thread === current.thread &&
+    previous.reply === current.reply &&
+    previous.targetIdentity.thread === current.targetIdentity.thread &&
+    previous.targetIdentity.reply === current.targetIdentity.reply &&
+    previous.threadId === current.threadId &&
+    previous.replyId === current.replyId &&
+    previous.viewerId === current.viewerId &&
+    previous.authorId === current.authorId &&
+    previous.moderator === current.moderator &&
+    previous.suggestionState === current.suggestionState &&
+    previous.triggerDisabled === current.triggerDisabled &&
+    previous.deleteDisabled === current.deleteDisabled &&
+    lazyMenuItemsMatch(previous.items, current.items)
+  );
+}
+
+function lazyMenuChildrenMatch(
+  children: React.ReactNode,
+  items: readonly LazyMenuItemFacts[],
+) {
+  const elements = Children.toArray(children);
+  if (elements.length !== items.length) return false;
+  return elements.every((child, index) => {
+    if (!isValidElement(child)) return false;
+    const item = items[index];
+    const props = child.props as {
+      children?: React.ReactNode;
+      disabled?: boolean;
+      onSelect?: () => void;
+    };
+    return Boolean(
+      item &&
+        props.children === item.label &&
+        Boolean(props.disabled) === item.disabled &&
+        props.onSelect === item.onSelect,
+    );
+  });
+}
+
+function createLazyMenuItemBinding(fact: LazyMenuItemFacts): LazyMenuItemBinding {
+  let element: HTMLElement | null = null;
+  let current = false;
+  let invalid = false;
+  let dom: RequestModeDomSnapshot | null = null;
+  let placement: RequestModePlacement | null = null;
+  let history: RequestModeDomGuard | null = null;
+  const capture: React.RefCallback<HTMLElement> = (next) => {
+    if (next === null) {
+      if (element) current = false;
+      return;
+    }
+    if (element && element !== next) {
+      invalid = true;
+      current = false;
+      return;
+    }
+    if (element === next) {
+      current = true;
+      return;
+    }
+    element = next;
+    current = true;
+    placement = captureRequestModePlacement(next);
+    dom = placement ? snapshotRequestModeDom(next) : null;
+    history = placement ? createRequestModeDomGuard(next, placement) : null;
+    if (!placement || !dom || !history) invalid = true;
+  };
+  return Object.freeze({
+    fact,
+    capture,
+    element: () => (current && !invalid ? element : null),
+    isCurrent: (content: HTMLElement) =>
+      Boolean(
+        current &&
+          !invalid &&
+          element &&
+          dom &&
+          placement &&
+          history &&
+          history.isClean() &&
+          element.isConnected &&
+          element.ownerDocument === content.ownerDocument &&
+          element.parentElement === content &&
+          requestModePlacementMatches(element, placement) &&
+          requestModeDomMatches(dom) &&
+          element.getAttribute("role") === "menuitem" &&
+          element.textContent === fact.label &&
+          element.getAttribute("aria-disabled") ===
+            (fact.disabled ? "true" : null) &&
+          element.hasAttribute("data-disabled") === fact.disabled &&
+          history.isClean() &&
+          requestModePlacementMatches(element, placement) &&
+          requestModeDomMatches(dom),
+      ),
+    release: () => {
+      history?.release();
+      history = null;
+    },
+  });
+}
+
+function prepareLazyMenuItems(
+  children: React.ReactNode,
+  facts: readonly LazyMenuItemFacts[],
+): LazyMenuPreparedItems | null {
+  const elements = Children.toArray(children);
+  if (elements.length !== facts.length) return null;
+  const bindings: LazyMenuItemBinding[] = [];
+  const rendered: React.ReactElement[] = [];
+  for (const [index, child] of elements.entries()) {
+    const fact = facts[index];
+    if (!fact || !isValidElement(child)) return null;
+    const binding = createLazyMenuItemBinding(fact);
+    const item = child as React.ReactElement<{
+      ref?: React.Ref<HTMLElement>;
+    }>;
+    bindings.push(binding);
+    rendered.push(
+      cloneElement(item, {
+        ref: composeRefs(item.props.ref, binding.capture),
+      }),
+    );
+  }
+  return Object.freeze({
+    bindings: Object.freeze(bindings),
+    children: rendered,
+  });
+}
+
+function currentLazyMenuBusyFacts(owner: LazyMenuOwnerFacts) {
+  const { coordinator, threadId, replyId } = owner;
+  const key = commentTargetKey(threadId, replyId);
+  const ownBusy = coordinator.owners.has(key) || coordinator.batchTargets.has(key);
+  if (replyId !== null) {
+    const rootDeleting =
+      coordinator.owners.get(commentTargetKey(threadId, null))?.action.type ===
+      "delete";
+    const blocked = ownBusy || rootDeleting;
+    return { triggerDisabled: blocked, deleteDisabled: blocked };
+  }
+  const hasPendingReply =
+    [...coordinator.owners.values()].some(
+      (action) => action.threadId === threadId && action.replyId !== null,
+    ) ||
+    [...coordinator.batchOwners.values()].some((action) =>
+      action.targets.some(
+        (target) =>
+          target.kind !== "local-suggestion" &&
+          target.threadId === threadId &&
+          target.replyId !== null,
+      ),
+    );
+  return {
+    triggerDisabled: ownBusy,
+    deleteDisabled: ownBusy || hasPendingReply,
+  };
+}
+
+function lazyMenuOwnerFactsAreCurrent(
+  owner: LazyMenuOwnerFacts,
+  requirePublishedTarget = true,
+) {
+  const {
+    coordinator,
+    session,
+    threadId,
+    replyId,
+    targetIdentity,
+  } = owner;
+  const currentThread = session.comments
+    .list()
+    .find((candidate) => candidate.id === threadId);
+  const currentReply =
+    replyId === null
+      ? null
+      : currentThread?.replies.find((candidate) => candidate.id === replyId) ??
+        null;
+  const currentIdentity = storedCommentTargetIdentity(
+    session,
+    threadId,
+    replyId,
+  );
+  const authorId = currentReply?.authorId ?? currentThread?.authorId;
+  const suggestionState =
+    currentReply?.suggestionState ?? currentThread?.suggestionState ?? null;
+  const moderator = session.role === "owner";
+  const visible = authorId === session.user.id || moderator;
+  const canEdit = authorId === session.user.id && !suggestionState;
+  const busy = currentLazyMenuBusyFacts(owner);
+  const expectedItems = [
+    ...(canEdit ? ["edit" as const] : []),
+    "delete" as const,
+  ];
+  return (
+    (!requirePublishedTarget || coordinator.mounted) &&
+    coordinator.session === session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    (!requirePublishedTarget ||
+      coordinator.targets.has(commentTargetKey(threadId, replyId))) &&
+    session.docId === owner.documentId &&
+    session.user.id === owner.viewerId &&
+    currentThread !== undefined &&
+    (replyId === null || currentReply !== null) &&
+    currentIdentity?.thread === targetIdentity.thread &&
+    currentIdentity.reply === targetIdentity.reply &&
+    authorId === owner.authorId &&
+    moderator === owner.moderator &&
+    visible &&
+    suggestionState === owner.suggestionState &&
+    busy.triggerDisabled === owner.triggerDisabled &&
+    busy.deleteDisabled === owner.deleteDisabled &&
+    owner.items.length === expectedItems.length &&
+    owner.items.every((item, index) => {
+      const id = expectedItems[index];
+      return Boolean(
+        id &&
+          item.id === id &&
+          item.label ===
+            (id === "edit"
+              ? "Edit"
+              : replyId === null
+                ? "Delete thread"
+                : "Delete") &&
+          item.disabled ===
+            (id === "edit"
+              ? busy.triggerDisabled
+              : busy.deleteDisabled),
+      );
+    })
+  );
+}
+
+function captureLazyMenuKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): LazyMenuKeyboardAuthority | null {
+  const base = captureRequestModeKeyboardAuthority(ownerDocument, ownerWindow);
+  if (!base) return null;
+  const EventTargetConstructor = ownerWindow.EventTarget;
+  const eventCurrentTarget = captureRequestModeGetter<EventTarget | null>(
+    ownerWindow,
+    ownerWindow.Event.prototype,
+    "currentTarget",
+  );
+  const code = captureRequestModeGetter<string>(
+    ownerWindow,
+    ownerWindow.KeyboardEvent.prototype,
+    "code",
+  );
+  const addEventListener = captureLazyMenuWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureLazyMenuWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const isCurrent = () =>
+    base.isCurrent() &&
+    ownerWindow.EventTarget === EventTargetConstructor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    Boolean(eventCurrentTarget?.isCurrent()) &&
+    Boolean(code?.isCurrent()) &&
+    Boolean(addEventListener?.isCurrent()) &&
+    Boolean(removeEventListener?.isCurrent());
+  if (
+    !eventCurrentTarget ||
+    !code ||
+    !addEventListener ||
+    !removeEventListener ||
+    !isCurrent()
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ...base,
+    eventCurrentTarget,
+    code,
+    addEventListener,
+    removeEventListener,
+    getPrototypeOf,
+    isCurrent,
+  });
+}
+
+function captureLazyMenuWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): LazyMenuWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(
+      ({ target: entry, descriptor, prototype }) =>
+        getPrototypeOf(entry) === prototype &&
+        (descriptor
+          ? requestModeDescriptorMatches(
+              getOwnPropertyDescriptor(entry, property),
+              descriptor,
+            )
+          : getOwnPropertyDescriptor(entry, property) === undefined),
+    ) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  if (!isCurrent()) return null;
+  return Object.freeze({ value, isCurrent });
+}
+
+function lazyMenuPathMatchesTerminal(
+  path: readonly EventTarget[],
+  publication: LazyMenuPublication,
+  terminal: EventTarget,
+) {
+  const { ownerDocument, placement } = publication;
+  return (
+    path.length === placement.chain.length + 2 &&
+    placement.chain.every(({ node }, index) => path[index] === node) &&
+    path.at(-2) === ownerDocument &&
+    path.at(-1) === terminal
+  );
+}
+
+function createLazyMenuListenerRegistration(
+  ownerWindow: Window & typeof globalThis,
+  keyboard: LazyMenuKeyboardAuthority,
+): LazyMenuListenerRegistration {
+  const identity = Symbol("lazy-menu-listener");
+  const proofs = new WeakMap<globalThis.KeyboardEvent, LazyMenuListenerProof>();
+  const invalidEvents = new WeakSet<Event>();
+  let publication: LazyMenuPublication | null = null;
+  let claimed: LazyMenuListenerProof | null = null;
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (this: EventTarget, event: Event) {
+    const current = publication;
+    if (
+      !current ||
+      !active ||
+      released ||
+      current.listener !== registration ||
+      current.isRetired() ||
+      !(event instanceof keyboard.KeyboardEvent) ||
+      keyboard.getPrototypeOf(event) !== keyboard.KeyboardEvent.prototype ||
+      invalidEvents.has(event) ||
+      !keyboard.isCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = keyboard.eventCurrentTarget.read(event);
+      const path = keyboard.eventPath.invoke(event);
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this ||
+        terminal !== this ||
+        keyboard.eventPhase.read(event) !== keyboard.Event.CAPTURING_PHASE ||
+        !lazyMenuPathMatchesTerminal(path, current, this)
+      ) {
+        return;
+      }
+      proofs.set(
+        event,
+        Object.freeze({
+          identity: Symbol("lazy-menu-listener-proof"),
+          registration,
+          publication: current,
+          nativeEvent: event,
+          receiver: this,
+          currentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofFor = (
+    nativeEvent: globalThis.KeyboardEvent,
+    current: LazyMenuPublication,
+  ) => {
+    const proof = proofs.get(nativeEvent);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      publication !== current ||
+      current.listener !== registration ||
+      current.isRetired() ||
+      proof.registration !== registration ||
+      proof.publication !== current ||
+      proof.nativeEvent !== nativeEvent ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      invalidEvents.has(nativeEvent) ||
+      !keyboard.isCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = keyboard.eventPath.invoke(nativeEvent);
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        lazyMenuPathMatchesTerminal(path, current, proof.receiver)
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(nativeEvent);
+      return null;
+    }
+  };
+
+  const registration: LazyMenuListenerRegistration = Object.freeze({
+    identity,
+    listener,
+    activate: (current: LazyMenuPublication) => {
+      if (
+        publication ||
+        active ||
+        released ||
+        current.listener !== registration ||
+        current.ownerWindow !== ownerWindow ||
+        current.keyboard !== keyboard ||
+        !keyboard.isCurrent()
+      ) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        ownerWindow.addEventListener("keydown", listener, true);
+        return (
+          ownerWindow.addEventListener === keyboard.addEventListener.value &&
+          keyboard.addEventListener.isCurrent()
+        );
+      } catch {
+        active = false;
+        publication = null;
+        return false;
+      }
+    },
+    proofFor,
+    claim: (proof: LazyMenuListenerProof, current: LazyMenuPublication) => {
+      if (claimed || proofFor(proof.nativeEvent, current) !== proof) return false;
+      claimed = proof;
+      return true;
+    },
+    retains: (proof: LazyMenuListenerProof, current: LazyMenuPublication) =>
+      publication === current &&
+      current.listener === registration &&
+      claimed === proof &&
+      proofs.get(proof.nativeEvent) === proof &&
+      proof.registration === registration &&
+      proof.publication === current &&
+      proof.receiver === proof.currentTarget &&
+      proof.receiver === proof.terminal &&
+      !invalidEvents.has(proof.nativeEvent) &&
+      (active !== released) &&
+      keyboard.isCurrent(),
+    release: (current: LazyMenuPublication) => {
+      if (publication !== current || released) return;
+      released = true;
+      active = false;
+      ownerWindow.removeEventListener("keydown", listener, true);
+    },
+  });
+  return registration;
+}
+
+function lazyMenuEventPathMatches(
+  path: readonly EventTarget[],
+  publication: LazyMenuPublication,
+  proof: LazyMenuListenerProof,
+) {
+  return (
+    (publication.listener.proofFor(proof.nativeEvent, publication) === proof ||
+      publication.listener.retains(proof, publication)) &&
+    path.length === proof.path.length &&
+    path.every((entry, index) => entry === proof.path[index]) &&
+    lazyMenuPathMatchesTerminal(path, publication, proof.receiver)
+  );
+}
+
+function exactLazyMenuKey(
+  event: KeyboardEvent<HTMLButtonElement>,
+  publication: LazyMenuPublication,
+  expectedPhase: number,
+  expectedDispatchTarget: EventTarget | null,
+): LazyMenuReactKey | null {
+  const keyboard = publication.keyboard;
+  if (!event || typeof event !== "object" || !keyboard.isCurrent()) return null;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    keyboard.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  const reactEventIdentity: object = event;
+  const nativeEventIdentity: object = nativeEvent;
+  const listener = publication.listener.proofFor(nativeEvent, publication);
+  if (!listener) return null;
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    const code = keyboard.code.read(nativeEvent);
+    const direction =
+      key === "ArrowDown" && code === "ArrowDown"
+        ? "first"
+        : key === "ArrowUp" && code === "ArrowUp"
+          ? "last"
+          : null;
+    if (!direction) return null;
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const nativeCurrentTarget =
+      keyboard.eventCurrentTarget.read(nativeEvent);
+    const phase = keyboard.eventPhase.read(nativeEvent);
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const bubbles = keyboard.eventBubbles.read(nativeEvent);
+    const cancelable = keyboard.eventCancelable.read(nativeEvent);
+    const defaultPrevented =
+      keyboard.eventDefaultPrevented.read(nativeEvent);
+    const cancelBubble = keyboard.eventCancelBubble.read(nativeEvent);
+    const view = keyboard.eventView.read(nativeEvent);
+    const repeat = keyboard.repeat.read(nativeEvent);
+    const composing = keyboard.composing.read(nativeEvent);
+    const altKey = keyboard.altKey.read(nativeEvent);
+    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
+    const metaKey = keyboard.metaKey.read(nativeEvent);
+    const shiftKey = keyboard.shiftKey.read(nativeEvent);
+    const trusted = keyboard.trusted.read(nativeEvent);
+    const reactEvent = event as KeyboardEvent<HTMLButtonElement> & {
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    return (
+      keyboard.eventType.read(nativeEvent) === "keydown" &&
+      phase === expectedPhase &&
+      bubbles &&
+      cancelable &&
+      !defaultPrevented &&
+      !cancelBubble &&
+      trusted &&
+      (view === null || view === publication.ownerWindow) &&
+      !repeat &&
+      !composing &&
+      !altKey &&
+      !ctrlKey &&
+      !metaKey &&
+      !shiftKey &&
+      target === publication.trigger &&
+      lazyMenuEventPathMatches(path, publication, listener) &&
+      nativeCurrentTarget !== null &&
+      (nativeCurrentTarget === publication.ownerDocument ||
+        nativeCurrentTarget instanceof keyboard.Node) &&
+      path.includes(nativeCurrentTarget) &&
+      path.filter((entry) => entry === nativeCurrentTarget).length === 1 &&
+      (expectedDispatchTarget === null ||
+        nativeCurrentTarget === expectedDispatchTarget) &&
+      publication.trigger.ownerDocument === publication.ownerDocument &&
+      keyboard.activeElement.read(publication.ownerDocument) ===
+        publication.trigger &&
+      reactEventIdentity !== nativeEventIdentity &&
+      event.type === "keydown" &&
+      event.currentTarget === publication.trigger &&
+      event.target === target &&
+      event.nativeEvent === nativeEvent &&
+      event.key === key &&
+      event.code === code &&
+      event.eventPhase === phase &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === bubbles &&
+      event.cancelable === cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, view) &&
+      typeof reactEvent.isDefaultPrevented === "function" &&
+      reactEvent.isDefaultPrevented() === defaultPrevented &&
+      typeof reactEvent.isPropagationStopped === "function" &&
+      reactEvent.isPropagationStopped() === cancelBubble &&
+      typeof reactEvent.persist === "function"
+    )
+      ? Object.freeze({
+          event,
+          direction,
+          nativeEvent,
+          listener,
+          dispatchTarget: nativeCurrentTarget,
+          prototype: keyboard.getPrototypeOf(event),
+          phase,
+          target,
+          path: Object.freeze([...path]),
+          key,
+          code,
+          bubbles,
+          cancelable,
+          defaultPrevented,
+          cancelBubble,
+          trusted,
+          view,
+          repeat,
+          composing,
+          altKey,
+          ctrlKey,
+          metaKey,
+          shiftKey,
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function lazyMenuReactPairMatches(
+  capture: LazyMenuReactKey,
+  bubble: LazyMenuReactKey,
+  publication: LazyMenuPublication,
+) {
+  const keyboard = publication.keyboard;
+  return (
+    capture.event !== bubble.event &&
+    capture.nativeEvent === bubble.nativeEvent &&
+    capture.listener === bubble.listener &&
+    capture.listener.nativeEvent === capture.nativeEvent &&
+    capture.listener.publication === publication &&
+    capture.listener.registration === publication.listener &&
+    capture.direction === bubble.direction &&
+    capture.prototype === bubble.prototype &&
+    capture.phase === keyboard.Event.CAPTURING_PHASE &&
+    bubble.phase === keyboard.Event.BUBBLING_PHASE &&
+    capture.dispatchTarget === bubble.dispatchTarget &&
+    capture.target === publication.trigger &&
+    bubble.target === publication.trigger &&
+    lazyMenuEventPathMatches(capture.path, publication, capture.listener) &&
+    lazyMenuEventPathMatches(bubble.path, publication, bubble.listener) &&
+    capture.path.every((entry, index) => entry === bubble.path[index]) &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.trusted === bubble.trusted &&
+    capture.view === bubble.view &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.altKey === bubble.altKey &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey
+  );
+}
+
+function lazyMenuTriggerMatches(
+  publication: LazyMenuPublication,
+  content: Element | null,
+) {
+  const { authority, trigger } = publication;
+  const expected = authority.trigger.props;
+  return (
+    !publication.isRetired() &&
+    publication.history.isClean() &&
+    requestModePlacementMatches(trigger, publication.placement) &&
+    requestModeDomMatches(publication.dom) &&
+    lazyMenuOwnerFactsAreCurrent(authority.owner) &&
+    lazyMenuChildrenMatch(authority.children, authority.owner.items) &&
+    trigger.isConnected &&
+    trigger.tagName === "BUTTON" &&
+    trigger.type === (expected.type ?? "submit") &&
+    trigger.className === (expected.className ?? "") &&
+    trigger.getAttribute("aria-label") === expected["aria-label"] &&
+    trigger.disabled === Boolean(expected.disabled) &&
+    trigger.disabled === authority.owner.triggerDisabled &&
+    trigger.getAttribute("aria-busy") ===
+      (expected["aria-busy"] ? "true" : null) &&
+    trigger.getAttribute("aria-haspopup") === "menu" &&
+    trigger.getAttribute("aria-expanded") === "false" &&
+    trigger.getAttribute("aria-controls") === null &&
+    content === null
+  );
+}
+
+function currentLazyMenuItems(
+  content: HTMLElement,
+  bindings: readonly LazyMenuItemBinding[],
+  facts: readonly LazyMenuItemFacts[],
+) {
+  if (
+    content.children.length !== bindings.length ||
+    bindings.length !== facts.length
+  ) {
+    return null;
+  }
+  const elements: HTMLElement[] = [];
+  for (const [index, binding] of bindings.entries()) {
+    const element = binding.element();
+    if (
+      !element ||
+      binding.fact !== facts[index] ||
+      content.children.item(index) !== element ||
+      !binding.isCurrent(content) ||
+      elements.includes(element)
+    ) {
+      return null;
+    }
+    elements.push(element);
+  }
+  return Object.freeze(elements);
+}
+
 function useLazyTrigger() {
   const [armed, setArmed] = useState(false);
   const [open, setOpen] = useState(false);
@@ -1727,14 +2691,20 @@ function useLazyTrigger() {
       "aria-haspopup": "menu" as const,
       "aria-expanded": false,
       onPointerEnter: () => setArmed(true),
-      onPointerDown: (e: React.PointerEvent) => {
-        if (e.button !== 0 || e.ctrlKey) return;
+      onPointerDown: (event: React.PointerEvent) => {
+        if (event.button !== 0 || event.ctrlKey) return;
         setArmed(true);
         setOpen(true);
       },
-      onKeyDown: (e: React.KeyboardEvent) => {
-        if (e.key !== "Enter" && e.key !== " " && e.key !== "ArrowDown") return;
-        e.preventDefault();
+      onKeyDown: (event: React.KeyboardEvent) => {
+        if (
+          event.key !== "Enter" &&
+          event.key !== " " &&
+          event.key !== "ArrowDown"
+        ) {
+          return;
+        }
+        event.preventDefault();
         setArmed(true);
         setOpen(true);
       },
@@ -1744,13 +2714,525 @@ function useLazyTrigger() {
   return { armed, open, setOpen, plainProps };
 }
 
-function LazyMenu({ trigger, children, ...content }: { trigger: React.ReactElement<React.ComponentProps<"button">>; children: React.ReactNode } & Omit<React.ComponentProps<typeof MenuContent>, "children">) {
-  const { armed, open, setOpen, plainProps } = useLazyTrigger();
-  if (!armed) return cloneElement(trigger, plainProps);
+// DropdownMenu forwards this Menu primitive callback at runtime but omits the private prop from its public type.
+const DirectionalMenuContent = MenuContent as React.ComponentType<
+  React.ComponentProps<typeof MenuContent> & {
+    onOpenAutoFocus?: (event: Event) => void;
+  }
+>;
+
+/**
+ * Mounts a Radix DropdownMenu root only once the user reaches for its trigger. A root is ~20 fibers even
+ * while closed, and comments can contain hundreds of action disclosures. The closed plain trigger keeps
+ * an immutable owner-realm publication so ArrowDown and ArrowUp can safely hand the exact interaction to
+ * the newly mounted menu and focus its first or last enabled item without a document-global listener.
+ */
+function LazyMenu({
+  trigger,
+  children,
+  owner,
+  ...content
+}: {
+  trigger: React.ReactElement<React.ComponentProps<"button">>;
+  children: React.ReactNode;
+  owner: LazyMenuOwnerFacts;
+} & Omit<React.ComponentProps<typeof MenuContent>, "children">) {
+  const [mount] = useState(() => Symbol("lazy-comment-menu"));
+  const [cells] = useState(createLazyMenuCells);
+  const [armed, setArmed] = useState(false);
+  const [open, setOpenState] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const pendingCapture = useRef<LazyMenuReactKey | null>(null);
+  const pendingOpen = useRef<LazyMenuPendingOpen | null>(null);
+  const preparedItems = useMemo(
+    () => prepareLazyMenuItems(children, owner.items),
+    [children, owner.items],
+  );
+  const authority = useMemo(
+    () =>
+      Object.freeze({
+        mount,
+        owner,
+        trigger,
+        children,
+        items: preparedItems?.bindings ?? Object.freeze([]),
+        armed,
+        open,
+      } satisfies LazyMenuRenderAuthority),
+    [armed, children, mount, open, owner, preparedItems, trigger],
+  );
+  const directionActions = useMemo(
+    () =>
+      Object.freeze({
+        first: Object.freeze({
+          identity: Symbol("lazy-menu-first"),
+          authority,
+        }),
+        last: Object.freeze({
+          identity: Symbol("lazy-menu-last"),
+          authority,
+        }),
+      }),
+    [authority],
+  );
+
+  const setOpen = useCallback((next: boolean) => {
+    if (!next) {
+      pendingCapture.current = null;
+      pendingOpen.current = null;
+      cells.openHistory.read()?.release();
+      cells.openHistory.write(null);
+    }
+    setOpenState(next);
+  }, [cells]);
+
+  const finishDirectionalOpen = useCallback(
+    (event: Event) => {
+      const pending = pendingOpen.current;
+      const nextTrigger = triggerRef.current;
+      const menu = contentRef.current;
+      if (!pending) return;
+      if (!nextTrigger || !menu) {
+        pendingOpen.current = null;
+        setOpenState(false);
+        return;
+      }
+      const { publication, destination } = pending;
+      const { keyboard, ownerDocument } = publication;
+      const menuPlacement = captureRequestModePlacement(menu);
+      const menuHistory = menuPlacement
+        ? createRequestModeDomGuard(menu, menuPlacement)
+        : null;
+      const menuDom = menuPlacement ? snapshotRequestModeDom(menu) : null;
+      const ownerCurrent = lazyMenuOwnerFactsAreCurrent(
+        publication.authority.owner,
+      );
+      const items = currentLazyMenuItems(
+        menu,
+        publication.authority.items,
+        publication.authority.owner.items,
+      );
+      const bubbleEvent =
+        pending.bubble.event as KeyboardEvent<HTMLButtonElement>;
+      const destinationIndex = publication.authority.items.indexOf(destination);
+      const target =
+        destinationIndex < 0 ? null : items?.[destinationIndex] ?? null;
+      const controls = nextTrigger.getAttribute("aria-controls");
+      const labelledBy = menu.getAttribute("aria-labelledby");
+      if (
+        !cells.claimedPublications.has(publication) ||
+        !cells.claimedDirections.has(pending.action) ||
+        !cells.claimedReactEvents.has(pending.capture.event) ||
+        !cells.claimedReactEvents.has(pending.bubble.event) ||
+        !cells.claimedNativeEvents.has(pending.nativeEvent) ||
+        !cells.claimedListenerProofs.has(pending.listener) ||
+        !cells.claimedDestinations.has(destination) ||
+        !claimedLazyMenuReactEvents.has(pending.capture.event) ||
+        !claimedLazyMenuReactEvents.has(pending.bubble.event) ||
+        !claimedLazyMenuNativeEvents.has(pending.nativeEvent) ||
+        !claimedLazyMenuListenerProofs.has(pending.listener) ||
+        !claimedLazyMenuDestinations.has(destination) ||
+        !keyboard.isCurrent() ||
+        !ownerCurrent ||
+        pending.capture.nativeEvent !== pending.nativeEvent ||
+        pending.bubble.nativeEvent !== pending.nativeEvent ||
+        pending.capture.listener !== pending.listener ||
+        pending.bubble.listener !== pending.listener ||
+        !publication.listener.retains(pending.listener, publication) ||
+        pending.capture.direction !== pending.direction ||
+        pending.bubble.direction !== pending.direction ||
+        !lazyMenuReactPairMatches(
+          pending.capture,
+          pending.bubble,
+          publication,
+        ) ||
+        !items ||
+        !target ||
+        destination.fact !== publication.authority.owner.items[destinationIndex] ||
+        destination.fact.disabled ||
+        target.getAttribute("aria-disabled") === "true" ||
+        nextTrigger.ownerDocument !== ownerDocument ||
+        menu.ownerDocument !== ownerDocument ||
+        nextTrigger.getAttribute("aria-expanded") !== "true" ||
+        nextTrigger.getAttribute("data-state") !== "open" ||
+        !controls ||
+        menu.id !== controls ||
+        labelledBy !== nextTrigger.id ||
+        menu.getAttribute("role") !== "menu" ||
+        !menuPlacement ||
+        !menuHistory ||
+        !menuDom ||
+        !menuHistory.isClean() ||
+        !requestModePlacementMatches(menu, menuPlacement) ||
+        !requestModeDomMatches(menuDom)
+      ) {
+        menuHistory?.release();
+        pendingOpen.current = null;
+        setOpenState(false);
+        return;
+      }
+      event.preventDefault();
+      if (!event.defaultPrevented) {
+        menuHistory.release();
+        pendingOpen.current = null;
+        setOpenState(false);
+        return;
+      }
+      if (!publication.listener.retains(pending.listener, publication)) {
+        menuHistory.release();
+        pendingOpen.current = null;
+        setOpenState(false);
+        return;
+      }
+      bubbleEvent.preventDefault();
+      if (
+        !bubbleEvent.defaultPrevented ||
+        !keyboard.eventDefaultPrevented.read(pending.nativeEvent) ||
+        !publication.listener.retains(pending.listener, publication) ||
+        pendingOpen.current !== pending ||
+        triggerRef.current !== nextTrigger ||
+        contentRef.current !== menu ||
+        !keyboard.isCurrent() ||
+        !lazyMenuOwnerFactsAreCurrent(publication.authority.owner) ||
+        !menuHistory.isClean() ||
+        !requestModePlacementMatches(menu, menuPlacement) ||
+        !requestModeDomMatches(menuDom)
+      ) {
+        menuHistory.release();
+        pendingOpen.current = null;
+        setOpenState(false);
+        return;
+      }
+      pendingOpen.current = null;
+      cells.openHistory.read()?.release();
+      cells.openHistory.write(menuHistory);
+      keyboard.focus.invoke(target, { preventScroll: true });
+      const focused =
+        keyboard.activeElement.read(ownerDocument) === target &&
+        keyboard.isCurrent() &&
+        publication.listener.retains(pending.listener, publication) &&
+        lazyMenuOwnerFactsAreCurrent(publication.authority.owner) &&
+        menuHistory.isClean() &&
+        requestModePlacementMatches(menu, menuPlacement) &&
+        requestModeDomMatches(menuDom);
+      if (!focused) {
+        menuHistory.release();
+        cells.openHistory.write(null);
+        setOpenState(false);
+      }
+    },
+    [cells],
+  );
+
+  const onDirectionalKeyDown = useMemo(() => {
+    const directions = directionActions;
+    return (event: KeyboardEvent<HTMLButtonElement>) => {
+      const publication = cells.active.read();
+      if (publication && !publication.keyboard.isCurrent()) {
+        publication.retire();
+        return;
+      }
+      if (
+        publication &&
+        publication.authority === authority &&
+        (!publication.history.isClean() ||
+          !requestModePlacementMatches(
+            publication.trigger,
+            publication.placement,
+          ) ||
+          !requestModeDomMatches(publication.dom) ||
+          !lazyMenuOwnerFactsAreCurrent(publication.authority.owner))
+      ) {
+        publication.retire();
+        return;
+      }
+      if (
+        !publication ||
+        publication.authority !== authority ||
+        publication.authority.mount !== mount ||
+        publication.authority.armed !== armed ||
+        publication.authority.open ||
+        !lazyMenuOwnersMatch(publication.authority.owner, owner) ||
+        !lazyMenuTriggerMatches(publication, contentRef.current)
+      )
+        return;
+      const capture = pendingCapture.current;
+      const exact = exactLazyMenuKey(
+        event,
+        publication,
+        publication.keyboard.Event.BUBBLING_PHASE,
+        capture?.dispatchTarget ?? null,
+      );
+      if (!exact) return;
+      pendingCapture.current = null;
+      if (
+        !capture ||
+        !lazyMenuReactPairMatches(capture, exact, publication)
+      ) {
+        return;
+      }
+      const enabled = publication.authority.items.filter(
+        (item) => !item.fact.disabled,
+      );
+      const destination =
+        exact.direction === "first"
+          ? enabled[0]
+          : enabled[enabled.length - 1];
+      const direction = directions[exact.direction];
+      if (
+        !destination ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedDirections.has(direction) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(exact.nativeEvent) ||
+        cells.claimedListenerProofs.has(exact.listener) ||
+        cells.claimedDestinations.has(destination) ||
+        claimedLazyMenuReactEvents.has(capture.event) ||
+        claimedLazyMenuReactEvents.has(event) ||
+        claimedLazyMenuNativeEvents.has(exact.nativeEvent) ||
+        claimedLazyMenuListenerProofs.has(exact.listener) ||
+        claimedLazyMenuDestinations.has(destination) ||
+        cells.active.read() !== publication
+      ) {
+        return;
+      }
+      if (!publication.listener.claim(exact.listener, publication)) return;
+      cells.claimedPublications.add(publication);
+      cells.claimedDirections.add(direction);
+      cells.claimedReactEvents.add(capture.event);
+      cells.claimedReactEvents.add(event);
+      cells.claimedNativeEvents.add(exact.nativeEvent);
+      cells.claimedListenerProofs.add(exact.listener);
+      cells.claimedDestinations.add(destination);
+      claimedLazyMenuReactEvents.add(capture.event);
+      claimedLazyMenuReactEvents.add(event);
+      claimedLazyMenuNativeEvents.add(exact.nativeEvent);
+      claimedLazyMenuListenerProofs.add(exact.listener);
+      claimedLazyMenuDestinations.add(destination);
+      pendingOpen.current = Object.freeze({
+        publication,
+        direction: exact.direction,
+        action: direction,
+        destination,
+        capture,
+        bubble: exact,
+        nativeEvent: exact.nativeEvent,
+        listener: exact.listener,
+      });
+      if (
+        cells.active.read() !== publication ||
+        publication.authority !== authority ||
+        publication.authority.open ||
+        !publication.listener.retains(exact.listener, publication) ||
+        !publication.keyboard.isCurrent() ||
+        !lazyMenuOwnersMatch(publication.authority.owner, owner) ||
+        !lazyMenuTriggerMatches(publication, contentRef.current)
+      ) {
+        pendingOpen.current = null;
+        return;
+      }
+      flushSync(() => {
+        setArmed(true);
+        setOpenState(true);
+      });
+    };
+  }, [armed, authority, cells, directionActions, mount, owner]);
+
+  const onDirectionalKeyDownCapture = useMemo(
+    () => (event: KeyboardEvent<HTMLButtonElement>) => {
+      const publication = cells.active.read();
+      if (publication && !publication.keyboard.isCurrent()) {
+        publication.retire();
+        return;
+      }
+      if (
+        publication &&
+        publication.authority === authority &&
+        (!publication.history.isClean() ||
+          !requestModePlacementMatches(
+            publication.trigger,
+            publication.placement,
+          ) ||
+          !requestModeDomMatches(publication.dom) ||
+          !lazyMenuOwnerFactsAreCurrent(publication.authority.owner))
+      ) {
+        publication.retire();
+        return;
+      }
+      if (
+        !publication ||
+        publication.authority !== authority ||
+        publication.authority.mount !== mount ||
+        publication.authority.armed !== armed ||
+        publication.authority.open ||
+        !lazyMenuOwnersMatch(publication.authority.owner, owner) ||
+        !lazyMenuTriggerMatches(publication, contentRef.current)
+      ) {
+        return;
+      }
+      const exact = exactLazyMenuKey(
+        event,
+        publication,
+        publication.keyboard.Event.CAPTURING_PHASE,
+        null,
+      );
+      if (
+        !exact ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(exact.nativeEvent) ||
+        cells.claimedListenerProofs.has(exact.listener) ||
+        claimedLazyMenuReactEvents.has(event) ||
+        claimedLazyMenuNativeEvents.has(exact.nativeEvent) ||
+        claimedLazyMenuListenerProofs.has(exact.listener)
+      ) {
+        return;
+      }
+      pendingCapture.current = exact;
+      queueMicrotask(() => {
+        if (pendingCapture.current === exact) pendingCapture.current = null;
+      });
+    },
+    [armed, authority, cells, mount, owner],
+  );
+
+  const onPlainKeyDown = useMemo(
+    () => (event: KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        onDirectionalKeyDown(event);
+        return;
+      }
+      if (
+        armed ||
+        (event.key !== "Enter" && event.key !== " ") ||
+        owner.triggerDisabled
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setArmed(true);
+      setOpenState(true);
+    },
+    [armed, onDirectionalKeyDown, owner.triggerDisabled],
+  );
+
+  useLayoutEffect(() => {
+    const element = triggerRef.current;
+    const ownerWindow = element?.ownerDocument.defaultView;
+    const placement = element ? captureRequestModePlacement(element) : null;
+    const keyboard =
+      element && ownerWindow
+        ? captureLazyMenuKeyboardAuthority(element.ownerDocument, ownerWindow)
+        : null;
+    const history =
+      element && placement
+        ? createRequestModeDomGuard(element, placement)
+        : null;
+    if (
+      !element ||
+      !ownerWindow ||
+      !placement ||
+      !keyboard ||
+      !history ||
+      open ||
+      !lazyMenuOwnerFactsAreCurrent(owner, false) ||
+      !lazyMenuChildrenMatch(children, owner.items) ||
+      !preparedItems ||
+      !preparedItems.bindings.every(
+        (binding, index) => binding.fact === owner.items[index],
+      )
+    ) {
+      history?.release();
+      return;
+    }
+    let retired = false;
+    const listener = createLazyMenuListenerRegistration(ownerWindow, keyboard);
+    const publication: LazyMenuPublication = Object.freeze({
+      identity: Symbol("lazy-menu-publication"),
+      authority,
+      trigger: element,
+      ownerDocument: element.ownerDocument,
+      ownerWindow,
+      keyboard,
+      listener,
+      dom: snapshotRequestModeDom(element),
+      placement,
+      history,
+      isRetired: () => retired,
+      retire: () => {
+        if (retired) return;
+        retired = true;
+        listener.release(publication);
+        if (cells.active.read() === publication) cells.active.write(null);
+        queueMicrotask(() => {
+          history.release();
+          publication.authority.items.forEach((item) => item.release());
+        });
+      },
+    });
+    cells.active.read()?.retire();
+    cells.active.write(publication);
+    if (!listener.activate(publication)) {
+      publication.retire();
+      return;
+    }
+    return publication.retire;
+  }, [authority, cells, children, open, owner, preparedItems]);
+
+  useLayoutEffect(
+    () => () => {
+      pendingCapture.current = null;
+      pendingOpen.current = null;
+      cells.openHistory.read()?.release();
+      cells.openHistory.write(null);
+    },
+    [cells],
+  );
+
+  const captureTrigger = useCallback((element: HTMLButtonElement | null) => {
+    triggerRef.current = element;
+  }, []);
+  const suppliedTriggerRef = (
+    trigger.props as React.ComponentProps<"button"> & {
+      ref?: React.Ref<HTMLButtonElement>;
+    }
+  ).ref;
+  const composedTriggerRef = useComposedRefs(
+    suppliedTriggerRef,
+    captureTrigger,
+  );
+  const renderedTrigger = cloneElement(trigger, {
+    ref: composedTriggerRef,
+    onKeyDownCapture: onDirectionalKeyDownCapture,
+    onKeyDown: onPlainKeyDown,
+    ...(!armed
+      ? {
+          "aria-haspopup": "menu" as const,
+          "aria-expanded": false,
+          onPointerEnter: () => setArmed(true),
+          onPointerDown: (event: React.PointerEvent) => {
+            if (event.button !== 0 || event.ctrlKey) return;
+            setArmed(true);
+            setOpenState(true);
+          },
+        }
+      : {}),
+  });
+  if (!armed) return renderedTrigger;
   return (
     <Menu open={open} onOpenChange={setOpen}>
-      <MenuTrigger asChild>{trigger}</MenuTrigger>
-      <MenuContent {...content}>{children}</MenuContent>
+      <MenuTrigger asChild>{renderedTrigger}</MenuTrigger>
+      <DirectionalMenuContent
+        {...content}
+        ref={(element) => {
+          contentRef.current = element;
+        }}
+        onOpenAutoFocus={finishDirectionalOpen}
+      >
+        {preparedItems?.children ?? children}
+      </DirectionalMenuContent>
     </Menu>
   );
 }
@@ -5624,6 +7106,47 @@ const ThreadCard = memo(function ThreadCard({
     if (session.commentsViaApi) rowActions.run(replyId, { type: "react", emoji, reacted: !reactions[emoji]?.includes(me) });
     else void ops.react(thread.id, replyId, emoji);
   };
+  const editRoot = () => setEditing("root");
+  const deleteRoot = () => deleteTarget(null);
+  const rootTargetIdentity =
+    storedCommentTargetIdentity(session, thread.id, null) ??
+    Object.freeze({ thread, reply: null });
+  const rootMenuItems = Object.freeze([
+    ...(thread.authorId === me && !thread.suggestionState
+      ? [
+          Object.freeze({
+            id: "edit" as const,
+            label: "Edit",
+            disabled: rootBusy,
+            onSelect: editRoot,
+          }),
+        ]
+      : []),
+    Object.freeze({
+      id: "delete" as const,
+      label: "Delete thread",
+      disabled: rootDeleteBlocked,
+      onSelect: deleteRoot,
+    }),
+  ]);
+  const rootMenuOwner = Object.freeze({
+    session,
+    documentId: session.docId,
+    visit: actionCoordinator.visit,
+    coordinator: actionCoordinator,
+    thread,
+    reply: null,
+    targetIdentity: rootTargetIdentity,
+    threadId: thread.id,
+    replyId: null,
+    viewerId: me,
+    authorId: thread.authorId,
+    moderator: canModerate,
+    suggestionState: thread.suggestionState ?? null,
+    triggerDisabled: rootBusy,
+    deleteDisabled: rootDeleteBlocked,
+    items: rootMenuItems,
+  } satisfies LazyMenuOwnerFacts);
 
   return (
     <div
@@ -5721,6 +7244,7 @@ const ThreadCard = memo(function ThreadCard({
             <LazyMenu
               align="end"
               className="w-40"
+              owner={rootMenuOwner}
               trigger={
                 <button type="button" className="icon-btn h-7 w-7" aria-label="Comment actions" disabled={rootBusy} aria-busy={rootBusy || undefined}>
                   <MoreHorizontal size={16} />
@@ -5728,11 +7252,11 @@ const ThreadCard = memo(function ThreadCard({
               }
             >
               {thread.authorId === me && !thread.suggestionState && (
-                <MenuItem icon={<Pencil size={14} />} disabled={rootBusy} onSelect={() => setEditing("root")}>
+                <MenuItem icon={<Pencil size={14} />} disabled={rootBusy} onSelect={editRoot}>
                   Edit
                 </MenuItem>
               )}
-              <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={rootDeleteBlocked} onSelect={() => deleteTarget(null)}>
+              <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={rootDeleteBlocked} onSelect={deleteRoot}>
                 Delete thread
               </MenuItem>
             </LazyMenu>
@@ -5764,6 +7288,47 @@ const ThreadCard = memo(function ThreadCard({
             const replyAction = rowActions.state(r.id);
             const replyBusy = replyAction.pending !== null || replyAction.batch !== null;
             const replyBlocked = replyBusy || rowActions.rootDeleting;
+            const editReply = () => setEditing(r.id);
+            const deleteReply = () => deleteTarget(r.id);
+            const replyTargetIdentity =
+              storedCommentTargetIdentity(session, thread.id, r.id) ??
+              Object.freeze({ thread, reply: r });
+            const replyMenuItems = Object.freeze([
+              ...(r.authorId === me && !r.suggestionState
+                ? [
+                    Object.freeze({
+                      id: "edit" as const,
+                      label: "Edit",
+                      disabled: replyBlocked,
+                      onSelect: editReply,
+                    }),
+                  ]
+                : []),
+              Object.freeze({
+                id: "delete" as const,
+                label: "Delete",
+                disabled: replyBlocked,
+                onSelect: deleteReply,
+              }),
+            ]);
+            const replyMenuOwner = Object.freeze({
+              session,
+              documentId: session.docId,
+              visit: actionCoordinator.visit,
+              coordinator: actionCoordinator,
+              thread,
+              reply: r,
+              targetIdentity: replyTargetIdentity,
+              threadId: thread.id,
+              replyId: r.id,
+              viewerId: me,
+              authorId: r.authorId,
+              moderator: canModerate,
+              suggestionState: r.suggestionState ?? null,
+              triggerDisabled: replyBlocked,
+              deleteDisabled: replyBlocked,
+              items: replyMenuItems,
+            } satisfies LazyMenuOwnerFacts);
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
                 <div className="flex items-start gap-2.5">
@@ -5815,6 +7380,7 @@ const ThreadCard = memo(function ThreadCard({
                       <LazyMenu
                         align="end"
                         className="w-36"
+                        owner={replyMenuOwner}
                         trigger={
                           <button type="button" className="icon-btn h-6 w-6" aria-label="Reply actions" disabled={replyBlocked} aria-busy={replyBusy || undefined}>
                             <MoreHorizontal size={14} />
@@ -5822,11 +7388,11 @@ const ThreadCard = memo(function ThreadCard({
                         }
                       >
                         {r.authorId === me && !r.suggestionState && (
-                          <MenuItem icon={<Pencil size={14} />} disabled={replyBlocked} onSelect={() => setEditing(r.id)}>
+                          <MenuItem icon={<Pencil size={14} />} disabled={replyBlocked} onSelect={editReply}>
                             Edit
                           </MenuItem>
                         )}
-                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={replyBlocked} onSelect={() => deleteTarget(r.id)}>
+                        <MenuItem icon={<Trash2 size={14} />} className="text-danger" disabled={replyBlocked} onSelect={deleteReply}>
                           Delete
                         </MenuItem>
                       </LazyMenu>
