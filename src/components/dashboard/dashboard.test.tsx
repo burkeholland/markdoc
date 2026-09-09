@@ -925,6 +925,19 @@ async function dispatchSearchResultKey(
   key: string,
   init: KeyboardEventInit = {},
 ) {
+  const event = searchResultKeyEvent(source, key, init);
+  await act(async () => {
+    source.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function searchResultKeyEvent(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
   const ownerWindow = source.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The search key source has no owner window");
   const event = new ownerWindow.KeyboardEvent("keydown", {
@@ -934,10 +947,6 @@ async function dispatchSearchResultKey(
     ...init,
   });
   markSearchResultEventTrusted(event, ownerWindow);
-  await act(async () => {
-    source.dispatchEvent(event);
-    await Promise.resolve();
-  });
   return event;
 }
 
@@ -4604,7 +4613,7 @@ describe("dashboard search result keyboard focus", () => {
     "restored result replacement",
     "restored result root",
   ] as const)(
-    "retires %s history and lets a clean render recover",
+    "rejects %s history once and mints a clean successor without an external render",
     async (scenario) => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
@@ -4651,6 +4660,12 @@ describe("dashboard search result keyboard focus", () => {
         search.focus();
         focus.mockClear();
         preventDefault.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const requestCount = searchDocuments.mock.calls.length;
+        const staleHandler = captureReactHandler(search, "onKeyDown");
 
         const rejected = await dispatchSearchResultKey(search, "ArrowDown");
 
@@ -4658,19 +4673,23 @@ describe("dashboard search result keyboard focus", () => {
         expect(search).toHaveFocus();
         expect(focus).not.toHaveBeenCalled();
         expect(preventDefault).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(search).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
 
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
         const currentSearch = screen.getByRole("textbox", {
           name: "Search documents",
         }) as HTMLInputElement;
+        expect(captureReactHandler(currentSearch, "onKeyDown")).not.toBe(
+          staleHandler,
+        );
         currentSearch.focus();
         focus.mockClear();
+        preventDefault.mockClear();
         const accepted = await dispatchSearchResultKey(
           currentSearch,
           "ArrowDown",
@@ -4680,12 +4699,77 @@ describe("dashboard search result keyboard focus", () => {
         expect(focus).toHaveBeenCalledExactlyOnceWith({
           preventScroll: true,
         });
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(currentSearch).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(listDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
       } finally {
         await act(async () => root.unmount());
         host.remove();
       }
     },
   );
+
+  it("releases a queued DOM-barrier successor when cleanup wins", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let mounted = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const link = searchResultLinks(host)[0]!;
+      link.setAttribute("data-search-result-attack", "1");
+      link.removeAttribute("data-search-result-attack");
+      await act(async () => {});
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requestCount = searchDocuments.mock.calls.length;
+      const event = searchResultKeyEvent(search, "ArrowDown");
+
+      act(() => {
+        search.dispatchEvent(event);
+        root.unmount();
+      });
+      mounted = false;
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(host).toBeEmptyDOMElement();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.replace).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      if (mounted) await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 
   it("rejects partial ref replay and cleanup while complete replay mints a usable successor", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");

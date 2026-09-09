@@ -3663,10 +3663,30 @@ function armSearchControlDomBarrier(
   cells: SearchControlPublicationCells,
   ownerDocument: Document,
   roots: readonly SearchControlRootPublication[],
+  requestSuccessor: () => void,
 ) {
   cells.domBarrier?.release();
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return;
   let attempted = false;
+  let successorQueued = false;
   let released = false;
+  const noteAttempt = () => {
+    if (released || attempted) return;
+    attempted = true;
+    successorQueued = true;
+    queueMicrotask(() => {
+      if (
+        released ||
+        !successorQueued ||
+        cells.domBarrier !== barrier
+      ) {
+        return;
+      }
+      successorQueued = false;
+      requestSuccessor();
+    });
+  };
   const listener = (event: Event) => {
     if (
       released ||
@@ -3680,28 +3700,29 @@ function armSearchControlDomBarrier(
     }
     const target = TRUSTED_EVENT_TARGET(event);
     if (
-      target instanceof Node &&
-      roots.some(({ element }) => element.contains(target))
+      target !== null &&
+      TRUSTED_IS_PROTOTYPE_OF(ownerWindow.Node.prototype, target) &&
+      (target as Node).ownerDocument === ownerDocument &&
+      roots.some(({ element }) => element.contains(target as Node))
     ) {
-      attempted = true;
+      noteAttempt();
     }
   };
-  for (const type of ["input", "change", "keydown", "click"]) {
-    TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, listener, true);
-  }
   const barrier: SearchControlDomBarrier = Object.freeze({
     attempted: () => attempted,
-    noteAttempt: () => {
-      attempted = true;
-    },
+    noteAttempt,
     release: () => {
       if (released) return;
       released = true;
+      successorQueued = false;
       for (const type of ["input", "change", "keydown", "click"]) {
         TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, listener, true);
       }
     },
   });
+  for (const type of ["input", "change", "keydown", "click"]) {
+    TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, listener, true);
+  }
   cells.domBarrier = barrier;
   cells.replay?.release();
   cells.replay = null;
@@ -5232,7 +5253,12 @@ function createSearchControlPublication(
             const ownedActivePublication = cells.active === publication;
             retire("other");
             if (ownedActivePublication) {
-              armSearchControlDomBarrier(cells, ownerDocument, publishedRoots);
+              armSearchControlDomBarrier(
+                cells,
+                ownerDocument,
+                publishedRoots,
+                requestSuccessor,
+              );
             }
           },
           (records) =>
