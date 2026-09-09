@@ -947,6 +947,7 @@ interface CreateFormKeyboardAuthority {
   readonly button: HTMLButtonElement;
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
+  readonly objectPrototype: object;
   readonly Event: typeof Event;
   readonly UIEvent: typeof UIEvent;
   readonly KeyboardEvent: typeof KeyboardEvent;
@@ -962,6 +963,7 @@ interface CreateFormKeyboardAuthority {
   readonly trusted: TokenRenameTrustedAuthority;
   readonly apply: typeof Reflect.apply;
   readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
   readonly isCurrent: () => boolean;
   readonly targets: readonly HTMLElement[];
 }
@@ -973,6 +975,17 @@ interface CreateFormKeyboardSnapshot {
   readonly phase: number;
   readonly path: readonly EventTarget[];
   readonly view: Window;
+}
+
+interface CreateFormKeyboardPair {
+  readonly identity: symbol;
+  readonly publication: CreateFormPublication;
+  readonly action: CreateFormAction;
+  readonly captureReactEvent: ReactKeyboardEvent<HTMLFormElement>;
+  readonly nativeEvent: Event;
+  readonly capture: CreateFormKeyboardSnapshot;
+  bubbleReactEvent: ReactKeyboardEvent<HTMLFormElement> | null;
+  claimed: boolean;
 }
 
 interface CreateFormButtonControl {
@@ -1048,6 +1061,7 @@ interface CreateFormPublication {
   readonly button: CreateFormSlot<HTMLButtonElement>;
   readonly form: CreateFormSlot<HTMLFormElement>;
   keyboard: CreateFormKeyboardAuthority | null;
+  keyboardPair: CreateFormKeyboardPair | null;
   dom: SecretNoticeDomSnapshot | null;
   buttonDom: SecretNoticeDomSnapshot | null;
   placement: readonly SecretNoticePlacement[] | null;
@@ -1141,9 +1155,11 @@ function captureCreateFormKeyboardAuthority(
     return null;
   }
   const objectConstructor = ownerWindow.Object;
+  const objectPrototype = objectConstructor.prototype;
   const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
   const prototypeOf = objectConstructor.getPrototypeOf;
-  const apply = ownerWindow.Reflect.apply;
+  const reflectObject = ownerWindow.Reflect;
+  const apply = reflectObject.apply;
   const EventConstructor = ownerWindow.Event;
   const UIEventConstructor = ownerWindow.UIEvent;
   const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
@@ -1201,7 +1217,35 @@ function captureCreateFormKeyboardAuthority(
     htmlElementPrototype,
     "focus",
   );
-  if (!event || !keyboard || !ui || !document || !composedPath || !preventDefault || !focus) {
+  const getOwnPropertyDescriptorMethod = captureTokenRenameMethod<
+    typeof Object.getOwnPropertyDescriptor
+  >(getOwnPropertyDescriptor, objectConstructor, "getOwnPropertyDescriptor");
+  const getPrototypeOfMethod = captureTokenRenameMethod<typeof Object.getPrototypeOf>(
+    getOwnPropertyDescriptor,
+    objectConstructor,
+    "getPrototypeOf",
+  );
+  const isPrototypeOfMethod = captureTokenRenameMethod<
+    typeof Object.prototype.isPrototypeOf
+  >(getOwnPropertyDescriptor, objectPrototype, "isPrototypeOf");
+  const applyMethod = captureTokenRenameMethod<typeof Reflect.apply>(
+    getOwnPropertyDescriptor,
+    reflectObject,
+    "apply",
+  );
+  if (
+    !event
+    || !keyboard
+    || !ui
+    || !document
+    || !composedPath
+    || !preventDefault
+    || !focus
+    || !getOwnPropertyDescriptorMethod
+    || !getPrototypeOfMethod
+    || !isPrototypeOfMethod
+    || !applyMethod
+  ) {
     return null;
   }
   let probe: KeyboardEvent;
@@ -1218,12 +1262,17 @@ function captureCreateFormKeyboardAuthority(
       (target): target is HTMLElement => target instanceof HTMLElementConstructor,
     ),
   ];
+  let invalid = false;
   const isCurrent = () => {
+    if (invalid) return false;
     try {
-      return ownerDocument.defaultView === ownerWindow
+      const current = ownerDocument.defaultView === ownerWindow
         && ownerWindow.Object === objectConstructor
+        && ownerWindow.Object.prototype === objectPrototype
         && ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
         && ownerWindow.Object.getPrototypeOf === prototypeOf
+        && ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOfMethod.method
+        && ownerWindow.Reflect === reflectObject
         && ownerWindow.Reflect.apply === apply
         && ownerWindow.Event === EventConstructor
         && ownerWindow.UIEvent === UIEventConstructor
@@ -1245,8 +1294,16 @@ function captureCreateFormKeyboardAuthority(
         && composedPath.isCurrent()
         && preventDefault.isCurrent()
         && focus.isCurrent()
-        && trusted.isCurrent();
+        && trusted.isCurrent()
+        && getOwnPropertyDescriptorMethod.isCurrent()
+        && getPrototypeOfMethod.isCurrent()
+        && isPrototypeOfMethod.isCurrent()
+        && applyMethod.isCurrent()
+        && apply(isPrototypeOfMethod.method, keyboardEventPrototype, [probe]) === true;
+      if (!current) invalid = true;
+      return current;
     } catch {
+      invalid = true;
       return false;
     }
   };
@@ -1260,6 +1317,7 @@ function captureCreateFormKeyboardAuthority(
     button,
     ownerDocument,
     ownerWindow,
+    objectPrototype,
     Event: EventConstructor,
     UIEvent: UIEventConstructor,
     KeyboardEvent: KeyboardEventConstructor,
@@ -1275,6 +1333,7 @@ function captureCreateFormKeyboardAuthority(
     trusted,
     apply,
     prototypeOf,
+    isPrototypeOf: isPrototypeOfMethod.method,
     isCurrent,
     targets: Object.freeze(targets),
   });
@@ -1291,10 +1350,16 @@ function createFormNativeValue<Value>(
 function captureCreateFormEscape(
   authority: CreateFormKeyboardAuthority,
   nativeEvent: Event,
+  expectedPhase: number,
 ): CreateFormKeyboardSnapshot | null {
   if (
     !authority.isCurrent()
     || authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype
+    || authority.apply(
+      authority.isPrototypeOf,
+      authority.KeyboardEvent.prototype,
+      [nativeEvent],
+    ) !== true
     || !authority.trusted.matches(nativeEvent)
   ) {
     return null;
@@ -1330,7 +1395,7 @@ function captureCreateFormEscape(
       createFormNativeValue<string>(authority, authority.event.type, nativeEvent) !== "keydown"
       || !(target instanceof authority.HTMLElement)
       || !currentTarget
-      || (phase !== authority.Event.AT_TARGET && phase !== authority.Event.BUBBLING_PHASE)
+      || phase !== expectedPhase
       || !createFormNativeValue<boolean>(authority, authority.event.bubbles, nativeEvent)
       || !createFormNativeValue<boolean>(authority, authority.event.cancelable, nativeEvent)
       || createFormNativeValue<boolean>(authority, authority.event.defaultPrevented, nativeEvent)
@@ -1388,7 +1453,7 @@ function createFormEscapeMatches(
   authority: CreateFormKeyboardAuthority,
   snapshot: CreateFormKeyboardSnapshot,
 ) {
-  const current = captureCreateFormEscape(authority, snapshot.event);
+  const current = captureCreateFormEscape(authority, snapshot.event, snapshot.phase);
   return Boolean(
     current
     && current.target === snapshot.target
@@ -1407,15 +1472,13 @@ function exactCreateFormReactEvent(
 ) {
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLFormElement> & {
-      _reactName?: unknown;
       isComposing?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
       isPersistent?: unknown;
       persist?: unknown;
     };
-    return reactEvent._reactName === "onKeyDown"
-      && event.nativeEvent === snapshot.event
+    return event.nativeEvent === snapshot.event
       && event.type === "keydown"
       && event.target === snapshot.target
       && event.currentTarget === authority.form
@@ -1453,6 +1516,7 @@ class CreateFormCoordinator {
   #replay: CreateFormReplay | null = null;
   #claimedPublications = new WeakSet<CreateFormPublication>();
   #claimedActions = new WeakSet<CreateFormAction>();
+  #claimedKeyboardPairs = new WeakSet<CreateFormKeyboardPair>();
   #claimedReactEvents = new WeakSet<object>();
   #claimedNativeEvents = new WeakSet<Event>();
 
@@ -1482,6 +1546,7 @@ class CreateFormCoordinator {
         element: null,
       },
       keyboard: null,
+      keyboardPair: null,
       dom: null,
       buttonDom: null,
       placement: null,
@@ -1643,15 +1708,12 @@ class CreateFormCoordinator {
     if (this.#replay) this.#invalidateReplay(this.#replay);
   }
 
-  claim(
+  publishKeyboardPair(
     publication: CreateFormPublication,
     event: ReactKeyboardEvent<HTMLFormElement>,
     factsAreCurrent: () => boolean,
     domIsExact: () => boolean,
-  ): Readonly<{
-    authority: CreateFormKeyboardAuthority;
-    native: CreateFormKeyboardSnapshot;
-  }> | null {
+  ) {
     const authority = publication.keyboard;
     const nativeEvent = event.nativeEvent;
     if (
@@ -1660,6 +1722,7 @@ class CreateFormCoordinator {
       || publication.retired
       || publication.claimed
       || publication.action.claimed
+      || publication.keyboardPair
       || this.#claimedPublications.has(publication)
       || this.#claimedActions.has(publication.action)
       || this.#claimedReactEvents.has(event)
@@ -1667,48 +1730,151 @@ class CreateFormCoordinator {
       || !factsAreCurrent()
       || !this.#publicationIsCurrent(publication, domIsExact)
     ) {
+      return;
+    }
+    const capture = captureCreateFormEscape(
+      authority,
+      nativeEvent,
+      authority.Event.CAPTURING_PHASE,
+    );
+    if (
+      !capture
+      || !exactCreateFormReactEvent(event, authority, capture)
+      || !createFormEscapeMatches(authority, capture)
+      || !factsAreCurrent()
+      || !this.#publicationIsCurrent(publication, domIsExact)
+    ) {
+      return;
+    }
+    const pair: CreateFormKeyboardPair = {
+      identity: Symbol("token-create-keyboard-pair"),
+      publication,
+      action: publication.action,
+      captureReactEvent: event,
+      nativeEvent,
+      capture,
+      bubbleReactEvent: null,
+      claimed: false,
+    };
+    Object.seal(pair);
+    publication.keyboardPair = pair;
+    queueMicrotask(() => {
+      if (publication.keyboardPair === pair && !pair.claimed) {
+        publication.keyboardPair = null;
+      }
+    });
+  }
+
+  claim(
+    publication: CreateFormPublication,
+    event: ReactKeyboardEvent<HTMLFormElement>,
+    factsAreCurrent: () => boolean,
+    domIsExact: () => boolean,
+  ): Readonly<{
+    authority: CreateFormKeyboardAuthority;
+    native: CreateFormKeyboardSnapshot;
+    pair: CreateFormKeyboardPair;
+  }> | null {
+    const authority = publication.keyboard;
+    const pair = publication.keyboardPair;
+    const nativeEvent = event.nativeEvent;
+    if (
+      !authority
+      || !pair
+      || pair.publication !== publication
+      || pair.action !== publication.action
+      || pair.captureReactEvent === event
+      || pair.bubbleReactEvent !== null
+      || pair.nativeEvent !== nativeEvent
+      || pair.capture.event !== nativeEvent
+      || pair.capture.phase !== authority.Event.CAPTURING_PHASE
+      || pair.claimed
+      || this.#current !== publication
+      || publication.retired
+      || publication.claimed
+      || publication.action.claimed
+      || this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(publication.action)
+      || this.#claimedKeyboardPairs.has(pair)
+      || this.#claimedReactEvents.has(event)
+      || this.#claimedNativeEvents.has(nativeEvent)
+      || !factsAreCurrent()
+      || !this.#publicationIsCurrent(publication, domIsExact)
+    ) {
       return null;
     }
-    const native = captureCreateFormEscape(authority, nativeEvent);
+    const native = captureCreateFormEscape(
+      authority,
+      nativeEvent,
+      authority.Event.BUBBLING_PHASE,
+    );
     if (
       !native
       || !exactCreateFormReactEvent(event, authority, native)
+      || native.target !== pair.capture.target
+      || native.currentTarget !== pair.capture.currentTarget
+      || native.view !== pair.capture.view
+      || native.path.length !== pair.capture.path.length
+      || !native.path.every((entry, index) => entry === pair.capture.path[index])
       || !createFormEscapeMatches(authority, native)
       || !factsAreCurrent()
       || !this.#publicationIsCurrent(publication, domIsExact)
     ) {
       return null;
     }
+    pair.bubbleReactEvent = event;
     publication.claimed = true;
     publication.action.claimed = true;
+    pair.claimed = true;
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(publication.action);
+    this.#claimedKeyboardPairs.add(pair);
+    this.#claimedReactEvents.add(pair.captureReactEvent);
     this.#claimedReactEvents.add(event);
     this.#claimedNativeEvents.add(nativeEvent);
-    return Object.freeze({ authority, native });
+    return Object.freeze({ authority, native, pair });
   }
 
   claimedIsCurrent(
     publication: CreateFormPublication,
     native: CreateFormKeyboardSnapshot,
+    pair: CreateFormKeyboardPair,
     factsAreCurrent: () => boolean,
     domIsExact: () => boolean,
   ) {
     return this.#current === publication
       && publication.claimed
       && publication.action.claimed
+      && publication.keyboardPair === pair
+      && pair.publication === publication
+      && pair.action === publication.action
+      && pair.bubbleReactEvent !== null
+      && pair.claimed
       && this.#claimedPublications.has(publication)
       && this.#claimedActions.has(publication.action)
+      && this.#claimedKeyboardPairs.has(pair)
+      && this.#claimedReactEvents.has(pair.captureReactEvent)
+      && this.#claimedReactEvents.has(pair.bubbleReactEvent)
       && this.#claimedNativeEvents.has(native.event)
       && factsAreCurrent()
       && this.#publicationIsCurrent(publication, domIsExact);
   }
 
   ownsClaim(publication: CreateFormPublication) {
+    const pair = publication.keyboardPair;
     return publication.claimed
       && publication.action.claimed
+      && !!pair
+      && pair.publication === publication
+      && pair.action === publication.action
+      && pair.bubbleReactEvent !== null
+      && pair.claimed
       && this.#claimedPublications.has(publication)
-      && this.#claimedActions.has(publication.action);
+      && this.#claimedActions.has(publication.action)
+      && this.#claimedKeyboardPairs.has(pair)
+      && this.#claimedReactEvents.has(pair.captureReactEvent)
+      && this.#claimedReactEvents.has(pair.bubbleReactEvent)
+      && this.#claimedNativeEvents.has(pair.nativeEvent);
   }
 
   #publicationIsCurrent(
@@ -1781,6 +1947,7 @@ class CreateFormCoordinator {
   #retire(publication: CreateFormPublication) {
     publication.retired = true;
     if (this.#current === publication) this.#current = null;
+    if (!publication.keyboardPair?.claimed) publication.keyboardPair = null;
     publication.history?.disconnect();
   }
 }
@@ -3782,6 +3949,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       || !createFormCoordinator.claimedIsCurrent(
         publication,
         claim.native,
+        claim.pair,
         () => createFactsAreCurrent(publication.facts),
         () => createDomIsExact(publication),
       )
@@ -3941,6 +4109,12 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
           tabIndex={-1}
           aria-busy={busy || undefined}
           data-testid="token-create-form"
+          onKeyDownCapture={(event) => createFormCoordinator.publishKeyboardPair(
+           createFormPublication,
+           event,
+           () => createFactsAreCurrent(createFormPublication.facts),
+           () => createDomIsExact(createFormPublication),
+          )}
           onKeyDown={(event) => deliverCreateEscape(createFormPublication, event)}
           onSubmit={(event) => { event.preventDefault(); void create(); }}>
           <label className="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3">Name (shown as the agent)

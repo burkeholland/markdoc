@@ -412,6 +412,107 @@ type CreateKeyboardSetup = {
   focus: ReturnType<typeof vi.spyOn>;
 };
 
+type CreateAuthorityMutation = (
+  ownerWindow: Window & typeof globalThis,
+) => () => void;
+
+function replaceRealmProperty(
+  target: object,
+  key: PropertyKey,
+  replacement: (descriptor: PropertyDescriptor) => PropertyDescriptor,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  if (!descriptor) throw new Error(`The create authority has no ${String(key)} descriptor`);
+  Object.defineProperty(target, key, replacement(descriptor));
+  return () => Object.defineProperty(target, key, descriptor);
+}
+
+const createAuthorityMutations = [
+  ["constructor", (ownerWindow) => replaceRealmProperty(
+    ownerWindow,
+    "KeyboardEvent",
+    (descriptor) => ({
+      ...descriptor,
+      value: class extends ownerWindow.KeyboardEvent {},
+    }),
+  )],
+  ["prototype link", (ownerWindow) => {
+    const prototype = ownerWindow.KeyboardEvent.prototype;
+    const original = Object.getPrototypeOf(prototype);
+    Object.setPrototypeOf(prototype, ownerWindow.Event.prototype);
+    return () => Object.setPrototypeOf(prototype, original);
+  }],
+  ["getter descriptor", (ownerWindow) => replaceRealmProperty(
+    ownerWindow.KeyboardEvent.prototype,
+    "key",
+    (descriptor) => ({
+      ...descriptor,
+      get: function (this: KeyboardEvent) {
+        return descriptor.get?.call(this);
+      },
+    }),
+  )],
+  ["method descriptor", (ownerWindow) => {
+    const original = ownerWindow.Event.prototype.preventDefault;
+    return replaceRealmProperty(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+      (descriptor) => ({
+        ...descriptor,
+        value: function (this: Event) {
+          return original.call(this);
+        },
+      }),
+    );
+  }],
+  ["Object.getOwnPropertyDescriptor", (ownerWindow) => {
+    const original = ownerWindow.Object.getOwnPropertyDescriptor;
+    return replaceRealmProperty(
+      ownerWindow.Object,
+      "getOwnPropertyDescriptor",
+      (descriptor) => ({
+        ...descriptor,
+        value: (target: object, key: PropertyKey) => original(target, key),
+      }),
+    );
+  }],
+  ["Object.getPrototypeOf", (ownerWindow) => {
+    const original = ownerWindow.Object.getPrototypeOf;
+    return replaceRealmProperty(
+      ownerWindow.Object,
+      "getPrototypeOf",
+      (descriptor) => ({
+        ...descriptor,
+        value: (target: object) => original(target),
+      }),
+    );
+  }],
+  ["Object.prototype.isPrototypeOf", (ownerWindow) => {
+    const original = ownerWindow.Object.prototype.isPrototypeOf;
+    return replaceRealmProperty(
+      ownerWindow.Object.prototype,
+      "isPrototypeOf",
+      (descriptor) => ({
+        ...descriptor,
+        value: function (this: object, target: object) {
+          return original.call(this, target);
+        },
+      }),
+    );
+  }],
+  ["Reflect.apply", (ownerWindow) => {
+    const original = ownerWindow.Reflect.apply;
+    return replaceRealmProperty(
+      ownerWindow.Reflect,
+      "apply",
+      (descriptor) => ({
+        ...descriptor,
+        value: original.bind(ownerWindow.Reflect),
+      }),
+    );
+  }],
+] satisfies readonly (readonly [string, CreateAuthorityMutation])[];
+
 describe("Settings → Agents: account-session authority", () => {
   it.each(["success", "failure"] as const)(
     "retires an old account list %s at the parent layout boundary",
@@ -1161,6 +1262,119 @@ describe("Settings → Agents: create token Escape authority", () => {
     expect(callsFor("POST")).toHaveLength(0);
     expect(callsFor("PATCH")).toHaveLength(0);
   });
+
+  it("rejects a structurally matching wrapper that reached only the bubble action boundary", async () => {
+    const view = await showStrictCreate();
+    const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    const propsKey = Object.keys(form).find((key) => key.startsWith("__reactProps$"));
+    if (!propsKey) throw new Error("React props were not attached to the create form");
+    const properties = form as unknown as Record<string, Record<string, unknown>>;
+    const props = properties[propsKey];
+    if (!props) throw new Error("The create form has no React props");
+    const bubble = props.onKeyDown;
+    if (typeof bubble !== "function") throw new Error("The create form has no bubble handler");
+    const fabricatedPrevent = vi.fn();
+    properties[propsKey] = {
+      ...props,
+      onKeyDownCapture: undefined,
+      onKeyDown: undefined,
+    };
+    name.addEventListener("keydown", (nativeEvent) => {
+      bubble({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        key: "Escape",
+        code: "Escape",
+        target: name,
+        currentTarget: form,
+        nativeEvent,
+        eventPhase: nativeEvent.eventPhase,
+        bubbles: nativeEvent.bubbles,
+        cancelable: nativeEvent.cancelable,
+        defaultPrevented: nativeEvent.defaultPrevented,
+        isTrusted: nativeEvent.isTrusted,
+        repeat: false,
+        isComposing: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        view: name.ownerDocument.defaultView,
+        preventDefault: fabricatedPrevent,
+        stopPropagation: vi.fn(),
+        isDefaultPrevented: () => false,
+        isPropagationStopped: () => false,
+        persist: vi.fn(),
+        isPersistent: () => true,
+      } as unknown as ReactKeyboardEvent<HTMLFormElement>);
+    }, { once: true });
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    let fabricated!: KeyboardEvent;
+    try {
+      fabricated = dispatchTokenEscape(name);
+    } finally {
+      properties[propsKey] = props;
+    }
+
+    expect(fabricated.defaultPrevented).toBe(false);
+    expect(fabricatedPrevent).not.toHaveBeenCalled();
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+    const accepted = dispatchTokenEscape(name);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+    expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it.each(createAuthorityMutations)(
+    "permanently rejects a restored %s until a clean keyed successor",
+    async (_label, mutate) => {
+      const view = await showStrictCreate();
+      const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+      const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+      const ownerWindow = name.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The create form has no owner window");
+      name.focus();
+      const duringMutation = createTokenEscape(name);
+      const restore = mutate(ownerWindow);
+      view.setup.preventDefault.mockClear();
+      try {
+        act(() => name.dispatchEvent(duringMutation));
+      } finally {
+        restore();
+      }
+      expect(duringMutation.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+      const restored = dispatchTokenEscape(name);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+      act(() => view.root.render(
+        <StrictMode>
+          <TokensPanel key={`authority-${_label}`} origin="https://markdoc.test" userLogin="alice" />
+        </StrictMode>,
+      ));
+      await view.panel.findByText("No tokens yet.");
+      await settleCreatePublication();
+      fireEvent.click(view.panel.getByTestId("token-add"));
+      await settleCreatePublication();
+      const currentName = view.panel.getByTestId("token-name") as HTMLInputElement;
+      currentName.focus();
+      const accepted = dispatchTokenEscape(currentName);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+      expect(callsFor("POST")).toHaveLength(0);
+      expect(callsFor("PATCH")).toHaveLength(0);
+    },
+  );
 
   it("is inert outside the form and while create or a blocking token operation is pending", async () => {
     const view = await showStrictCreate({ tokens: [token] });
