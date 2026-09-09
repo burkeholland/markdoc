@@ -20,11 +20,42 @@ import {
   type SlashState,
 } from "./slash-menu";
 
+function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  const nativeOwnerWindow = (
+    ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window & typeof globalThis }
+    >
+  )[implementationSymbol]._globalObject;
+  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: nativeOwnerWindow,
+  });
+  if (ownerDocument.defaultView !== nativeOwnerWindow) {
+    throw new Error("Unable to expose jsdom's native owner window");
+  }
+  return () => {
+    if (previous) {
+      Object.defineProperty(ownerDocument, "defaultView", previous);
+    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
+      throw new Error("Unable to restore jsdom's public owner window");
+    }
+  };
+}
+
 describe("slashMenuPlugin", () => {
   let ytext: Y.Text;
   let binding: MarkdownBinding;
   let view: EditorView;
   let host: HTMLDivElement;
+  let restoreOwnerWindow: () => void;
   let states: (SlashState | null)[];
   let keys: SlashKey[];
   let enterReached: number;
@@ -100,20 +131,6 @@ describe("slashMenuPlugin", () => {
     });
     if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
   };
-  const jsdomKeyboardEventViewInput = (ownerDocument: Document): Window => {
-    const implementationSymbol = Object.getOwnPropertySymbols(
-      ownerDocument,
-    ).find((symbol) => String(symbol) === "Symbol(impl)");
-    if (!implementationSymbol) {
-      throw new Error("Document implementation slot was not available");
-    }
-    return (
-      ownerDocument as unknown as Record<
-        symbol,
-        { _globalObject: Window }
-      >
-    )[implementationSymbol]._globalObject;
-  };
   const keyboardEvent = (k: string, init: KeyboardEventInit = {}) => {
     const ownerDocument = view.dom.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
@@ -124,7 +141,7 @@ describe("slashMenuPlugin", () => {
       bubbles: true,
       cancelable: true,
       ...init,
-      view: jsdomKeyboardEventViewInput(ownerDocument),
+      view: ownerWindow,
     });
     if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
     return event;
@@ -141,11 +158,15 @@ describe("slashMenuPlugin", () => {
   // Doc: <p>Hello</p><p>World</p>; the second paragraph starts at 8.
   const WORLD = 8;
 
-  beforeEach(() => setup("Hello\n\nWorld"));
+  beforeEach(() => {
+    restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
+    setup("Hello\n\nWorld");
+  });
   afterEach(() => {
     view.destroy();
     binding.destroy();
     host.remove();
+    restoreOwnerWindow();
   });
 
   it("activates on / at the start of a paragraph and tracks the query", () => {
@@ -170,6 +191,7 @@ describe("slashMenuPlugin", () => {
   it("does not activate inside a code block", () => {
     view.destroy();
     binding.destroy();
+    host.remove();
     setup("```\nabc\n```");
     select(4); // end of "abc"
     type("/");

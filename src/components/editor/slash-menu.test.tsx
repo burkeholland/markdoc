@@ -124,6 +124,7 @@ type Visit = Omit<MenuVisit, "controller"> & {
 
 type IntegratedVisit = MenuVisit & {
   host: HTMLDivElement;
+  restoreOwnerWindow: () => void;
 };
 
 const container = document.createElement("div");
@@ -208,22 +209,38 @@ function jsdomKeyboardEventImplementation(
   return implementation;
 }
 
-function jsdomKeyboardEventViewInput(ownerDocument: Document): Window {
+function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
   const implementationSymbol = Object.getOwnPropertySymbols(
     ownerDocument,
   ).find((symbol) => String(symbol) === "Symbol(impl)");
   if (!implementationSymbol) {
     throw new Error("Document implementation slot was not available");
   }
-  return (
+  const nativeOwnerWindow = (
     ownerDocument as unknown as Record<
       symbol,
-      { _globalObject: Window }
+      { _globalObject: Window & typeof globalThis }
     >
   )[implementationSymbol]._globalObject;
+  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: nativeOwnerWindow,
+  });
+  if (ownerDocument.defaultView !== nativeOwnerWindow) {
+    throw new Error("Unable to expose jsdom's native owner window");
+  }
+  return () => {
+    if (previous) {
+      Object.defineProperty(ownerDocument, "defaultView", previous);
+    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
+      throw new Error("Unable to restore jsdom's public owner window");
+    }
+  };
 }
 
 function makeIntegratedVisit(): IntegratedVisit {
+  const restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
   const controller = createSlashMenuController();
   const state = EditorState.create({
     schema,
@@ -245,6 +262,7 @@ function makeIntegratedVisit(): IntegratedVisit {
     onComment: vi.fn<() => void>(),
     onKeepAgent: vi.fn<() => void>(),
     host,
+    restoreOwnerWindow,
   };
 }
 
@@ -275,7 +293,7 @@ async function dispatchIntegratedKey(
     bubbles: true,
     cancelable: true,
     ...init,
-    view: jsdomKeyboardEventViewInput(ownerDocument),
+    view: ownerWindow,
   });
   if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
   markJsdomEventTrusted(event);
@@ -298,9 +316,7 @@ async function dispatchRejectedNativeViewKey(
     code: "End",
     bubbles: true,
     cancelable: true,
-    view: nativeView
-      ? jsdomKeyboardEventViewInput(nativeView.document)
-      : null,
+    view: nativeView,
   });
   if (event.view !== nativeView) throw new Error("Rejected keyboard event lost its requested public view");
   markJsdomEventTrusted(event);
@@ -324,7 +340,7 @@ async function dispatchStructuralWindowLookalikeKey(
     code: key,
     bubbles: true,
     cancelable: true,
-    view: jsdomKeyboardEventViewInput(ownerDocument),
+    view: ownerWindow,
   });
   if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
   markJsdomEventTrusted(event);
@@ -805,6 +821,7 @@ describe("slash-menu native keyboard publication", () => {
     } finally {
       visit.view.destroy();
       visit.host.remove();
+      visit.restoreOwnerWindow();
     }
   });
 
@@ -829,6 +846,7 @@ describe("slash-menu native keyboard publication", () => {
     } finally {
       visit.view.destroy();
       visit.host.remove();
+      visit.restoreOwnerWindow();
     }
   });
 
@@ -897,6 +915,7 @@ describe("slash-menu native keyboard publication", () => {
     } finally {
       visit.view.destroy();
       visit.host.remove();
+      visit.restoreOwnerWindow();
       foreignFrame.remove();
     }
   });
@@ -923,6 +942,7 @@ describe("slash-menu native keyboard publication", () => {
     } finally {
       visit.view.destroy();
       visit.host.remove();
+      visit.restoreOwnerWindow();
     }
   });
 
@@ -961,6 +981,7 @@ describe("slash-menu native keyboard publication", () => {
     } finally {
       visit.view.destroy();
       visit.host.remove();
+      visit.restoreOwnerWindow();
     }
   });
 });
