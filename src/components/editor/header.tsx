@@ -4294,13 +4294,20 @@ function modeSwitcherOpenFocusTarget(
 function modeSwitcherOpenPlacementMatches(
   snapshot: ModeSwitcherPlacementSnapshot,
   content: HTMLElement,
+  openingNodes: ReadonlySet<Node>,
 ) {
   let previousSibling = snapshot.node.previousSibling;
   let nextSibling = snapshot.node.nextSibling;
-  while (previousSibling && previousSibling.contains(content)) {
+  while (
+    previousSibling
+    && (previousSibling.contains(content) || openingNodes.has(previousSibling))
+  ) {
     previousSibling = previousSibling.previousSibling;
   }
-  while (nextSibling && nextSibling.contains(content)) {
+  while (
+    nextSibling
+    && (nextSibling.contains(content) || openingNodes.has(nextSibling))
+  ) {
     nextSibling = nextSibling.nextSibling;
   }
   return (
@@ -4314,6 +4321,7 @@ function modeSwitcherOpeningMutationIsExpected(
   record: MutationRecord,
   source: ModeSwitcherPublication,
   successor: ModeSwitcherPublication,
+  openingNodes: Set<Node>,
 ) {
   const trigger = source.dom.trigger;
   const content = successor.dom.content;
@@ -4353,12 +4361,14 @@ function modeSwitcherOpeningMutationIsExpected(
     && addedNode.tabIndex === 0
     && addedNode.childNodes.length === 0
   );
-  return Boolean(
+  const expected = Boolean(
     record.type === "childList"
     && record.removedNodes.length === 0
     && record.addedNodes.length === 1
     && (addedNode?.contains(content) || expectedFocusGuard)
   );
+  if (expected && addedNode) openingNodes.add(addedNode);
+  return expected;
 }
 
 function createModeSwitcherOpenFocusGuard(
@@ -4387,13 +4397,18 @@ function createModeSwitcherOpenFocusGuard(
   return Object.freeze({
     isExact: (successor: ModeSwitcherPublication) => {
       if (observer) records.push(...observer.takeRecords());
+      const openingNodes = new Set<Node>();
       if (
         invalid
         || !successor.dom.content
         || !records.every((record) =>
-          modeSwitcherOpeningMutationIsExpected(record, source, successor))
+          modeSwitcherOpeningMutationIsExpected(record, source, successor, openingNodes))
         || !placements.every((snapshot) =>
-          modeSwitcherOpenPlacementMatches(snapshot, successor.dom.content!))
+          modeSwitcherOpenPlacementMatches(
+            snapshot,
+            successor.dom.content!,
+            openingNodes,
+          ))
       ) {
         invalid = true;
       }
