@@ -1,6 +1,13 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import type { EditorView } from "prosemirror-view";
 import {
   ArrowUpToLine,
@@ -25,6 +32,25 @@ import { useSessionValue } from "./use-session";
 
 const MENU_WIDTH = 372;
 const MENU_HEIGHT = 40;
+const TABLE_MENU_CLASS =
+  "touch-target scrollbar-thin absolute z-30 flex items-center gap-0.5 overflow-x-auto rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10";
+const TABLE_MENU_BUTTON_CLASS =
+  "flex h-8 w-8 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white";
+const TABLE_MENU_ACTIVE_BUTTON_CLASS = "bg-white/20 text-white";
+const TABLE_MENU_LABEL = "Table";
+
+const TABLE_MENU_CONTROL_DEFINITIONS = Object.freeze([
+  Object.freeze({ label: "Row above", testId: "table-row-before", align: null }),
+  Object.freeze({ label: "Row below", testId: "table-row-after", align: null }),
+  Object.freeze({ label: "Column left", testId: "table-col-before", align: null }),
+  Object.freeze({ label: "Column right", testId: "table-col-after", align: null }),
+  Object.freeze({ label: "Delete row", testId: "table-delete-row", align: null }),
+  Object.freeze({ label: "Delete column", testId: "table-delete-col", align: null }),
+  Object.freeze({ label: "Align left", testId: "table-align-left", align: "left" }),
+  Object.freeze({ label: "Align center", testId: "table-align-center", align: "center" }),
+  Object.freeze({ label: "Align right", testId: "table-align-right", align: "right" }),
+  Object.freeze({ label: "Delete table", testId: "table-delete", align: null }),
+] as const);
 
 interface ScheduledFrame {
   id: number;
@@ -54,10 +80,12 @@ type Alignment = Exclude<TableAlign, null>;
 
 interface TableMenuControlPublication {
   identity: symbol;
+  revision: number;
   retired: boolean;
   mount: symbol;
   geometry: TableMenuGeometry;
   authority: TableMenuAuthority;
+  editor: HTMLElement;
   view: EditorView;
   container: HTMLElement;
   session: CollabSession;
@@ -72,10 +100,15 @@ interface TableMenuControlPublication {
   controls: Set<TableMenuControl>;
   controlOrder: TableMenuControl[];
   mouseDownObserved: boolean;
+  keyboardObserved: boolean;
+  keyboardClaimed: boolean;
+  successorRequested: boolean;
+  requestSuccessor: () => void;
   root: HTMLDivElement | null;
   bindRoot: (element: HTMLDivElement | null) => void;
   domSnapshot: TableMenuDomSnapshot | null;
   domMonitor: TableMenuDomMonitor | null;
+  keyboardRuntime: TableMenuKeyboardRuntime | null;
 }
 
 interface TableMenuControl {
@@ -151,7 +184,552 @@ interface TableMenuControlSet {
   controls: TableMenuControls;
 }
 
+interface TableMenuKeyboardAction {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly controlIdentity: symbol;
+  readonly index: number;
+}
+
+interface TableMenuKeyboardEntry {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly control: TableMenuControl;
+  readonly index: number;
+  readonly element: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly action: TableMenuKeyboardAction;
+}
+
+interface TableMenuKeyboardPublication {
+  readonly identity: symbol;
+  readonly controlPublication: TableMenuControlPublication;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly root: HTMLDivElement;
+  readonly editor: HTMLElement;
+  readonly view: EditorView;
+  readonly container: HTMLElement;
+  readonly session: CollabSession;
+  readonly actions: EditorActions;
+  readonly format: FormatState;
+  readonly tablePos: number;
+  readonly tableAlign: TableAlign;
+  readonly canEdit: boolean;
+  readonly activeSurface: CollabSession["activeSurface"];
+  readonly entries: readonly TableMenuKeyboardEntry[];
+  readonly snapshot: TableMenuDomSnapshot;
+}
+
+interface TableMenuNativeKeyProof {
+  readonly identity: symbol;
+  readonly publication: TableMenuKeyboardPublication;
+  readonly entry: TableMenuKeyboardEntry;
+  readonly action: TableMenuKeyboardAction;
+  readonly event: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly destination: TableMenuKeyboardEntry;
+  readonly trusted: true;
+  readonly ctrlKey: false;
+  readonly metaKey: false;
+  readonly altKey: false;
+  readonly shiftKey: false;
+  readonly repeat: false;
+  readonly composing: false;
+  readonly propagationStopped: () => boolean;
+  crossed: boolean;
+}
+
+interface TableMenuReactEventMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly stopPropagation: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+  readonly persist: (...args: never[]) => unknown;
+}
+
+interface TableMenuReactKeyProof {
+  readonly event: object;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly key: string;
+  readonly eventPhase: number;
+  readonly methods: TableMenuReactEventMethods;
+  readonly composing: false | null;
+}
+
+interface TableMenuTerminalKeyProof {
+  readonly native: TableMenuNativeKeyProof;
+  readonly reactCapture: TableMenuReactKeyProof;
+  readonly reactBubble: TableMenuReactKeyProof;
+}
+
+interface TableMenuKeyboardRuntime {
+  readonly publication: TableMenuKeyboardPublication;
+  readonly publish: () => boolean;
+  readonly release: () => void;
+  readonly captureRoot: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly captureControl: (
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly bubbleControl: (
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly bubbleRoot: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+}
+
+type TableMenuIntrinsicGetter<T> = {
+  readonly read: (target: object) => T;
+  readonly isCurrent: () => boolean;
+};
+
+type TableMenuIntrinsicMethod<Args extends readonly unknown[], Result> = {
+  readonly call: (target: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+};
+
+interface TableMenuKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly eventPrototype: object;
+  readonly keyboardPrototype: object;
+  readonly documentPrototype: object;
+  readonly htmlElementPrototype: object;
+  readonly eventType: TableMenuIntrinsicGetter<string>;
+  readonly eventTarget: TableMenuIntrinsicGetter<EventTarget | null>;
+  readonly eventCurrentTarget: TableMenuIntrinsicGetter<EventTarget | null>;
+  readonly eventPhase: TableMenuIntrinsicGetter<number>;
+  readonly eventBubbles: TableMenuIntrinsicGetter<boolean>;
+  readonly eventCancelable: TableMenuIntrinsicGetter<boolean>;
+  readonly eventDefaultPrevented: TableMenuIntrinsicGetter<boolean>;
+  readonly eventCancelBubble: TableMenuIntrinsicGetter<boolean>;
+  readonly eventPath: TableMenuIntrinsicMethod<readonly [], EventTarget[]>;
+  readonly eventPreventDefault: TableMenuIntrinsicMethod<readonly [], void>;
+  readonly eventStopPropagation: TableMenuIntrinsicMethod<readonly [], void>;
+  readonly eventStopImmediatePropagation: TableMenuIntrinsicMethod<readonly [], void>;
+  readonly eventView: TableMenuIntrinsicGetter<Window | null>;
+  readonly keyboardKey: TableMenuIntrinsicGetter<string>;
+  readonly keyboardCtrl: TableMenuIntrinsicGetter<boolean>;
+  readonly keyboardMeta: TableMenuIntrinsicGetter<boolean>;
+  readonly keyboardAlt: TableMenuIntrinsicGetter<boolean>;
+  readonly keyboardShift: TableMenuIntrinsicGetter<boolean>;
+  readonly keyboardRepeat: TableMenuIntrinsicGetter<boolean>;
+  readonly keyboardComposing: TableMenuIntrinsicGetter<boolean>;
+  readonly activeElement: TableMenuIntrinsicGetter<Element | null>;
+  readonly focus: TableMenuIntrinsicMethod<readonly [FocusOptions?], void>;
+  readonly addEventListener: TableMenuIntrinsicMethod<
+    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
+    void
+  >;
+  readonly removeEventListener: TableMenuIntrinsicMethod<
+    readonly [string, EventListener, (boolean | EventListenerOptions)?],
+    void
+  >;
+  readonly addWindowEventListener: TableMenuIntrinsicMethod<
+    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
+    void
+  >;
+  readonly removeWindowEventListener: TableMenuIntrinsicMethod<
+    readonly [string, EventListener, (boolean | EventListenerOptions)?],
+    void
+  >;
+  readonly isTrusted: {
+    readonly matches: (event: object) => boolean;
+    readonly read: (event: object) => boolean;
+    readonly isCurrent: () => boolean;
+  };
+  readonly defineProperty: typeof Reflect.defineProperty;
+  readonly apply: typeof Reflect.apply;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly isCurrent: () => boolean;
+}
+
 const ROOT_REPLAY_REF = Symbol("table-menu-root-ref");
+const TABLE_MENU_MISSING = Symbol("table-menu-missing");
+
+function tableMenuDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current
+    && current.configurable === expected.configurable
+    && current.enumerable === expected.enumerable
+    && current.writable === expected.writable
+    && current.value === expected.value
+    && current.get === expected.get
+    && current.set === expected.set
+  );
+}
+
+function captureTableMenuKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+): TableMenuKeyboardAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const defineProperty = ownerWindow.Reflect.defineProperty;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const authorities: Array<{ readonly isCurrent: () => boolean }> = [];
+  const prototypeLinks: Array<readonly [object, object | null]> = [];
+  const linkedPrototypes = new Set<object>();
+  const capturePrototypeChain = (prototype: object) => {
+    let current: object | null = prototype;
+    while (current && !linkedPrototypes.has(current)) {
+      linkedPrototypes.add(current);
+      const parent = getPrototypeOf(current) as object | null;
+      prototypeLinks.push(Object.freeze([current, parent] as const));
+      current = parent;
+    }
+  };
+  capturePrototypeChain(keyboardPrototype);
+  capturePrototypeChain(eventPrototype);
+  capturePrototypeChain(documentPrototype);
+  capturePrototypeChain(htmlElementPrototype);
+  capturePrototypeChain(ownerWindow.EventTarget.prototype);
+
+  const captureGetter = <T,>(
+    prototype: object,
+    property: PropertyKey,
+  ): TableMenuIntrinsicGetter<T> | null => {
+    let current: object | null = prototype;
+    while (current) {
+      const descriptor = getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        if (typeof descriptor.get !== "function") return null;
+        const owner = current;
+        const expected = Object.freeze({ ...descriptor });
+        const getter = descriptor.get;
+        const authority = Object.freeze({
+          read: (target: object) => apply(getter, target, []) as T,
+          isCurrent: () =>
+            tableMenuDescriptorsMatch(
+              getOwnPropertyDescriptor(owner, property),
+              expected,
+            ),
+        });
+        authorities.push(authority);
+        return authority;
+      }
+      current = getPrototypeOf(current) as object | null;
+    }
+    return null;
+  };
+
+  const captureMethod = <Args extends readonly unknown[], Result>(
+    prototype: object,
+    property: PropertyKey,
+  ): TableMenuIntrinsicMethod<Args, Result> | null => {
+    let current: object | null = prototype;
+    while (current) {
+      const descriptor = getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        if (typeof descriptor.value !== "function") return null;
+        const owner = current;
+        const expected = Object.freeze({ ...descriptor });
+        const method = descriptor.value as (...args: Args) => Result;
+        const authority = Object.freeze({
+          call: (target: object, ...args: Args) =>
+            apply(method, target, args) as Result,
+          isCurrent: () =>
+            tableMenuDescriptorsMatch(
+              getOwnPropertyDescriptor(owner, property),
+              expected,
+            ),
+        });
+        authorities.push(authority);
+        return authority;
+      }
+      current = getPrototypeOf(current) as object | null;
+    }
+    return null;
+  };
+
+  const captureCallableProperty = <Args extends readonly unknown[], Result>(
+    target: object,
+    property: PropertyKey,
+  ): TableMenuIntrinsicMethod<Args, Result> | null => {
+    let current: object | null = target;
+    while (current) {
+      const descriptor = getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        const method = typeof descriptor.value === "function"
+          ? descriptor.value
+          : typeof descriptor.get === "function"
+            ? apply(descriptor.get, target, [])
+            : null;
+        if (typeof method !== "function") return null;
+        const owner = current;
+        const expected = Object.freeze({ ...descriptor });
+        const authority = Object.freeze({
+          call: (receiver: object, ...args: Args) =>
+            apply(method as (...values: Args) => Result, receiver, args) as Result,
+          isCurrent: () => {
+            const currentDescriptor = getOwnPropertyDescriptor(owner, property);
+            if (!tableMenuDescriptorsMatch(currentDescriptor, expected)) return false;
+            return typeof expected.get !== "function"
+              || apply(expected.get, target, []) === method;
+          },
+        });
+        authorities.push(authority);
+        return authority;
+      }
+      current = getPrototypeOf(current) as object | null;
+    }
+    return null;
+  };
+
+  const eventType = captureGetter<string>(eventPrototype, "type");
+  const eventTarget = captureGetter<EventTarget | null>(eventPrototype, "target");
+  const eventCurrentTarget = captureGetter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = captureGetter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = captureGetter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = captureGetter<boolean>(eventPrototype, "cancelable");
+  const eventDefaultPrevented = captureGetter<boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const eventCancelBubble = captureGetter<boolean>(
+    eventPrototype,
+    "cancelBubble",
+  );
+  const eventPath = captureMethod<readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const eventPreventDefault = captureMethod<readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const eventStopPropagation = captureMethod<readonly [], void>(
+    eventPrototype,
+    "stopPropagation",
+  );
+  const eventStopImmediatePropagation = captureMethod<readonly [], void>(
+    eventPrototype,
+    "stopImmediatePropagation",
+  );
+  const eventView = captureGetter<Window | null>(
+    ownerWindow.UIEvent.prototype,
+    "view",
+  );
+  const keyboardKey = captureGetter<string>(keyboardPrototype, "key");
+  const keyboardCtrl = captureGetter<boolean>(keyboardPrototype, "ctrlKey");
+  const keyboardMeta = captureGetter<boolean>(keyboardPrototype, "metaKey");
+  const keyboardAlt = captureGetter<boolean>(keyboardPrototype, "altKey");
+  const keyboardShift = captureGetter<boolean>(keyboardPrototype, "shiftKey");
+  const keyboardRepeat = captureGetter<boolean>(keyboardPrototype, "repeat");
+  const keyboardComposing = captureGetter<boolean>(
+    keyboardPrototype,
+    "isComposing",
+  );
+  const activeElement = captureGetter<Element | null>(
+    documentPrototype,
+    "activeElement",
+  );
+  const focus = captureMethod<readonly [FocusOptions?], void>(
+    htmlElementPrototype,
+    "focus",
+  );
+  const addEventListener = captureMethod<
+    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
+    void
+  >(ownerWindow.EventTarget.prototype, "addEventListener");
+  const removeEventListener = captureMethod<
+    readonly [string, EventListener, (boolean | EventListenerOptions)?],
+    void
+  >(ownerWindow.EventTarget.prototype, "removeEventListener");
+  const addWindowEventListener = captureCallableProperty<
+    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
+    void
+  >(ownerWindow, "addEventListener");
+  const removeWindowEventListener = captureCallableProperty<
+    readonly [string, EventListener, (boolean | EventListenerOptions)?],
+    void
+  >(ownerWindow, "removeEventListener");
+
+  let trustProbe: KeyboardEvent;
+  try {
+    trustProbe = new ownerWindow.KeyboardEvent("table-menu-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trustDescriptor = getOwnPropertyDescriptor(trustProbe, "isTrusted");
+  if (
+    !trustDescriptor
+    || trustDescriptor.configurable !== false
+    || typeof trustDescriptor.get !== "function"
+    || trustDescriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expectedTrustDescriptor = Object.freeze({ ...trustDescriptor });
+  const isTrusted = Object.freeze({
+    matches: (event: object) =>
+      tableMenuDescriptorsMatch(
+        getOwnPropertyDescriptor(event, "isTrusted"),
+        expectedTrustDescriptor,
+      ),
+    read: (event: object) =>
+      apply(trustDescriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      tableMenuDescriptorsMatch(
+        getOwnPropertyDescriptor(trustProbe, "isTrusted"),
+        expectedTrustDescriptor,
+      ),
+  });
+
+  if (
+    !eventType
+    || !eventTarget
+    || !eventCurrentTarget
+    || !eventPhase
+    || !eventBubbles
+    || !eventCancelable
+    || !eventDefaultPrevented
+    || !eventCancelBubble
+    || !eventPath
+    || !eventPreventDefault
+    || !eventStopPropagation
+    || !eventStopImmediatePropagation
+    || !eventView
+    || !keyboardKey
+    || !keyboardCtrl
+    || !keyboardMeta
+    || !keyboardAlt
+    || !keyboardShift
+    || !keyboardRepeat
+    || !keyboardComposing
+    || !activeElement
+    || !focus
+    || !addEventListener
+    || !removeEventListener
+    || !addWindowEventListener
+    || !removeWindowEventListener
+  ) {
+    return null;
+  }
+
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+    && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+    && ownerWindow.Reflect.apply === apply
+    && ownerWindow.Reflect.defineProperty === defineProperty
+    && ownerWindow.Event.prototype === eventPrototype
+    && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
+    && ownerWindow.Document.prototype === documentPrototype
+    && ownerWindow.HTMLElement.prototype === htmlElementPrototype
+    && prototypeLinks.every(
+      ([prototype, parent]) => getPrototypeOf(prototype) === parent,
+    )
+    && isTrusted.isCurrent()
+    && authorities.every((authority) => authority.isCurrent());
+
+  return Object.freeze({
+    ownerWindow,
+    eventPrototype,
+    keyboardPrototype,
+    documentPrototype,
+    htmlElementPrototype,
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventStopPropagation,
+    eventStopImmediatePropagation,
+    eventView,
+    keyboardKey,
+    keyboardCtrl,
+    keyboardMeta,
+    keyboardAlt,
+    keyboardShift,
+    keyboardRepeat,
+    keyboardComposing,
+    activeElement,
+    focus,
+    addEventListener,
+    removeEventListener,
+    addWindowEventListener,
+    removeWindowEventListener,
+    isTrusted,
+    defineProperty,
+    apply,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    isCurrent,
+  });
+}
+
+function tableMenuEventPath(
+  ownerDocument: Document,
+  ownerWindow: Window,
+  target: Node,
+) {
+  const path: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    path.push(current);
+    current = current.parentNode;
+  }
+  if (path.at(-1) !== ownerDocument) return null;
+  path.push(ownerWindow);
+  return Object.freeze(path);
+}
+
+function tableMenuPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+  ownerDocument: Document,
+) {
+  const actualWindow = actual.at(-1);
+  const expectedWindow = expected.at(-1);
+  return actual.length === expected.length
+    && tableMenuIsOwnerWindow(actualWindow, ownerDocument, expectedWindow)
+    && actual.slice(0, -1).every((target, index) => target === expected[index]);
+}
+
+function tableMenuIsOwnerWindow(
+  candidate: unknown,
+  ownerDocument: Document,
+  expected: unknown,
+) {
+  return candidate === expected
+    || (
+      typeof candidate === "object"
+      && candidate !== null
+      && "document" in candidate
+      && candidate.document === ownerDocument
+      && "window" in candidate
+      && candidate.window === candidate
+    );
+}
+
+function tableMenuDestination(key: string, current: number, count: number) {
+  if (count !== TABLE_MENU_CONTROL_DEFINITIONS.length || current < 0 || current >= count) {
+    return null;
+  }
+  if (key === "ArrowRight" || key === "ArrowDown") return (current + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (current - 1 + count) % count;
+  if (key === "Home") return current === 0 ? null : 0;
+  if (key === "End") return current === count - 1 ? null : count - 1;
+  return null;
+}
 
 function elementAttributes(node: Node) {
   if (node.nodeType !== Node.ELEMENT_NODE) return null;
@@ -273,6 +851,761 @@ function publicationMatchesSnapshot(
     && matchesDomSnapshot(snapshot, exactContent);
 }
 
+function tableMenuPublicationFactsAreCurrent(
+  publication: TableMenuKeyboardPublication,
+  coordinator: TableMenuControlCoordinator,
+) {
+  const controlPublication = publication.controlPublication;
+  const authority = controlPublication.authority;
+  return coordinator.ownsPublication(controlPublication)
+    && !controlPublication.retired
+    && controlPublication.keyboardRuntime?.publication === publication
+    && authority.active
+    && controlPublication.geometry.authority === authority
+    && controlPublication.editor === publication.editor
+    && authority.editor === publication.editor
+    && authority.view === publication.view
+    && authority.container === publication.container
+    && authority.session === publication.session
+    && authority.format === publication.format
+    && authority.canEdit === publication.canEdit
+    && authority.activeSurface === publication.activeSurface
+    && controlPublication.view === publication.view
+    && controlPublication.container === publication.container
+    && controlPublication.session === publication.session
+    && controlPublication.actions === publication.actions
+    && controlPublication.format === publication.format
+    && controlPublication.tablePos === publication.tablePos
+    && controlPublication.tableAlign === publication.tableAlign
+    && controlPublication.canEdit === publication.canEdit
+    && controlPublication.activeSurface === publication.activeSurface
+    && publication.session.canEdit === publication.canEdit
+    && publication.session.activeSurface === publication.activeSurface
+    && publication.format.tablePos === publication.tablePos
+    && publication.format.tableAlign === publication.tableAlign
+    && publication.tablePos >= 0
+    && publication.canEdit
+    && publication.activeSurface === "rich"
+    && publication.ownerDocument.defaultView === publication.ownerWindow
+    && publication.root.ownerDocument === publication.ownerDocument
+    && publication.editor.ownerDocument === publication.ownerDocument
+    && publication.container.ownerDocument === publication.ownerDocument
+    && publication.view.dom === publication.editor
+    && !publication.view.isDestroyed
+    && !isTableMenuHidden(publication.view.state);
+}
+
+function tableMenuDomIsExact(publication: TableMenuKeyboardPublication) {
+  const controlPublication = publication.controlPublication;
+  const root = publication.root;
+  const snapshot = publication.snapshot;
+  if (
+    controlPublication.domSnapshot !== snapshot
+    || !controlPublication.domMonitor?.check()
+    || !publicationMatchesSnapshot(controlPublication, snapshot, true)
+    || snapshot.root !== root
+    || snapshot.buttons.length !== TABLE_MENU_CONTROL_DEFINITIONS.length
+    || publication.entries.length !== TABLE_MENU_CONTROL_DEFINITIONS.length
+    || controlPublication.controlOrder.length !== TABLE_MENU_CONTROL_DEFINITIONS.length
+    || controlPublication.controls.size !== TABLE_MENU_CONTROL_DEFINITIONS.length
+    || !Object.isFrozen(publication)
+    || !Object.isFrozen(publication.entries)
+    || !Object.isFrozen(controlPublication.controlOrder)
+    || root.ownerDocument !== publication.ownerDocument
+    || !root.isConnected
+    || root.tagName !== "DIV"
+    || root.className !== TABLE_MENU_CLASS
+    || root.getAttribute("role") !== "toolbar"
+    || root.getAttribute("aria-label") !== TABLE_MENU_LABEL
+    || root.getAttribute("aria-orientation") !== "horizontal"
+    || root.dataset.testid !== "table-menu"
+  ) {
+    return false;
+  }
+  return publication.entries.every((entry, index) => {
+    const definition = TABLE_MENU_CONTROL_DEFINITIONS[index];
+    const expectedPressed = definition.align
+      ? String(publication.tableAlign === definition.align)
+      : null;
+    const button = entry.element;
+    return entry.index === index
+      && entry.publicationIdentity === publication.identity
+      && entry.control === controlPublication.controlOrder[index]
+      && entry.control.publication === controlPublication
+      && entry.control.identity === entry.action.controlIdentity
+      && entry.action.publicationIdentity === publication.identity
+      && entry.action.index === index
+      && snapshot.buttons[index] === button
+      && entry.control.element === button
+      && button.ownerDocument === publication.ownerDocument
+      && button.isConnected
+      && button.tagName === "BUTTON"
+      && button.parentElement !== null
+      && root.contains(button)
+      && button.type === "button"
+      && button.getAttribute("type") === "button"
+      && !button.disabled
+      && !button.matches(":disabled")
+      && button.getAttribute("aria-label") === definition.label
+      && button.getAttribute("aria-pressed") === expectedPressed
+      && button.dataset.testid === definition.testId
+      && button.className === cn(
+        TABLE_MENU_BUTTON_CLASS,
+        expectedPressed === "true" && TABLE_MENU_ACTIVE_BUTTON_CLASS,
+      );
+  });
+}
+
+function readTableMenuReactKeyProof(
+  event: object,
+  native: TableMenuNativeKeyProof,
+  currentTarget: Element,
+  authority: TableMenuKeyboardAuthority,
+  expectedMethods?: TableMenuReactEventMethods,
+): TableMenuReactKeyProof | null {
+  const ownValue = (property: PropertyKey) => {
+    const descriptor = authority.getOwnPropertyDescriptor(event, property);
+    return descriptor && "value" in descriptor
+      ? descriptor.value
+      : TABLE_MENU_MISSING;
+  };
+  const methodValue = (property: PropertyKey) => {
+    let current: object | null = event;
+    while (current) {
+      const descriptor = authority.getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        return "value" in descriptor && typeof descriptor.value === "function"
+          ? descriptor.value
+          : TABLE_MENU_MISSING;
+      }
+      current = authority.getPrototypeOf(current) as object | null;
+    }
+    return TABLE_MENU_MISSING;
+  };
+  const preventDefault = methodValue("preventDefault");
+  const stopPropagation = methodValue("stopPropagation");
+  const isDefaultPrevented = methodValue("isDefaultPrevented");
+  const isPropagationStopped = methodValue("isPropagationStopped");
+  const persist = methodValue("persist");
+  if (
+    typeof preventDefault !== "function"
+    || typeof stopPropagation !== "function"
+    || typeof isDefaultPrevented !== "function"
+    || typeof isPropagationStopped !== "function"
+    || typeof persist !== "function"
+  ) {
+    return null;
+  }
+  const methods = Object.freeze({
+    preventDefault: preventDefault as (...args: never[]) => unknown,
+    stopPropagation: stopPropagation as (...args: never[]) => unknown,
+    isDefaultPrevented: isDefaultPrevented as (...args: never[]) => unknown,
+    isPropagationStopped: isPropagationStopped as (...args: never[]) => unknown,
+    persist: persist as (...args: never[]) => unknown,
+  });
+  const composing = ownValue("isComposing");
+  const eventPhase = ownValue("eventPhase");
+  if (
+    ownValue("_reactName") !== "onKeyDown"
+    || ownValue("type") !== "keydown"
+    || ownValue("nativeEvent") !== native.event
+    || ownValue("target") !== native.target
+    || ownValue("currentTarget") !== currentTarget
+    || ownValue("bubbles") !== true
+    || ownValue("cancelable") !== true
+    || ownValue("defaultPrevented") !== false
+    || ownValue("isTrusted") !== true
+    || ownValue("key") !== native.key
+    || ownValue("ctrlKey") !== false
+    || ownValue("metaKey") !== false
+    || ownValue("altKey") !== false
+    || ownValue("shiftKey") !== false
+    || ownValue("repeat") !== false
+    || (composing !== TABLE_MENU_MISSING && composing !== false)
+    || ownValue("view") !== native.publication.ownerWindow
+    || eventPhase !== authority.eventPhase.read(native.event)
+    || authority.apply(isDefaultPrevented, event, []) !== false
+    || authority.apply(isPropagationStopped, event, []) !== false
+    || (expectedMethods && (
+      methods.preventDefault !== expectedMethods.preventDefault
+      || methods.stopPropagation !== expectedMethods.stopPropagation
+      || methods.isDefaultPrevented !== expectedMethods.isDefaultPrevented
+      || methods.isPropagationStopped !== expectedMethods.isPropagationStopped
+      || methods.persist !== expectedMethods.persist
+    ))
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    event,
+    nativeEvent: native.event,
+    target: native.target,
+    key: native.key,
+    eventPhase: eventPhase as number,
+    methods,
+    composing: composing === false ? false : null,
+  });
+}
+
+function tableMenuReactProofIsCurrent(
+  proof: TableMenuReactKeyProof,
+  native: TableMenuNativeKeyProof,
+  authority: TableMenuKeyboardAuthority,
+) {
+  const event = proof.event;
+  const ownValue = (property: PropertyKey) => {
+    const descriptor = authority.getOwnPropertyDescriptor(event, property);
+    return descriptor && "value" in descriptor
+      ? descriptor.value
+      : TABLE_MENU_MISSING;
+  };
+  const methodValue = (property: PropertyKey) => {
+    let current: object | null = event;
+    while (current) {
+      const descriptor = authority.getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        return "value" in descriptor && typeof descriptor.value === "function"
+          ? descriptor.value
+          : TABLE_MENU_MISSING;
+      }
+      current = authority.getPrototypeOf(current) as object | null;
+    }
+    return TABLE_MENU_MISSING;
+  };
+  return ownValue("_reactName") === "onKeyDown"
+    && ownValue("type") === "keydown"
+    && ownValue("nativeEvent") === native.event
+    && ownValue("target") === native.target
+    && ownValue("currentTarget") === null
+    && ownValue("bubbles") === true
+    && ownValue("cancelable") === true
+    && ownValue("defaultPrevented") === false
+    && ownValue("isTrusted") === true
+    && ownValue("key") === native.key
+    && ownValue("ctrlKey") === false
+    && ownValue("metaKey") === false
+    && ownValue("altKey") === false
+    && ownValue("shiftKey") === false
+    && ownValue("repeat") === false
+    && (
+      proof.composing === null
+        ? ownValue("isComposing") === TABLE_MENU_MISSING
+        : ownValue("isComposing") === false
+    )
+    && ownValue("view") === native.publication.ownerWindow
+    && ownValue("eventPhase") === proof.eventPhase
+    && methodValue("preventDefault") === proof.methods.preventDefault
+    && methodValue("stopPropagation") === proof.methods.stopPropagation
+    && methodValue("isDefaultPrevented") === proof.methods.isDefaultPrevented
+    && methodValue("isPropagationStopped") === proof.methods.isPropagationStopped
+    && methodValue("persist") === proof.methods.persist
+    && authority.apply(proof.methods.isDefaultPrevented, event, []) === false
+    && authority.apply(proof.methods.isPropagationStopped, event, []) === false;
+}
+
+function createTableMenuKeyboardRuntime(
+  controlPublication: TableMenuControlPublication,
+  snapshot: TableMenuDomSnapshot,
+  coordinator: TableMenuControlCoordinator,
+): TableMenuKeyboardRuntime | null {
+  const root = snapshot.root;
+  const ownerDocument = root.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView as (Window & typeof globalThis) | null;
+  if (
+    !ownerWindow
+    || controlPublication.root !== root
+    || controlPublication.editor.ownerDocument !== ownerDocument
+    || controlPublication.container.ownerDocument !== ownerDocument
+  ) {
+    return null;
+  }
+  const authority = captureTableMenuKeyboardAuthority(ownerWindow);
+  if (!authority || !authority.isCurrent()) return null;
+  const windowAuthority = ownerWindow;
+  const keyboardAuthority = authority;
+  const identity = Symbol("table-menu-keyboard-publication");
+  const entries: TableMenuKeyboardEntry[] = [];
+  for (let index = 0; index < controlPublication.controlOrder.length; index++) {
+    const control = controlPublication.controlOrder[index];
+    const element = control?.element;
+    const path = element
+      ? tableMenuEventPath(ownerDocument, ownerWindow, element)
+      : null;
+    if (!control || !element || !path || snapshot.buttons[index] !== element) return null;
+    entries.push(Object.freeze({
+      identity: Symbol(`table-menu-keyboard-entry-${index}`),
+      publicationIdentity: identity,
+      control,
+      index,
+      element,
+      path,
+      action: Object.freeze({
+        identity: Symbol(`table-menu-keyboard-action-${index}`),
+        publicationIdentity: identity,
+        controlIdentity: control.identity,
+        index,
+      }),
+    }));
+  }
+  const publication: TableMenuKeyboardPublication = Object.freeze({
+    identity,
+    controlPublication,
+    ownerDocument,
+    ownerWindow,
+    root,
+    editor: controlPublication.editor,
+    view: controlPublication.view,
+    container: controlPublication.container,
+    session: controlPublication.session,
+    actions: controlPublication.actions,
+    format: controlPublication.format,
+    tablePos: controlPublication.tablePos,
+    tableAlign: controlPublication.tableAlign,
+    canEdit: controlPublication.canEdit,
+    activeSurface: controlPublication.activeSurface,
+    entries: Object.freeze(entries),
+    snapshot,
+  });
+
+  let released = false;
+  let published = false;
+  let nativeProof: TableMenuNativeKeyProof | null = null;
+  let reactRootCapture: TableMenuReactKeyProof | null = null;
+  let reactControlCapture: TableMenuReactKeyProof | null = null;
+  let reactControlBubble: TableMenuReactKeyProof | null = null;
+  let reactRootBubble: TableMenuReactKeyProof | null = null;
+  let boundaryProof: TableMenuNativeKeyProof | null = null;
+  let terminal: TableMenuTerminalKeyProof | null = null;
+  let windowTerminal: TableMenuTerminalKeyProof | null = null;
+  let windowListenerActive = false;
+
+  const publicationIsCurrent = () => {
+    if (
+      authority.isCurrent()
+      && tableMenuPublicationFactsAreCurrent(publication, coordinator)
+      && tableMenuDomIsExact(publication)
+    ) {
+      return true;
+    }
+    if (coordinator.ownsPublication(controlPublication)) {
+      coordinator.invalidate(controlPublication);
+    }
+    return false;
+  };
+  const nativeStillMatches = (proof: TableMenuNativeKeyProof) =>
+    authority.isCurrent()
+    && authority.getPrototypeOf(proof.event) === authority.keyboardPrototype
+    && authority.isTrusted.matches(proof.event)
+    && authority.isTrusted.read(proof.event) === proof.trusted
+    && authority.eventType.read(proof.event) === "keydown"
+    && authority.eventTarget.read(proof.event) === proof.target
+    && authority.eventView.read(proof.event) === publication.ownerWindow
+    && authority.eventBubbles.read(proof.event)
+    && authority.eventCancelable.read(proof.event)
+    && authority.keyboardKey.read(proof.event) === proof.key
+    && authority.keyboardCtrl.read(proof.event) === proof.ctrlKey
+    && authority.keyboardMeta.read(proof.event) === proof.metaKey
+    && authority.keyboardAlt.read(proof.event) === proof.altKey
+    && authority.keyboardShift.read(proof.event) === proof.shiftKey
+    && authority.keyboardRepeat.read(proof.event) === proof.repeat
+    && authority.keyboardComposing.read(proof.event) === proof.composing;
+  const entryForControl = (control: TableMenuControl) =>
+    publication.entries.find((entry) => entry.control === control) ?? null;
+  const removeWindowListener = () => {
+    if (!windowListenerActive) return;
+    authority.removeWindowEventListener.call(
+      publication.ownerWindow,
+      "keydown",
+      onNativeWindowBubble,
+    );
+    windowListenerActive = false;
+  };
+  const clearProof = (proof?: TableMenuNativeKeyProof) => {
+    if (proof && nativeProof !== proof) return;
+    removeWindowListener();
+    nativeProof = null;
+    reactRootCapture = null;
+    reactControlCapture = null;
+    reactControlBubble = null;
+    reactRootBubble = null;
+    boundaryProof = null;
+    terminal = null;
+    windowTerminal = null;
+  };
+  const rejectObservedEvent = (proof: TableMenuNativeKeyProof) => {
+    if (nativeProof !== proof) return;
+    clearProof(proof);
+    coordinator.invalidate(controlPublication);
+  };
+  const exactNativeEvent = (
+    event: Event,
+    entry: TableMenuKeyboardEntry,
+  ): TableMenuNativeKeyProof | null => {
+    if (
+      !publicationIsCurrent()
+      || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+      || !authority.isTrusted.matches(event)
+      || authority.isTrusted.read(event) !== true
+    ) {
+      return null;
+    }
+    const key = authority.keyboardKey.read(event);
+    const destinationIndex = tableMenuDestination(
+      key,
+      entry.index,
+      publication.entries.length,
+    );
+    const destination = destinationIndex === null
+      ? null
+      : publication.entries[destinationIndex];
+    if (
+      !destination
+      || authority.eventCurrentTarget.read(event) !== ownerDocument
+      || authority.eventPhase.read(event) !== ownerWindow.Event.CAPTURING_PHASE
+      || !authority.eventBubbles.read(event)
+      || !authority.eventCancelable.read(event)
+      || authority.eventDefaultPrevented.read(event)
+      || authority.eventCancelBubble.read(event)
+      || authority.eventView.read(event) !== ownerWindow
+      || authority.keyboardCtrl.read(event)
+      || authority.keyboardMeta.read(event)
+      || authority.keyboardAlt.read(event)
+      || authority.keyboardShift.read(event)
+      || authority.keyboardRepeat.read(event)
+      || authority.keyboardComposing.read(event)
+      || authority.activeElement.read(ownerDocument) !== entry.element
+      || entry.publicationIdentity !== publication.identity
+      || entry.action.publicationIdentity !== publication.identity
+      || entry.action.controlIdentity !== entry.control.identity
+      || destination.publicationIdentity !== publication.identity
+      || !tableMenuPathMatches(
+        entry.path,
+        authority.eventPath.call(event),
+        ownerDocument,
+      )
+      || authority.getOwnPropertyDescriptor(event, "stopPropagation")
+      || authority.getOwnPropertyDescriptor(event, "stopImmediatePropagation")
+    ) {
+      return null;
+    }
+    let propagationStopped = false;
+    if (
+      !authority.defineProperty(event, "stopPropagation", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: () => {
+          propagationStopped = true;
+          authority.eventStopPropagation.call(event);
+        },
+      })
+      || !authority.defineProperty(event, "stopImmediatePropagation", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: () => {
+          propagationStopped = true;
+          authority.eventStopImmediatePropagation.call(event);
+        },
+      })
+    ) {
+      return null;
+    }
+    return {
+      identity: Symbol("table-menu-native-key"),
+      publication,
+      entry,
+      action: entry.action,
+      event: event as KeyboardEvent,
+      target: entry.element,
+      path: entry.path,
+      key,
+      destination,
+      trusted: true,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+      composing: false,
+      propagationStopped: () => propagationStopped,
+      crossed: false,
+    };
+  };
+  const beginNativeEvent = (event: Event) => {
+    if (
+      released
+      || authority.eventType.read(event) !== "keydown"
+      || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    ) {
+      return;
+    }
+    const target = authority.eventTarget.read(event);
+    const entry = publication.entries.find(({ element }) => element === target);
+    if (!entry) return;
+    if (nativeProof) {
+      if (nativeProof.event === event) return;
+      nativeProof.crossed = true;
+      coordinator.attemptNativeEvent(event);
+      return;
+    }
+    if (!coordinator.attemptNativeEvent(event)) return;
+    const proof = exactNativeEvent(event, entry);
+    if (!proof) return;
+    controlPublication.keyboardObserved = true;
+    nativeProof = proof;
+    queueMicrotask(() => {
+      if (nativeProof === proof && !terminal) rejectObservedEvent(proof);
+    });
+  };
+  const readReact = (
+    event: object,
+    currentTarget: Element,
+    expectedMethods?: TableMenuReactEventMethods,
+  ) => nativeProof
+    ? readTableMenuReactKeyProof(
+      event,
+      nativeProof,
+      currentTarget,
+      authority,
+      expectedMethods,
+    )
+    : null;
+  const captureRoot = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (
+      !event
+      || typeof event !== "object"
+      || !nativeProof
+      || reactRootCapture
+      || !coordinator.attemptReactEvent(event)
+    ) {
+      return;
+    }
+    reactRootCapture = readReact(event, publication.root);
+  };
+  const captureControl = (
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const entry = entryForControl(control);
+    if (
+      !nativeProof
+      || !entry
+      || nativeProof.entry !== entry
+      || !reactRootCapture
+      || reactControlCapture
+      || event !== reactRootCapture.event
+    ) {
+      return;
+    }
+    reactControlCapture = readReact(
+      event,
+      entry.element,
+      reactRootCapture.methods,
+    );
+  };
+  const bubbleControl = (
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const entry = entryForControl(control);
+    if (
+      !event
+      || typeof event !== "object"
+      || !nativeProof
+      || !entry
+      || nativeProof.entry !== entry
+      || !reactControlCapture
+      || reactControlBubble
+      || !coordinator.attemptReactEvent(event)
+    ) {
+      return;
+    }
+    reactControlBubble = readReact(
+      event,
+      entry.element,
+      reactControlCapture.methods,
+    );
+  };
+  const bubbleRoot = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (
+      !nativeProof
+      || !reactControlBubble
+      || reactRootBubble
+      || event !== reactControlBubble.event
+    ) {
+      return;
+    }
+    reactRootBubble = readReact(
+      event,
+      publication.root,
+      reactControlBubble.methods,
+    );
+  };
+  const authenticateTerminal = (proof: TableMenuNativeKeyProof) => {
+    if (
+      proof.crossed
+      || boundaryProof !== proof
+      || !reactRootCapture
+      || reactControlCapture?.event !== reactRootCapture.event
+      || !reactControlBubble
+      || reactRootBubble?.event !== reactControlBubble.event
+      || !nativeStillMatches(proof)
+      || !publicationIsCurrent()
+      || authority.activeElement.read(ownerDocument) !== proof.target
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      native: proof,
+      reactCapture: reactRootCapture,
+      reactBubble: reactControlBubble,
+    });
+  };
+  const settleTerminal = (proof: TableMenuTerminalKeyProof) => {
+    const native = proof.native;
+    if (
+      terminal !== proof
+      || windowTerminal !== proof
+      || nativeProof !== native
+      || released
+      || native.crossed
+      || native.propagationStopped()
+      || authority.eventCurrentTarget.read(native.event) !== null
+      || authority.eventPhase.read(native.event) !== ownerWindow.Event.NONE
+      || authority.eventDefaultPrevented.read(native.event)
+      || authority.eventCancelBubble.read(native.event)
+      || authority.activeElement.read(ownerDocument) !== native.target
+      || !nativeStillMatches(native)
+      || !tableMenuReactProofIsCurrent(proof.reactCapture, native, authority)
+      || !tableMenuReactProofIsCurrent(proof.reactBubble, native, authority)
+      || !publicationIsCurrent()
+      || !coordinator.claimKeyboard(
+        publication,
+        native.entry,
+        native.action,
+        proof.reactCapture.event,
+        proof.reactBubble.event,
+        native.event,
+      )
+    ) {
+      rejectObservedEvent(native);
+      return;
+    }
+    clearProof(native);
+    authority.eventPreventDefault.call(native.event);
+    authority.focus.call(native.destination.element, { preventScroll: true });
+    coordinator.requestSuccessor(controlPublication);
+  };
+  function onNativeWindowBubble(event: Event) {
+    if (
+      !terminal
+      || terminal.native.event !== event
+      || !tableMenuIsOwnerWindow(
+        keyboardAuthority.eventCurrentTarget.read(event),
+        ownerDocument,
+        windowAuthority,
+      )
+      || keyboardAuthority.eventPhase.read(event) !== windowAuthority.Event.BUBBLING_PHASE
+      || keyboardAuthority.eventDefaultPrevented.read(event)
+      || keyboardAuthority.eventCancelBubble.read(event)
+      || terminal.native.propagationStopped()
+      || !tableMenuPathMatches(
+        terminal.native.path,
+        keyboardAuthority.eventPath.call(event),
+        ownerDocument,
+      )
+    ) {
+      return;
+    }
+    windowTerminal = terminal;
+  }
+  const onNativeCapture = (event: Event) => {
+    beginNativeEvent(event);
+  };
+  const onNativeBubble = (event: Event) => {
+    const proof = nativeProof;
+    if (
+      !proof
+      || proof.event !== event
+      || authority.eventCurrentTarget.read(event) !== ownerDocument
+      || authority.eventPhase.read(event) !== ownerWindow.Event.BUBBLING_PHASE
+      || authority.eventDefaultPrevented.read(event)
+      || authority.eventCancelBubble.read(event)
+    ) {
+      return;
+    }
+    const authenticated = authenticateTerminal(proof);
+    if (!authenticated || proof.path.at(-1) !== ownerWindow) return;
+    terminal = authenticated;
+    windowListenerActive = true;
+    authority.addWindowEventListener.call(
+      ownerWindow,
+      "keydown",
+      onNativeWindowBubble,
+    );
+    queueMicrotask(() => {
+      if (terminal === authenticated) settleTerminal(authenticated);
+    });
+  };
+  const boundaryListeners = publication.entries.map((entry) => {
+    const listener = (event: Event) => {
+      if (
+        nativeProof?.event === event
+        && nativeProof.entry === entry
+        && authority.eventCurrentTarget.read(event) === entry.element
+        && (
+          authority.eventPhase.read(event) === ownerWindow.Event.CAPTURING_PHASE
+          || authority.eventPhase.read(event) === ownerWindow.Event.AT_TARGET
+        )
+        && publicationIsCurrent()
+        && authority.activeElement.read(ownerDocument) === entry.element
+      ) {
+        boundaryProof = nativeProof;
+      }
+    };
+    return Object.freeze({ entry, listener });
+  });
+  const publish = () => {
+    if (
+      published
+      || released
+      || !authority.isCurrent()
+      || !tableMenuDomIsExact(publication)
+    ) {
+      return false;
+    }
+    published = true;
+    authority.addEventListener.call(ownerDocument, "keydown", onNativeCapture, true);
+    authority.addEventListener.call(ownerDocument, "keydown", onNativeBubble);
+    for (const { entry, listener } of boundaryListeners) {
+      authority.addEventListener.call(entry.element, "keydown", listener, true);
+    }
+    return true;
+  };
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearProof();
+    if (!published) return;
+    authority.removeEventListener.call(ownerDocument, "keydown", onNativeCapture, true);
+    authority.removeEventListener.call(ownerDocument, "keydown", onNativeBubble);
+    for (const { entry, listener } of boundaryListeners) {
+      authority.removeEventListener.call(entry.element, "keydown", listener, true);
+    }
+  };
+
+  return Object.freeze({
+    publication,
+    publish,
+    release,
+    captureRoot,
+    captureControl,
+    bubbleControl,
+    bubbleRoot,
+  });
+}
+
 function publicationsMatchForReplay(
   source: TableMenuControlPublication,
   successor: TableMenuControlPublication,
@@ -284,6 +1617,7 @@ function publicationsMatchForReplay(
     && successor.geometry.top === source.geometry.top
     && successor.geometry.width === source.geometry.width
     && successor.authority === source.authority
+    && successor.editor === source.editor
     && successor.view === source.view
     && successor.container === source.container
     && successor.session === source.session
@@ -295,6 +1629,7 @@ function publicationsMatchForReplay(
     && successor.tableAlign === source.tableAlign
     && successor.canEdit === source.canEdit
     && successor.activeSurface === source.activeSurface
+    && successor.requestSuccessor === source.requestSuccessor
     && !successor.view.isDestroyed
     && !isTableMenuHidden(successor.view.state);
 }
@@ -305,6 +1640,13 @@ class TableMenuControlCoordinator {
   #elementOwners = new WeakMap<HTMLButtonElement, TableMenuElementOwner>();
   #replayCandidate: TableMenuReplayCandidate | null = null;
   #replay: TableMenuReplay | null = null;
+  #claimedPublications = new WeakSet<TableMenuKeyboardPublication>();
+  #claimedEntries = new WeakSet<TableMenuKeyboardEntry>();
+  #claimedActions = new WeakSet<TableMenuKeyboardAction>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedNativeEvents = new WeakSet<Event>();
+  #attemptedReactEvents = new WeakSet<object>();
+  #attemptedNativeEvents = new WeakSet<Event>();
 
   publish(publication: TableMenuControlPublication) {
     if (publication.retired || (this.#current && this.#current !== publication)) return false;
@@ -314,6 +1656,7 @@ class TableMenuControlCoordinator {
       !snapshot
       || (replay && (
         replay.source.mouseDownObserved
+        || replay.source.keyboardObserved
         || replay.source.controlOrder.some((control) => control.claimed)
         || !replay.source.domMonitor?.check()
         || !publicationsMatchForReplay(replay.source, publication)
@@ -336,6 +1679,17 @@ class TableMenuControlCoordinator {
     publication.domSnapshot = snapshot;
     this.#current = publication;
     this.#container = publication.container;
+    const keyboardRuntime = createTableMenuKeyboardRuntime(
+      publication,
+      snapshot,
+      this,
+    );
+    publication.keyboardRuntime = keyboardRuntime;
+    const keyboardPublished = keyboardRuntime?.publish();
+    if (!keyboardPublished) {
+      this.#retire(publication, false);
+      return false;
+    }
     return true;
   }
 
@@ -351,6 +1705,7 @@ class TableMenuControlCoordinator {
       this.#current
       || !publication.retired
       || publication.mouseDownObserved
+      || publication.keyboardObserved
       || publication.controlOrder.some((control) => control.claimed)
       || !publication.domMonitor?.check()
       || publication.view.isDestroyed
@@ -366,6 +1721,98 @@ class TableMenuControlCoordinator {
 
   ownsPublication(publication: TableMenuControlPublication) {
     return this.#current === publication && this.#container === publication.container;
+  }
+
+  attemptNativeEvent(event: Event) {
+    if (this.#attemptedNativeEvents.has(event)) return false;
+    this.#attemptedNativeEvents.add(event);
+    return true;
+  }
+
+  attemptReactEvent(event: object) {
+    if (this.#attemptedReactEvents.has(event)) return false;
+    this.#attemptedReactEvents.add(event);
+    return true;
+  }
+
+  claimKeyboard(
+    publication: TableMenuKeyboardPublication,
+    entry: TableMenuKeyboardEntry,
+    action: TableMenuKeyboardAction,
+    captureEvent: object,
+    bubbleEvent: object,
+    nativeEvent: Event,
+  ) {
+    const controlPublication = publication.controlPublication;
+    if (
+      !this.ownsPublication(controlPublication)
+      || controlPublication.keyboardRuntime?.publication !== publication
+      || publication.entries[entry.index] !== entry
+      || entry.action !== action
+      || entry.publicationIdentity !== publication.identity
+      || action.publicationIdentity !== publication.identity
+      || this.#claimedPublications.has(publication)
+      || this.#claimedEntries.has(entry)
+      || this.#claimedActions.has(action)
+      || this.#claimedReactEvents.has(captureEvent)
+      || this.#claimedReactEvents.has(bubbleEvent)
+      || this.#claimedNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedEntries.add(entry);
+    this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(captureEvent);
+    this.#claimedReactEvents.add(bubbleEvent);
+    this.#claimedNativeEvents.add(nativeEvent);
+    controlPublication.keyboardClaimed = true;
+    return true;
+  }
+
+  requestSuccessor(publication: TableMenuControlPublication) {
+    if (publication.successorRequested) return;
+    publication.successorRequested = true;
+    publication.requestSuccessor();
+  }
+
+  invalidate(publication: TableMenuControlPublication) {
+    if (publication.retired) {
+      this.requestSuccessor(publication);
+      return;
+    }
+    this.#retire(publication, false);
+    this.requestSuccessor(publication);
+  }
+
+  captureRootKey(
+    publication: TableMenuControlPublication,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    publication.keyboardRuntime?.captureRoot(event);
+  }
+
+  captureControlKey(
+    publication: TableMenuControlPublication,
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    publication.keyboardRuntime?.captureControl(control, event);
+  }
+
+  bubbleControlKey(
+    publication: TableMenuControlPublication,
+    control: TableMenuControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    publication.keyboardRuntime?.bubbleControl(control, event);
+  }
+
+  bubbleRootKey(
+    publication: TableMenuControlPublication,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    publication.keyboardRuntime?.bubbleRoot(event);
   }
 
   bindRoot(publication: TableMenuControlPublication, element: HTMLDivElement | null) {
@@ -472,6 +1919,8 @@ class TableMenuControlCoordinator {
       && this.#current === publication
       && snapshot
       && !publication.mouseDownObserved
+      && !publication.keyboardObserved
+      && !publication.keyboardClaimed
       && publication.controlOrder.every((control) => !control.claimed)
       && publication.domMonitor?.check()
       && publicationMatchesSnapshot(publication, snapshot, true)
@@ -488,6 +1937,8 @@ class TableMenuControlCoordinator {
       }
       : null;
     if (!this.#replayCandidate) publication.domMonitor?.disconnect();
+    publication.keyboardRuntime?.release();
+    publication.keyboardRuntime = null;
     publication.retired = true;
     publication.domSnapshot = null;
     if (this.#current === publication) {
@@ -525,6 +1976,8 @@ class TableMenuControlCoordinator {
       || this.#replay?.source === publication
     ) {
       this.#discardReplay(publication);
+      if (!publication.retired) this.#retire(publication, false);
+      this.requestSuccessor(publication);
     }
   }
 
@@ -546,6 +1999,8 @@ function createControlPublication({
   format,
   canEdit,
   activeSurface,
+  requestSuccessor,
+  revision,
 }: {
   coordinator: TableMenuControlCoordinator;
   mount: symbol;
@@ -557,7 +2012,13 @@ function createControlPublication({
   format: FormatState;
   canEdit: boolean;
   activeSurface: CollabSession["activeSurface"];
+  requestSuccessor: () => void;
+  revision: number;
 }): TableMenuControlSet {
+  const editor = geometry.authority.editor;
+  if (!editor) {
+    throw new Error("Cannot publish table controls without the current editor");
+  }
   const ownedGeometry = {
     authority: geometry.authority,
     left: geometry.left,
@@ -566,10 +2027,12 @@ function createControlPublication({
   };
   const publication: TableMenuControlPublication = {
     identity: Symbol("table-menu-control-publication"),
+    revision,
     retired: false,
     mount,
     geometry: ownedGeometry,
     authority: ownedGeometry.authority,
+    editor,
     view,
     container,
     session,
@@ -584,10 +2047,15 @@ function createControlPublication({
     controls: new Set(),
     controlOrder: [],
     mouseDownObserved: false,
+    keyboardObserved: false,
+    keyboardClaimed: false,
+    successorRequested: false,
+    requestSuccessor,
     root: null,
     bindRoot: () => undefined,
     domSnapshot: null,
     domMonitor: null,
+    keyboardRuntime: null,
   };
   publication.bindRoot = (element) => coordinator.bindRoot(publication, element);
   const control = (invoke: () => void): TableMenuControl => {
@@ -609,21 +2077,20 @@ function createControlPublication({
     return control(() => publication.alignAction.call(publication.actions, target));
   };
 
-  return {
-    publication,
-    controls: {
-      rowBefore: table("rowBefore"),
-      rowAfter: table("rowAfter"),
-      colBefore: table("colBefore"),
-      colAfter: table("colAfter"),
-      deleteRow: table("deleteRow"),
-      deleteColumn: table("deleteColumn"),
-      alignLeft: align("left"),
-      alignCenter: align("center"),
-      alignRight: align("right"),
-      deleteTable: table("deleteTable"),
-    },
-  };
+  const controls = Object.freeze({
+    rowBefore: table("rowBefore"),
+    rowAfter: table("rowAfter"),
+    colBefore: table("colBefore"),
+    colAfter: table("colAfter"),
+    deleteRow: table("deleteRow"),
+    deleteColumn: table("deleteColumn"),
+    alignLeft: align("left"),
+    alignCenter: align("center"),
+    alignRight: align("right"),
+    deleteTable: table("deleteTable"),
+  });
+  Object.freeze(publication.controlOrder);
+  return Object.freeze({ publication, controls });
 }
 
 function MenuButton({
@@ -633,6 +2100,8 @@ function MenuButton({
   buttonRef,
   onMouseDown,
   onClick,
+  onKeyDownCapture,
+  onKeyDown,
   children,
   testId,
 }: {
@@ -642,6 +2111,8 @@ function MenuButton({
   buttonRef: (element: HTMLButtonElement | null) => void;
   onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   testId?: string;
 }) {
@@ -650,9 +2121,11 @@ function MenuButton({
       <button
         ref={buttonRef}
         type="button"
-        className={cn("flex h-8 w-8 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white", active && "bg-white/20 text-white")}
+        className={cn(TABLE_MENU_BUTTON_CLASS, active && TABLE_MENU_ACTIVE_BUTTON_CLASS)}
         onMouseDown={onMouseDown}
         onClick={onClick}
+        onKeyDownCapture={onKeyDownCapture}
+        onKeyDown={onKeyDown}
         aria-label={label}
         aria-pressed={active}
         data-testid={testId}
@@ -729,7 +2202,10 @@ function TableMenuControls({
 }) {
   const [controlMount] = useState(() => Symbol("table-menu-controls"));
   const [controlCoordinator] = useState(() => new TableMenuControlCoordinator());
-  const [, setPublicationRevision] = useState(0);
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   const controlSet = createControlPublication({
     coordinator: controlCoordinator,
     mount: controlMount,
@@ -741,6 +2217,8 @@ function TableMenuControls({
     format,
     canEdit,
     activeSurface,
+    requestSuccessor: requestPublicationSuccessor,
+    revision: publicationRevision,
   });
   const { publication, controls } = controlSet;
 
@@ -831,47 +2309,60 @@ function TableMenuControls({
     control.claimed = true;
     control.invoke();
   };
+  const onKeyDownCapture = (control: TableMenuControl) => (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    controlCoordinator.captureControlKey(publication, control, event);
+  };
+  const onKeyDown = (control: TableMenuControl) => (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    controlCoordinator.bubbleControlKey(publication, control, event);
+  };
 
   return (
     <div
       ref={(element) => publication.bindRoot(element)}
-      className="touch-target scrollbar-thin absolute z-30 flex items-center gap-0.5 overflow-x-auto rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
+      className={TABLE_MENU_CLASS}
       style={{ left, top, width }}
       data-testid="table-menu"
       role="toolbar"
-      aria-label="Table"
+      aria-label={TABLE_MENU_LABEL}
+      aria-orientation="horizontal"
+      onKeyDownCapture={(event) => controlCoordinator.captureRootKey(publication, event)}
+      onKeyDown={(event) => controlCoordinator.bubbleRootKey(publication, event)}
     >
-      <MenuButton label="Row above" keys="Mod-Alt-↑" buttonRef={controls.rowBefore.buttonRef} onMouseDown={onMouseDown(controls.rowBefore)} onClick={onClick(controls.rowBefore)} testId="table-row-before">
+      <MenuButton label="Row above" keys="Mod-Alt-↑" buttonRef={controls.rowBefore.buttonRef} onMouseDown={onMouseDown(controls.rowBefore)} onClick={onClick(controls.rowBefore)} onKeyDownCapture={onKeyDownCapture(controls.rowBefore)} onKeyDown={onKeyDown(controls.rowBefore)} testId="table-row-before">
         <ArrowUpToLine size={16} />
       </MenuButton>
-      <MenuButton label="Row below" keys="Mod-Alt-↓" buttonRef={controls.rowAfter.buttonRef} onMouseDown={onMouseDown(controls.rowAfter)} onClick={onClick(controls.rowAfter)} testId="table-row-after">
+      <MenuButton label="Row below" keys="Mod-Alt-↓" buttonRef={controls.rowAfter.buttonRef} onMouseDown={onMouseDown(controls.rowAfter)} onClick={onClick(controls.rowAfter)} onKeyDownCapture={onKeyDownCapture(controls.rowAfter)} onKeyDown={onKeyDown(controls.rowAfter)} testId="table-row-after">
         <ArrowDownToLine size={16} />
       </MenuButton>
-      <MenuButton label="Column left" keys="Mod-Alt-←" buttonRef={controls.colBefore.buttonRef} onMouseDown={onMouseDown(controls.colBefore)} onClick={onClick(controls.colBefore)} testId="table-col-before">
+      <MenuButton label="Column left" keys="Mod-Alt-←" buttonRef={controls.colBefore.buttonRef} onMouseDown={onMouseDown(controls.colBefore)} onClick={onClick(controls.colBefore)} onKeyDownCapture={onKeyDownCapture(controls.colBefore)} onKeyDown={onKeyDown(controls.colBefore)} testId="table-col-before">
         <ArrowLeftToLine size={16} />
       </MenuButton>
-      <MenuButton label="Column right" keys="Mod-Alt-→" buttonRef={controls.colAfter.buttonRef} onMouseDown={onMouseDown(controls.colAfter)} onClick={onClick(controls.colAfter)} testId="table-col-after">
+      <MenuButton label="Column right" keys="Mod-Alt-→" buttonRef={controls.colAfter.buttonRef} onMouseDown={onMouseDown(controls.colAfter)} onClick={onClick(controls.colAfter)} onKeyDownCapture={onKeyDownCapture(controls.colAfter)} onKeyDown={onKeyDown(controls.colAfter)} testId="table-col-after">
         <ArrowRightToLine size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete row" keys="Mod-Alt-⌫" buttonRef={controls.deleteRow.buttonRef} onMouseDown={onMouseDown(controls.deleteRow)} onClick={onClick(controls.deleteRow)} testId="table-delete-row">
+      <MenuButton label="Delete row" keys="Mod-Alt-⌫" buttonRef={controls.deleteRow.buttonRef} onMouseDown={onMouseDown(controls.deleteRow)} onClick={onClick(controls.deleteRow)} onKeyDownCapture={onKeyDownCapture(controls.deleteRow)} onKeyDown={onKeyDown(controls.deleteRow)} testId="table-delete-row">
         <TableRowsSplit size={16} />
       </MenuButton>
-      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" buttonRef={controls.deleteColumn.buttonRef} onMouseDown={onMouseDown(controls.deleteColumn)} onClick={onClick(controls.deleteColumn)} testId="table-delete-col">
+      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" buttonRef={controls.deleteColumn.buttonRef} onMouseDown={onMouseDown(controls.deleteColumn)} onClick={onClick(controls.deleteColumn)} onKeyDownCapture={onKeyDownCapture(controls.deleteColumn)} onKeyDown={onKeyDown(controls.deleteColumn)} testId="table-delete-col">
         <TableColumnsSplit size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Align left" active={format.tableAlign === "left"} buttonRef={controls.alignLeft.buttonRef} onMouseDown={onMouseDown(controls.alignLeft)} onClick={onClick(controls.alignLeft)} testId="table-align-left">
+      <MenuButton label="Align left" active={format.tableAlign === "left"} buttonRef={controls.alignLeft.buttonRef} onMouseDown={onMouseDown(controls.alignLeft)} onClick={onClick(controls.alignLeft)} onKeyDownCapture={onKeyDownCapture(controls.alignLeft)} onKeyDown={onKeyDown(controls.alignLeft)} testId="table-align-left">
         <TextAlignStart size={16} />
       </MenuButton>
-      <MenuButton label="Align center" active={format.tableAlign === "center"} buttonRef={controls.alignCenter.buttonRef} onMouseDown={onMouseDown(controls.alignCenter)} onClick={onClick(controls.alignCenter)} testId="table-align-center">
+      <MenuButton label="Align center" active={format.tableAlign === "center"} buttonRef={controls.alignCenter.buttonRef} onMouseDown={onMouseDown(controls.alignCenter)} onClick={onClick(controls.alignCenter)} onKeyDownCapture={onKeyDownCapture(controls.alignCenter)} onKeyDown={onKeyDown(controls.alignCenter)} testId="table-align-center">
         <TextAlignCenter size={16} />
       </MenuButton>
-      <MenuButton label="Align right" active={format.tableAlign === "right"} buttonRef={controls.alignRight.buttonRef} onMouseDown={onMouseDown(controls.alignRight)} onClick={onClick(controls.alignRight)} testId="table-align-right">
+      <MenuButton label="Align right" active={format.tableAlign === "right"} buttonRef={controls.alignRight.buttonRef} onMouseDown={onMouseDown(controls.alignRight)} onClick={onClick(controls.alignRight)} onKeyDownCapture={onKeyDownCapture(controls.alignRight)} onKeyDown={onKeyDown(controls.alignRight)} testId="table-align-right">
         <TextAlignEnd size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete table" buttonRef={controls.deleteTable.buttonRef} onMouseDown={onMouseDown(controls.deleteTable)} onClick={onClick(controls.deleteTable)} testId="table-delete">
+      <MenuButton label="Delete table" buttonRef={controls.deleteTable.buttonRef} onMouseDown={onMouseDown(controls.deleteTable)} onClick={onClick(controls.deleteTable)} onKeyDownCapture={onKeyDownCapture(controls.deleteTable)} onKeyDown={onKeyDown(controls.deleteTable)} testId="table-delete">
         <Trash2 size={16} />
       </MenuButton>
     </div>
