@@ -1814,7 +1814,7 @@ describe("status bar directional issues authority", () => {
     const current = callbacks();
     const props = statusProps(current);
     const view = await renderStatus(props);
-    const trigger = openIssues();
+    openIssues();
     const content = screen.getByTestId("status-issues-content");
     const list = content.querySelector("ul");
     const first = list?.firstElementChild;
