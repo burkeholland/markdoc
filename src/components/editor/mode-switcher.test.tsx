@@ -244,7 +244,7 @@ function mutationRecordWith(
   overrides: Partial<MutationRecord>,
 ): MutationRecord {
   return new Proxy(record, {
-    get(target, property, receiver) {
+    get(target, property) {
       return Object.prototype.hasOwnProperty.call(overrides, property)
         ? Reflect.get(overrides, property, overrides)
         : Reflect.get(target, property, target);
