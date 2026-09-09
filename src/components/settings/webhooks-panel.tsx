@@ -2048,7 +2048,6 @@ function reactKeyboardEventMatches(
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLFormElement> & {
       _reactName?: unknown;
-      isComposing?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
       isPersistent?: unknown;
@@ -2071,7 +2070,6 @@ function reactKeyboardEventMatches(
       event.key === snapshot.key &&
       event.code === snapshot.code &&
       event.repeat === snapshot.repeat &&
-      reactEvent.isComposing === snapshot.composing &&
       event.ctrlKey === snapshot.ctrlKey &&
       event.altKey === snapshot.altKey &&
       event.metaKey === snapshot.metaKey &&

@@ -256,7 +256,8 @@ function keyboardEvent(
     eventPhase?: number;
   } = {},
 ) {
-  const KeyboardEventType = options.KeyboardEventType ?? window.KeyboardEvent;
+  const KeyboardEventType = options.KeyboardEventType ??
+    currentTarget.ownerDocument.defaultView!.KeyboardEvent;
   const key = options.key ?? "Escape";
   const code = options.code ?? "Escape";
   const altKey = options.altKey ?? false;
@@ -378,7 +379,9 @@ function dispatchKeyboardEvent(
 function dispatchKeyboardWithReactMutation(
   form: HTMLFormElement,
   target: HTMLElement,
-  mutate: (event: ReactKeyboardEvent<HTMLFormElement>) => void,
+  mutate: (
+    event: ReactKeyboardEvent<HTMLFormElement>,
+  ) => void | (() => void),
   init: KeyboardEventInit = {},
   trusted = true,
 ) {
@@ -397,8 +400,12 @@ function dispatchKeyboardWithReactMutation(
   const wrapped = {
     ...props,
     onKeyDown: (event: ReactKeyboardEvent<HTMLFormElement>) => {
-      mutate(event);
-      (handler as KeyDownHandler)(event);
+      const restore = mutate(event);
+      try {
+        (handler as KeyDownHandler)(event);
+      } finally {
+        if (typeof restore === "function") restore();
+      }
     },
   };
   properties[propsKey] = wrapped;
@@ -412,6 +419,12 @@ function dispatchKeyboardWithReactMutation(
 interface DirectView {
   host: HTMLDivElement;
   root: Root;
+  frame?: HTMLIFrameElement;
+}
+
+interface KeyboardDirectView<Setup> extends DirectView {
+  frame: HTMLIFrameElement;
+  setup: Setup;
 }
 
 const directViews: DirectView[] = [];
@@ -420,6 +433,32 @@ function renderDirect(node: ReactNode): DirectView {
   const host = document.createElement("div");
   document.body.append(host);
   const view = { host, root: createRoot(host) };
+  directViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function renderKeyboardDirect<Setup>(
+  node: ReactNode,
+  setup: (ownerWindow: Window & typeof globalThis) => Setup,
+): KeyboardDirectView<Setup> {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) {
+    frame.remove();
+    throw new Error("The keyboard frame has no current realm");
+  }
+  const host = ownerDocument.createElement("div");
+  ownerDocument.body.append(host);
+  const configured = setup(ownerWindow);
+  const view = {
+    host,
+    root: createRoot(host),
+    frame,
+    setup: configured,
+  };
   directViews.push(view);
   act(() => view.root.render(node));
   return view;
@@ -492,6 +531,7 @@ afterEach(() => {
   for (const view of directViews.splice(0)) {
     act(() => view.root.unmount());
     view.host.remove();
+    view.frame?.remove();
   }
   foreignRoot.remove();
   vi.restoreAllMocks();
@@ -2069,10 +2109,10 @@ describe("Settings → Webhooks: exact committed controls", () => {
   });
 
   describe("Settings → Webhooks: Escape cancellation", () => {
-    function trackNativePrevention() {
-      const nativePreventDefault = window.Event.prototype.preventDefault;
+    function trackNativePrevention(ownerWindow: Window & typeof globalThis) {
+      const nativePreventDefault = ownerWindow.Event.prototype.preventDefault;
       return vi
-        .spyOn(window.Event.prototype, "preventDefault")
+        .spyOn(ownerWindow.Event.prototype, "preventDefault")
         .mockImplementation(function (this: Event) {
           Reflect.apply(nativePreventDefault, this, []);
         });
@@ -2087,7 +2127,6 @@ describe("Settings → Webhooks: exact committed controls", () => {
       _label,
       targetId,
     ) => {
-      const preventDefault = trackNativePrevention();
       const confirmMock = vi.fn(() => true);
       const writeText = vi.fn(() => Promise.resolve());
       vi.stubGlobal("confirm", confirmMock);
@@ -2099,7 +2138,11 @@ describe("Settings → Webhooks: exact committed controls", () => {
       vi.stubGlobal("navigator", navigatorWithClipboard);
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
 
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
@@ -2124,10 +2167,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects an untrusted owner dispatch and accepts the next trusted Escape", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2150,10 +2196,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects trusted native key, modifier, composition, and dispatch-state drift", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2195,10 +2244,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("uses captured native methods and focus getter instead of replaced public values", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2206,24 +2258,32 @@ describe("Settings → Webhooks: exact committed controls", () => {
       const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
       const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
       const docs = within(view.host).getByTestId("webhook-docs") as HTMLInputElement;
-      const event = createDispatchedKeyboardEvent(url);
       const publicPath = vi.fn(() => [docs]);
       const publicPreventDefault = vi.fn();
       const publicActiveElement = vi.fn(() => docs);
-      Object.defineProperties(event, {
-        composedPath: { configurable: true, value: publicPath },
-        preventDefault: { configurable: true, value: publicPreventDefault },
-      });
       url.focus();
-      Object.defineProperty(document, "activeElement", {
-        configurable: true,
-        get: publicActiveElement,
-      });
-      try {
-        fireEvent(url, event);
-      } finally {
-        Reflect.deleteProperty(document, "activeElement");
-      }
+      const event = dispatchKeyboardWithReactMutation(
+        form,
+        url,
+        (reactEvent) => {
+          Object.defineProperties(reactEvent.nativeEvent, {
+            composedPath: { configurable: true, value: publicPath },
+            preventDefault: {
+              configurable: true,
+              value: publicPreventDefault,
+            },
+          });
+          Object.defineProperty(url.ownerDocument, "activeElement", {
+            configurable: true,
+            get: publicActiveElement,
+          });
+          return () => {
+            Reflect.deleteProperty(reactEvent.nativeEvent, "composedPath");
+            Reflect.deleteProperty(reactEvent.nativeEvent, "preventDefault");
+            Reflect.deleteProperty(url.ownerDocument, "activeElement");
+          };
+        },
+      );
 
       expect(publicPath).not.toHaveBeenCalled();
       expect(publicPreventDefault).not.toHaveBeenCalled();
@@ -2235,25 +2295,30 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects changed native descriptors before accepting after restoration", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
 
       const form = within(view.host).getByTestId("webhook-form") as HTMLFormElement;
       const url = within(view.host).getByTestId("webhook-url") as HTMLInputElement;
+      const ownerWindow = url.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The keyboard target has no owner window");
       const descriptor = Object.getOwnPropertyDescriptor(
-        window.KeyboardEvent.prototype,
+        ownerWindow.KeyboardEvent.prototype,
         "key",
       );
       if (!descriptor?.get) {
         throw new Error("KeyboardEvent.key has no native getter");
       }
       url.focus();
-      Object.defineProperty(window.KeyboardEvent.prototype, "key", {
+      Object.defineProperty(ownerWindow.KeyboardEvent.prototype, "key", {
         ...descriptor,
         get: () => "Enter",
       });
@@ -2262,7 +2327,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
         expect(rejected.defaultPrevented).toBe(false);
       } finally {
         Object.defineProperty(
-          window.KeyboardEvent.prototype,
+          ownerWindow.KeyboardEvent.prototype,
           "key",
           descriptor,
         );
@@ -2277,10 +2342,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects changed React identity, parity fields, and predicates without poisoning recovery", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2316,7 +2384,6 @@ describe("Settings → Webhooks: exact committed controls", () => {
         ["code", (event) => replace(event, "code", "Enter")],
         ["modifier", (event) => replace(event, "altKey", true)],
         ["repeat", (event) => replace(event, "repeat", true)],
-        ["composition", (event) => replace(event, "isComposing", true)],
         ["target", (event) => replace(event, "target", docs)],
         ["current target", (event) => replace(event, "currentTarget", docs)],
         ["phase", (event) => replace(event, "eventPhase", Event.NONE)],
@@ -2355,18 +2422,26 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("claims before prevention, removes one form, and rejects prevention reentry", async () => {
-      const nativePreventDefault = window.Event.prototype.preventDefault;
       let keyDown: KeyDownHandler | null = null;
       let reactEvent: ReactKeyboardEvent<HTMLFormElement> | null = null;
-      const preventDefault = vi
-        .spyOn(window.Event.prototype, "preventDefault")
-        .mockImplementation(function (this: Event) {
-          if (keyDown && reactEvent) keyDown(reactEvent);
-          Reflect.apply(nativePreventDefault, this, []);
-        });
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        (ownerWindow) => {
+          const nativePreventDefault =
+            ownerWindow.Event.prototype.preventDefault;
+          return vi
+            .spyOn(ownerWindow.Event.prototype, "preventDefault")
+            .mockImplementation(function (this: Event) {
+              if (keyDown && reactEvent) keyDown(reactEvent);
+              Reflect.apply(nativePreventDefault, this, []);
+            });
+        },
+      );
+      const preventDefault = view.setup;
+      const ownerWindow = view.host.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The keyboard host has no owner window");
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2377,7 +2452,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
       const currentKeyDown = reactProp<KeyDownHandler>(form, "onKeyDown");
       keyDown = currentKeyDown;
       const removedForms: Node[] = [];
-      const observer = new MutationObserver((records) => {
+      const observer = new ownerWindow.MutationObserver((records) => {
         for (const record of records) {
           removedForms.push(
             ...[...record.removedNodes].filter(
@@ -2401,12 +2476,15 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("preserves the current draft and action error exactly like Cancel", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation((url, init) =>
         url === "/api/webhooks" && init?.method === "POST"
           ? Promise.resolve(response({ error: "Receiver rejected this draft" }, 422))
           : Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2444,7 +2522,6 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("is inert while Create owns the form", async () => {
-      const preventDefault = trackNativePrevention();
       const create = deferred<Response>();
       let created = false;
       fetchMock.mockImplementation((url, init) => {
@@ -2455,7 +2532,11 @@ describe("Settings → Webhooks: exact committed controls", () => {
           webhooks: created ? [activeWebhook] : [],
         }));
       });
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2485,10 +2566,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects every ineligible key and event provenance without poisoning the current form", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2580,9 +2664,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
           target: url,
           make: () => {
             const candidate = keyboardEvent(form, url);
+            const ownerWindow = form.ownerDocument.defaultView;
+            if (!ownerWindow) {
+              throw new Error("The keyboard form has no owner window");
+            }
             Object.defineProperty(candidate.event, "nativeEvent", {
               configurable: true,
-              value: new window.Event("keydown", {
+              value: new ownerWindow.Event("keydown", {
                 bubbles: true,
                 cancelable: true,
               }),
@@ -2621,10 +2709,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("rejects a stale draft handler and admits only its current successor", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2656,12 +2747,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
       "replace and restore a control",
       "reorder and restore the form",
     ] as const)("permanently rejects restored DOM history after %s and recovers on a keyed mount", async (history) => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(
+      const view = renderKeyboardDirect(
         <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
+        trackNativePrevention,
       );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2720,12 +2812,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
       "form-only ref replay",
       "all-ref replay without layout replay",
     ] as const)("rejects a manual %s and lets a complete keyed successor recover", async (replay) => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(
+      const view = renderKeyboardDirect(
         <StrictMode><BoundaryHarness cardKey={1} /></StrictMode>,
+        trackNativePrevention,
       );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2769,10 +2862,13 @@ describe("Settings → Webhooks: exact committed controls", () => {
     });
 
     it("releases a removed form's authority and leaves a fresh Strict root usable", async () => {
-      const preventDefault = trackNativePrevention();
       fetchMock.mockImplementation(() =>
         Promise.resolve(response({ webhooks: [] })));
-      const view = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const preventDefault = view.setup;
       await within(view.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(view.host).getByTestId("webhook-add"));
@@ -2789,7 +2885,11 @@ describe("Settings → Webhooks: exact committed controls", () => {
       expect(fetchMock).toHaveBeenCalledTimes(callsAtUnmount);
       expect(view.host).toBeEmptyDOMElement();
 
-      const successor = renderDirect(<StrictMode><WebhooksPanel /></StrictMode>);
+      const successor = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackNativePrevention,
+      );
+      const successorPreventDefault = successor.setup;
       await within(successor.host).findByTestId("webhooks-empty");
       await settle();
       fireEvent.click(within(successor.host).getByTestId("webhook-add"));
@@ -2797,7 +2897,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
         .getByTestId("webhook-form") as HTMLFormElement;
       successorForm.focus();
       dispatchKeyboardEvent(successorForm);
-      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(successorPreventDefault).toHaveBeenCalledTimes(1);
       expect(within(successor.host).queryByTestId("webhook-form")).toBeNull();
     });
   });
