@@ -341,6 +341,10 @@ type FormKeyboardGetterAuthority<Field extends string> = Readonly<{
   isCurrent: () => boolean;
 }>;
 
+type FormKeyboardViewIdentity =
+  | ReactKeyboardEvent<HTMLFormElement>["view"]
+  | Window;
+
 type FormKeyboardMethodAuthority<Method> = Readonly<{
   method: Method;
   isCurrent: () => boolean;
@@ -395,7 +399,7 @@ type FormKeyboardEventSnapshot = Readonly<{
   altKey: boolean;
   metaKey: boolean;
   shiftKey: boolean;
-  view: Window;
+  view: FormKeyboardViewIdentity;
   trusted: true;
 }>;
 
