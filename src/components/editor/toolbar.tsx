@@ -45,7 +45,7 @@ type HeadingLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 interface HeadingDisclosure {
   readonly mount: object;
   readonly destination: HeadingLevel;
-  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly keyboard: ToolbarKeyboardIntrinsics;
 }
 
 interface HeadingState {
@@ -172,6 +172,7 @@ interface ToolbarReplay {
   readonly source: ToolbarPublication;
   readonly dom: ToolbarDomSnapshot;
   readonly placement: ToolbarPlacement;
+  readonly keyboard: ToolbarKeyboardIntrinsics;
   readonly unchanged: () => boolean;
   readonly release: () => void;
 }
@@ -186,10 +187,16 @@ interface RefReplay {
 interface ToolbarTrustedAuthority {
   readonly read: (event: object) => boolean;
   readonly matches: (event: object) => boolean;
-  readonly isCurrent: () => boolean;
+}
+
+interface ToolbarDescriptorEvidence {
+  readonly owner: object;
+  readonly property: PropertyKey;
+  readonly descriptor: PropertyDescriptor;
 }
 
 interface ToolbarKeyboardIntrinsics {
+  readonly ownerWindow: Window & typeof globalThis;
   readonly keyboardPrototype: object;
   readonly objectPrototype: object;
   readonly bubblingPhase: number;
@@ -222,6 +229,17 @@ interface ToolbarKeyboardIntrinsics {
   readonly view: (this: UIEvent) => Window | null;
   readonly activeElement: (this: Document) => Element | null;
   readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly isCurrent: () => boolean;
+  readonly methodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly ownDataMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
 }
 
 interface ToolbarKeyboardSnapshot {
@@ -287,31 +305,67 @@ function isTransientToolbarAttribute(node: Node, name: string | null): boolean {
 }
 
 function toolbarGetter<This extends object, Value>(
-  ownerWindow: Window & typeof globalThis,
-  prototype: object,
-  property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  owner: object,
+  property: PropertyKey,
+  evidence: ToolbarDescriptorEvidence[],
 ): ((this: This) => Value) | null {
-  const getter = ownerWindow.Object.getOwnPropertyDescriptor(prototype, property)?.get;
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  const getter = descriptor?.get;
+  if (typeof getter === "function" && descriptor) {
+    evidence.push(Object.freeze({
+      owner,
+      property,
+      descriptor: Object.freeze({ ...descriptor }),
+    }));
+  }
   return typeof getter === "function" ? (getter as (this: This) => Value) : null;
+}
+
+function toolbarMethod<Method extends (...args: never[]) => unknown>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  owner: object,
+  property: PropertyKey,
+  evidence: ToolbarDescriptorEvidence[],
+): Method | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  const method = descriptor?.value;
+  if (typeof method === "function" && descriptor) {
+    evidence.push(Object.freeze({
+      owner,
+      property,
+      descriptor: Object.freeze({ ...descriptor }),
+    }));
+  }
+  return typeof method === "function" ? (method as Method) : null;
 }
 
 function toolbarDescriptorsMatch(
   current: PropertyDescriptor | undefined,
   expected: PropertyDescriptor,
 ): boolean {
-  return Boolean(
-    current &&
-      current.configurable === expected.configurable &&
-      current.enumerable === expected.enumerable &&
-      current.get === expected.get &&
-      current.set === expected.set &&
-      current.value === expected.value &&
-      current.writable === expected.writable
-  );
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value &&
+        current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
 }
 
 function captureToolbarTrustedAuthority(
   ownerWindow: Window & typeof globalThis,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  evidence: ToolbarDescriptorEvidence[],
 ): ToolbarTrustedAuthority | null {
   let probe: globalThis.KeyboardEvent;
   try {
@@ -319,8 +373,6 @@ function captureToolbarTrustedAuthority(
   } catch {
     return null;
   }
-  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
-  const apply = ownerWindow.Reflect.apply;
   const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
   if (
     !descriptor ||
@@ -331,120 +383,204 @@ function captureToolbarTrustedAuthority(
     return null;
   }
   const expected = Object.freeze({ ...descriptor });
+  evidence.push(Object.freeze({
+    owner: probe,
+    property: "isTrusted",
+    descriptor: expected,
+  }));
   const matches = (event: object) =>
     toolbarDescriptorsMatch(getOwnPropertyDescriptor(event, "isTrusted"), expected);
   return Object.freeze({
     matches,
     read: (event: object) =>
       apply(descriptor.get as (this: object) => boolean, event, []),
-    isCurrent: () =>
-      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
-      ownerWindow.Reflect.apply === apply &&
-      matches(probe),
   });
 }
 
 function captureToolbarKeyboardIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): ToolbarKeyboardIntrinsics | null {
-  const eventPrototype = ownerWindow.Event.prototype;
-  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
-  const uiEventPrototype = ownerWindow.UIEvent.prototype;
-  const documentPrototype = ownerWindow.Document.prototype;
-  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
-  const trusted = captureToolbarTrustedAuthority(ownerWindow);
-  const type = toolbarGetter<Event, string>(ownerWindow, eventPrototype, "type");
-  const target = toolbarGetter<Event, EventTarget | null>(
+  const objectConstructor = ownerWindow.Object;
+  const reflectObject = ownerWindow.Reflect;
+  const eventConstructor = ownerWindow.Event;
+  const uiEventConstructor = ownerWindow.UIEvent;
+  const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const documentConstructor = ownerWindow.Document;
+  const htmlElementConstructor = ownerWindow.HTMLElement;
+  const objectPrototype = objectConstructor.prototype;
+  const eventPrototype = eventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const evidence: ToolbarDescriptorEvidence[] = [];
+  const apply = toolbarMethod<typeof Reflect.apply>(
+    getOwnPropertyDescriptor,
+    reflectObject,
+    "apply",
+    evidence,
+  );
+  const getPrototypeOf = toolbarMethod<typeof Object.getPrototypeOf>(
+    getOwnPropertyDescriptor,
+    objectConstructor,
+    "getPrototypeOf",
+    evidence,
+  );
+  const isPrototypeOf = toolbarMethod<typeof Object.prototype.isPrototypeOf>(
+    getOwnPropertyDescriptor,
+    objectPrototype,
+    "isPrototypeOf",
+    evidence,
+  );
+  const descriptorMethod = toolbarMethod<
+    typeof Object.getOwnPropertyDescriptor
+  >(
+    getOwnPropertyDescriptor,
+    objectConstructor,
+    "getOwnPropertyDescriptor",
+    evidence,
+  );
+  if (
+    apply !== ownerWindow.Reflect.apply ||
+    getPrototypeOf !== ownerWindow.Object.getPrototypeOf ||
+    isPrototypeOf !== ownerWindow.Object.prototype.isPrototypeOf ||
+    descriptorMethod !== getOwnPropertyDescriptor
+  ) {
+    return null;
+  }
+  const trusted = captureToolbarTrustedAuthority(
     ownerWindow,
+    getOwnPropertyDescriptor,
+    apply,
+    evidence,
+  );
+  const type = toolbarGetter<Event, string>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "type",
+    evidence,
+  );
+  const target = toolbarGetter<Event, EventTarget | null>(
+    getOwnPropertyDescriptor,
     eventPrototype,
     "target",
+    evidence,
   );
   const currentTarget = toolbarGetter<Event, EventTarget | null>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     eventPrototype,
     "currentTarget",
+    evidence,
   );
   const eventPhase = toolbarGetter<Event, number>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     eventPrototype,
     "eventPhase",
+    evidence,
   );
-  const bubbles = toolbarGetter<Event, boolean>(ownerWindow, eventPrototype, "bubbles");
+  const bubbles = toolbarGetter<Event, boolean>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "bubbles",
+    evidence,
+  );
   const cancelable = toolbarGetter<Event, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     eventPrototype,
     "cancelable",
+    evidence,
   );
   const defaultPrevented = toolbarGetter<Event, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     eventPrototype,
     "defaultPrevented",
+    evidence,
   );
   const cancelBubble = toolbarGetter<Event, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     eventPrototype,
     "cancelBubble",
+    evidence,
   );
   const key = toolbarGetter<globalThis.KeyboardEvent, string>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "key",
+    evidence,
   );
   const code = toolbarGetter<globalThis.KeyboardEvent, string>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "code",
+    evidence,
   );
   const location = toolbarGetter<globalThis.KeyboardEvent, number>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "location",
+    evidence,
   );
   const altKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "altKey",
+    evidence,
   );
   const ctrlKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "ctrlKey",
+    evidence,
   );
   const metaKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "metaKey",
+    evidence,
   );
   const shiftKey = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "shiftKey",
+    evidence,
   );
   const repeat = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "repeat",
+    evidence,
   );
   const isComposing = toolbarGetter<globalThis.KeyboardEvent, boolean>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     keyboardPrototype,
     "isComposing",
+    evidence,
   );
   const view = toolbarGetter<UIEvent, Window | null>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     uiEventPrototype,
     "view",
+    evidence,
   );
   const activeElement = toolbarGetter<Document, Element | null>(
-    ownerWindow,
+    getOwnPropertyDescriptor,
     documentPrototype,
     "activeElement",
+    evidence,
   );
-  const composedPath = eventPrototype.composedPath;
-  const focus = htmlElementPrototype.focus;
-  const apply = ownerWindow.Reflect.apply;
-  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
-  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  const composedPath = toolbarMethod<typeof Event.prototype.composedPath>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+    evidence,
+  );
+  const focus = toolbarMethod<typeof HTMLElement.prototype.focus>(
+    getOwnPropertyDescriptor,
+    htmlElementPrototype,
+    "focus",
+    evidence,
+  );
   if (
     !trusted ||
     !type ||
@@ -474,9 +610,86 @@ function captureToolbarKeyboardIntrinsics(
   ) {
     return null;
   }
+  let historyIsClean = true;
+  const ownerRealmIsCurrent = () =>
+    ownerWindow.Object === objectConstructor &&
+    ownerWindow.Reflect === reflectObject &&
+    ownerWindow.Event === eventConstructor &&
+    ownerWindow.UIEvent === uiEventConstructor &&
+    ownerWindow.KeyboardEvent === keyboardConstructor &&
+    ownerWindow.Document === documentConstructor &&
+    ownerWindow.HTMLElement === htmlElementConstructor &&
+    ownerWindow.Object.prototype === objectPrototype &&
+    eventConstructor.prototype === eventPrototype &&
+    uiEventConstructor.prototype === uiEventPrototype &&
+    keyboardConstructor.prototype === keyboardPrototype &&
+    documentConstructor.prototype === documentPrototype &&
+    htmlElementConstructor.prototype === htmlElementPrototype &&
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
+    ownerWindow.Reflect.apply === apply;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    try {
+      historyIsClean =
+        ownerRealmIsCurrent() &&
+        evidence.every(({ owner, property, descriptor }) =>
+          toolbarDescriptorsMatch(
+            getOwnPropertyDescriptor(owner, property),
+            descriptor,
+          ),
+        );
+    } catch {
+      historyIsClean = false;
+    }
+    return historyIsClean;
+  };
+  const methodMatches = (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => {
+    if (!isCurrent() || typeof value !== "function") return false;
+    try {
+      let owner: object | null = event;
+      while (owner) {
+        const descriptor = getOwnPropertyDescriptor(owner, property);
+        if (descriptor) {
+          return "value" in descriptor && descriptor.value === value;
+        }
+        owner = getPrototypeOf(owner);
+      }
+      return false;
+    } catch {
+      historyIsClean = false;
+      return false;
+    }
+  };
+  const ownDataMatches = (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => {
+    if (!isCurrent()) return false;
+    try {
+      const descriptor = getOwnPropertyDescriptor(event, property);
+      return Boolean(
+        descriptor &&
+          "value" in descriptor &&
+          descriptor.value === value,
+      );
+    } catch {
+      historyIsClean = false;
+      return false;
+    }
+  };
+  if (!isCurrent()) return null;
   return Object.freeze({
+    ownerWindow,
     keyboardPrototype,
-    objectPrototype: ownerWindow.Object.prototype,
+    objectPrototype,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
     apply,
     getPrototypeOf,
@@ -507,7 +720,64 @@ function captureToolbarKeyboardIntrinsics(
     view,
     activeElement,
     focus,
+    isCurrent,
+    methodMatches,
+    ownDataMatches,
   });
+}
+
+interface ToolbarReactMethods {
+  readonly preventDefault: HeadingReactKeyEvent["preventDefault"];
+}
+
+function captureToolbarReactMethods(
+  event: object,
+  proof: HeadingReactKeyEvent,
+  snapshot: ToolbarKeyboardSnapshot,
+  intrinsics: ToolbarKeyboardIntrinsics,
+): ToolbarReactMethods | null {
+  try {
+    const candidate = event as HeadingReactKeyEvent;
+    const isDefaultPrevented = candidate.isDefaultPrevented;
+    const isPropagationStopped = candidate.isPropagationStopped;
+    const isPersistent = proof.isPersistent;
+    const persist = candidate.persist;
+    const preventDefault = candidate.preventDefault;
+    const stopPropagation = candidate.stopPropagation;
+    if (
+      typeof isDefaultPrevented === "function" &&
+      typeof isPropagationStopped === "function" &&
+      isDefaultPrevented === isPropagationStopped &&
+      intrinsics.methodMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) &&
+      intrinsics.methodMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) &&
+      intrinsics.apply(isDefaultPrevented, event, []) ===
+        snapshot.defaultPrevented &&
+      intrinsics.apply(isPropagationStopped, event, []) ===
+        snapshot.cancelBubble &&
+      typeof isPersistent === "function" &&
+      intrinsics.methodMatches(event, "isPersistent", isPersistent) &&
+      intrinsics.apply(isPersistent, event, []) === true &&
+      typeof persist === "function" &&
+      intrinsics.methodMatches(event, "persist", persist) &&
+      typeof preventDefault === "function" &&
+      intrinsics.methodMatches(event, "preventDefault", preventDefault) &&
+      typeof stopPropagation === "function" &&
+      intrinsics.methodMatches(event, "stopPropagation", stopPropagation)
+    ) {
+      return Object.freeze({ preventDefault });
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function readToolbarKeyboardEvent(
@@ -516,13 +786,13 @@ function readToolbarKeyboardEvent(
 ): ToolbarKeyboardSnapshot | null {
   try {
     if (
+      !intrinsics.isCurrent() ||
       !intrinsics.apply(intrinsics.isPrototypeOf, intrinsics.keyboardPrototype, [event]) ||
-      !intrinsics.trusted.isCurrent() ||
       !intrinsics.trusted.matches(event)
     ) {
       return null;
     }
-    return Object.freeze({
+    const snapshot = Object.freeze({
       type: intrinsics.apply(intrinsics.event.type, event, []),
       target: intrinsics.apply(intrinsics.event.target, event, []),
       currentTarget: intrinsics.apply(intrinsics.event.currentTarget, event, []),
@@ -550,6 +820,7 @@ function readToolbarKeyboardEvent(
       isTrusted: intrinsics.trusted.read(event),
       view: intrinsics.apply(intrinsics.view, event, []),
     });
+    return intrinsics.isCurrent() ? snapshot : null;
   } catch {
     return null;
   }
@@ -573,11 +844,7 @@ function toolbarKeyboardPathMatches(
     expected.at(-1) === ownerDocument &&
     path.length === expected.length + 1 &&
     expected.every((entry, index) => path[index] === entry) &&
-    (terminal === ownerWindow ||
-      (typeof terminal === "object" &&
-        terminal !== null &&
-        "document" in terminal &&
-        terminal.document === ownerDocument))
+    terminal === ownerWindow
   );
 }
 
@@ -899,7 +1166,7 @@ function createToolbarPublication({
           authority.headingDisclosure.mount === mount &&
           (authority.headingDisclosure.destination === 0 ||
             authority.headingDisclosure.destination === 6) &&
-          typeof authority.headingDisclosure.focus === "function")) &&
+          Object.isFrozen(authority.headingDisclosure.keyboard))) &&
       headingFocusFactsMatch() &&
       authority.session.canEdit === authority.canEdit &&
       authority.session.canUndo === authority.canUndo &&
@@ -1458,11 +1725,16 @@ function createToolbarPublication({
       ({ level }) => level === disclosure.destination,
     )?.control;
     const element = destination?.element();
+    const disclosureKeyboard = disclosure?.keyboard;
     if (
       !keyboard ||
+      !disclosureKeyboard ||
       !destination ||
       !element ||
       !authority.headingOpen ||
+      !keyboard.isCurrent() ||
+      !disclosureKeyboard.isCurrent() ||
+      disclosureKeyboard.ownerWindow !== element.ownerDocument.defaultView ||
       !ownsControl(destination) ||
       focusedHeadings.has(disclosure)
     ) {
@@ -1470,10 +1742,16 @@ function createToolbarPublication({
     }
     focusedHeadings.add(disclosure);
     headingFocusClaimed = true;
-    keyboard.apply(disclosure.focus, element, [PREVENT_SCROLL]);
+    if (!disclosureKeyboard.isCurrent()) return false;
+    disclosureKeyboard.apply(
+      disclosureKeyboard.focus,
+      element,
+      [PREVENT_SCROLL],
+    );
     return Boolean(
-      keyboard.apply(
-        keyboard.activeElement,
+      disclosureKeyboard.isCurrent() &&
+      disclosureKeyboard.apply(
+        disclosureKeyboard.activeElement,
         element.ownerDocument,
         [],
       ) === element && ownsControl(destination),
@@ -1493,6 +1771,7 @@ function createToolbarPublication({
       source: publication,
       dom: domSnapshot,
       placement: placementSnapshot,
+      keyboard: keyboard!,
       unchanged: replayDomUnchanged,
       release: releaseReplayGuard,
     });
@@ -1521,8 +1800,6 @@ function createToolbarPublication({
       establishmentDeferred = authority.headingOpen;
       return undefined;
     }
-    keyboard = captureToolbarKeyboardIntrinsics(ownerWindow);
-    if (!keyboard) return undefined;
     const placement = captureToolbarPlacement(ownedRoot);
     if (!placement) return undefined;
     const pendingReplay = replay.current;
@@ -1532,6 +1809,8 @@ function createToolbarPublication({
         sameAuthority &&
         pendingReplay.source.isRetired() &&
         successorOf.current === pendingReplay.source &&
+        pendingReplay.keyboard.ownerWindow === ownerWindow &&
+        pendingReplay.keyboard.isCurrent() &&
         pendingReplay.unchanged() &&
         pendingReplay.dom.node === ownedRoot &&
         toolbarPlacementMatches(ownedRoot, pendingReplay.placement) &&
@@ -1540,7 +1819,10 @@ function createToolbarPublication({
       pendingReplay.release();
       if (successorOf.current === pendingReplay.source) successorOf.current = null;
       if (sameAuthority && !exactReplay) return undefined;
+      if (sameAuthority) keyboard = pendingReplay.keyboard;
     }
+    keyboard ??= captureToolbarKeyboardIntrinsics(ownerWindow);
+    if (!keyboard) return undefined;
     const previous = active.current;
     if (previous && previous !== publication) previous.retire();
     active.current = publication;
@@ -1760,6 +2042,10 @@ function createToolbarPublication({
         if (blockedRadixOpen === event) blockedRadixOpen = null;
       });
     }
+    if (keyboard && !keyboard.isCurrent()) {
+      retire("other");
+      return;
+    }
     const trigger = buttons.heading.element();
     const nativeEvent = event.nativeEvent;
     const snapshot =
@@ -1776,6 +2062,14 @@ function createToolbarPublication({
     const proof = event as HeadingReactKeyEvent;
     const reactPrototype =
       keyboard && event ? keyboard.getPrototypeOf(event) : null;
+    const reactMethods =
+      keyboard && snapshot
+        ? captureToolbarReactMethods(event, proof, snapshot, keyboard)
+        : null;
+    if (keyboard && !keyboard.isCurrent()) {
+      retire("other");
+      return;
+    }
     if (
       !keyboard ||
       !snapshot ||
@@ -1788,7 +2082,7 @@ function createToolbarPublication({
           !ownsControl(destination.control))) ||
       !reactPrototype ||
       reactPrototype === keyboard.objectPrototype ||
-      reactPrototype.constructor?.name !== "SyntheticBaseEvent" ||
+      !reactMethods ||
       event.type !== snapshot.type ||
       event.type !== "keydown" ||
       event.nativeEvent !== nativeEvent ||
@@ -1809,15 +2103,11 @@ function createToolbarPublication({
       event.repeat !== snapshot.repeat ||
       !Object.is(event.view, snapshot.view) ||
       proof._reactName !== "onKeyDown" ||
-      typeof event.isDefaultPrevented !== "function" ||
-      event.isDefaultPrevented() ||
-      typeof event.isPropagationStopped !== "function" ||
-      event.isPropagationStopped() ||
-      typeof proof.isPersistent !== "function" ||
-      !proof.isPersistent() ||
-      typeof event.persist !== "function" ||
-      typeof event.preventDefault !== "function" ||
-      typeof event.stopPropagation !== "function" ||
+      !keyboard.ownDataMatches(event, "_reactName", "onKeyDown") ||
+      !keyboard.ownDataMatches(event, "nativeEvent", nativeEvent) ||
+      !keyboard.ownDataMatches(event, "type", snapshot.type) ||
+      !keyboard.ownDataMatches(event, "target", trigger) ||
+      !keyboard.ownDataMatches(event, "currentTarget", trigger) ||
       snapshot.target !== trigger ||
       snapshot.currentTarget === null ||
       snapshot.eventPhase !== keyboard.bubblingPhase ||
@@ -1846,15 +2136,28 @@ function createToolbarPublication({
         trigger.ownerDocument,
         [],
       ) !== trigger ||
+      !keyboard.isCurrent() ||
       !claimHeadingKey(event, nativeEvent) ||
       !ownsControl(buttons.heading)
     ) {
+      if (keyboard && !keyboard.isCurrent()) retire("other");
       return;
     }
-    event.preventDefault();
+    keyboard.apply(reactMethods.preventDefault, event, []);
+    if (!keyboard.isCurrent()) {
+      retire("other");
+      return;
+    }
+    const preventedPredicate = proof.isDefaultPrevented;
     if (
       !event.defaultPrevented ||
-      !event.isDefaultPrevented() ||
+      typeof preventedPredicate !== "function" ||
+      !keyboard.methodMatches(
+        event,
+        "isDefaultPrevented",
+        preventedPredicate,
+      ) ||
+      !keyboard.apply(preventedPredicate, event, []) ||
       !keyboard.apply(
         keyboard.event.defaultPrevented,
         nativeEvent,
@@ -1873,7 +2176,7 @@ function createToolbarPublication({
     const disclosure = Object.freeze({
       mount,
       destination: destination.level,
-      focus: keyboard.focus,
+      keyboard,
     });
     const next = Object.freeze({
       mount,

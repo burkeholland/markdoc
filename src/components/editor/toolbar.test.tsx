@@ -891,6 +891,124 @@ describe("Toolbar Text style trusted arrows", () => {
     expect(f.actions.focus).toHaveBeenCalledOnce();
   });
 
+  it("accepts a genuine pair while React's synthetic constructor has a minified-looking name", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    const trigger = textStyle();
+    const handler = headingChildKeyHandler(trigger);
+    const event = headingKeyEvent(trigger, "ArrowUp");
+    trigger.focus();
+    focus.mockClear();
+
+    dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
+      const prototype = Object.getPrototypeOf(reactEvent);
+      const constructor = prototype?.constructor;
+      if (typeof constructor !== "function") {
+        throw new Error("Synthetic event had no constructor");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(constructor, "name");
+      if (!descriptor?.configurable) {
+        throw new Error("Synthetic constructor name was not configurable");
+      }
+      Object.defineProperty(constructor, "name", {
+        ...descriptor,
+        value: "a",
+      });
+      try {
+        handler(reactEvent);
+      } finally {
+        Object.defineProperty(constructor, "name", descriptor);
+      }
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(textStyle()).toHaveAttribute("aria-expanded", "true");
+    expect(headingItem("Heading 6")).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it.each([
+    "KeyboardEvent key getter",
+    "HTMLElement focus method",
+  ] as const)(
+    "permanently rejects a restored %s until a distinct clean successor",
+    (surface) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const f = fixture();
+      const view = strictRenderToolbar(f.props);
+      let trigger = textStyle();
+      trigger.focus();
+      focus.mockClear();
+      const owner =
+        surface === "KeyboardEvent key getter"
+          ? trigger.ownerDocument.defaultView!.KeyboardEvent.prototype
+          : trigger.ownerDocument.defaultView!.HTMLElement.prototype;
+      const property =
+        surface === "KeyboardEvent key getter" ? "key" : "focus";
+      const descriptor = Object.getOwnPropertyDescriptor(owner, property);
+      if (!descriptor) throw new Error(`${surface} had no descriptor`);
+      const replacement =
+        surface === "KeyboardEvent key getter"
+          ? {
+              ...descriptor,
+              get: function (this: KeyboardEvent) {
+                if (typeof descriptor.get !== "function") {
+                  throw new Error("KeyboardEvent key was not a getter");
+                }
+                return Reflect.apply(descriptor.get, this, []);
+              },
+            }
+          : {
+              ...descriptor,
+              value: function (
+                this: HTMLElement,
+                ...args: Parameters<HTMLElement["focus"]>
+              ) {
+                if (typeof descriptor.value !== "function") {
+                  throw new Error("HTMLElement focus was not a method");
+                }
+                return Reflect.apply(descriptor.value, this, args);
+              },
+            };
+
+      Object.defineProperty(owner, property, replacement);
+      let rejected: KeyboardEvent;
+      try {
+        rejected = dispatchHeadingKey(trigger, "ArrowUp");
+      } finally {
+        Object.defineProperty(owner, property, descriptor);
+      }
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(actionCalls(f.actions)).toBe(0);
+
+      const restored = dispatchHeadingKey(trigger, "ArrowUp");
+      expect(restored.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+      view.update(f.props, 1);
+      trigger = textStyle();
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = dispatchHeadingKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(headingItem("Heading 6")).toHaveFocus();
+      expect(actionCalls(f.actions)).toBe(0);
+    },
+  );
+
   it.each([
     ["closed", "ArrowDown", "Paragraph"],
     ["closed", "ArrowUp", "Heading 6"],
