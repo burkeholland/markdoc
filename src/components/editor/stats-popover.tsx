@@ -2349,7 +2349,7 @@ class StatsDisclosureCoordinator {
       return true;
     };
     const remember = (event: Event) => {
-      const publication = coordinator.#current;
+      const publication = this.#current;
       if (
         !active ||
         !publication ||
