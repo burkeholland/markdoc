@@ -177,6 +177,60 @@ function keyDown(element: Element, key: string) {
   return event;
 }
 
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function modeArrowEvent(
+  element: Element,
+  key: "ArrowDown" | "ArrowUp",
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The mode trigger has no owner realm");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function modeArrow(
+  element: Element,
+  key: "ArrowDown" | "ArrowUp",
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = modeArrowEvent(element, key, init, trusted);
+  fireEvent(element, event);
+  return event;
+}
+
 async function waitForOutsideListener() {
   await act(async () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -287,6 +341,11 @@ function selectMode(name: "Editing" | "Suggesting" | "Viewing", value: EditMode)
   fireEvent.click(radio(name));
 }
 
+function expectNoModeAction(session: ModeSession) {
+  expect(session.setMode).not.toHaveBeenCalled();
+  expect(window.open).not.toHaveBeenCalled();
+}
+
 beforeEach(() => {
   vi.spyOn(window, "open").mockImplementation(() => null);
 });
@@ -307,6 +366,8 @@ describe("ModeSwitcher presentation authority", () => {
     ["keyboard", " ", "current-before-stale"],
     ["keyboard", "ArrowDown", "stale-before-current"],
     ["keyboard", "ArrowDown", "current-before-stale"],
+    ["keyboard", "ArrowUp", "stale-before-current"],
+    ["keyboard", "ArrowUp", "current-before-stale"],
   ] as const)("accepts only the current exact %s open source with %s %s", (kind, key, order) => {
     const session = new ModeSession("same-element", "owner", "editing");
     const host = document.createElement("div");
@@ -329,7 +390,10 @@ describe("ModeSwitcher presentation authority", () => {
             ctrlKey: false,
             pointerType: "mouse",
           })
-        : new KeyboardEvent("keydown", { bubbles: true, key });
+        : key === "ArrowDown" || key === "ArrowUp"
+          ? modeArrowEvent(reused, key)
+          : new KeyboardEvent("keydown", { bubbles: true, key });
+      if (kind === "keyboard") reused.focus();
       const invokeCurrent = () => reused.dispatchEvent(exactEvent);
       const invokeStale = () => {
         stale(sourceEvent(reused, key));
@@ -710,10 +774,403 @@ describe("ModeSwitcher presentation authority", () => {
   );
 });
 
+describe("ModeSwitcher trusted arrow disclosure", () => {
+  it.each([
+    ["owner", "ArrowDown", false, "Editing"],
+    ["owner", "ArrowUp", false, "reader"],
+    ["viewer", "ArrowDown", false, "Viewing"],
+    ["viewer", "ArrowUp", false, "reader"],
+    ["owner", "ArrowDown", true, "Editing"],
+    ["owner", "ArrowUp", true, "reader"],
+    ["viewer", "ArrowDown", true, "Viewing"],
+    ["viewer", "ArrowUp", true, "reader"],
+  ] as const)(
+    "opens or keeps open for a current %s %s from %s and focuses %s once",
+    async (role, key, initiallyOpen, destinationName) => {
+      const session = new ModeSession(
+        `${role}-${key}-${initiallyOpen ? "open" : "closed"}`,
+        role,
+        role === "viewer" ? "viewing" : "editing",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+
+      try {
+        act(() => root.render(
+          <StrictMode>
+            <ModeSwitcher session={session.asCollabSession()} />
+          </StrictMode>,
+        ));
+        const modeTrigger = trigger();
+        if (initiallyOpen) openMenu();
+        const source = initiallyOpen ? menu() : modeTrigger;
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        document.documentElement.scrollTop = 19;
+        document.documentElement.scrollLeft = 5;
+        document.body.scrollTop = 13;
+        document.body.scrollLeft = 3;
+
+        const event = modeArrow(source, key);
+        const destination = destinationName === "reader"
+          ? screen.getByTestId("mode-reader")
+          : radio(destinationName);
+        await waitFor(() => expect(destination).toHaveFocus());
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalled();
+        expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+        expect(focus.mock.contexts.filter((context) => context === destination)).toHaveLength(1);
+        expect(document.documentElement.scrollTop).toBe(19);
+        expect(document.documentElement.scrollLeft).toBe(5);
+        expect(document.body.scrollTop).toBe(13);
+        expect(document.body.scrollLeft).toBe(3);
+        expectNoModeAction(session);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects %s arrows before prevention, opening, focus, or activation", (_name, init) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const session = new ModeSession(`rejected-${_name}`, "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    modeTrigger.focus();
+    for (const key of ["ArrowDown", "ArrowUp"] as const) {
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = modeArrow(modeTrigger, key, init);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(modeTrigger).toHaveFocus();
+      expectNoModeAction(session);
+    }
+  });
+
+  it("rejects untrusted, pre-canceled, propagation-stopped, unfocused, descendant, and foreign-realm input without spending a clean arrow", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const session = new ModeSession("rejected-provenance", "owner", "editing");
+    render(
+      <>
+        <ModeSwitcher session={session.asCollabSession()} />
+        <button type="button">Outside arrow owner</button>
+      </>,
+    );
+    const modeTrigger = trigger();
+    const outside = screen.getByRole("button", { name: "Outside arrow owner" });
+    modeTrigger.focus();
+    focus.mockClear();
+
+    const untrusted = modeArrow(modeTrigger, "ArrowUp", {}, false);
+    const prevented = modeArrowEvent(modeTrigger, "ArrowUp");
+    prevented.preventDefault();
+    preventDefault.mockClear();
+    fireEvent(modeTrigger, prevented);
+    const stopped = modeArrowEvent(modeTrigger, "ArrowUp");
+    stopped.stopPropagation();
+    fireEvent(modeTrigger, stopped);
+    outside.focus();
+    focus.mockClear();
+    const unfocused = modeArrow(modeTrigger, "ArrowUp");
+    modeTrigger.focus();
+    focus.mockClear();
+    const label = modeTrigger.querySelector("span");
+    if (!label) throw new Error("The mode trigger label was not rendered");
+    const descendant = modeArrow(label, "ArrowUp");
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as (Window & typeof globalThis) | null;
+    if (!foreignWindow) throw new Error("The iframe has no window");
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      key: "ArrowUp",
+      bubbles: true,
+      cancelable: true,
+    });
+    markJsdomEventTrusted(foreign);
+    fireEvent(modeTrigger, foreign);
+
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(descendant.defaultPrevented).toBe(false);
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expectNoModeAction(session);
+
+    iframe.remove();
+  });
+
+  it("uses captured prevention and focus intrinsics without scrolling or activation", () => {
+    const nativeFocus = vi.spyOn(HTMLElement.prototype, "focus");
+    const session = new ModeSession("arrow-intrinsics", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    modeTrigger.focus();
+    const dynamicPreventDefault = vi.fn();
+    const event = modeArrowEvent(modeTrigger, "ArrowUp");
+    Object.defineProperty(event, "preventDefault", {
+      configurable: true,
+      value: dynamicPreventDefault,
+    });
+    nativeFocus.mockClear();
+
+    fireEvent(modeTrigger, event);
+
+    const reader = screen.getByTestId("mode-reader");
+    expect(event.defaultPrevented).toBe(true);
+    expect(reader).toHaveFocus();
+    expect(nativeFocus.mock.contexts.filter((context) => context === reader)).toHaveLength(1);
+    expect(nativeFocus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(dynamicPreventDefault).not.toHaveBeenCalled();
+    expectNoModeAction(session);
+  });
+
+  it("claims one exact arrow across native replay and a reentrant competing event", async () => {
+    const readerFocus = vi.spyOn(HTMLElement.prototype, "focus");
+    const session = new ModeSession("arrow-replay", "owner", "editing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    modeTrigger.focus();
+    readerFocus.mockClear();
+    const replay = modeArrowEvent(modeTrigger, "ArrowUp");
+    const reentrant = modeArrowEvent(modeTrigger, "ArrowUp");
+    let nested = false;
+    modeTrigger.addEventListener("keydown", () => {
+      if (nested) return;
+      nested = true;
+      modeTrigger.dispatchEvent(reentrant);
+    }, { once: true });
+
+    act(() => {
+      modeTrigger.dispatchEvent(replay);
+      modeTrigger.dispatchEvent(replay);
+    });
+    const reader = screen.getByTestId("mode-reader");
+    await waitFor(() => expect(reader).toHaveFocus());
+
+    expect([replay.defaultPrevented, reentrant.defaultPrevented].filter(Boolean)).toHaveLength(1);
+    expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+    expect(readerFocus.mock.contexts.filter((context) => context === reader)).toHaveLength(1);
+    expectNoModeAction(session);
+  });
+
+  it.each([
+    "attribute restoration",
+    "sibling restoration",
+    "replacement restoration",
+    "session restoration",
+  ] as const)("permanently rejects %s and admits a complete keyed successor", async (change) => {
+    const session = new ModeSession(`arrow-${change}`, "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="initial" session={session} />
+        </StrictMode>,
+      ));
+      const stale = trigger();
+      stale.focus();
+      if (change === "attribute restoration") {
+        stale.setAttribute("aria-label", "mutated");
+        stale.removeAttribute("aria-label");
+      } else if (change === "sibling restoration") {
+        const sibling = document.createElement("span");
+        stale.parentNode?.insertBefore(sibling, stale);
+        sibling.remove();
+      } else if (change === "replacement restoration") {
+        const parent = stale.parentNode;
+        if (!parent) throw new Error("The mode trigger has no parent");
+        const replacement = stale.cloneNode(true);
+        parent.replaceChild(replacement, stale);
+        parent.replaceChild(stale, replacement);
+      } else if (change === "session restoration") {
+        session.role = "viewer";
+      }
+      const rejected = modeArrow(stale, "ArrowUp");
+      if (change === "session restoration") session.role = "owner";
+      stale.focus();
+      const restored = modeArrow(stale, "ArrowUp");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expectNoModeAction(session);
+
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="successor" session={session} />
+        </StrictMode>,
+      ));
+      const current = trigger();
+      current.focus();
+      const accepted = modeArrow(current, "ArrowUp");
+      await waitFor(() => expect(screen.getByTestId("mode-reader")).toHaveFocus());
+      expect(accepted.defaultPrevented).toBe(true);
+      expectNoModeAction(session);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("rejects partial ref cleanup and admits a complete keyed successor", async () => {
+    const session = new ModeSession("arrow-partial-ref", "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="initial" session={session} />
+        </StrictMode>,
+      ));
+      const stale = trigger();
+      const ref = fiberFor(stale).ref;
+      if (typeof ref !== "function") throw new Error("Mode trigger callback ref was not attached");
+      stale.focus();
+      act(() => ref(null));
+
+      const rejected = modeArrow(stale, "ArrowUp");
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expectNoModeAction(session);
+
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="successor" session={session} />
+        </StrictMode>,
+      ));
+      const current = trigger();
+      current.focus();
+      const accepted = modeArrow(current, "ArrowUp");
+      await waitFor(() => expect(screen.getByTestId("mode-reader")).toHaveFocus());
+      expect(accepted.defaultPrevented).toBe(true);
+      expectNoModeAction(session);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it("does not revive arrow authority after descriptor replacement and restoration", async () => {
+    const session = new ModeSession("arrow-descriptor-history", "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const descriptor = Object.getOwnPropertyDescriptor(KeyboardEvent.prototype, "key");
+    if (!descriptor?.get) throw new Error("KeyboardEvent.key getter is unavailable");
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="initial" session={session} />
+        </StrictMode>,
+      ));
+      const stale = trigger();
+      stale.focus();
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...descriptor,
+        get() {
+          return descriptor.get!.call(this);
+        },
+      });
+      const poisoned = modeArrow(stale, "ArrowUp");
+      Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+      const restored = modeArrow(stale, "ArrowUp");
+
+      expect(poisoned.defaultPrevented).toBe(false);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expectNoModeAction(session);
+
+      act(() => root.render(
+        <StrictMode>
+          <ModeBoundary key="successor" session={session} />
+        </StrictMode>,
+      ));
+      const current = trigger();
+      current.focus();
+      const accepted = modeArrow(current, "ArrowUp");
+      await waitFor(() => expect(screen.getByTestId("mode-reader")).toHaveFocus());
+      expect(accepted.defaultPrevented).toBe(true);
+      expectNoModeAction(session);
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+      act(() => root.unmount());
+    }
+  });
+
+  it("removes the exact trigger listener on cleanup and leaves detached input inert", async () => {
+    const add = vi.spyOn(EventTarget.prototype, "addEventListener");
+    const remove = vi.spyOn(EventTarget.prototype, "removeEventListener");
+    const session = new ModeSession("arrow-cleanup", "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(<ModeSwitcher session={session.asCollabSession()} />));
+    const stale = trigger();
+    const additions = add.mock.calls
+      .map((call, index) => ({ call, context: add.mock.contexts[index] }))
+      .filter(({ call, context }) => call[0] === "keydown" && context === stale);
+    expect(additions.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+
+    for (const { call: addition } of additions) {
+      const listener = addition[1];
+      const removals = remove.mock.calls
+        .map((call, index) => ({ call, context: remove.mock.contexts[index] }))
+        .filter(
+          ({ call, context }) =>
+            call[0] === "keydown"
+            && call[1] === listener
+            && call[2] === true
+            && context === stale,
+        );
+      expect(removals).toHaveLength(1);
+    }
+    stale.focus();
+    const event = modeArrow(stale, "ArrowUp");
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expectNoModeAction(session);
+  });
+});
+
 describe("ModeSwitcher current behavior", () => {
   it.each([
     ["trigger pointer", "pointer"],
     ["trigger keyboard", "keyboard"],
+    ["trigger Space", "space"],
     ["Editing choice", "editing"],
     ["Suggesting choice", "suggesting"],
     ["Viewing choice", "viewing"],
@@ -741,8 +1198,8 @@ describe("ModeSwitcher current behavior", () => {
       if (family === "pointer") {
         pointerDown(modeTrigger);
         expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
-      } else if (family === "keyboard") {
-        keyDown(modeTrigger, "Enter");
+      } else if (family === "keyboard" || family === "space") {
+        keyDown(modeTrigger, family === "keyboard" ? "Enter" : " ");
         expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
       } else {
         openMenu();
@@ -1098,7 +1555,7 @@ describe("ModeSwitcher current behavior", () => {
     const outside = screen.getByRole("button", { name: "Outside control" });
     modeTrigger.focus();
 
-    fireEvent.keyDown(modeTrigger, { key: "ArrowDown", shiftKey: true });
+    modeArrow(modeTrigger, "ArrowDown");
     await waitFor(() => expect(radio("Editing")).toHaveFocus());
     await userEvent.keyboard("{ArrowDown}");
     expect(radio("Suggesting")).toHaveFocus();
