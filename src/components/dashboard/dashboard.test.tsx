@@ -1661,7 +1661,9 @@ describe("dashboard Account menu directional publication", () => {
       expect(preventDefault).not.toHaveBeenCalled();
       expect(focus).not.toHaveBeenCalled();
 
-      const foreignWindow = iframe.contentWindow;
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
       if (!foreignWindow) throw new Error("The iframe has no content window");
       const foreign = new foreignWindow.KeyboardEvent("keydown", {
         key: "ArrowDown",
