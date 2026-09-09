@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -11,6 +12,7 @@ import {
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
+  type ComponentPropsWithoutRef,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -8687,6 +8689,1530 @@ function createFilterPublication(
   });
 }
 
+type AccountDirection = "first" | "last";
+type AccountKeyRoute = "block" | "radix";
+
+interface AccountMenuState {
+  readonly identity: symbol;
+  readonly open: boolean;
+}
+
+interface AccountAuthority {
+  readonly mount: symbol;
+  readonly visit: symbol;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+}
+
+interface AccountRenderPublication {
+  readonly identity: symbol;
+  readonly authority: AccountAuthority;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+  readonly router: ReturnType<typeof useRouter>;
+  readonly routerPush: ReturnType<typeof useRouter>["push"];
+  readonly openSettings: () => void;
+  readonly signOut: () => void;
+  readonly state: AccountMenuState;
+  readonly open: boolean;
+  readonly setState: Dispatch<SetStateAction<AccountMenuState>>;
+  readonly changeOpen: (open: boolean) => void;
+}
+
+type AccountElementRole = "trigger" | "content" | "settings" | "sign-out";
+
+interface AccountElementOwnerView {
+  readonly role: AccountElementRole;
+  readonly element: () => HTMLElement | null;
+}
+
+interface AccountRefReplay {
+  readonly owner: AccountElementOwnerView;
+  readonly element: HTMLElement;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface AccountDirectionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly direction: AccountDirection;
+  readonly key: "ArrowDown" | "ArrowUp";
+  readonly code: "ArrowDown" | "ArrowUp";
+  readonly destination: "settings" | "sign-out";
+}
+
+interface AccountKeyboardAuthority {
+  readonly base: SearchResultKeyboardAuthority;
+  readonly code: (event: Event) => string;
+  readonly location: (event: Event) => number;
+  readonly composed: (event: Event) => boolean;
+  readonly detail: (event: Event) => number;
+  readonly isKeyboardEvent: (event: object) => boolean;
+  readonly addEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  readonly removeEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
+  readonly addWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
+  readonly removeWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface AccountRouteProof {
+  readonly event: KeyboardEvent;
+  readonly key: string;
+  readonly direction: AccountDirection | null;
+  readonly path: readonly EventTarget[];
+}
+
+interface AccountNativeKeyProof extends AccountRouteProof {
+  readonly publication: AccountPublication;
+  readonly action: AccountDirectionPublication;
+  readonly code: string;
+  readonly location: number;
+  readonly view: Window | null;
+  readonly reactCaptureEvent: object;
+  readonly reactPrototype: object;
+  readonly propagationStopped: () => boolean;
+  crossed: boolean;
+  boundary: boolean;
+  reactBubbleEvent: object | null;
+}
+
+interface AccountFocusRequest {
+  readonly source: AccountPublication;
+  readonly authority: AccountAuthority;
+  readonly state: AccountMenuState;
+  readonly nextState: AccountMenuState;
+  readonly direction: AccountDirectionPublication;
+  readonly trigger: HTMLButtonElement;
+  readonly triggerChild: TemplateGridDomSnapshot;
+  readonly settingsAction: () => void;
+  readonly signOutAction: () => void;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactCaptureEvent: object;
+  readonly reactBubbleEvent: object;
+}
+
+interface AccountPublication {
+  readonly identity: symbol;
+  readonly render: AccountRenderPublication;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLDivElement | null;
+  readonly settings: HTMLDivElement | null;
+  readonly signOut: HTMLDivElement | null;
+  readonly triggerDom: TemplateGridDomSnapshot;
+  readonly triggerPlacement: TemplateGridPlacement;
+  readonly contentDom: TemplateGridDomSnapshot | null;
+  readonly contentPlacement: TemplateGridPlacement | null;
+  readonly actions: Readonly<Record<AccountDirection, AccountDirectionPublication>>;
+  readonly focus: (element: HTMLElement, options: FocusOptions) => void;
+  readonly intrinsicsAreCurrent: () => boolean;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface AccountReplayGuard {
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface AccountPublicationRuntime {
+  readonly publication: AccountPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: AccountElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly isExactNoRefLayoutReplay: () => boolean;
+  readonly releaseReplayGuard: () => void;
+  readonly captureKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  readonly routeKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
+}
+
+interface AccountPublicationCells {
+  active: AccountPublication | null;
+  successorOf: AccountPublication | null;
+  pendingFocus: AccountFocusRequest | null;
+  delivery: symbol | null;
+  readonly claimedPublications: WeakSet<AccountPublication>;
+  readonly claimedDirections: WeakSet<AccountDirectionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedAutoFocusEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly attemptedAutoFocusEvents: WeakSet<Event>;
+}
+
+interface AccountPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureTrigger: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureContent: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureSettings: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureSignOut: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly routeKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
+}
+
+class AccountElementOwner<T extends HTMLElement>
+  implements AccountElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: AccountElementRole,
+    private readonly onChange: (
+      owner: AccountElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+function captureAccountKeyboardAuthority(
+  view: Window & typeof globalThis,
+): AccountKeyboardAuthority | null {
+  const base = captureSearchResultKeyboardAuthority(view);
+  const code = captureSearchOwnerGetter<string>(
+    view,
+    view.KeyboardEvent.prototype,
+    "code",
+  );
+  const location = captureSearchOwnerGetter<number>(
+    view,
+    view.KeyboardEvent.prototype,
+    "location",
+  );
+  const composed = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "composed",
+  );
+  const detail = captureSearchOwnerGetter<number>(
+    view,
+    view.UIEvent.prototype,
+    "detail",
+  );
+  const isPrototypeOf = captureSearchOwnerMethod<[object], boolean>(
+    view,
+    view.Object.prototype,
+    "isPrototypeOf",
+  );
+  const addEventListener = captureSearchOwnerMethod<
+    [
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ],
+    void
+  >(view, view.EventTarget.prototype, "addEventListener");
+  const removeEventListener = captureSearchOwnerMethod<
+    [
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ],
+    void
+  >(view, view.EventTarget.prototype, "removeEventListener");
+  const addWindowEventListener = captureSearchOwnerGetter<
+    Window["addEventListener"]
+  >(view, view, "addEventListener");
+  const removeWindowEventListener = captureSearchOwnerGetter<
+    Window["removeEventListener"]
+  >(view, view, "removeEventListener");
+  const addWindowListener = addWindowEventListener?.read(view);
+  const removeWindowListener = removeWindowEventListener?.read(view);
+  if (
+    !base ||
+    !code ||
+    !location ||
+    !composed ||
+    !detail ||
+    !isPrototypeOf ||
+    !addEventListener ||
+    !removeEventListener ||
+    !addWindowEventListener ||
+    !removeWindowEventListener ||
+    typeof addWindowListener !== "function" ||
+    typeof removeWindowListener !== "function"
+  ) {
+    return null;
+  }
+  const authorities = [
+    code,
+    location,
+    composed,
+    detail,
+    isPrototypeOf,
+    addEventListener,
+    removeEventListener,
+    addWindowEventListener,
+    removeWindowEventListener,
+  ];
+  return Object.freeze({
+    base,
+    code: (event: Event) => code.read(event),
+    location: (event: Event) => location.read(event),
+    composed: (event: Event) => composed.read(event),
+    detail: (event: Event) => detail.read(event),
+    isKeyboardEvent: (event: object) =>
+      isPrototypeOf.call(view.KeyboardEvent.prototype, [event]),
+    addEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ) =>
+      addEventListener.call(target, [type, listener, options]),
+    removeEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ) =>
+      removeEventListener.call(target, [type, listener, options]),
+    addWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
+      TRUSTED_REFLECT_APPLY(addWindowListener, view, [type, listener]),
+    removeWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
+      TRUSTED_REFLECT_APPLY(removeWindowListener, view, [type, listener]),
+    isCurrent: () =>
+      base.isCurrent() &&
+      authorities.every((authority) => authority.isCurrent()),
+  });
+}
+
+function accountRenderIsExact(render: AccountRenderPublication) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.authority) &&
+    Object.isFrozen(render.state) &&
+    typeof render.authority.mount === "symbol" &&
+    typeof render.authority.visit === "symbol" &&
+    render.authority.user === render.user &&
+    render.authority.userId === render.userId &&
+    render.user.id === render.userId &&
+    render.router.push === render.routerPush &&
+    typeof render.openSettings === "function" &&
+    typeof render.signOut === "function" &&
+    typeof render.setState === "function" &&
+    typeof render.changeOpen === "function" &&
+    typeof render.state.identity === "symbol" &&
+    render.open === render.state.open
+  );
+}
+
+function captureAccountPath(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+  ownerWindow: Window & typeof globalThis,
+): readonly EventTarget[] | null {
+  const actualWindow = actual.at(-1);
+  if (
+    expected.at(-1) !== ownerWindow ||
+    !(actualWindow instanceof ownerWindow.Window) ||
+    expected.length !== actual.length ||
+    !expected
+      .slice(0, -1)
+      .every((entry, index) => actual[index] === entry)
+  ) {
+    return null;
+  }
+  return Object.freeze([...actual]);
+}
+
+function accountPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+) {
+  return (
+    expected.length === actual.length &&
+    expected.every((entry, index) => actual[index] === entry)
+  );
+}
+
+function accountAncestorsAreEnabled(
+  element: HTMLElement,
+  ownerDocument: Document,
+) {
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    if (
+      current.matches(":disabled") ||
+      current.hasAttribute("inert") ||
+      current.hasAttribute("hidden") ||
+      current.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+    if (current === ownerDocument.documentElement) return true;
+  }
+  return false;
+}
+
+function accountElementsAreExact(
+  render: AccountRenderPublication,
+  owners: {
+    trigger: AccountElementOwner<HTMLButtonElement>;
+    content: AccountElementOwner<HTMLDivElement>;
+    settings: AccountElementOwner<HTMLDivElement>;
+    signOut: AccountElementOwner<HTMLDivElement>;
+  },
+  requireCurrentRender = true,
+) {
+  const trigger = owners.trigger.element();
+  const ownerDocument = trigger?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    (requireCurrentRender && !accountRenderIsExact(render)) ||
+    !ownerDocument ||
+    !ownerWindow ||
+    !(trigger instanceof ownerWindow.HTMLButtonElement) ||
+    !trigger.isConnected ||
+    trigger.type !== "button" ||
+    trigger.className !== "rounded-full" ||
+    trigger.getAttribute("aria-label") !== "Account" ||
+    trigger.getAttribute("aria-haspopup") !== "menu" ||
+    trigger.getAttribute("aria-expanded") !== String(render.open) ||
+    trigger.getAttribute("data-state") !== (render.open ? "open" : "closed") ||
+    trigger.id.length === 0 ||
+    trigger.children.length !== 1 ||
+    !accountAncestorsAreEnabled(trigger, ownerDocument)
+  ) {
+    return false;
+  }
+  const content = owners.content.element();
+  const settings = owners.settings.element();
+  const signOut = owners.signOut.element();
+  if (!render.open) {
+    return (
+      content === null &&
+      settings === null &&
+      signOut === null &&
+      trigger.getAttribute("aria-controls") === null
+    );
+  }
+  if (
+    !(content instanceof ownerWindow.HTMLDivElement) ||
+    !(settings instanceof ownerWindow.HTMLDivElement) ||
+    !(signOut instanceof ownerWindow.HTMLDivElement) ||
+    !content.isConnected ||
+    !settings.isConnected ||
+    !signOut.isConnected ||
+    content.ownerDocument !== ownerDocument ||
+    settings.ownerDocument !== ownerDocument ||
+    signOut.ownerDocument !== ownerDocument ||
+    content.getAttribute("role") !== "menu" ||
+    content.getAttribute("data-state") !== "open" ||
+    content.getAttribute("aria-labelledby") !== trigger.id ||
+    content.id.length === 0 ||
+    trigger.getAttribute("aria-controls") !== content.id ||
+    content.className !==
+      "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-56" ||
+    content.children.length !== 3 ||
+    content.children.item(1) !== settings ||
+    content.children.item(2) !== signOut ||
+    settings.parentElement !== content ||
+    signOut.parentElement !== content ||
+    settings.getAttribute("role") !== "menuitem" ||
+    signOut.getAttribute("role") !== "menuitem" ||
+    settings.className !== "menu-item" ||
+    signOut.className !== "menu-item" ||
+    settings.textContent?.trim() !== "Agents & API tokens" ||
+    signOut.textContent?.trim() !== "Sign out" ||
+    !accountAncestorsAreEnabled(content, ownerDocument) ||
+    !accountAncestorsAreEnabled(settings, ownerDocument) ||
+    !accountAncestorsAreEnabled(signOut, ownerDocument)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function createAccountDomGuard(
+  ownerDocument: Document,
+  trigger: HTMLButtonElement,
+  content: HTMLDivElement | null,
+  triggerPlacement: TemplateGridPlacement,
+  contentPlacement: TemplateGridPlacement | null,
+  onMutation: () => void,
+): AccountReplayGuard | null {
+  const MutationObserverConstructor =
+    ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const roots = [trigger, content].filter(
+    (
+      element,
+    ): element is HTMLButtonElement | HTMLDivElement => element !== null,
+  );
+  const placements = contentPlacement
+    ? [...triggerPlacement, ...contentPlacement]
+    : triggerPlacement;
+  const relevant = (mutation: MutationRecord) => {
+    if (
+      roots.some(
+        (root) => mutation.target === root || root.contains(mutation.target),
+      )
+    ) {
+      return true;
+    }
+    if (mutation.type === "attributes") {
+      return (
+        (mutation.attributeName === "aria-disabled" ||
+          mutation.attributeName === "hidden" ||
+          mutation.attributeName === "inert") &&
+        placements.some(({ node }) => mutation.target === node)
+      );
+    }
+    if (mutation.type !== "childList") return false;
+    return placements.some(
+      ({ node, parent }) =>
+        mutation.target === parent &&
+        (mutation.previousSibling === node ||
+          mutation.nextSibling === node ||
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (changedNode) =>
+              changedNode === node ||
+              (changedNode.nodeType === 1 &&
+                (changedNode as Element).contains(node)),
+          )),
+    );
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    if (!changed && records.some(relevant)) {
+      changed = true;
+      onMutation();
+    }
+    return changed;
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(ownerDocument, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    unchanged: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createAccountPublication(
+  render: AccountRenderPublication,
+  cells: AccountPublicationCells,
+  requestSuccessor: () => void,
+): AccountPublicationSet {
+  let currentRuntime: AccountPublicationRuntime | null = null;
+  let lastRuntime: AccountPublicationRuntime | null = null;
+  let successorRequested = false;
+  let noRefLayoutReplayUsed = false;
+
+  const onElementChange = (
+    owner: AccountElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf === runtime.publication
+    ) {
+      successorRequested = true;
+      requestSuccessor();
+    }
+  };
+
+  const owners = {
+    trigger: new AccountElementOwner<HTMLButtonElement>(
+      "trigger",
+      onElementChange,
+    ),
+    content: new AccountElementOwner<HTMLDivElement>(
+      "content",
+      onElementChange,
+    ),
+    settings: new AccountElementOwner<HTMLDivElement>(
+      "settings",
+      onElementChange,
+    ),
+    signOut: new AccountElementOwner<HTMLDivElement>(
+      "sign-out",
+      onElementChange,
+    ),
+  };
+  const expectedOwners = () =>
+    render.open
+      ? [owners.trigger, owners.content, owners.settings, owners.signOut]
+      : [owners.trigger];
+
+  const createRuntime = (): AccountPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    if (!accountElementsAreExact(render, owners)) return null;
+    const trigger = owners.trigger.element();
+    if (!trigger) return null;
+    const ownerDocument = trigger.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const content = owners.content.element();
+    const settings = owners.settings.element();
+    const signOut = owners.signOut.element();
+    const triggerPlacement = searchControlPlacement(trigger);
+    const contentPlacement = content ? searchControlPlacement(content) : null;
+    const keyboard = ownerWindow
+      ? captureAccountKeyboardAuthority(ownerWindow)
+      : null;
+    const triggerPath = templateGridEventPath(ownerDocument, trigger);
+    if (
+      !ownerWindow ||
+      !keyboard ||
+      !triggerPlacement ||
+      !triggerPath ||
+      (render.open && (!content || !settings || !signOut || !contentPlacement))
+    ) {
+      return null;
+    }
+
+    const identity = Symbol("dashboard-account-publication");
+    const actions = Object.freeze({
+      first: Object.freeze({
+        identity: Symbol("dashboard-account-first"),
+        publicationIdentity: identity,
+        direction: "first" as const,
+        key: "ArrowDown" as const,
+        code: "ArrowDown" as const,
+        destination: "settings" as const,
+      }),
+      last: Object.freeze({
+        identity: Symbol("dashboard-account-last"),
+        publicationIdentity: identity,
+        direction: "last" as const,
+        key: "ArrowUp" as const,
+        code: "ArrowUp" as const,
+        destination: "sign-out" as const,
+      }),
+    });
+    const triggerDom = snapshotTemplateGridDom(trigger);
+    const contentDom = content ? snapshotTemplateGridDom(content) : null;
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: AccountRefReplay[] = [];
+    let guard: AccountReplayGuard | null = null;
+    let keyboardHistoryIsClean = true;
+    let routeProof: AccountRouteProof | null = null;
+    let nativeProof: AccountNativeKeyProof | null = null;
+    let nativeListening = false;
+    let terminalListening = false;
+    const reactCaptureCandidates = new WeakMap<Event, object>();
+
+    const intrinsicsAreCurrent = () => {
+      if (!keyboardHistoryIsClean) return false;
+      keyboardHistoryIsClean =
+        ownerDocument.defaultView === ownerWindow && keyboard.isCurrent();
+      return keyboardHistoryIsClean;
+    };
+    const publication: AccountPublication = Object.freeze({
+      identity,
+      render,
+      ownerDocument,
+      ownerWindow,
+      trigger,
+      content,
+      settings,
+      signOut,
+      triggerDom,
+      triggerPlacement,
+      contentDom,
+      contentPlacement,
+      actions,
+      focus: keyboard.base.focus,
+      intrinsicsAreCurrent,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const exactDomMatches = () =>
+      accountElementsAreExact(render, owners) &&
+      templateGridDomMatches(triggerDom) &&
+      searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
+      (render.open
+        ? Boolean(
+            contentDom &&
+              contentPlacement &&
+              templateGridDomMatches(contentDom) &&
+              searchControlPlacementMatches(ownerDocument, contentPlacement),
+          )
+        : true);
+    const replayDomMatches = () =>
+      accountElementsAreExact(render, owners, false) &&
+      templateGridDomMatches(triggerDom) &&
+      searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
+      (render.open
+        ? Boolean(
+            contentDom &&
+              contentPlacement &&
+              templateGridDomMatches(contentDom) &&
+              searchControlPlacementMatches(ownerDocument, contentPlacement),
+          )
+        : true);
+    const publicationOwnsCurrentDom = () => {
+      if (
+        retired ||
+        cells.active !== publication ||
+        publication.render !== render ||
+        !accountRenderIsExact(render) ||
+        !exactDomMatches() ||
+        !guard?.unchanged()
+      ) {
+        if (retire("other")) requestSuccessor();
+        return false;
+      }
+      return true;
+    };
+    const removeTerminalListener = () => {
+      if (!terminalListening) return;
+      terminalListening = false;
+      keyboard.removeWindowEventListener("keydown", onWindowTerminal);
+    };
+    const clearProof = () => {
+      removeTerminalListener();
+      routeProof = null;
+      nativeProof = null;
+    };
+    const releaseNativeListeners = () => {
+      if (!nativeListening) {
+        removeTerminalListener();
+        return;
+      }
+      nativeListening = false;
+      keyboard.removeEventListener(
+        trigger,
+        "keydown",
+        onNativeCapture,
+        true,
+      );
+      keyboard.removeEventListener(trigger, "keydown", onNativeBoundary);
+      removeTerminalListener();
+    };
+    const releaseGuard = () => {
+      guard?.release();
+      guard = null;
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      clearProof();
+      releaseNativeListeners();
+      if (cells.active === publication) {
+        cells.active = null;
+        cells.successorOf = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "other") releaseGuard();
+      else {
+        queueMicrotask(() => {
+          releaseGuard();
+        });
+      }
+      if (
+        reason === "layout" &&
+        cells.pendingFocus?.source === publication
+      ) {
+        queueMicrotask(() => {
+          if (cells.pendingFocus?.source === publication) {
+            cells.pendingFocus = null;
+          }
+        });
+      }
+      return true;
+    };
+
+    const routeEvent = (event: Event): AccountRouteProof | null => {
+      try {
+        if (!intrinsicsAreCurrent()) {
+          if (retire("other")) requestSuccessor();
+          return null;
+        }
+        const path = captureAccountPath(
+          triggerPath,
+          keyboard.base.composedPath(event),
+          ownerWindow,
+        );
+        if (
+          !publicationOwnsCurrentDom() ||
+          !keyboard.isKeyboardEvent(event) ||
+          keyboard.base.type(event) !== "keydown" ||
+          keyboard.base.currentTarget(event) !== trigger ||
+          (keyboard.base.phase(event) !== ownerWindow.Event.AT_TARGET &&
+            keyboard.base.phase(event) !==
+              ownerWindow.Event.CAPTURING_PHASE) ||
+          keyboard.base.target(event) !== trigger ||
+          !keyboard.base.bubbles(event) ||
+          !path
+        ) {
+          return null;
+        }
+        const key = keyboard.base.key(event);
+        return Object.freeze({
+          event: event as KeyboardEvent,
+          key,
+          direction:
+            key === "ArrowDown" ? "first" : key === "ArrowUp" ? "last" : null,
+          path,
+        });
+      } catch {
+        return null;
+      }
+    };
+    const reactEventMatches = (
+      event: object,
+      proof: AccountRouteProof,
+      phase: number,
+      requireTrusted: boolean,
+      expectedView?: Window | null,
+      expectedCurrentTarget: EventTarget | null = trigger,
+    ) => {
+      const reactPrototype = TRUSTED_OBJECT_GET_PROTOTYPE_OF(event);
+      const isDefaultPrevented = searchControlOwnValue(
+        event,
+        "isDefaultPrevented",
+      );
+      const isPropagationStopped = searchControlOwnValue(
+        event,
+        "isPropagationStopped",
+      );
+      try {
+        return (
+          reactPrototype !== null &&
+          reactPrototype !== ownerWindow.Object.prototype &&
+          searchControlOwnValue(event, "type") === "keydown" &&
+          searchControlOwnValue(event, "nativeEvent") === proof.event &&
+          searchControlOwnValue(event, "target") === trigger &&
+          searchControlOwnValue(event, "currentTarget") ===
+            expectedCurrentTarget &&
+          searchControlOwnValue(event, "eventPhase") === phase &&
+          searchControlOwnValue(event, "bubbles") === true &&
+          searchControlOwnValue(event, "cancelable") === true &&
+          searchControlOwnValue(event, "defaultPrevented") === false &&
+          (!requireTrusted ||
+            searchControlOwnValue(event, "isTrusted") === true) &&
+          searchControlOwnValue(event, "key") === proof.key &&
+          searchControlOwnValue(event, "code") ===
+            keyboard.code(proof.event) &&
+          searchControlOwnValue(event, "location") ===
+            keyboard.location(proof.event) &&
+          searchControlOwnValue(event, "ctrlKey") ===
+            keyboard.base.ctrlKey(proof.event) &&
+          searchControlOwnValue(event, "metaKey") ===
+            keyboard.base.metaKey(proof.event) &&
+          searchControlOwnValue(event, "altKey") ===
+            keyboard.base.altKey(proof.event) &&
+          searchControlOwnValue(event, "shiftKey") ===
+            keyboard.base.shiftKey(proof.event) &&
+          searchControlOwnValue(event, "repeat") ===
+            keyboard.base.repeat(proof.event) &&
+          searchControlOwnValue(event, "view") ===
+            (expectedView === undefined
+              ? keyboard.base.view(proof.event)
+              : expectedView) &&
+          typeof isDefaultPrevented === "function" &&
+          !isDefaultPrevented() &&
+          typeof isPropagationStopped === "function" &&
+          !isPropagationStopped()
+        );
+      } catch {
+        return false;
+      }
+    };
+    const exactNativeEvent = (
+      proof: AccountRouteProof,
+    ): AccountNativeKeyProof | null => {
+      const event = proof.event;
+      const action = proof.direction ? actions[proof.direction] : null;
+      const reactCaptureEvent = reactCaptureCandidates.get(event);
+      if (!action || !reactCaptureEvent) return null;
+      try {
+        const eventView = keyboard.base.view(event);
+        if (
+          render.open ||
+          render.state.open ||
+          action.publicationIdentity !== identity ||
+          keyboard.base.defaultPrevented(event) ||
+          keyboard.base.cancelBubble(event) ||
+          !keyboard.base.cancelable(event) ||
+          !keyboard.composed(event) ||
+          keyboard.detail(event) !== 0 ||
+          keyboard.code(event) !== action.code ||
+          keyboard.location(event) !== 0 ||
+          keyboard.base.ctrlKey(event) ||
+          keyboard.base.metaKey(event) ||
+          keyboard.base.altKey(event) ||
+          keyboard.base.shiftKey(event) ||
+          keyboard.base.repeat(event) ||
+          keyboard.base.composing(event) ||
+          !keyboard.base.trusted.matches(event) ||
+          keyboard.base.trusted.read(event) !== true ||
+          (eventView !== null && eventView !== ownerWindow) ||
+          keyboard.base.activeElement.read(ownerDocument) !== trigger ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "preventDefault",
+          ) ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "stopPropagation",
+          ) ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "stopImmediatePropagation",
+          ) ||
+          !reactEventMatches(
+            reactCaptureEvent,
+            proof,
+            ownerWindow.Event.CAPTURING_PHASE,
+            true,
+            eventView,
+            null,
+          )
+        ) {
+          return null;
+        }
+        let propagationStopped = false;
+        if (
+          !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: () => {
+              propagationStopped = true;
+              keyboard.base.stopPropagation(event);
+            },
+          }) ||
+          !TRUSTED_REFLECT_DEFINE_PROPERTY(
+            event,
+            "stopImmediatePropagation",
+            {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: () => {
+                propagationStopped = true;
+                keyboard.base.stopImmediatePropagation(event);
+              },
+            },
+          )
+        ) {
+          return null;
+        }
+        return {
+          ...proof,
+          publication,
+          action,
+          code: action.code,
+          location: 0,
+          view: eventView,
+          reactCaptureEvent,
+          reactPrototype: TRUSTED_OBJECT_GET_PROTOTYPE_OF(
+            reactCaptureEvent,
+          )!,
+          propagationStopped: () => propagationStopped,
+          crossed: false,
+          boundary: false,
+          reactBubbleEvent: null,
+        };
+      } catch {
+        return null;
+      }
+    };
+    const nativeStillMatches = (proof: AccountNativeKeyProof) => {
+      try {
+        return (
+          intrinsicsAreCurrent() &&
+          keyboard.base.trusted.matches(proof.event) &&
+          keyboard.base.trusted.read(proof.event) === true &&
+          keyboard.base.type(proof.event) === "keydown" &&
+          keyboard.base.target(proof.event) === trigger &&
+          keyboard.base.bubbles(proof.event) &&
+          keyboard.base.cancelable(proof.event) &&
+          keyboard.composed(proof.event) &&
+          keyboard.detail(proof.event) === 0 &&
+          keyboard.base.key(proof.event) === proof.action.key &&
+          keyboard.code(proof.event) === proof.code &&
+          keyboard.location(proof.event) === proof.location &&
+          keyboard.base.view(proof.event) === proof.view &&
+          !keyboard.base.ctrlKey(proof.event) &&
+          !keyboard.base.metaKey(proof.event) &&
+          !keyboard.base.altKey(proof.event) &&
+          !keyboard.base.shiftKey(proof.event) &&
+          !keyboard.base.repeat(proof.event) &&
+          !keyboard.base.composing(proof.event) &&
+          accountPathMatches(
+            proof.path,
+            keyboard.base.composedPath(proof.event),
+          )
+        );
+      } catch {
+        return false;
+      }
+    };
+    const claim = (proof: AccountNativeKeyProof) => {
+      const bubble = proof.reactBubbleEvent;
+      if (
+        !bubble ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedDirections.has(proof.action) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(proof.reactCaptureEvent) ||
+        cells.claimedReactEvents.has(bubble)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedDirections.add(proof.action);
+      cells.claimedNativeEvents.add(proof.event);
+      cells.claimedReactEvents.add(proof.reactCaptureEvent);
+      cells.claimedReactEvents.add(bubble);
+      return true;
+    };
+    const openAutoFocus = (event: Event) => {
+      const pending = cells.pendingFocus;
+      if (
+        !pending ||
+        !(event instanceof ownerWindow.CustomEvent) ||
+        cells.attemptedAutoFocusEvents.has(event) ||
+        cells.claimedAutoFocusEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedAutoFocusEvents.add(event);
+      const destination =
+        pending.direction.destination === "settings" ? settings : signOut;
+      if (
+        !render.open ||
+        !content ||
+        !settings ||
+        !signOut ||
+        !destination ||
+        pending.authority !== render.authority ||
+        pending.state !== pending.source.render.state ||
+        pending.nextState !== render.state ||
+        pending.nextState.open !== true ||
+        pending.trigger !== trigger ||
+        pending.settingsAction !== render.openSettings ||
+        pending.signOutAction !== render.signOut ||
+        pending.source.trigger.children.item(0) !==
+          pending.triggerChild.node ||
+        !templateGridDomMatches(pending.triggerChild) ||
+        !pending.source.isRetired() ||
+        !pending.source.intrinsicsAreCurrent() ||
+        !cells.claimedPublications.has(pending.source) ||
+        !cells.claimedDirections.has(pending.direction) ||
+        !cells.claimedNativeEvents.has(pending.nativeEvent) ||
+        !cells.claimedReactEvents.has(pending.reactCaptureEvent) ||
+        !cells.claimedReactEvents.has(pending.reactBubbleEvent) ||
+        cells.active !== publication ||
+        cells.delivery !== null ||
+        !publicationOwnsCurrentDom() ||
+        keyboard.base.type(event) !== "focusScope.autoFocusOnMount" ||
+        keyboard.base.target(event) !== content ||
+        keyboard.base.currentTarget(event) !== content ||
+        keyboard.base.phase(event) !== ownerWindow.Event.AT_TARGET ||
+        keyboard.base.bubbles(event) ||
+        !keyboard.base.cancelable(event) ||
+        keyboard.base.defaultPrevented(event) ||
+        keyboard.base.cancelBubble(event) ||
+        keyboard.base.activeElement.read(ownerDocument) !== trigger
+      ) {
+        return;
+      }
+      cells.claimedAutoFocusEvents.add(event);
+      keyboard.base.preventDefault(event);
+      if (!keyboard.base.defaultPrevented(event)) return;
+      cells.pendingFocus = null;
+      pending.source.focus(destination, { preventScroll: true });
+    };
+    const onWindowTerminal = (event: Event) => {
+      const proof = nativeProof;
+      if (
+        !proof ||
+        proof.event !== event ||
+        !proof.boundary ||
+        !proof.reactBubbleEvent ||
+        proof.crossed ||
+        proof.propagationStopped() ||
+        cells.delivery !== null
+      ) {
+        return;
+      }
+      try {
+        if (
+          keyboard.base.currentTarget(event) !== proof.path.at(-1) ||
+          keyboard.base.phase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+          keyboard.base.defaultPrevented(event) ||
+          keyboard.base.cancelBubble(event) ||
+          searchControlOwnValue(
+            proof.reactCaptureEvent,
+            "currentTarget",
+          ) !== null ||
+          searchControlOwnValue(
+            proof.reactBubbleEvent,
+            "currentTarget",
+          ) !== null ||
+          keyboard.base.activeElement.read(ownerDocument) !== trigger ||
+          render.state.open ||
+          !nativeStillMatches(proof) ||
+          !publicationOwnsCurrentDom() ||
+          !claim(proof)
+        ) {
+          return;
+        }
+        const triggerChild = trigger.children.item(0);
+        if (!(triggerChild instanceof ownerWindow.HTMLElement)) return;
+        const nextState = Object.freeze({
+          identity: Symbol("dashboard-account-open"),
+          open: true,
+        });
+        cells.delivery = publication.identity;
+        cells.pendingFocus = Object.freeze({
+          source: publication,
+          authority: render.authority,
+          state: render.state,
+          nextState,
+          direction: proof.action,
+          trigger,
+          triggerChild: snapshotTemplateGridDom(triggerChild),
+          settingsAction: render.openSettings,
+          signOutAction: render.signOut,
+          nativeEvent: proof.event,
+          reactCaptureEvent: proof.reactCaptureEvent,
+          reactBubbleEvent: proof.reactBubbleEvent,
+        });
+        publication.retire();
+        keyboard.base.preventDefault(event);
+        if (!keyboard.base.defaultPrevented(event)) {
+          cells.pendingFocus = null;
+          return;
+        }
+        render.setState((current) =>
+          current === render.state && !current.open ? nextState : current,
+        );
+        requestSuccessor();
+      } finally {
+        if (cells.delivery === publication.identity) cells.delivery = null;
+      }
+    };
+    const onNativeCapture = (event: Event) => {
+      const proof = routeEvent(event);
+      if (!proof) return;
+      if (routeProof) {
+        if (routeProof.event !== event && nativeProof) {
+          nativeProof.crossed = true;
+        }
+        if (proof.direction) cells.attemptedNativeEvents.add(event);
+        return;
+      }
+      routeProof = proof;
+      if (!proof.direction) return;
+      if (cells.attemptedNativeEvents.has(event)) return;
+      cells.attemptedNativeEvents.add(event);
+      nativeProof = exactNativeEvent(proof);
+      if (nativeProof) {
+        terminalListening = true;
+        keyboard.addWindowEventListener("keydown", onWindowTerminal);
+      }
+      queueMicrotask(() => {
+        if (routeProof !== proof) return;
+        const directional = proof.direction !== null;
+        clearProof();
+        if (directional && !retired) {
+          publication.retire();
+          requestSuccessor();
+        }
+      });
+    };
+    const onNativeBoundary = (event: Event) => {
+      if (
+        nativeProof?.event === event &&
+        keyboard.base.currentTarget(event) === trigger &&
+        keyboard.base.phase(event) === ownerWindow.Event.AT_TARGET &&
+        publicationOwnsCurrentDom() &&
+        intrinsicsAreCurrent() &&
+        keyboard.base.activeElement.read(ownerDocument) === trigger
+      ) {
+        nativeProof.boundary = true;
+      }
+    };
+    const captureKeyDown = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        cells.claimedReactEvents.has(event) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedReactEvents.add(event);
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      if (
+        nativeEvent instanceof ownerWindow.Event &&
+        searchControlOwnValue(event, "currentTarget") === trigger &&
+        searchControlOwnValue(event, "eventPhase") ===
+          ownerWindow.Event.CAPTURING_PHASE
+      ) {
+        reactCaptureCandidates.set(nativeEvent, event);
+      }
+    };
+    const routeKeyDown = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ): AccountKeyRoute => {
+      if (!event || typeof event !== "object") return "block";
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      const route = routeProof;
+      if (
+        !route ||
+        nativeEvent !== route.event ||
+        searchControlOwnValue(event, "currentTarget") !== trigger
+      ) {
+        return "block";
+      }
+      if (!route.direction) {
+        const exact = reactEventMatches(
+          event,
+          route,
+          ownerWindow.Event.BUBBLING_PHASE,
+          false,
+        );
+        routeProof = null;
+        return exact ? "radix" : "block";
+      }
+      const proof = nativeProof;
+      const isNewWrapper = event !== proof?.reactCaptureEvent;
+      if (
+        !proof ||
+        proof.event !== nativeEvent ||
+        !proof.boundary ||
+        proof.reactBubbleEvent ||
+        (isNewWrapper &&
+          (cells.claimedReactEvents.has(event) ||
+            cells.attemptedReactEvents.has(event)))
+      ) {
+        return "block";
+      }
+      if (isNewWrapper) cells.attemptedReactEvents.add(event);
+      if (
+        TRUSTED_OBJECT_GET_PROTOTYPE_OF(event) !== proof.reactPrototype ||
+        !reactEventMatches(
+          event,
+          proof,
+          isNewWrapper
+            ? ownerWindow.Event.BUBBLING_PHASE
+            : ownerWindow.Event.CAPTURING_PHASE,
+          true,
+        ) ||
+        !nativeStillMatches(proof) ||
+        !publicationOwnsCurrentDom()
+      ) {
+        return "block";
+      }
+      proof.reactBubbleEvent = event;
+      return "block";
+    };
+
+    const runtime: AccountPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish the Account menu without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        guard = createAccountDomGuard(
+          ownerDocument,
+          trigger,
+          content,
+          triggerPlacement,
+          contentPlacement,
+          () => {
+            retire("other");
+            requestSuccessor();
+          },
+        );
+        if (
+          !guard ||
+          cells.active ||
+          !exactDomMatches() ||
+          !guard.unchanged()
+        ) {
+          releaseGuard();
+          return false;
+        }
+        cells.active = publication;
+        cells.successorOf = null;
+        if (!render.open) {
+          nativeListening = true;
+          keyboard.addEventListener(
+            trigger,
+            "keydown",
+            onNativeCapture,
+            true,
+          );
+          keyboard.addEventListener(trigger, "keydown", onNativeBoundary);
+        }
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: AccountElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        ((layoutRetired &&
+          (retirement === "layout" || retirement === "element")) ||
+          (!layoutRetired && retirement === "element")) &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "reattached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        replayDomMatches() &&
+        Boolean(guard?.unchanged()),
+      isExactNoRefLayoutReplay: () =>
+        retired &&
+        established &&
+        retirement === "layout" &&
+        layoutRetired &&
+        publication.render === render &&
+        publication.render.authority === render.authority &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "attached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        intrinsicsAreCurrent() &&
+        exactDomMatches() &&
+        Boolean(guard?.unchanged()),
+      releaseReplayGuard: releaseGuard,
+      captureKeyDown,
+      routeKeyDown,
+      openAutoFocus,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (
+      currentRuntime &&
+      currentRuntime === lastRuntime &&
+      cells.active === currentRuntime.publication &&
+      !currentRuntime.publication.isRetired()
+    ) {
+      return currentRuntime.retireForLayout;
+    }
+    if (lastRuntime) {
+      if (
+        !noRefLayoutReplayUsed &&
+        lastRuntime.isExactNoRefLayoutReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        noRefLayoutReplayUsed = true;
+        lastRuntime.releaseReplayGuard();
+        const runtime = createRuntime();
+        if (!runtime) return;
+        currentRuntime = runtime;
+        lastRuntime = runtime;
+        if (!runtime.publish()) {
+          runtime.retireForElement();
+          currentRuntime = null;
+          return;
+        }
+        return runtime.retireForLayout;
+      }
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        successorRequested = true;
+        requestSuccessor();
+      }
+      return;
+    }
+    if (!accountElementsAreExact(render, owners)) return;
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active;
+    previous?.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+  };
+
+  return Object.freeze({
+    establish,
+    captureTrigger: owners.trigger.capture,
+    captureContent: owners.content.capture,
+    captureSettings: owners.settings.capture,
+    captureSignOut: owners.signOut.capture,
+    captureKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      currentRuntime?.captureKeyDown(event),
+    routeKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      currentRuntime?.routeKeyDown(event) ?? "block",
+    openAutoFocus: (event: Event) => {
+      if (!currentRuntime) establish();
+      currentRuntime?.openAutoFocus(event);
+    },
+  });
+}
+
+interface AccountMenuTriggerProps
+  extends ComponentPropsWithoutRef<"button"> {
+  readonly routeAccountKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+}
+
+const AccountMenuTrigger = forwardRef<
+  HTMLButtonElement,
+  AccountMenuTriggerProps
+>(function AccountMenuTrigger(
+  { onKeyDown, routeAccountKeyDown, ...props },
+  ref,
+) {
+  return (
+    <button
+      {...props}
+      ref={ref}
+      onKeyDown={(event) => {
+        if (routeAccountKeyDown(event) === "radix") onKeyDown?.(event);
+      }}
+    />
+  );
+});
+
 const TRASH_RETENTION_DAYS = 30;
 
 /** Star toggle for a document card; hover-visible unless starred. */
@@ -8738,6 +10264,59 @@ function StorageBadge({ doc }: { doc: Doc }) {
 
 export function Dashboard({ user, documents: initialDocuments, githubAvailable, githubConfigured, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
   const router = useRouter();
+  const [accountMount] = useState(() => Symbol("dashboard-account"));
+  const accountAuthority = useMemo<AccountAuthority>(
+    () =>
+      Object.freeze({
+        mount: accountMount,
+        visit: Symbol("dashboard-account-user-visit"),
+        user,
+        userId: user.id,
+      }),
+    [accountMount, user],
+  );
+  const [accountState, setAccountState] = useState<AccountMenuState>(() =>
+    Object.freeze({
+      identity: Symbol("dashboard-account-closed"),
+      open: false,
+    }),
+  );
+  const [accountCells] = useState<AccountPublicationCells>(() => ({
+    active: null,
+    successorOf: null,
+    pendingFocus: null,
+    delivery: null,
+    claimedPublications: new WeakSet(),
+    claimedDirections: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    claimedAutoFocusEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+    attemptedAutoFocusEvents: new WeakSet(),
+  }));
+  const [, setAccountRevision] = useState(0);
+  const requestAccountSuccessor = useCallback(() => {
+    setAccountRevision((revision) => revision + 1);
+  }, []);
+  const changeAccountOpen = useCallback((open: boolean) => {
+    setAccountState((current) =>
+      current.open === open
+        ? current
+        : Object.freeze({
+            identity: Symbol(
+              open ? "dashboard-account-open" : "dashboard-account-closed",
+            ),
+            open,
+          }),
+    );
+  }, []);
+  const openAccountSettings = useCallback(() => {
+    router.push("/settings");
+  }, [router]);
+  const signOutAccount = useCallback(() => {
+    void signOutSafely();
+  }, []);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const searchRefOwner = useRef<object | null>(null);
@@ -9652,6 +11231,41 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     () => establishFilters(),
     [establishFilters],
   );
+  const accountRender: AccountRenderPublication = Object.freeze({
+    identity: Symbol("dashboard-account-render"),
+    authority: accountAuthority,
+    user,
+    userId: user.id,
+    router,
+    routerPush: router.push,
+    openSettings: openAccountSettings,
+    signOut: signOutAccount,
+    state: accountState,
+    open: accountState.open,
+    setState: setAccountState,
+    changeOpen: changeAccountOpen,
+  });
+  const {
+    establish: establishAccount,
+    captureTrigger: captureAccountTrigger,
+    captureContent: captureAccountContent,
+    captureSettings: captureAccountSettings,
+    captureSignOut: captureAccountSignOut,
+    captureKeyDown: captureAccountKeyDown,
+    routeKeyDown: routeAccountKeyDown,
+    openAutoFocus: openAccountAutoFocus,
+  } = createAccountPublication(
+    accountRender,
+    accountCells,
+    requestAccountSuccessor,
+  );
+  const accountOpenAutoFocusProps = {
+    onOpenAutoFocus: openAccountAutoFocus,
+  };
+  useLayoutEffect(
+    () => establishAccount(),
+    [establishAccount],
+  );
 
   return (
     <TooltipProvider>
@@ -9707,21 +11321,33 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
             <ThemeToggle className="shrink-0" />
-            <Menu>
+            <Menu open={accountState.open} onOpenChange={changeAccountOpen}>
               <MenuTrigger asChild>
-                <button type="button" className="rounded-full" aria-label="Account">
+                <AccountMenuTrigger
+                  ref={captureAccountTrigger}
+                  type="button"
+                  className="rounded-full"
+                  aria-label="Account"
+                  onKeyDownCapture={captureAccountKeyDown}
+                  routeAccountKeyDown={routeAccountKeyDown}
+                >
                   <Avatar name={user.name} src={user.image} size={36} />
-                </button>
+                </AccountMenuTrigger>
               </MenuTrigger>
-              <MenuContent align="end" className="w-56">
+              <MenuContent
+                ref={captureAccountContent}
+                align="end"
+                className="w-56"
+                {...accountOpenAutoFocusProps}
+              >
                 <div className="px-2.5 py-2">
                   <div className="truncate text-sm font-medium text-ink">{user.name}</div>
                   {user.login && <div className="truncate text-xs text-ink-3">@{user.login}</div>}
                 </div>
-                <MenuItem icon={<Bot size={15} />} onSelect={() => router.push("/settings")}>
+                <MenuItem ref={captureAccountSettings} icon={<Bot size={15} />} onSelect={openAccountSettings}>
                   Agents &amp; API tokens
                 </MenuItem>
-                <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+                <MenuItem ref={captureAccountSignOut} icon={<LogOut size={15} />} onSelect={signOutAccount}>
                   Sign out
                 </MenuItem>
               </MenuContent>
