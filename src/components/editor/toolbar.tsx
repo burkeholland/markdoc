@@ -492,12 +492,7 @@ function captureToolbarKeyboardIntrinsics(
     apply,
     evidence,
   );
-  const windowReference = toolbarGetter<Window, Window>(
-    getOwnPropertyDescriptor,
-    ownerWindow,
-    "window",
-    evidence,
-  );
+  const listenerTarget = ownerWindow.window;
   const type = toolbarGetter<Event, string>(
     getOwnPropertyDescriptor,
     eventPrototype,
@@ -642,7 +637,6 @@ function captureToolbarKeyboardIntrinsics(
   );
   if (
     !trusted ||
-    !windowReference ||
     !type ||
     !target ||
     !currentTarget ||
@@ -670,12 +664,6 @@ function captureToolbarKeyboardIntrinsics(
     typeof getPrototypeOf !== "function" ||
     typeof isPrototypeOf !== "function"
   ) {
-    return null;
-  }
-  let listenerTarget: EventTarget;
-  try {
-    listenerTarget = apply(windowReference, ownerWindow, []);
-  } catch {
     return null;
   }
   let historyIsClean = true;
