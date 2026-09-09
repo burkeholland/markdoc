@@ -8775,7 +8775,7 @@ interface AccountNativeKeyProof extends AccountRouteProof {
   readonly action: AccountDirectionPublication;
   readonly code: string;
   readonly location: number;
-  readonly view: Window;
+  readonly view: Window | null;
   readonly reactCaptureEvent: object;
   readonly reactPrototype: object;
   readonly propagationStopped: () => boolean;
@@ -9472,6 +9472,7 @@ function createAccountPublication(
       proof: AccountRouteProof,
       phase: number,
       requireTrusted: boolean,
+      expectedView?: Window | null,
     ) => {
       const reactPrototype = TRUSTED_OBJECT_GET_PROTOTYPE_OF(event);
       const isDefaultPrevented = searchControlOwnValue(
@@ -9513,7 +9514,9 @@ function createAccountPublication(
           searchControlOwnValue(event, "repeat") ===
             keyboard.base.repeat(proof.event) &&
           searchControlOwnValue(event, "view") ===
-            keyboard.base.view(proof.event) &&
+            (expectedView === undefined
+              ? keyboard.base.view(proof.event)
+              : expectedView) &&
           typeof isDefaultPrevented === "function" &&
           !isDefaultPrevented() &&
           typeof isPropagationStopped === "function" &&
@@ -9531,6 +9534,7 @@ function createAccountPublication(
       const reactCaptureEvent = reactCaptureCandidates.get(event);
       if (!action || !reactCaptureEvent) return null;
       try {
+        const eventView = keyboard.base.view(event);
         if (
           render.open ||
           render.state.open ||
@@ -9550,7 +9554,7 @@ function createAccountPublication(
           keyboard.base.composing(event) ||
           !keyboard.base.trusted.matches(event) ||
           keyboard.base.trusted.read(event) !== true ||
-          keyboard.base.view(event) !== ownerWindow ||
+          (eventView !== null && eventView !== ownerWindow) ||
           keyboard.base.activeElement.read(ownerDocument) !== trigger ||
           TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
             event,
@@ -9569,6 +9573,7 @@ function createAccountPublication(
             proof,
             ownerWindow.Event.CAPTURING_PHASE,
             true,
+            eventView,
           )
         ) {
           return null;
@@ -9606,7 +9611,7 @@ function createAccountPublication(
           action,
           code: action.code,
           location: 0,
-          view: ownerWindow,
+          view: eventView,
           reactCaptureEvent,
           reactPrototype: TRUSTED_OBJECT_GET_PROTOTYPE_OF(
             reactCaptureEvent,

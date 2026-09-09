@@ -436,6 +436,20 @@ function interceptReactHandler(
   };
 }
 
+function cloneReactEventWithView(event: unknown, view: unknown) {
+  if (!event || typeof event !== "object") {
+    throw new Error("The React keyboard event was not an object");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(event);
+  descriptors.view = {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: view,
+  };
+  return Object.create(Object.getPrototypeOf(event), descriptors);
+}
+
 function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
   const onClick = reactProps(element).onClick;
   if (!onClick) throw new Error("The button did not have an onClick handler");
@@ -987,8 +1001,22 @@ function accountKeyEvent(
     location: 0,
     ...init,
   });
-  if (trusted) markSearchResultEventTrusted(event, ownerWindow);
+  if (trusted) markFilterEventTrusted(event);
   return event;
+}
+
+function accountViewedKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  view: Window,
+) {
+  try {
+    const event = accountKeyEvent(trigger, key, { view });
+    return event.view === view ? event : null;
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
 }
 
 async function dispatchAccountKey(
@@ -1133,6 +1161,7 @@ describe("dashboard Account menu directional publication", () => {
 
       trigger.focus();
       const event = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(event.view).toBeNull();
       expect(event.defaultPrevented).toBe(true);
       expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
 
@@ -1143,6 +1172,148 @@ describe("dashboard Account menu directional publication", () => {
       host.remove();
     }
   });
+
+  it("accepts an exact non-null owner view when jsdom can construct one", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const ownerWindow = trigger.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+      trigger.focus();
+      const event = accountViewedKeyEvent(trigger, "ArrowUp", ownerWindow);
+      if (event) {
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(true);
+        expect(accountMenuItem("Sign out")).toHaveFocus();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a non-null foreign native view when jsdom can construct one", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const foreignWindow = iframe.contentWindow;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const event = accountViewedKeyEvent(trigger, "ArrowDown", foreignWindow);
+      if (event) {
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it.each(["foreign owner realm", "window lookalike"] as const)(
+    "rejects a null-view native event paired with a non-null %s React view",
+    async (viewKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      const iframe = document.createElement("iframe");
+      document.body.append(host, iframe);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        const foreignWindow = iframe.contentWindow;
+        if (!foreignWindow) throw new Error("The iframe has no content window");
+        const rejectedView =
+          viewKind === "foreign owner realm"
+            ? foreignWindow
+            : Object.freeze({ document: trigger.ownerDocument });
+        const restore = interceptReactHandler(
+          trigger,
+          "onKeyDown",
+          (original, event) => {
+            original(cloneReactEventWithView(event, rejectedView));
+          },
+        );
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = accountKeyEvent(trigger, "ArrowDown");
+        expect(event.view).toBeNull();
+        try {
+          await dispatchAccountKey(trigger, event);
+        } finally {
+          restore();
+        }
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        iframe.remove();
+      }
+    },
+  );
 
   it("rejects partial ref replay after the zero-ref Strict replay and permits a clean successor", async () => {
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
