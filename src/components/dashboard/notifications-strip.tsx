@@ -18,6 +18,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 type NotificationSnapshot = ReturnType<typeof useNotifications>;
 type NotificationRouter = ReturnType<typeof useRouter>;
 type NotificationNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
+type NotificationKeyboardKey = NotificationNavigationKey | "Delete";
 
 interface NotificationRowAuthority {
   readonly index: number;
@@ -38,7 +39,12 @@ interface NotificationStripAuthority {
   readonly rows: readonly NotificationRowAuthority[];
 }
 
-type NotificationActionKind = "read-all" | "open" | "dismiss" | "browse";
+type NotificationActionKind =
+  | "read-all"
+  | "open"
+  | "dismiss"
+  | "browse"
+  | "delete";
 
 interface NotificationActionPublication {
   readonly identity: symbol;
@@ -57,6 +63,7 @@ interface NotificationRowPublication {
   readonly openAction: NotificationActionPublication;
   readonly dismissAction: NotificationActionPublication;
   readonly browseAction: NotificationActionPublication;
+  readonly deleteAction: NotificationActionPublication;
 }
 
 interface NotificationDomSnapshot {
@@ -214,7 +221,7 @@ interface NotificationStripPublicationSet {
   readonly onReadAll: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onOpen: (row: NotificationRowAuthority, event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onDismiss: (row: NotificationRowAuthority, event: ReactMouseEvent<HTMLButtonElement>) => void;
-  readonly onBrowse: (
+  readonly onKeyDown: (
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => void;
@@ -352,9 +359,20 @@ class NotificationStripCoordinator {
       this.#claimedEvents.has(event) ||
       this.#claimedEvents.has(nativeEvent) ||
       action.publicationIdentity !== publication.identity ||
-      action.kind !== "browse" ||
       action.rowIndex === null ||
-      publication.rows[action.rowIndex]?.browseAction !== action
+      !(
+        (action.kind === "browse" &&
+          publication.rows[action.rowIndex]?.browseAction === action) ||
+        (action.kind === "delete" &&
+          publication.rows[action.rowIndex]?.deleteAction === action)
+      )
+    ) {
+      return false;
+    }
+    const row = publication.rows[action.rowIndex];
+    if (
+      !row ||
+      (action.kind === "delete" && this.#claimedRows.has(row))
     ) {
       return false;
     }
@@ -362,6 +380,7 @@ class NotificationStripCoordinator {
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     this.#claimedPublications.add(publication);
+    if (action.kind === "delete") this.#claimedRows.add(row);
     return true;
   }
 }
@@ -1516,6 +1535,7 @@ function createNotificationStripPublication(
           openAction: action("open", index),
           dismissAction: action("dismiss", index),
           browseAction: action("browse", index),
+          deleteAction: action("delete", index),
         });
       }),
     );
@@ -1766,7 +1786,7 @@ function createNotificationStripPublication(
   };
 
   const claim = (
-    kind: NotificationActionKind,
+    kind: "open" | "dismiss",
     row: NotificationRowAuthority,
     event: ReactMouseEvent<HTMLButtonElement>,
   ): NotificationStripPublication | null => {
@@ -1877,7 +1897,14 @@ function createNotificationStripPublication(
         target,
         path,
       } = nativeFacts;
-      if (!isNotificationNavigationKey(key)) return null;
+      if (
+        (!isNotificationNavigationKey(key) && key !== "Delete") ||
+        (key === "Delete" &&
+          (code !== "Delete" ||
+            location !== publication.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD))
+      ) {
+        return null;
+      }
       const proof = event as ReactKeyboardEvent<HTMLButtonElement> &
         NotificationReactEvent;
       const reactIsComposing = (
@@ -1914,6 +1941,7 @@ function createNotificationStripPublication(
         event.cancelable !== nativeFacts.cancelable ||
         event.defaultPrevented !== nativeFacts.defaultPrevented ||
         event.isTrusted !== nativeFacts.isTrusted ||
+        !Object.is(event.view, nativeFacts.view) ||
         event.key !== key ||
         event.code !== code ||
         event.location !== location ||
@@ -1938,6 +1966,7 @@ function createNotificationStripPublication(
             ["cancelable", event.cancelable],
             ["defaultPrevented", event.defaultPrevented],
             ["isTrusted", event.isTrusted],
+            ["view", event.view],
             ["key", event.key],
             ["code", event.code],
             ["location", event.location],
@@ -1986,12 +2015,13 @@ function createNotificationStripPublication(
       }
       return Object.freeze({
         publicationIdentity: publication.identity,
+        actionKind: key === "Delete" ? "delete" : "browse",
         nativeEvent,
         source,
         sourceIndex,
         destination,
         destinationIndex,
-        key,
+        key: key as NotificationKeyboardKey,
       });
     } catch {
       return null;
@@ -2070,7 +2100,7 @@ function createNotificationStripPublication(
     if (!publication) return;
     void publication.authority.markRead(row.notification.id);
   };
-  const onBrowse = (
+  const onKeyDown = (
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
@@ -2096,12 +2126,24 @@ function createNotificationStripPublication(
       return;
     }
     const facts = keyboardFacts(publication, publishedRow, event);
+    const action =
+      facts?.actionKind === "delete"
+        ? publishedRow.deleteAction
+        : publishedRow.browseAction;
     if (
       !facts ||
       facts.publicationIdentity !== publication.identity ||
+      runtime.isRetired() ||
+      publication.authority !== authority ||
+      publishedRow.authority !== row ||
+      !coordinator.isCurrent(publication) ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !runtime.historyIsClean() ||
+      !runtime.publishedDomMatches() ||
       !coordinator.claimKeyboard(
         publication,
-        publishedRow.browseAction,
+        action,
         event,
         facts.nativeEvent,
       )
@@ -2126,6 +2168,10 @@ function createNotificationStripPublication(
     ) {
       return;
     }
+    if (facts.actionKind === "delete") {
+      void publication.authority.markRead(row.notification.id);
+      return;
+    }
     publication.focusCustody.focus(facts.destination);
   };
 
@@ -2138,7 +2184,7 @@ function createNotificationStripPublication(
     onReadAll,
     onOpen,
     onDismiss,
-    onBrowse,
+    onKeyDown,
   });
 }
 
@@ -2197,7 +2243,7 @@ export function NotificationsStrip() {
     onReadAll,
     onOpen,
     onDismiss,
-    onBrowse,
+    onKeyDown,
   } = publication;
 
   return (
@@ -2243,7 +2289,7 @@ export function NotificationsStrip() {
                 type="button"
                 className="min-w-0 flex-1 text-left"
                 onClick={(event) => onOpen(row, event)}
-                onKeyDown={(event) => onBrowse(row, event)}
+                onKeyDown={(event) => onKeyDown(row, event)}
                 data-testid="notification-open"
               >
                 <span className="text-ink-2">
