@@ -519,6 +519,15 @@ function menuKey(
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Menu trigger owner window was unavailable");
+  let listenerReceiver: Window | null = null;
+  const observeReceiver = function (this: Window) {
+    listenerReceiver = this;
+  };
+  ownerWindow.addEventListener("status-bar-window-probe", observeReceiver, {
+    once: true,
+  });
+  ownerWindow.dispatchEvent(new ownerWindow.Event("status-bar-window-probe"));
+  expect(listenerReceiver).toBe(ownerWindow);
   const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
