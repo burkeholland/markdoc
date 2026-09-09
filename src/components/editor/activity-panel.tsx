@@ -127,6 +127,10 @@ interface ActivityCapturedGetter<Value> extends ActivityCapturedIntrinsic {
   readonly read: (target: object) => Value;
 }
 
+interface ActivityCapturedValue<Value> extends ActivityCapturedIntrinsic {
+  readonly read: () => Value;
+}
+
 interface ActivityCapturedMethod<Args extends readonly unknown[], Result>
   extends ActivityCapturedIntrinsic {
   readonly invoke: (target: object, ...args: Args) => Result;
@@ -147,6 +151,7 @@ interface ActivityKeyboardAuthority {
   readonly Event: typeof globalThis.Event;
   readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
   readonly Node: typeof globalThis.Node;
+  readonly apply: typeof Reflect.apply;
   readonly eventType: ActivityCapturedGetter<string>;
   readonly eventTarget: ActivityCapturedGetter<EventTarget | null>;
   readonly eventCurrentTarget: ActivityCapturedGetter<EventTarget | null>;
@@ -167,7 +172,7 @@ interface ActivityKeyboardAuthority {
   readonly metaKey: ActivityCapturedGetter<boolean>;
   readonly shiftKey: ActivityCapturedGetter<boolean>;
   readonly activeElement: ActivityCapturedGetter<Element | null>;
-  readonly documentView: ActivityCapturedGetter<Window | null>;
+  readonly documentView: ActivityCapturedValue<Window | null>;
   readonly focus: ActivityCapturedMethod<readonly [FocusOptions?], void>;
   readonly listen: ActivityCapturedMethod<
     readonly [string, EventListener, boolean],
@@ -178,15 +183,29 @@ interface ActivityKeyboardAuthority {
     void
   >;
   readonly trusted: ActivityTrustedGetter;
+  readonly reactMethodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
   readonly isCurrent: () => boolean;
 }
 
 type ActivityHeaderKeyPhase = "capture" | "bubble";
 
+interface ActivityReactKeyMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly stopPropagation: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+  readonly persist: (...args: never[]) => unknown;
+}
+
 interface ActivityHeaderKeyFacts {
   readonly nativeEvent: globalThis.KeyboardEvent;
   readonly key: ActivityHeaderNavigationKey;
   readonly delegationTarget: Node;
+  readonly methods: ActivityReactKeyMethods;
 }
 
 /**
@@ -204,6 +223,7 @@ interface ActivityNativeKeySnapshot {
   readonly bubbles: boolean;
   readonly cancelable: boolean;
   readonly view: Window | null;
+  readonly receiver: EventTarget;
 }
 
 /**
@@ -219,6 +239,7 @@ interface ActivityNativeKeyDelivery {
   captureInvalid: boolean;
   captureRootCount: number;
   captureRootEvent: ReactKeyboardEvent<HTMLElement> | null;
+  reactMethods: ActivityReactKeyMethods | null;
   captureCount: number;
   captureEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
   bubbleInvalid: boolean;
@@ -1117,6 +1138,50 @@ function captureActivityGetter<Value>(
   return null;
 }
 
+function captureActivityValue<Value>(
+  ownerWindow: Window & typeof globalThis,
+  target: object,
+  property: string,
+): ActivityCapturedValue<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const emptyOwners: object[] = [];
+  let owner: object | null = target;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (!("value" in descriptor) && typeof descriptor.get !== "function") {
+        return null;
+      }
+      const holder = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const read = "value" in descriptor
+        ? () => descriptor.value as Value
+        : () => apply(descriptor.get!, target, []) as Value;
+      return Object.freeze({
+        read,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          emptyOwners.every(
+            (candidate) =>
+              getOwnPropertyDescriptor(candidate, property) === undefined,
+          ) &&
+          activityDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    emptyOwners.push(owner);
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
 function captureActivityMethod<Args extends readonly unknown[], Result>(
   ownerWindow: Window & typeof globalThis,
   prototype: object,
@@ -1187,37 +1252,6 @@ function captureActivityTrustedGetter(
   });
 }
 
-/**
- * The owner realm's own window for a document: `defaultView` read through the getter the realm
- * published on the prototype rather than as a property of the document. An own `defaultView`
- * installed on the document itself would otherwise substitute a structural stand-in for the exact
- * window the document's own events propagate to, and every later owner-realm proof — the capture
- * listener's target, the event path's terminus and `view` parity — would be measured against a
- * window that never appears in a dispatch.
- */
-function activityDocumentView(
-  document: Document,
-): (Window & typeof globalThis) | null {
-  try {
-    let owner: object | null = Object.getPrototypeOf(document) as object | null;
-    while (owner) {
-      const descriptor = Object.getOwnPropertyDescriptor(owner, "defaultView");
-      if (descriptor) {
-        const getter = descriptor.get;
-        if (typeof getter !== "function") return null;
-        const view: unknown = Reflect.apply(getter, document, []);
-        return view && typeof view === "object"
-          ? (view as Window & typeof globalThis)
-          : null;
-      }
-      owner = Object.getPrototypeOf(owner) as object | null;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
 function captureActivityKeyboardAuthority(
   ownerDocument: Document,
   ownerWindow: Window & typeof globalThis,
@@ -1229,6 +1263,9 @@ function captureActivityKeyboardAuthority(
   const DocumentConstructor = ownerWindow.Document;
   const HTMLElementConstructor = ownerWindow.HTMLElement;
   const EventTargetConstructor = ownerWindow.EventTarget;
+  const apply = ownerWindow.Reflect.apply;
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
   const eventPrototype = EventConstructor.prototype;
   const uiEventPrototype = UIEventConstructor.prototype;
   const keyboardPrototype = KeyboardEventConstructor.prototype;
@@ -1255,7 +1292,11 @@ function captureActivityKeyboardAuthority(
   const metaKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "metaKey");
   const shiftKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "shiftKey");
   const activeElement = captureActivityGetter<Element | null>(ownerWindow, documentPrototype, "activeElement");
-  const documentView = captureActivityGetter<Window | null>(ownerWindow, documentPrototype, "defaultView");
+  const documentView = captureActivityValue<Window | null>(
+    ownerWindow,
+    ownerDocument,
+    "defaultView",
+  );
   const focus = captureActivityMethod<readonly [FocusOptions?], void>(ownerWindow, htmlElementPrototype, "focus");
   const listen = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "addEventListener");
   const unlisten = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "removeEventListener");
@@ -1286,8 +1327,7 @@ function captureActivityKeyboardAuthority(
     !listen ||
     !unlisten ||
     !trusted ||
-    documentView.read(ownerDocument) !== ownerWindow ||
-    !(ownerWindow instanceof EventTargetConstructor)
+    documentView.read() !== ownerWindow
   ) {
     return null;
   }
@@ -1336,8 +1376,28 @@ function captureActivityKeyboardAuthority(
       HTMLElementConstructor.prototype === htmlElementPrototype &&
       EventTargetConstructor.prototype === eventTargetPrototype &&
       captured.every((intrinsic) => intrinsic.isCurrent()) &&
-      documentView.read(ownerDocument) === ownerWindow;
+      documentView.read() === ownerWindow;
     return historyIsClean;
+  };
+  const reactMethodMatches = (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => {
+    if (!isCurrent() || typeof value !== "function") return false;
+    try {
+      let owner: object | null = event;
+      while (owner) {
+        const descriptor = getOwnPropertyDescriptor(owner, property);
+        if (descriptor) {
+          return "value" in descriptor && descriptor.value === value;
+        }
+        owner = getPrototypeOf(owner) as object | null;
+      }
+    } catch {
+      historyIsClean = false;
+    }
+    return false;
   };
   if (!isCurrent()) return null;
   return Object.freeze({
@@ -1345,6 +1405,7 @@ function captureActivityKeyboardAuthority(
     Event: EventConstructor,
     KeyboardEvent: KeyboardEventConstructor,
     Node: NodeConstructor,
+    apply,
     eventType,
     eventTarget,
     eventCurrentTarget,
@@ -1370,6 +1431,7 @@ function captureActivityKeyboardAuthority(
     listen,
     unlisten,
     trusted,
+    reactMethodMatches,
     isCurrent,
   });
 }
@@ -1474,6 +1536,7 @@ function activityNativeKeySnapshotMatches(
       keyboard.eventBubbles.read(event) === snapshot.bubbles &&
       keyboard.eventCancelable.read(event) === snapshot.cancelable &&
       Object.is(view, snapshot.view) &&
+      (view === null || view === keyboard.ownerWindow) &&
       !keyboard.eventDefaultPrevented.read(event) &&
       !keyboard.eventCancelBubble.read(event) &&
       !keyboard.repeat.read(event) &&
@@ -1482,6 +1545,9 @@ function activityNativeKeySnapshotMatches(
       !keyboard.ctrlKey.read(event) &&
       !keyboard.metaKey.read(event) &&
       !keyboard.shiftKey.read(event) &&
+      snapshot.path[snapshot.path.length - 2] ===
+        snapshot.publication.ownerDocument &&
+      snapshot.path[snapshot.path.length - 1] === snapshot.receiver &&
       path.length === snapshot.path.length &&
       path.every((entry, index) => entry === snapshot.path[index])
     );
@@ -1502,6 +1568,62 @@ function activityWrapperNativeEvent(
   }
 }
 
+function activityReactKeyMethods(
+  event: ReactKeyboardEvent<HTMLElement>,
+  keyboard: ActivityKeyboardAuthority,
+  expected?: ActivityReactKeyMethods,
+): ActivityReactKeyMethods | null {
+  try {
+    const methods = Object.freeze({
+      preventDefault: event.preventDefault as (...args: never[]) => unknown,
+      stopPropagation: event.stopPropagation as (...args: never[]) => unknown,
+      isDefaultPrevented: event.isDefaultPrevented as (
+        ...args: never[]
+      ) => unknown,
+      isPropagationStopped: event.isPropagationStopped as (
+        ...args: never[]
+      ) => unknown,
+      persist: event.persist as (...args: never[]) => unknown,
+    });
+    if (
+      !keyboard.reactMethodMatches(
+        event,
+        "preventDefault",
+        methods.preventDefault,
+      ) ||
+      !keyboard.reactMethodMatches(
+        event,
+        "stopPropagation",
+        methods.stopPropagation,
+      ) ||
+      !keyboard.reactMethodMatches(
+        event,
+        "isDefaultPrevented",
+        methods.isDefaultPrevented,
+      ) ||
+      !keyboard.reactMethodMatches(
+        event,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+      ) ||
+      !keyboard.reactMethodMatches(event, "persist", methods.persist) ||
+      keyboard.apply(methods.isDefaultPrevented, event, []) !== false ||
+      keyboard.apply(methods.isPropagationStopped, event, []) !== false ||
+      (expected !== undefined &&
+        (methods.preventDefault !== expected.preventDefault ||
+          methods.stopPropagation !== expected.stopPropagation ||
+          methods.isDefaultPrevented !== expected.isDefaultPrevented ||
+          methods.isPropagationStopped !== expected.isPropagationStopped ||
+          methods.persist !== expected.persist))
+    ) {
+      return null;
+    }
+    return methods;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * One genuine trusted React/native keydown pair on the exact focused header control, read through
  * the publication's captured owner-realm intrinsics rather than the event's own properties. The
@@ -1514,6 +1636,8 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
   source: HTMLButtonElement,
   reactCurrentTarget: Element,
   phase: ActivityHeaderKeyPhase,
+  windowReceiver: EventTarget,
+  expectedMethods?: ActivityReactKeyMethods,
 ): ActivityHeaderKeyFacts | null {
   const keyboard = publication.keyboard;
   if (!event || typeof event !== "object" || !keyboard || !keyboard.isCurrent()) {
@@ -1522,9 +1646,6 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
   const nativeEvent = event.nativeEvent;
   const reactEvent = event as ReactKeyboardEvent<Element> & {
     _reactName?: unknown;
-    isDefaultPrevented?: unknown;
-    isPropagationStopped?: unknown;
-    persist?: unknown;
   };
   if (
     !nativeEvent ||
@@ -1555,6 +1676,11 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
     const metaKey = keyboard.metaKey.read(nativeEvent);
     const shiftKey = keyboard.shiftKey.read(nativeEvent);
     const nativeView = keyboard.eventView.read(nativeEvent);
+    const methods = activityReactKeyMethods(
+      event as ReactKeyboardEvent<HTMLElement>,
+      keyboard,
+      expectedMethods,
+    );
     return keyboard.eventType.read(nativeEvent) === "keydown" &&
       nativePhase ===
         (phase === "capture"
@@ -1584,7 +1710,7 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
       path.includes(currentTarget) &&
       path.includes(publication.header) &&
       path.includes(publication.panel) &&
-      path[path.length - 1] === keyboard.ownerWindow &&
+      path[path.length - 1] === windowReceiver &&
       keyboard.activeElement.read(publication.ownerDocument) === source &&
       event.type === "keydown" &&
       event.currentTarget === reactCurrentTarget &&
@@ -1604,12 +1730,13 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
       event.isTrusted === trusted &&
       Object.is(event.view, nativeView) &&
       reactEvent._reactName === "onKeyDown" &&
-      typeof reactEvent.isDefaultPrevented === "function" &&
-      reactEvent.isDefaultPrevented() === defaultPrevented &&
-      typeof reactEvent.isPropagationStopped === "function" &&
-      reactEvent.isPropagationStopped() === cancelBubble &&
-      typeof reactEvent.persist === "function"
-      ? Object.freeze({ nativeEvent, key, delegationTarget: currentTarget })
+      methods
+      ? Object.freeze({
+          nativeEvent,
+          key,
+          delegationTarget: currentTarget,
+          methods,
+        })
       : null;
   } catch {
     return null;
@@ -2047,9 +2174,7 @@ function createActivityPublication({
     type Retirement = "element" | "layout" | "other";
     const panelElement = panel.element();
     const headerElement = header.element();
-    const ownerWindow = panelElement
-      ? activityDocumentView(panelElement.ownerDocument)
-      : null;
+    const ownerWindow = panelElement?.ownerDocument.defaultView;
     const headerControls = currentHeaderControls();
     const placement = panelElement
       ? captureActivityPlacement(panelElement)
@@ -2152,7 +2277,7 @@ function createActivityPublication({
      * see a trusted header keydown, and the only place a delivery ledger is ever opened. One native
      * event is snapshotted at most once, so a re-dispatched event can never open a second ledger.
      */
-    function captureNative(nativeEvent: Event) {
+    function captureNative(this: EventTarget, nativeEvent: Event) {
       if (
         retired ||
         !keyboard ||
@@ -2166,13 +2291,17 @@ function createActivityPublication({
       seenNativeKeys.add(nativeEvent);
       if (!coordinator.isCurrent(publication)) return;
       try {
+        const currentTarget = keyboard.eventCurrentTarget.read(nativeEvent);
+        const path = keyboard.eventPath.invoke(nativeEvent);
         if (
           !keyboard.trusted.matches(nativeEvent) ||
           !keyboard.trusted.read(nativeEvent) ||
           keyboard.eventType.read(nativeEvent) !== "keydown" ||
-          keyboard.eventCurrentTarget.read(nativeEvent) !== ownerWindow ||
+          currentTarget !== this ||
           keyboard.eventPhase.read(nativeEvent) !==
-            keyboard.Event.CAPTURING_PHASE
+            keyboard.Event.CAPTURING_PHASE ||
+          path[path.length - 2] !== publication.ownerDocument ||
+          path[path.length - 1] !== this
         ) {
           return;
         }
@@ -2189,16 +2318,18 @@ function createActivityPublication({
             key,
             code: keyboard.code.read(nativeEvent),
             target,
-            path: Object.freeze([...keyboard.eventPath.invoke(nativeEvent)]),
+            path: Object.freeze([...path]),
             bubbles: keyboard.eventBubbles.read(nativeEvent),
             cancelable: keyboard.eventCancelable.read(nativeEvent),
             view: keyboard.eventView.read(nativeEvent),
+            receiver: this,
           }),
           delegationTarget: null,
           crossedPanel: false,
           captureInvalid: false,
           captureRootCount: 0,
           captureRootEvent: null,
+          reactMethods: null,
           captureCount: 0,
           captureEvent: null,
           bubbleInvalid: false,
@@ -2289,6 +2420,8 @@ function createActivityPublication({
               source.element,
               liveHeader,
               phase,
+              staged.receiver,
+              delivery.reactMethods ?? undefined,
             )
           : null;
       if (
@@ -2335,6 +2468,7 @@ function createActivityPublication({
         }
         delivery.captureRootCount += 1;
         delivery.captureRootEvent = event;
+        delivery.reactMethods = facts.methods;
         delivery.delegationTarget = facts.delegationTarget;
         return;
       }
@@ -2394,8 +2528,7 @@ function createActivityPublication({
         !liveHeader ||
         publication.presentation !== presentation ||
         keyboard.ownerWindow !== publication.ownerWindow ||
-        keyboard.documentView.read(publication.ownerDocument) !==
-          publication.ownerWindow ||
+        keyboard.documentView.read() !== publication.ownerWindow ||
         liveHeader !== publication.header ||
         source.element !== owned ||
         !activityHeaderControlsMatch(publication.headerControls, controls) ||
@@ -2406,16 +2539,18 @@ function createActivityPublication({
       ) {
         return;
       }
+      const carried = activityWrapperNativeEvent(event);
+      const delivery = carried ? nativeDeliveries.get(carried) : undefined;
+      if (!delivery || delivery.snapshot.publication !== publication) return;
       const facts = exactActivityHeaderKey(
         event,
         publication,
         source.element,
         source.element,
         phase,
+        delivery.snapshot.receiver,
+        delivery.reactMethods ?? undefined,
       );
-      const carried = facts?.nativeEvent ?? activityWrapperNativeEvent(event);
-      const delivery = carried ? nativeDeliveries.get(carried) : undefined;
-      if (!delivery || delivery.snapshot.publication !== publication) return;
       if (!facts) {
         if (phase === "capture") delivery.captureInvalid = true;
         else delivery.bubbleInvalid = true;

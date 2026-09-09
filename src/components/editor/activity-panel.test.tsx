@@ -227,6 +227,33 @@ function markActivityEventTrusted(event: Event) {
   if (!event.isTrusted) throw new Error("The Activity event trust slot did not update");
 }
 
+function replaceActivityPathTerminal(event: Event, terminal: EventTarget) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's Activity path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The Activity path terminal did not update");
+  }
+}
+
 function activityKeyboardEvent(
   element: HTMLElement,
   key: string,
@@ -2373,6 +2400,283 @@ describe("ActivityPanel header focus movement", () => {
       expect(focus).toHaveBeenCalledOnce();
     },
   );
+
+  it("authenticates the backing Window receiver and distinct React wrappers with shared method identities", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView("header-window-receiver");
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const capture = reactHandler<ActivityKeyHandler>(
+      refresh,
+      "onKeyDownCapture",
+    );
+    const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    const captures: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+    const bubbles: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+    const captureMethods: unknown[][] = [];
+    const bubbleMethods: unknown[][] = [];
+    const propsKey = Object.keys(refresh).find((key) =>
+      key.startsWith("__reactProps$"),
+    );
+    if (!propsKey) {
+      throw new Error("React props were not attached to the Activity control");
+    }
+    const record = refresh as unknown as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const originalProps = record[propsKey];
+    record[propsKey] = {
+      ...originalProps,
+      onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+        captures.push(event);
+        captureMethods.push([
+          event.preventDefault,
+          event.stopPropagation,
+          event.isDefaultPrevented,
+          event.isPropagationStopped,
+          event.persist,
+        ]);
+        capture(event);
+      },
+      onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+        bubbles.push(event);
+        bubbleMethods.push([
+          event.preventDefault,
+          event.stopPropagation,
+          event.isDefaultPrevented,
+          event.isPropagationStopped,
+          event.persist,
+        ]);
+        bubble(event);
+      },
+    };
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    const currentTargetGetter = ownerWindow
+      ? Object.getOwnPropertyDescriptor(
+          ownerWindow.Event.prototype,
+          "currentTarget",
+        )?.get
+      : undefined;
+    const composedPath = ownerWindow?.Event.prototype.composedPath;
+    if (!ownerWindow || !currentTargetGetter || !composedPath) {
+      throw new Error("Activity Window event intrinsics were unavailable");
+    }
+    const nativeDelivery: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget;
+    } = {};
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    const observeReceiver = function (this: EventTarget, nativeEvent: Event) {
+      if (nativeEvent !== event) return;
+      nativeDelivery.receiver = this;
+      nativeDelivery.currentTarget = Reflect.apply(
+        currentTargetGetter,
+        nativeEvent,
+        [],
+      ) as EventTarget | null;
+      nativeDelivery.terminal = Reflect.apply(
+        composedPath,
+        nativeEvent,
+        [],
+      ).at(-1);
+    };
+    ownerWindow.addEventListener("keydown", observeReceiver, true);
+    refresh.focus();
+    focus.mockClear();
+
+    try {
+      act(() => refresh.dispatchEvent(event));
+    } finally {
+      ownerWindow.removeEventListener("keydown", observeReceiver, true);
+      record[propsKey] = originalProps;
+    }
+
+    expect(captures).toHaveLength(1);
+    expect(bubbles).toHaveLength(1);
+    expect(captures[0]).not.toBe(bubbles[0]);
+    expect(captures[0]!.nativeEvent).toBe(event);
+    expect(bubbles[0]!.nativeEvent).toBe(event);
+    expect(captureMethods).toHaveLength(1);
+    expect(bubbleMethods).toEqual(captureMethods);
+    expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+    expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+    expect(event.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("rejects a structural Window terminal while retaining the genuine backing receiver", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView("header-structural-window");
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: refresh.ownerDocument },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const observation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget;
+    } = {};
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      nativeEvent: Event,
+    ) {
+      if (nativeEvent !== event) return;
+      observation.receiver = this;
+      observation.currentTarget = nativeEvent.currentTarget;
+      observation.terminal = nativeEvent.composedPath().at(-1);
+      replaceActivityPathTerminal(nativeEvent, structural);
+    });
+    ownerWindow.addEventListener("keydown", stageTerminal, {
+      capture: true,
+      once: true,
+    });
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => refresh.dispatchEvent(event));
+
+    expect(stageTerminal).toHaveBeenCalledOnce();
+    expect(observation.receiver).toBe(observation.currentTarget);
+    expect(observation.receiver).toBe(observation.terminal);
+    expect(observation.receiver).not.toBe(structural);
+    expect(event.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const recovered = activityKey(refresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("rejects a structural document defaultView and recovers through a clean publication", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const view = await mountHeaderView("header-structural-default-view");
+    const refresh = headerControl("Refresh activity");
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as Window & typeof globalThis;
+    Object.defineProperties(structural, {
+      document: { value: document },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      UIEvent: { value: ownerWindow.UIEvent },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Node: { value: ownerWindow.Node },
+      Document: { value: ownerWindow.Document },
+      HTMLElement: { value: ownerWindow.HTMLElement },
+      MutationObserver: { value: ownerWindow.MutationObserver },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const previous = Object.getOwnPropertyDescriptor(document, "defaultView");
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    try {
+      Object.defineProperty(document, "defaultView", {
+        configurable: true,
+        value: structural,
+      });
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      act(() => refresh.dispatchEvent(event));
+    } finally {
+      if (previous) {
+        Object.defineProperty(document, "defaultView", previous);
+      } else {
+        Reflect.deleteProperty(document, "defaultView");
+      }
+    }
+
+    const restored = activityKey(refresh, "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(restored.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    renderStrictActivity(view.root, {
+      session: view.session,
+      onClose: view.onClose,
+    });
+    const currentRefresh = headerControl("Refresh activity");
+    currentRefresh.focus();
+    focus.mockClear();
+
+    const recovered = activityKey(currentRefresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(headerControl("Close activity")).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("rejects changed React cancellation method identity before clean recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView("header-react-method-identity");
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    const restore = replaceKeyHandler(refresh, (event) => {
+      Object.defineProperty(event, "isDefaultPrevented", {
+        configurable: true,
+        value: () => false,
+      });
+      bubble(event);
+    });
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = activityKey(refresh, "ArrowRight");
+    restore();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const recovered = activityKey(refresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
 
   it("leaves every key inert while the refresh control is hidden", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
