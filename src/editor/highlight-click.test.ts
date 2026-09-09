@@ -425,10 +425,11 @@ describe("live highlight click ownership", () => {
     },
   );
 
-  it("activates the moved rich successor when browser hit tests stay inside its current decoration", () => {
+  it("recovers two clean rich clicks after a moved press and a post-click pointer selection", () => {
     const harness = makeHarness("rich", "comment");
     const destinationId = addCommentDestination(harness);
     const staleTarget = harness.target;
+    const view = harness.view as RichView;
     harness.view.focus();
     harness.setSourcePosition(ITEM_RANGE.from + 2);
     dispatch(staleTarget, "pointerdown", { button: 0, buttons: 1, detail: 1 });
@@ -438,6 +439,12 @@ describe("live highlight click ownership", () => {
     dispatch(harness.plainTarget, "pointerup", { button: 0, detail: 1 });
     dispatch(harness.plainTarget, "mouseup", { button: 0, detail: 1 });
     dispatch(harness.plainTarget, "click", { button: 0, detail: 1 });
+    const oldSelectionPosition = harness.session.binding.getSourceMap().srcToPm(ITEM_RANGE.from + 2);
+    view.dispatch(
+      view.state.tr
+        .setSelection(TextSelection.create(view.state.doc, oldSelectionPosition))
+        .setMeta("pointer", true),
+    );
     vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
 
     expect(harness.rawClick).not.toHaveBeenCalled();
@@ -446,7 +453,6 @@ describe("live highlight click ownership", () => {
     expect(harness.session.activeCommentId).toBeNull();
     expect(harness.session.comments.get(destinationId)).toBeNull();
     harness.target = currentTarget;
-    const view = harness.view as RichView;
     const downSourcePosition = AWAY_RANGE.from + 1;
     const releaseSourcePosition = AWAY_RANGE.from + 2;
     const clickSourcePosition = AWAY_RANGE.from + 3;
@@ -467,16 +473,16 @@ describe("live highlight click ownership", () => {
     harness.setSourcePosition(downSourcePosition);
     dispatch(currentTarget, "pointerdown", { button: 0, buttons: 1, detail: 1, clientX: 10 });
     dispatch(currentTarget, "mousedown", { button: 0, buttons: 1, detail: 1, clientX: 10 });
-    view.dispatch(
-      view.state.tr
-        .setSelection(TextSelection.create(view.state.doc, releasePosition))
-        .setMeta("pointer", true),
-    );
     harness.setSourcePosition(releaseSourcePosition);
     dispatch(currentTarget, "pointerup", { button: 0, detail: 1, clientX: 12 });
     dispatch(currentTarget, "mouseup", { button: 0, detail: 1, clientX: 12 });
     harness.setSourcePosition(clickSourcePosition);
     dispatch(currentTarget, "click", { button: 0, detail: 1, clientX: 14 });
+    view.dispatch(
+      view.state.tr
+        .setSelection(TextSelection.create(view.state.doc, releasePosition))
+        .setMeta("pointer", true),
+    );
     expect(view.state.selection.from).toBe(releasePosition);
 
     vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS - 1);
@@ -490,6 +496,39 @@ describe("live highlight click ownership", () => {
     expect(harness.session.activeCommentId).toBe(harness.id);
     expect(harness.session.activeSuggestionId).toBeNull();
     expect(harness.session.ytext.toString()).toBe(TEXT);
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).toHaveBeenCalledTimes(1);
+
+    harness.rawClick.mockClear();
+    harness.setActiveComment.mockClear();
+    harness.setActiveSuggestion.mockClear();
+    const secondTarget = harness.root.querySelector<HTMLElement>(
+      `[data-highlight-id="${harness.id}"][data-highlight-kind="comment"]`,
+    );
+    expect(secondTarget).not.toBeNull();
+    harness.target = secondTarget!;
+    const secondDownSourcePosition = AWAY_RANGE.from + 4;
+    const secondReleaseSourcePosition = AWAY_RANGE.from + 5;
+    const secondClickSourcePosition = AWAY_RANGE.from + 6;
+    harness.setSourcePosition(secondDownSourcePosition);
+    dispatch(secondTarget!, "pointerdown", { button: 0, buttons: 1, detail: 1, clientX: 20 });
+    dispatch(secondTarget!, "mousedown", { button: 0, buttons: 1, detail: 1, clientX: 20 });
+    harness.setSourcePosition(secondReleaseSourcePosition);
+    dispatch(secondTarget!, "pointerup", { button: 0, detail: 1, clientX: 22 });
+    dispatch(secondTarget!, "mouseup", { button: 0, detail: 1, clientX: 22 });
+    harness.setSourcePosition(secondClickSourcePosition);
+    dispatch(secondTarget!, "click", { button: 0, detail: 1, clientX: 24 });
+    const secondSelectionPosition = map.srcToPm(secondReleaseSourcePosition);
+    view.dispatch(
+      view.state.tr
+        .setSelection(TextSelection.create(view.state.doc, secondSelectionPosition))
+        .setMeta("pointer", true),
+    );
+
+    vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
+    expect(harness.rawClick).toHaveBeenCalledExactlyOnceWith("comment", harness.id, secondClickSourcePosition);
+    expect(harness.setActiveComment).toHaveBeenCalledExactlyOnceWith(harness.id);
+    expect(harness.setActiveSuggestion).not.toHaveBeenCalled();
     vi.advanceTimersByTime(HIGHLIGHT_ACTIVATION_WINDOW_MS);
     expect(harness.rawClick).toHaveBeenCalledTimes(1);
   });
