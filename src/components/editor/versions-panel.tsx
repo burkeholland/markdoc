@@ -931,30 +931,20 @@ function panelToolbarEventPath(
 
 function panelToolbarIsOwnerWindow(
   candidate: unknown,
-  ownerDocument: Document,
   expected: unknown,
 ) {
-  return (
-    candidate === expected ||
-    (typeof candidate === "object" &&
-      candidate !== null &&
-      "document" in candidate &&
-      candidate.document === ownerDocument &&
-      "window" in candidate &&
-      candidate.window === candidate)
-  );
+  return candidate === expected;
 }
 
 function panelToolbarPathMatches(
   expected: readonly EventTarget[],
   actual: readonly EventTarget[],
-  ownerDocument: Document,
+  ownerWindow: Window,
 ) {
-  const actualWindow = actual.at(-1);
-  const expectedWindow = expected.at(-1);
   return (
     actual.length === expected.length &&
-    panelToolbarIsOwnerWindow(actualWindow, ownerDocument, expectedWindow) &&
+    expected.at(-1) === ownerWindow &&
+    panelToolbarIsOwnerWindow(actual.at(-1), ownerWindow) &&
     actual
       .slice(0, -1)
       .every((target, index) => target === expected[index])
@@ -2320,7 +2310,7 @@ function createPanelToolbarKeyboardRuntime(
       !panelToolbarPathMatches(
         entry.path,
         authority.eventPath.call(event),
-        ownerDocument,
+        publication.ownerWindow,
       ) ||
       authority.getOwnPropertyDescriptor(event, "stopPropagation") ||
       authority.getOwnPropertyDescriptor(event, "stopImmediatePropagation")
@@ -2577,8 +2567,7 @@ function createPanelToolbarKeyboardRuntime(
       terminal.native.event !== event ||
       !panelToolbarIsOwnerWindow(
         keyboardAuthority.eventCurrentTarget.read(event),
-        ownerDocument,
-        windowAuthority,
+        publication.ownerWindow,
       ) ||
       keyboardAuthority.eventPhase.read(event) !==
         windowAuthority.Event.BUBBLING_PHASE ||
@@ -2588,7 +2577,7 @@ function createPanelToolbarKeyboardRuntime(
       !panelToolbarPathMatches(
         terminal.native.path,
         keyboardAuthority.eventPath.call(event),
-        ownerDocument,
+        publication.ownerWindow,
       )
     ) {
       return;

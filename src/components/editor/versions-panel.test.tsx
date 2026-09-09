@@ -531,6 +531,52 @@ async function dispatchVersionsToolbarEvent(
   });
 }
 
+function normalizeVersionsToolbarOwnerWindowBoundary(
+  ownerWindow: Window & typeof globalThis,
+  transformPath?: (
+    event: Event,
+    path: readonly EventTarget[],
+  ) => readonly EventTarget[],
+) {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const nativeComposedPath = eventPrototype.composedPath;
+  const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+    eventPrototype,
+    "currentTarget",
+  );
+  if (!currentTargetDescriptor?.get) {
+    throw new Error("Event currentTarget getter was unavailable");
+  }
+  vi.spyOn(eventPrototype, "composedPath").mockImplementation(function (
+    this: Event,
+  ) {
+    const path = nativeComposedPath.call(this);
+    const normalized =
+      path.length > 0
+        ? [...path.slice(0, -1), ownerWindow]
+        : path;
+    return [...(transformPath?.(this, normalized) ?? normalized)];
+  });
+  vi.spyOn(eventPrototype, "currentTarget", "get").mockImplementation(function (
+    this: Event,
+  ) {
+    const currentTarget = currentTargetDescriptor.get!.call(this) as
+      | EventTarget
+      | null;
+    if (typeof currentTarget !== "object" || currentTarget === null) {
+      return currentTarget;
+    }
+    const candidate = currentTarget as EventTarget & {
+      document?: Document;
+      window?: unknown;
+    };
+    return candidate.document === ownerWindow.document &&
+      candidate.window === currentTarget
+      ? ownerWindow
+      : currentTarget;
+  });
+}
+
 function createVersionDiffView(
   preview = versionDiffPreview(),
   current = VERSION_DIFF_CURRENT,
@@ -2338,6 +2384,19 @@ describe("VersionsPanel · direct-root Strict Mode authority", () => {
 });
 
 describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
+  let pathTerminalEvent: Event | null;
+  let pathTerminalOverride: EventTarget | null;
+
+  beforeEach(() => {
+    pathTerminalEvent = null;
+    pathTerminalOverride = null;
+    normalizeVersionsToolbarOwnerWindowBoundary(window, (event, path) =>
+      event === pathTerminalEvent && pathTerminalOverride
+        ? [...path.slice(0, -1), pathTerminalOverride]
+        : path,
+    );
+  });
+
   it("publishes a labelled, horizontal, ordered toolbar with one Refresh tab stop", async () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -2665,6 +2724,85 @@ describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
       }
     },
   );
+
+  it("rejects an owner-document lookalike at the path terminal and accepts a clean successor", async () => {
+    const lookalike: { document: Document; window: unknown } = {
+      document,
+      window: null,
+    };
+    lookalike.window = lookalike;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-owner-window-lookalike"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      let buttons = versionsToolbarButtons(host);
+      buttons.refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = versions.mock.calls.length;
+      pathTerminalEvent = createVersionsToolbarKey(
+        buttons.refresh,
+        "ArrowRight",
+      );
+      pathTerminalOverride = lookalike as unknown as EventTarget;
+
+      await dispatchVersionsToolbarEvent(
+        buttons.refresh,
+        pathTerminalEvent as KeyboardEvent,
+        false,
+      );
+
+      buttons = versionsToolbarButtons(host);
+      expect(pathTerminalEvent.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(buttons.refresh).toHaveFocus();
+      expect(buttons.refresh).toHaveAttribute("tabindex", "0");
+      expect(buttons.close).toHaveAttribute("tabindex", "-1");
+      expect(versions).toHaveBeenCalledTimes(requests);
+      expect(version).not.toHaveBeenCalled();
+      expect(renameVersion).not.toHaveBeenCalled();
+      expect(restoreVersion).not.toHaveBeenCalled();
+      expect(copyVersion).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+
+      pathTerminalEvent = null;
+      pathTerminalOverride = null;
+      const current = versionsToolbarButtons(host).refresh;
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(versions).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 
   it("rejects crossed deliveries and recovers with a clean event", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -3061,6 +3199,7 @@ describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
     ownerWindow.document.body.append(host);
     const root = createRoot(host);
     const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+    normalizeVersionsToolbarOwnerWindowBoundary(ownerWindow);
     const focus = vi
       .spyOn(ownerWindow.HTMLElement.prototype, "focus")
       .mockImplementation(function (
