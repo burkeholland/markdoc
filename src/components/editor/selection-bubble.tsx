@@ -2079,7 +2079,6 @@ class BubbleControlCoordinator {
     ) {
       return null;
     }
-    let publication: BubbleControlPublication;
     const keyboardListeners: BubbleKeyboardListener[] = [
       ...generation.controls.map((control) => {
         const binding = controlBindings.get(control)!;
@@ -2098,7 +2097,7 @@ class BubbleControlCoordinator {
         capture: false,
       }),
     ];
-    publication = {
+    const publication: BubbleControlPublication = {
       identity: Symbol("selection-bubble-control-publication"),
       retired: false,
       generation,
