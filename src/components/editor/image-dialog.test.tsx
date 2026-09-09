@@ -156,20 +156,32 @@ function reactProp<T>(element: Element, name: string): T {
   return value as T;
 }
 
-async function waitForCommittedReactProp<T>(
-  element: () => Element,
-  name: string,
-  previous: T,
+async function chooseFromCommittedSuccessor(
+  file: File,
+  previousOnChange: ChangeEventHandler<HTMLInputElement>,
 ) {
-  let candidate: T | undefined;
+  let candidate:
+    | {
+        readonly input: HTMLInputElement;
+        readonly onChange: ChangeEventHandler<HTMLInputElement>;
+      }
+    | undefined;
   await waitFor(() => {
-    const current = reactProp<T>(element(), name);
-    if (current === previous || current !== candidate) {
-      candidate = current;
-      throw new Error(`Waiting for committed React ${name}`);
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const onChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
+      input,
+      "onChange",
+    );
+    if (
+      onChange === previousOnChange ||
+      input !== candidate?.input ||
+      onChange !== candidate?.onChange
+    ) {
+      candidate = { input, onChange };
+      throw new Error("Waiting for committed React onChange");
     }
+    fireEvent.change(input, { target: { files: [file] } });
   });
-  return candidate as T;
 }
 
 function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
@@ -528,16 +540,11 @@ describe("ImageDialog upload lifecycle", () => {
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(input.value).toBe("");
-      await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-        () => screen.getByTestId("image-file"),
-        "onChange",
-        oldOnChange,
-      );
 
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
       });
-      choose(retryFile);
+      await chooseFromCommittedSuccessor(retryFile, oldOnChange);
       expect(onUpload).toHaveBeenCalledTimes(2);
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
       await act(async () => {
@@ -577,16 +584,11 @@ describe("ImageDialog upload lifecycle", () => {
       ),
     );
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-      () => screen.getByTestId("image-file"),
-      "onChange",
-      oldOnChange,
-    );
 
     const retryFile = new File(["retry"], "retry.png", {
       type: "image/png",
     });
-    choose(retryFile);
+    await chooseFromCommittedSuccessor(retryFile, oldOnChange);
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
     await act(async () => {
