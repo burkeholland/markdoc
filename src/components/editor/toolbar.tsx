@@ -1903,7 +1903,6 @@ function createToolbarPublication({
     const listenerTarget = currentKeyboard.listenerTarget;
     let installed = false;
     let released = false;
-    let registration: HeadingKeyListenerRegistration;
     const listener = function (this: EventTarget, event: Event) {
       if (!registration.isCurrent()) return;
       headingKeyNativePublication = null;
@@ -1947,7 +1946,7 @@ function createToolbarPublication({
         );
       }
     };
-    registration = Object.freeze({
+    const registration = Object.freeze({
       source: publication,
       ownerDocument,
       ownerWindow,

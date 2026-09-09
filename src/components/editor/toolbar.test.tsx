@@ -881,22 +881,21 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
     let pathTerminal: EventTarget | undefined;
-    let listenerReceiver: EventTarget | undefined;
     let listenerCurrentTarget: EventTarget | null | undefined;
+    const listener = vi.fn(function (this: EventTarget, event: Event) {
+      listenerCurrentTarget = event.currentTarget;
+      pathTerminal = event.composedPath().at(-1);
+    });
     trigger.ownerDocument.defaultView?.addEventListener(
       "keydown",
-      function (event) {
-        listenerReceiver = this;
-        listenerCurrentTarget = event.currentTarget;
-        pathTerminal = event.composedPath().at(-1);
-      },
+      listener,
       { capture: true, once: true },
     );
 
     const event = dispatchHeadingKey(trigger, "ArrowUp");
 
     if (!pathTerminal) throw new Error("Keyboard path had no window terminal");
-    expect(listenerReceiver).toBe(pathTerminal);
+    expect(listener.mock.contexts).toEqual([pathTerminal]);
     expect(listenerCurrentTarget).toBe(pathTerminal);
     expect(event.defaultPrevented).toBe(true);
     expect(textStyle()).toHaveAttribute("aria-expanded", "true");
@@ -927,14 +926,16 @@ describe("Toolbar Text style trusted arrows", () => {
       window: { value: structural },
       self: { value: structural },
     });
-    let stagedReceiver: EventTarget | undefined;
     const handlers = headingKeyHandlers(trigger);
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      replaceJsdomPathTerminal(event, structural);
+    });
     ownerWindow.addEventListener(
       "keydown",
-      function (event) {
-        stagedReceiver = this;
-        replaceJsdomPathTerminal(event, structural);
-      },
+      stageTerminal,
       { capture: true, once: true },
     );
     trigger.focus();
@@ -946,7 +947,8 @@ describe("Toolbar Text style trusted arrows", () => {
       bubble: handlers.action,
     });
 
-    expect(stagedReceiver).not.toBe(structural);
+    expect(stageTerminal.mock.contexts).toEqual([ownerWindow]);
+    expect(stageTerminal.mock.contexts[0]).not.toBe(structural);
     expect(rejected.composedPath()).toEqual([]);
     expect(rejected.defaultPrevented).toBe(false);
     expect(preventDefault).not.toHaveBeenCalled();
@@ -1038,15 +1040,17 @@ describe("Toolbar Text style trusted arrows", () => {
       ),
     ).toHaveLength(1);
 
-    let staleReceiver: EventTarget | undefined;
     let staleTerminal: EventTarget | undefined;
+    const publishStale = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      staleTerminal = event.composedPath().at(-1);
+      Reflect.apply(staleListener, this, [event]);
+    });
     ownerWindow.addEventListener(
       "keydown",
-      function (event) {
-        staleReceiver = this;
-        staleTerminal = event.composedPath().at(-1);
-        Reflect.apply(staleListener, this, [event]);
-      },
+      publishStale,
       { capture: true, once: true },
     );
     trigger.focus();
@@ -1056,7 +1060,7 @@ describe("Toolbar Text style trusted arrows", () => {
       capture: staleHandlers.capture,
       bubble: staleHandlers.action,
     });
-    expect(staleReceiver).toBe(staleTerminal);
+    expect(publishStale.mock.contexts).toEqual([staleTerminal]);
     expect(rejected.defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
     expect(trigger).toHaveAttribute("aria-expanded", "false");
@@ -1099,7 +1103,7 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
 
-    let constructor: Function | null = null;
+    let constructor: object | null = null;
     let descriptor: PropertyDescriptor | null = null;
     try {
       dispatchHeadingKeyWithHandlers(trigger, event, {
