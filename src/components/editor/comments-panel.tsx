@@ -1743,15 +1743,18 @@ interface LazyMenuOwnerFacts {
 interface LazyMenuKeyboardAuthority extends RequestModeKeyboardAuthority {
   readonly eventCurrentTarget: RequestModeCapturedGetter<EventTarget | null>;
   readonly code: RequestModeCapturedGetter<string>;
-  readonly addEventListener: RequestModeCapturedMethod<
-    readonly [string, EventListener, boolean],
-    void
+  readonly addEventListener: LazyMenuWindowMethod<
+    Window["addEventListener"]
   >;
-  readonly removeEventListener: RequestModeCapturedMethod<
-    readonly [string, EventListener, boolean],
-    void
+  readonly removeEventListener: LazyMenuWindowMethod<
+    Window["removeEventListener"]
   >;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
+}
+
+interface LazyMenuWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
 }
 
 interface LazyMenuRenderAuthority {
@@ -2177,20 +2180,12 @@ function captureLazyMenuKeyboardAuthority(
     ownerWindow.KeyboardEvent.prototype,
     "code",
   );
-  const addEventListener = captureRequestModeMethod<
-    readonly [string, EventListener, boolean],
-    void
-  >(
+  const addEventListener = captureLazyMenuWindowMethod(
     ownerWindow,
-    EventTargetConstructor.prototype,
     "addEventListener",
   );
-  const removeEventListener = captureRequestModeMethod<
-    readonly [string, EventListener, boolean],
-    void
-  >(
+  const removeEventListener = captureLazyMenuWindowMethod(
     ownerWindow,
-    EventTargetConstructor.prototype,
     "removeEventListener",
   );
   const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
@@ -2220,6 +2215,59 @@ function captureLazyMenuKeyboardAuthority(
     getPrototypeOf,
     isCurrent,
   });
+}
+
+function captureLazyMenuWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): LazyMenuWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(
+      ({ target: entry, descriptor, prototype }) =>
+        getPrototypeOf(entry) === prototype &&
+        (descriptor
+          ? requestModeDescriptorMatches(
+              getOwnPropertyDescriptor(entry, property),
+              descriptor,
+            )
+          : getOwnPropertyDescriptor(entry, property) === undefined),
+    ) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  if (!isCurrent()) return null;
+  return Object.freeze({ value, isCurrent });
 }
 
 function lazyMenuPathMatchesTerminal(
@@ -2349,9 +2397,18 @@ function createLazyMenuListenerRegistration(
         return false;
       }
       publication = current;
-      keyboard.addEventListener.invoke(ownerWindow, "keydown", listener, true);
       active = true;
-      return true;
+      try {
+        ownerWindow.addEventListener("keydown", listener, true);
+        return (
+          ownerWindow.addEventListener === keyboard.addEventListener.value &&
+          keyboard.addEventListener.isCurrent()
+        );
+      } catch {
+        active = false;
+        publication = null;
+        return false;
+      }
     },
     proofFor,
     claim: (proof: LazyMenuListenerProof, current: LazyMenuPublication) => {
@@ -2375,12 +2432,7 @@ function createLazyMenuListenerRegistration(
       if (publication !== current || released) return;
       released = true;
       active = false;
-      keyboard.removeEventListener.invoke(
-        ownerWindow,
-        "keydown",
-        listener,
-        true,
-      );
+      ownerWindow.removeEventListener("keydown", listener, true);
     },
   });
   return registration;

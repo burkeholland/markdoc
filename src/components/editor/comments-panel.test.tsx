@@ -3587,7 +3587,7 @@ describe("CommentsPanel", () => {
     it("rejects a same-prototype owner-window path terminal with exact realm facts", async () => {
       const nativePath = Event.prototype.composedPath;
       const windowLike = Object.create(
-        Object.getPrototypeOf(window),
+        window.Window.prototype,
       ) as Window & Record<string, unknown>;
       Object.defineProperties(windowLike, {
         document: { configurable: true, value: document },
@@ -3600,7 +3600,7 @@ describe("CommentsPanel", () => {
         Object: { configurable: true, value: window.Object },
         Reflect: { configurable: true, value: window.Reflect },
       });
-      expect(windowLike).toBeInstanceOf(window.Window);
+      expect(Object.getPrototypeOf(windowLike)).toBe(window.Window.prototype);
       expect(windowLike.document).toBe(document);
       expect(windowLike.KeyboardEvent).toBe(window.KeyboardEvent);
       const path = vi
