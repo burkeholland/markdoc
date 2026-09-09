@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { StrictMode, useEffect, useLayoutEffect, type RefCallback } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefCallback,
+} from "react";
 import { flushSync } from "react-dom";
 import type { DocumentDto } from "@/server/dto";
 
@@ -37,7 +43,7 @@ vi.mock("@/lib/clipboard", async (importOriginal) => {
 });
 
 import { ApiError } from "@/lib/api";
-import { ShareDialog } from "./share-dialog";
+import { AgentCollaborateCard, ShareDialog } from "./share-dialog";
 
 const DOC_ID = "doc-919";
 type CollaboratorResponse = {
@@ -191,6 +197,83 @@ function nativeKeyboard(target: HTMLElement, key = "Escape"): KeyboardEvent {
   const event = new Constructor("keydown", { bubbles: true, cancelable: true, key });
   Object.defineProperty(event, "target", { configurable: true, value: target });
   return event;
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function agentKeyEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const Constructor = element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!Constructor) throw new Error("The agent toggle has no owner-realm KeyboardEvent");
+  const event = new Constructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchAgentKey(
+  element: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+): KeyboardEvent {
+  const event = typeof keyOrEvent === "string"
+    ? agentKeyEvent(element, keyOrEvent, init)
+    : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchAgentKeyWithHandler(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the agent toggle");
+  const properties = element as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
 }
 
 function nativeChange(target: HTMLSelectElement, type = "change"): Event {
@@ -2702,6 +2785,402 @@ describe("ShareDialog · permission actions", () => {
       expect(onDocChange).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
+
+describe("ShareDialog agent disclosure directional keys", () => {
+  it("expands Right and collapses Left once while retaining focus, scroll, and Share actions", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    try {
+      render(
+        <StrictMode>
+          <ShareDialog
+            open
+            onOpenChange={onOpenChange}
+            doc={doc}
+            isOwner
+            onDocChange={onDocChange}
+          />
+        </StrictMode>,
+      );
+      await screen.findByText("@bob");
+      const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      toggle.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const scroll = { x: window.scrollX, y: window.scrollY };
+
+      const right = dispatchAgentKey(toggle, "ArrowRight");
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(right.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(screen.getByTestId("token-manager")).toBeInTheDocument();
+
+      preventDefault.mockClear();
+      const inertRight = dispatchAgentKey(toggle, "ArrowRight");
+      expect(inertRight.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(toggle).toHaveFocus();
+
+      const left = dispatchAgentKey(toggle, "ArrowLeft");
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+      expect(left.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(screen.queryByTestId("token-manager")).toBeNull();
+
+      preventDefault.mockClear();
+      const inertLeft = dispatchAgentKey(toggle, "ArrowLeft");
+      expect(inertLeft.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(toggle).toHaveFocus();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(onDocChange).not.toHaveBeenCalled();
+      expect(addCollaborator).not.toHaveBeenCalled();
+      expect(removeCollaborator).not.toHaveBeenCalled();
+      expect(patchDocument).not.toHaveBeenCalled();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("claims before prevention so reentrant directional input cannot duplicate expansion", async () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    let toggle: HTMLButtonElement | null = null;
+    let nested: KeyboardEvent | null = null;
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault").mockImplementation(function (this: Event) {
+      if (toggle && !nested) nested = dispatchAgentKey(toggle, "ArrowRight");
+      Reflect.apply(nativePreventDefault, this, []);
+    });
+    try {
+      render(
+        <StrictMode>
+          <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await screen.findByText("@bob");
+      toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      toggle.focus();
+      preventDefault.mockClear();
+
+      const accepted = dispatchAgentKey(toggle, "ArrowRight");
+
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(accepted.defaultPrevented).toBe(true);
+      expect((nested as KeyboardEvent | null)?.defaultPrevented).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("rejects modified, repeated, composing, malformed, stopped, untrusted, unfocused, and boundary input without consuming recovery", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    try {
+      render(
+        <StrictMode>
+          <ShareDialog open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await screen.findByText("@bob");
+      const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      toggle.focus();
+      preventDefault.mockClear();
+
+      const rejected = [
+        agentKeyEvent(toggle, "ArrowRight", { ctrlKey: true }),
+        agentKeyEvent(toggle, "ArrowRight", { altKey: true }),
+        agentKeyEvent(toggle, "ArrowRight", { metaKey: true }),
+        agentKeyEvent(toggle, "ArrowRight", { shiftKey: true }),
+        agentKeyEvent(toggle, "ArrowRight", { repeat: true }),
+        agentKeyEvent(toggle, "ArrowRight", { isComposing: true }),
+        agentKeyEvent(toggle, "ArrowRight", { bubbles: false }),
+        agentKeyEvent(toggle, "ArrowRight", { cancelable: false }),
+        agentKeyEvent(toggle, "PageDown"),
+        agentKeyEvent(toggle, "ArrowLeft"),
+        agentKeyEvent(toggle, "ArrowRight", {}, false),
+      ];
+      const previouslyPrevented = agentKeyEvent(toggle, "ArrowRight");
+      previouslyPrevented.preventDefault();
+      const propagationStopped = agentKeyEvent(toggle, "ArrowRight");
+      propagationStopped.stopPropagation();
+      preventDefault.mockClear();
+      rejected.push(previouslyPrevented, propagationStopped);
+
+      for (const event of rejected) {
+        dispatchAgentKey(toggle, event);
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+      }
+      outside.focus();
+      dispatchAgentKey(toggle, "ArrowRight");
+
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(outside).toHaveFocus();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+
+      toggle.focus();
+      preventDefault.mockClear();
+      const recovered = dispatchAgentKey(toggle, "ArrowRight");
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      outside.remove();
+    } finally {
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("leaves pointer, Enter, Space, and dialog Escape activation compatible", async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    toggle.focus();
+
+    const enter = dispatchAgentKey(toggle, "Enter");
+    expect(enter.defaultPrevented).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+
+    const space = dispatchAgentKey(toggle, " ");
+    expect(space.defaultPrevented).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+
+    const escape = dispatchAgentKey(toggle, "Escape");
+    expect(escape).toHaveProperty("key", "Escape");
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(tokensCreate).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("supports the exported local card fallback with the same directional boundaries", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const onClose = vi.fn();
+    try {
+      render(
+        <StrictMode>
+          <AgentCollaborateCard
+            origin="https://markdoc.test"
+            open
+            docId={DOC_ID}
+            onClose={onClose}
+          />
+        </StrictMode>,
+      );
+      const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      toggle.focus();
+      preventDefault.mockClear();
+
+      const right = dispatchAgentKey(toggle, "ArrowRight");
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(right.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      expect(screen.getByTestId("token-manager")).toBeInTheDocument();
+
+      preventDefault.mockClear();
+      expect(dispatchAgentKey(toggle, "ArrowRight").defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      const left = dispatchAgentKey(toggle, "ArrowLeft");
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+      expect(left.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(toggle).toHaveFocus();
+      expect(screen.queryByTestId("token-manager")).toBeNull();
+
+      preventDefault.mockClear();
+      expect(dispatchAgentKey(toggle, "ArrowLeft").defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+    }
+  });
+
+  it.each([
+    "detach and restore",
+    "reorder and restore",
+    "replace and restore",
+    "mutate and restore",
+  ] as const)(
+    "retires %s history and admits a clean keyed successor",
+    async (scenario) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      let generation = 0;
+      const renderCurrent = () => (
+        <StrictMode>
+          <ShareDialog
+            key={generation}
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>
+      );
+      const view = render(renderCurrent());
+      try {
+        await screen.findByText("@bob");
+        const card = screen.getByTestId("share-agent-card");
+        const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+        if (scenario === "detach and restore") {
+          const parent = card.parentNode!;
+          const next = card.nextSibling;
+          parent.removeChild(card);
+          parent.insertBefore(card, next);
+        } else if (scenario === "reorder and restore") {
+          const panel = toggle.nextSibling;
+          card.append(toggle);
+          card.insertBefore(toggle, panel);
+        } else if (scenario === "replace and restore") {
+          const replacement = toggle.cloneNode(true);
+          toggle.replaceWith(replacement);
+          replacement.replaceWith(toggle);
+        } else {
+          toggle.setAttribute("aria-expanded", "true");
+          toggle.setAttribute("aria-expanded", "false");
+        }
+        toggle.focus();
+        preventDefault.mockClear();
+
+        const rejected = dispatchAgentKey(toggle, "ArrowRight");
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+        generation += 1;
+        view.rerender(renderCurrent());
+        await act(async () => Promise.resolve());
+        const recovered = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+        recovered.focus();
+        preventDefault.mockClear();
+        const accepted = dispatchAgentKey(recovered, "ArrowRight");
+        await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(recovered).toHaveFocus();
+        expect(tokensCreate).not.toHaveBeenCalled();
+        expect(copyText).not.toHaveBeenCalled();
+      } finally {
+        preventDefault.mockRestore();
+      }
+    },
+  );
+
+  it("rejects partial Strict replay, crossed stale authority, and cleanup before current recovery", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = render(
+      <StrictMode>
+        <ShareDialog key="initial" open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@bob");
+      const staleToggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      const staleHandler = reactProp<
+        (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+      >(staleToggle, "onKeyDown");
+      const replayRef = reactAlternateRef(staleToggle);
+      act(() => {
+        replayRef(null);
+        replayRef(staleToggle);
+      });
+      await act(async () => Promise.resolve());
+      staleToggle.focus();
+      preventDefault.mockClear();
+      const partialReplay = dispatchAgentKey(staleToggle, "ArrowRight");
+      expect(partialReplay.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const nextDoc = { ...doc, id: "doc-agent-direction-current", title: "Current disclosure" };
+      view.rerender(
+        <StrictMode>
+          <ShareDialog key="current" open onOpenChange={vi.fn()} doc={nextDoc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await screen.findByRole("heading", { name: "Share “Current disclosure”" });
+      const currentToggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      currentToggle.focus();
+      preventDefault.mockClear();
+      const crossed = agentKeyEvent(currentToggle, "ArrowRight");
+      dispatchAgentKeyWithHandler(currentToggle, crossed, staleHandler);
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(currentToggle).toHaveAttribute("aria-expanded", "false");
+
+      const currentHandler = reactProp<
+        (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+      >(currentToggle, "onKeyDown");
+      view.unmount();
+      const fabricatedPrevention = vi.fn();
+      act(() => {
+        currentHandler({
+          key: "ArrowRight",
+          currentTarget: currentToggle,
+          preventDefault: fabricatedPrevention,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      });
+      expect(fabricatedPrevention).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      render(
+        <StrictMode>
+          <ShareDialog key="recovered" open onOpenChange={vi.fn()} doc={doc} isOwner onDocChange={vi.fn()} />
+        </StrictMode>,
+      );
+      await screen.findByText("@bob");
+      const recovered = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      recovered.focus();
+      preventDefault.mockClear();
+      const accepted = dispatchAgentKey(recovered, "ArrowRight");
+      await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(recovered).toHaveFocus();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
     }
   });
 });
