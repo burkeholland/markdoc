@@ -316,14 +316,87 @@ type PanelDomGuard = Readonly<{
   release: () => void;
 }>;
 
+type FormKeyboardNativeGetter = (this: object) => unknown;
+type FormKeyboardEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble";
+type FormKeyboardKeyField =
+  | "key"
+  | "code"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+type FormKeyboardGetterAuthority<Field extends string> = Readonly<{
+  getters: Readonly<Record<Field, FormKeyboardNativeGetter>>;
+  isCurrent: () => boolean;
+}>;
+
+type FormKeyboardMethodAuthority<Method> = Readonly<{
+  method: Method;
+  isCurrent: () => boolean;
+}>;
+
+type FormKeyboardTrustedAuthority = Readonly<{
+  matches: (event: object) => boolean;
+  read: (event: object) => boolean;
+  isCurrent: () => boolean;
+}>;
+
 type FormKeyboardAuthority = Readonly<{
   form: HTMLFormElement;
   root: HTMLDivElement;
   document: Document;
+  ownerWindow: Window & typeof globalThis;
   targets: readonly HTMLElement[];
   refTargets: readonly FormKeyboardRefTarget[];
+  Event: typeof Event;
+  UIEvent: typeof UIEvent;
   KeyboardEvent: typeof KeyboardEvent;
-  preventDefault: (this: Event) => void;
+  Document: typeof Document;
+  HTMLElement: typeof HTMLElement;
+  event: FormKeyboardGetterAuthority<FormKeyboardEventField>["getters"];
+  keyboard: FormKeyboardGetterAuthority<FormKeyboardKeyField>["getters"];
+  view: FormKeyboardNativeGetter;
+  activeElement: FormKeyboardNativeGetter;
+  composedPath: Event["composedPath"];
+  preventDefault: Event["preventDefault"];
+  trusted: FormKeyboardTrustedAuthority;
+  apply: typeof Reflect.apply;
+  prototypeOf: typeof Object.getPrototypeOf;
+  isCurrent: () => boolean;
+}>;
+
+type FormKeyboardEventSnapshot = Readonly<{
+  event: KeyboardEvent;
+  type: string;
+  target: HTMLElement;
+  currentTarget: EventTarget;
+  phase: number;
+  path: readonly EventTarget[];
+  bubbles: boolean;
+  cancelable: boolean;
+  defaultPrevented: boolean;
+  cancelBubble: boolean;
+  key: string;
+  code: string;
+  repeat: boolean;
+  composing: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  view: Window;
+  trusted: true;
 }>;
 
 type PanelReplay = Readonly<{
@@ -1471,6 +1544,100 @@ function isNativeReactSubmitEvent(
   ) ? nativeEvent : null;
 }
 
+function formKeyboardDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureFormKeyboardGetters<const Fields extends readonly string[]>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): FormKeyboardGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], FormKeyboardNativeGetter][] = [];
+  const descriptors: [Fields[number], PropertyDescriptor][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], FormKeyboardNativeGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) =>
+        formKeyboardDescriptorsMatch(
+          getOwnPropertyDescriptor(prototype, field),
+          expected,
+        )),
+  });
+}
+
+function captureFormKeyboardMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  name: PropertyKey,
+): FormKeyboardMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, name);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      formKeyboardDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, name),
+        expected,
+      ),
+  });
+}
+
+function captureFormKeyboardTrustedAuthority(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): FormKeyboardTrustedAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    formKeyboardDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as FormKeyboardNativeGetter, event, []) as boolean,
+    isCurrent: () => matches(probe),
+  });
+}
+
 function captureFormKeyboardAuthority(
   publication: PanelPublication,
   root: HTMLDivElement,
@@ -1478,23 +1645,140 @@ function captureFormKeyboardAuthority(
   const form = publication.form.element;
   const document = root.ownerDocument;
   const ownerWindow = document.defaultView;
-  const preventDefault = ownerWindow
-    ? Object.getOwnPropertyDescriptor(ownerWindow.Event.prototype, "preventDefault")?.value
-    : null;
   if (
     !form ||
     !ownerWindow ||
     form.ownerDocument !== document ||
-    form.parentElement !== root ||
-    typeof preventDefault !== "function"
+    form.parentElement !== root
   ) {
+    return null;
+  }
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const eventGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+    ] as const,
+  );
+  const keyboardGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view"] as const,
+  );
+  const documentGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath = captureFormKeyboardMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureFormKeyboardMethod<Event["preventDefault"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "preventDefault",
+  );
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !preventDefault
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("webhook-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trusted = captureFormKeyboardTrustedAuthority(
+    getOwnPropertyDescriptor,
+    apply,
+    probe,
+  );
+  if (!trusted) return null;
+  const isCurrent = () => {
+    try {
+      return (
+        document.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        preventDefault.isCurrent() &&
+        trusted.isCurrent()
+      );
+    } catch {
+      return false;
+    }
+  };
+  try {
+    if (!isCurrent() || trusted.read(probe) !== false) return null;
+  } catch {
     return null;
   }
   const targets = [
     form,
     ...[...form.querySelectorAll("*")].filter(
       (target): target is HTMLElement =>
-        target instanceof ownerWindow.HTMLElement,
+        target instanceof HTMLElementConstructor,
     ),
   ];
   const refTargets: FormKeyboardRefTarget[] = [];
@@ -1515,81 +1799,297 @@ function captureFormKeyboardAuthority(
     form,
     root,
     document,
+    ownerWindow,
     targets: Object.freeze(targets),
     refTargets: Object.freeze(refTargets),
-    KeyboardEvent: ownerWindow.KeyboardEvent,
-    preventDefault: preventDefault as (this: Event) => void,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    preventDefault: preventDefault.method,
+    trusted,
+    apply,
+    prototypeOf,
+    isCurrent,
   });
 }
 
-function isNativeReactEscapeEvent(
-  event: ReactKeyboardEvent<HTMLFormElement>,
-  authority: FormKeyboardAuthority | null,
-): KeyboardEvent | null {
-  if (!authority) return null;
-  const { document, form, root, targets, KeyboardEvent: KeyboardEventConstructor } = authority;
-  const ownerWindow = document.defaultView;
-  const target = event.target;
-  const nativeEvent = event.nativeEvent;
-  const isDefaultPrevented = event.isDefaultPrevented;
-  const isPropagationStopped = event.isPropagationStopped;
+function formKeyboardNativeValue<Value>(
+  authority: FormKeyboardAuthority,
+  getter: FormKeyboardNativeGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function captureFormKeyboardEvent(
+  authority: FormKeyboardAuthority,
+  nativeEvent: Event,
+): FormKeyboardEventSnapshot | null {
   if (
-    !ownerWindow ||
-    root.ownerDocument !== document ||
-    form.ownerDocument !== document ||
-    event.currentTarget !== form ||
-    event.type !== "keydown" ||
-    event.key !== "Escape" ||
-    event.code !== "Escape" ||
-    event.altKey ||
-    event.ctrlKey ||
-    event.metaKey ||
-    event.shiftKey ||
-    event.repeat ||
-    !event.bubbles ||
-    !event.cancelable ||
-    event.defaultPrevented ||
-    typeof isDefaultPrevented !== "function" ||
-    Reflect.apply(isDefaultPrevented, event, []) ||
-    typeof isPropagationStopped !== "function" ||
-    Reflect.apply(isPropagationStopped, event, []) ||
-    !(target instanceof ownerWindow.HTMLElement) ||
-    target.ownerDocument !== document ||
-    document.activeElement !== target ||
-    !targets.includes(target) ||
-    !(target === form || form.contains(target)) ||
-    !form.isConnected ||
-    !root.isConnected ||
-    form.parentElement !== root ||
-    !root.contains(form) ||
-    !(nativeEvent instanceof KeyboardEventConstructor) ||
-    nativeEvent.type !== "keydown" ||
-    nativeEvent.key !== event.key ||
-    nativeEvent.code !== event.code ||
-    nativeEvent.altKey !== event.altKey ||
-    nativeEvent.ctrlKey !== event.ctrlKey ||
-    nativeEvent.metaKey !== event.metaKey ||
-    nativeEvent.shiftKey !== event.shiftKey ||
-    nativeEvent.repeat !== event.repeat ||
-    nativeEvent.isComposing ||
-    nativeEvent.keyCode === 229 ||
-    !nativeEvent.bubbles ||
-    !nativeEvent.cancelable ||
-    nativeEvent.eventPhase === ownerWindow.Event.NONE ||
-    nativeEvent.defaultPrevented ||
-    nativeEvent.cancelBubble ||
-    nativeEvent.target !== target
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
   ) {
     return null;
   }
-  const path = nativeEvent.composedPath();
-  return (
-    path[0] === target &&
-    path.includes(form) &&
-    path.includes(root) &&
-    path.includes(document) &&
-    path.includes(ownerWindow)
-  ) ? nativeEvent : null;
+  try {
+    const type = formKeyboardNativeValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = formKeyboardNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = formKeyboardNativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = formKeyboardNativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const key = formKeyboardNativeValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    );
+    const code = formKeyboardNativeValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const repeat = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = formKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = formKeyboardNativeValue<Window | null>(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const activeElement = formKeyboardNativeValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.document,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.HTMLElement) ||
+      target.ownerDocument !== authority.document ||
+      !authority.targets.includes(target) ||
+      activeElement !== target ||
+      !currentTarget ||
+      (phase !== authority.Event.AT_TARGET &&
+        phase !== authority.Event.BUBBLING_PHASE) ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      key !== "Escape" ||
+      code !== "Escape" ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      view !== authority.ownerWindow ||
+      trusted !== true ||
+      !authority.form.isConnected ||
+      !authority.root.isConnected ||
+      authority.form.parentElement !== authority.root
+    ) {
+      return null;
+    }
+    const expectedPath: EventTarget[] = [];
+    let node: Node | null = target;
+    while (node) {
+      expectedPath.push(node);
+      if (node === authority.document) break;
+      node = node.parentNode;
+    }
+    expectedPath.push(authority.ownerWindow);
+    if (
+      expectedPath.at(-2) !== authority.document ||
+      path.length !== expectedPath.length ||
+      path.some((entry, index) => entry !== expectedPath[index]) ||
+      !path.includes(authority.form) ||
+      !path.includes(authority.root) ||
+      !path.includes(currentTarget)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      key,
+      code,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      trusted: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function formKeyboardEventMatches(
+  authority: FormKeyboardAuthority,
+  snapshot: FormKeyboardEventSnapshot,
+) {
+  const current = captureFormKeyboardEvent(authority, snapshot.event);
+  return Boolean(
+    current &&
+      current.type === snapshot.type &&
+      current.target === snapshot.target &&
+      current.currentTarget === snapshot.currentTarget &&
+      current.phase === snapshot.phase &&
+      current.bubbles === snapshot.bubbles &&
+      current.cancelable === snapshot.cancelable &&
+      current.defaultPrevented === snapshot.defaultPrevented &&
+      current.cancelBubble === snapshot.cancelBubble &&
+      current.key === snapshot.key &&
+      current.code === snapshot.code &&
+      current.repeat === snapshot.repeat &&
+      current.composing === snapshot.composing &&
+      current.ctrlKey === snapshot.ctrlKey &&
+      current.altKey === snapshot.altKey &&
+      current.metaKey === snapshot.metaKey &&
+      current.shiftKey === snapshot.shiftKey &&
+      current.view === snapshot.view &&
+      current.trusted === snapshot.trusted &&
+      current.path.length === snapshot.path.length &&
+      current.path.every((entry, index) => entry === snapshot.path[index])
+  );
+}
+
+function reactKeyboardEventMatches(
+  event: ReactKeyboardEvent<HTMLFormElement>,
+  authority: FormKeyboardAuthority,
+  snapshot: FormKeyboardEventSnapshot,
+) {
+  try {
+    const reactEvent = event as ReactKeyboardEvent<HTMLFormElement> & {
+      _reactName?: unknown;
+      isComposing?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      isPersistent?: unknown;
+      persist?: unknown;
+    };
+    const isDefaultPrevented = reactEvent.isDefaultPrevented;
+    const isPropagationStopped = reactEvent.isPropagationStopped;
+    const isPersistent = reactEvent.isPersistent;
+    return (
+      reactEvent._reactName === "onKeyDown" &&
+      event.nativeEvent === snapshot.event &&
+      event.type === snapshot.type &&
+      event.target === snapshot.target &&
+      event.currentTarget === authority.form &&
+      event.eventPhase === snapshot.phase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isTrusted === snapshot.trusted &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.repeat === snapshot.repeat &&
+      reactEvent.isComposing === snapshot.composing &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.altKey === snapshot.altKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.view === snapshot.view &&
+      typeof event.preventDefault === "function" &&
+      typeof event.stopPropagation === "function" &&
+      typeof isDefaultPrevented === "function" &&
+      !authority.apply(isDefaultPrevented, event, []) &&
+      typeof isPropagationStopped === "function" &&
+      !authority.apply(isPropagationStopped, event, []) &&
+      typeof reactEvent.persist === "function" &&
+      typeof isPersistent === "function" &&
+      authority.apply(isPersistent, event, []) === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
@@ -2772,26 +3272,30 @@ export function WebhooksPanel() {
     ) {
       return null;
     }
-    const nativeEvent = isNativeReactEscapeEvent(event, authority);
-    if (!nativeEvent) return null;
+    const native = captureFormKeyboardEvent(authority, event.nativeEvent);
+    if (!native || !reactKeyboardEventMatches(event, authority, native)) {
+      return null;
+    }
     publicationCoordinator.prepareControlClaim(candidate);
     if (
       candidate.keyboard !== authority ||
       candidate.form.element !== authority.form ||
       candidate.card.element !== authority.root ||
       candidate.presentation.cancel !== action ||
+      !formKeyboardEventMatches(authority, native) ||
+      !reactKeyboardEventMatches(event, authority, native) ||
       !ownsPanel(candidate) ||
       !publicationCoordinator.claim(
         candidate,
         null,
         action,
         event,
-        nativeEvent,
+        native.event,
       )
     ) {
       return null;
     }
-    return Object.freeze({ authority, nativeEvent });
+    return Object.freeze({ authority, nativeEvent: native.event });
   };
 
   useLayoutEffect(() => {
@@ -2900,7 +3404,7 @@ export function WebhooksPanel() {
             if (!action) return;
             const claim = claimPublishedEscape(publication, action, event);
             if (!claim) return;
-            Reflect.apply(
+            claim.authority.apply(
               claim.authority.preventDefault,
               claim.nativeEvent,
               [],
