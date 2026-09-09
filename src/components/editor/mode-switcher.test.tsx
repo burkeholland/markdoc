@@ -927,7 +927,7 @@ describe("ModeSwitcher trusted arrow disclosure", () => {
     const additions: HTMLSpanElement[] = [];
     const removals: HTMLSpanElement[] = [];
     const decorations = new Map<HTMLSpanElement, Set<string>>();
-    let restoreObserver = () => undefined;
+    let restoreObserver: () => void = () => undefined;
 
     try {
       act(() => root.render(
@@ -1000,7 +1000,7 @@ describe("ModeSwitcher trusted arrow disclosure", () => {
     const root = createRoot(host);
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     let poisoned = false;
-    let restoreObserver = () => undefined;
+    let restoreObserver: () => void = () => undefined;
 
     try {
       act(() => root.render(

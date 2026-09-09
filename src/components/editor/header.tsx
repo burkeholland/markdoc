@@ -3939,7 +3939,7 @@ function readModeSwitcherNativeKeyboardEvent(
       cancelBubble,
       composed: modeSwitcherNativeValue<boolean>(authority.event.composed, event, authority),
       timeStamp: modeSwitcherNativeValue<number>(authority.event.timeStamp, event, authority),
-      key,
+      key: action.key,
       code: modeSwitcherNativeValue<string>(authority.keyboard.code, event, authority),
       location: modeSwitcherNativeValue<number>(authority.keyboard.location, event, authority),
       altKey: false,
@@ -4168,7 +4168,7 @@ function modeSwitcherReactKeyboardEventMatches(
       && event.shiftKey === snapshot.shiftKey
       && event.repeat === snapshot.repeat
       && event.detail === snapshot.detail
-      && event.view === snapshot.view
+      && Object.is(event.view, snapshot.view)
       && reactEvent._reactName === "onKeyDown"
       && modeSwitcherNativeCall<boolean>(
         proof.isDefaultPrevented,
@@ -6235,6 +6235,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     viewing: <Eye size={15} />,
   };
   const labels: Record<EditMode, string> = { editing: "Editing", suggesting: "Suggesting", viewing: "Viewing" };
+  const openAutoFocusProps = { onOpenAutoFocus };
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
       <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
@@ -6256,11 +6257,11 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
           ref={captureContent}
           align="end"
           className="w-64"
-          onOpenAutoFocus={onOpenAutoFocus}
           onEscapeKeyDown={onEscapeKeyDown}
           onPointerDownOutside={onOutside}
           onFocusOutside={onOutside}
           onCloseAutoFocus={onCloseAutoFocus}
+          {...openAutoFocusProps}
         >
           <MenuRadioGroup ref={captureGroup} value={mode} onValueChange={onModeChange}>
             {publishedRows.map((row) => (
