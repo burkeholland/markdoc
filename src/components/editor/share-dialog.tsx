@@ -1007,7 +1007,7 @@ function shareDirectionalPathMatches(
   path: readonly EventTarget[],
   source: HTMLButtonElement,
   ownerDocument: Document,
-  ownerWindow: Window & typeof globalThis,
+  terminal: EventTarget,
 ): boolean {
   const expected: EventTarget[] = [];
   let current: Node | null = source;
@@ -1016,12 +1016,11 @@ function shareDirectionalPathMatches(
     if (current === ownerDocument) break;
     current = current.parentNode;
   }
-  const terminal = path.at(-1);
   return (
     expected.at(-1) === ownerDocument &&
     path.length === expected.length + 1 &&
     expected.every((entry, index) => path[index] === entry) &&
-    terminal === ownerWindow
+    path.at(-1) === terminal
   );
 }
 
@@ -1211,11 +1210,12 @@ function captureShareDirectionalReactEvent(
       !snapshot.isComposing &&
       (snapshot.view === null || snapshot.view === ownerWindow) &&
       snapshot.path.includes(snapshot.currentTarget) &&
+      snapshot.path.at(-1) !== undefined &&
       shareDirectionalPathMatches(
         snapshot.path,
         control,
         ownerDocument,
-        ownerWindow,
+        snapshot.path.at(-1)!,
       ) &&
       intrinsics.apply(intrinsics.activeElement, ownerDocument, []) === control &&
       shareDirectionalReactMethodsAreCurrent(reactSnapshot, intrinsics)
@@ -1264,17 +1264,19 @@ function captureShareDirectionalNativeStage(
   ownerWindow: Window & typeof globalThis,
   intrinsics: ShareDirectionalEventIntrinsics,
 ): ShareDirectionalNativeStage | null {
+  const terminal = snapshot.path.at(-1);
   return (
-    receiver === ownerWindow &&
-    snapshot.currentTarget === ownerWindow &&
+    terminal !== undefined &&
+    ownerDocument.defaultView === ownerWindow &&
+    receiver === snapshot.currentTarget &&
+    terminal === receiver &&
     snapshot.eventPhase === intrinsics.capturingPhase &&
     snapshot.target === control &&
-    snapshot.path.at(-1) === ownerWindow &&
     shareDirectionalPathMatches(
       snapshot.path,
       control,
       ownerDocument,
-      ownerWindow,
+      terminal,
     )
   )
     ? Object.freeze({ nativeEvent, receiver, snapshot })
@@ -1290,19 +1292,22 @@ function shareDirectionalStageMatches(
   ownerWindow: Window & typeof globalThis,
   intrinsics: ShareDirectionalEventIntrinsics,
 ): boolean {
+  const terminal = stage.snapshot.path.at(-1);
   return (
+    terminal !== undefined &&
     stage.nativeEvent === nativeEvent &&
-    stage.receiver === ownerWindow &&
-    stage.snapshot.currentTarget === ownerWindow &&
+    ownerDocument.defaultView === ownerWindow &&
+    stage.receiver === stage.snapshot.currentTarget &&
+    terminal === stage.receiver &&
     stage.snapshot.eventPhase === intrinsics.capturingPhase &&
     stage.snapshot.target === control &&
-    stage.snapshot.path.at(-1) === ownerWindow &&
     shareDirectionalPathMatches(
       stage.snapshot.path,
       control,
       ownerDocument,
-      ownerWindow,
+      terminal,
     ) &&
+    snapshot.path.at(-1) === terminal &&
     shareDirectionalNativeSnapshotsMatch(stage.snapshot, snapshot)
   );
 }

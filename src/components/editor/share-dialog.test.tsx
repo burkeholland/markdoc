@@ -3079,7 +3079,6 @@ describe("ShareDialog agent disclosure directional keys", () => {
 
   it("rejects modified, repeated, composing, malformed, stopped, untrusted, unfocused, and boundary input without consuming recovery", async () => {
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const outside = document.createElement("button");
     try {
       render(
         <StrictMode>
@@ -3117,24 +3116,12 @@ describe("ShareDialog agent disclosure directional keys", () => {
         expect(event.defaultPrevented).toBe(event === previouslyPrevented);
         expect(toggle).toHaveAttribute("aria-expanded", "false");
       }
-      document.body.append(outside);
-      outside.focus();
-      expect(outside).toHaveFocus();
-      const outsideModal = dispatchAgentKey(toggle, "ArrowRight");
-      expect(outsideModal.defaultPrevented).toBe(false);
       done.focus();
       expect(done).toHaveFocus();
       const unfocused = dispatchAgentKey(toggle, "ArrowRight");
       expect(unfocused.defaultPrevented).toBe(false);
 
-      expect(
-        preventionCallCount(
-          preventDefault,
-          ...rejected,
-          outsideModal,
-          unfocused,
-        ),
-      ).toBe(0);
+      expect(preventionCallCount(preventDefault, ...rejected, unfocused)).toBe(0);
       expect(toggle).toHaveAttribute("aria-expanded", "false");
       expect(done).toHaveFocus();
       expect(tokensCreate).not.toHaveBeenCalled();
@@ -3148,7 +3135,6 @@ describe("ShareDialog agent disclosure directional keys", () => {
       expect(preventionCallCount(preventDefault, recovered)).toBe(1);
       expect(toggle).toHaveFocus();
     } finally {
-      outside.remove();
       preventDefault.mockRestore();
     }
   });
@@ -3236,6 +3222,36 @@ describe("ShareDialog agent disclosure directional keys", () => {
     } finally {
       preventDefault.mockRestore();
     }
+  });
+
+  it("rejects an unfocused local trigger outside a modal and recovers at exact focus", async () => {
+    render(
+      <StrictMode>
+        <button type="button">Outside focus</button>
+        <AgentCollaborateCard
+          origin="https://markdoc.test"
+          open
+          docId={DOC_ID}
+        />
+      </StrictMode>,
+    );
+    const outside = screen.getByRole("button", { name: "Outside focus" });
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    outside.focus();
+    expect(outside).toHaveFocus();
+
+    const rejected = dispatchAgentKey(toggle, "ArrowRight");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(outside).toHaveFocus();
+
+    toggle.focus();
+    const accepted = dispatchAgentKey(toggle, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    expect(toggle).toHaveFocus();
+    expect(tokensCreate).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
   });
 
   it.each(["structural", "same-prototype"] as const)(
