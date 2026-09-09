@@ -519,24 +519,12 @@ function menuKey(
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Menu trigger owner window was unavailable");
-  const implementationSymbol = Object.getOwnPropertySymbols(
-    target.ownerDocument,
-  ).find((symbol) => String(symbol) === "Symbol(impl)");
-  if (!implementationSymbol)
-    throw new Error("Document implementation slot was not available");
-  const nativeOwnerWindow = (
-    target.ownerDocument as unknown as Record<
-      symbol,
-      { _globalObject: Window }
-    >
-  )[implementationSymbol]._globalObject;
   const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
     composed: true,
     code: key,
     key,
-    view: nativeOwnerWindow,
     ...init,
   });
   if (trusted) trustKeyboardEvent(event, ownerWindow);
