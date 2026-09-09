@@ -440,10 +440,26 @@ interface StatsPointerEventProof {
   readonly detail: number;
 }
 
+type StatsWindowKeyListener = (
+  this: EventTarget,
+  event: KeyboardEvent,
+) => void;
+
+interface StatsWindowKeyRegistration {
+  readonly identity: symbol;
+  readonly document: Document;
+  readonly target: StatsOwnerWindow;
+  readonly keyboardAuthority: StatsKeyboardAuthority;
+  readonly listener: StatsWindowKeyListener;
+  active: boolean;
+  removed: boolean;
+}
+
 interface StatsNativeCapture {
   readonly document: Document;
   readonly ownerWindow: StatsOwnerWindow;
   readonly keyboardAuthority: StatsKeyboardAuthority;
+  readonly windowKeyRegistration: StatsWindowKeyRegistration;
   readonly remove: VoidFunction;
 }
 
@@ -543,7 +559,7 @@ interface StatsDirectionalNativeEvent {
   readonly keyboardAuthority: StatsKeyboardAuthority;
   readonly ownerDocument: Document;
   readonly ownerWindow: StatsOwnerWindow;
-  readonly ownerWindowCapture: Window;
+  readonly listener: StatsDirectionalListenerProof;
   readonly type: string;
   readonly target: EventTarget | null;
   readonly currentTarget: EventTarget | null;
@@ -567,6 +583,18 @@ interface StatsDirectionalNativeEvent {
   readonly shiftKey: boolean;
   readonly repeat: boolean;
   readonly composing: boolean;
+  claimed: boolean;
+}
+
+interface StatsDirectionalListenerProof {
+  readonly registration: StatsWindowKeyRegistration;
+  readonly publication: StatsDisclosurePublication;
+  readonly listener: StatsWindowKeyListener;
+  readonly event: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly intrinsicCurrentTarget: EventTarget;
+  readonly terminal: EventTarget;
   claimed: boolean;
 }
 
@@ -1539,7 +1567,7 @@ function statsEventPathIsExact(
   target: Node,
   path: readonly EventTarget[],
   ownerDocument: Document,
-  ownerWindow: Window,
+  ownerWindow: EventTarget,
 ) {
   const expected: EventTarget[] = [];
   let current: Node | null = target;
@@ -2171,7 +2199,7 @@ class StatsDisclosureCoordinator {
     event: Event,
     document: Document,
     ownerWindow: StatsOwnerWindow,
-    ownerWindowCapture: Window,
+    listener: StatsDirectionalListenerProof,
     keyboardAuthority: StatsKeyboardAuthority,
   ) {
     const trigger = publication.elements.trigger;
@@ -2196,7 +2224,7 @@ class StatsDisclosureCoordinator {
       keyboardAuthority,
       ownerDocument: document,
       ownerWindow,
-      ownerWindowCapture,
+      listener,
       type: keyboardAuthority.eventType.read(event),
       target,
       currentTarget: event.currentTarget,
@@ -2232,6 +2260,8 @@ class StatsDisclosureCoordinator {
     if (
       this.#capture?.document === document &&
       this.#capture.ownerWindow === ownerWindow &&
+      this.#capture.windowKeyRegistration.active &&
+      !this.#capture.windowKeyRegistration.removed &&
       this.#capture.keyboardAuthority.isCurrent()
     ) {
       return true;
@@ -2319,7 +2349,7 @@ class StatsDisclosureCoordinator {
       return true;
     };
     const remember = (event: Event) => {
-      const publication = this.#current;
+      const publication = coordinator.#current;
       if (
         !active ||
         !publication ||
@@ -2446,35 +2476,94 @@ class StatsDisclosureCoordinator {
         0,
       );
     };
-    const onWindowKey = (event: KeyboardEvent) => {
-      const publication = this.#current;
-      const ownerWindowCapture =
-        keyboardAuthority.eventCurrentTarget.read(event);
+    const registrationBox: {
+      current: StatsWindowKeyRegistration | null;
+    } = { current: null };
+    const currentPublication = () => this.#current;
+    const currentRegistration = () =>
+      this.#capture?.windowKeyRegistration;
+    const consumeShortcut = (
+      publication: StatsClosedPublication,
+      event: KeyboardEvent,
+    ) => this.consumeShortcut(publication, event);
+    const recordDirectionalNative = (
+      publication: StatsClosedPublication,
+      event: KeyboardEvent,
+      listener: StatsDirectionalListenerProof,
+    ) =>
+      this.recordDirectionalNative(
+        publication,
+        event,
+        document,
+        ownerWindow,
+        listener,
+        keyboardAuthority,
+      );
+    const onWindowKey: StatsWindowKeyListener = function (
+      this: EventTarget,
+      event: KeyboardEvent,
+    ) {
+      const windowKeyRegistration = registrationBox.current;
+      const publication = currentPublication();
+      const phase = keyboardAuthority.eventPhase.read(event);
       if (
-        !publication ||
-        !(ownerWindowCapture instanceof ownerWindow.Window) ||
-        event.currentTarget !== ownerWindowCapture ||
-        keyboardAuthority.eventPath.call(event).at(-1) !==
-          ownerWindowCapture
+        !windowKeyRegistration ||
+        !windowKeyRegistration.active ||
+        windowKeyRegistration.removed ||
+        currentRegistration() !== windowKeyRegistration ||
+        windowKeyRegistration.listener !== onWindowKey ||
+        windowKeyRegistration.target !== ownerWindow ||
+        windowKeyRegistration.document !== document ||
+        windowKeyRegistration.keyboardAuthority !== keyboardAuthority ||
+        !publication
       ) {
         return;
       }
-      if (
-        keyboardAuthority.eventPhase.read(event) ===
-        ownerWindow.Event.CAPTURING_PHASE
-      ) {
-        this.recordDirectionalNative(
-          publication,
-          event,
-          document,
-          ownerWindow,
-          ownerWindowCapture,
-          keyboardAuthority,
-        );
-      } else {
-        this.consumeShortcut(publication, event);
+      if (phase !== ownerWindow.Event.CAPTURING_PHASE) {
+        consumeShortcut(publication, event);
+        return;
       }
+      const currentTarget = event.currentTarget;
+      const intrinsicCurrentTarget =
+        keyboardAuthority.eventCurrentTarget.read(event);
+      const terminal = keyboardAuthority.eventPath.call(event).at(-1);
+      if (
+        !currentTarget ||
+        !intrinsicCurrentTarget ||
+        !terminal ||
+        this !== currentTarget ||
+        this !== intrinsicCurrentTarget ||
+        this !== terminal
+      ) {
+        return;
+      }
+      const listener: StatsDirectionalListenerProof = {
+        registration: windowKeyRegistration,
+        publication,
+        listener: onWindowKey,
+        event,
+        receiver: this,
+        currentTarget,
+        intrinsicCurrentTarget,
+        terminal,
+        claimed: false,
+      };
+      recordDirectionalNative(
+        publication,
+        event,
+        listener,
+      );
     };
+    const windowKeyRegistration: StatsWindowKeyRegistration = {
+      identity: Symbol("stats-window-key-registration"),
+      document,
+      target: ownerWindow,
+      keyboardAuthority,
+      listener: onWindowKey,
+      active: true,
+      removed: false,
+    };
+    registrationBox.current = windowKeyRegistration;
     document.addEventListener("click", remember, true);
     document.addEventListener("keydown", remember, true);
     document.addEventListener("pointerdown", remember, true);
@@ -2491,9 +2580,12 @@ class StatsDisclosureCoordinator {
       document,
       ownerWindow,
       keyboardAuthority,
+      windowKeyRegistration,
       remove: () => {
         if (!active) return;
         active = false;
+        windowKeyRegistration.active = false;
+        windowKeyRegistration.removed = true;
         document.removeEventListener("click", remember, true);
         document.removeEventListener("keydown", remember, true);
         document.removeEventListener("pointerdown", remember, true);
@@ -3356,13 +3448,23 @@ class StatsDisclosureCoordinator {
     const trigger = publication.elements.trigger;
     if (!trigger || !this.matches(publication, true)) return false;
     if (nextOpen) {
-      if (!publication.current.publishAuthority(authority)) return false;
       const directional =
         source === "directional" &&
         this.#directionalIntent?.publication === publication &&
         this.#directionalIntent.authority === authority
           ? this.#directionalIntent
           : null;
+      if (
+        source === "directional" &&
+        (!directional ||
+          !directional.native.claimed ||
+          !directional.native.listener.claimed ||
+          !this.#claimedEvents.has(directional.native.listener) ||
+          !this.directionalListenerIsCurrent(directional.native))
+      ) {
+        return false;
+      }
+      if (!publication.current.publishAuthority(authority)) return false;
       this.#openFocus = { visit: render.visit, authority, directional };
       if (!directional) this.#directionalIntent = null;
       this.retireCloseFocus();
@@ -3409,6 +3511,36 @@ class StatsDisclosureCoordinator {
     return this.commitTransition(proof);
   }
 
+  directionalListenerIsCurrent(
+    native: StatsDirectionalNativeEvent,
+  ) {
+    const listener = native.listener;
+    const registration = listener.registration;
+    const capture = this.#capture;
+    return Boolean(
+      capture &&
+        capture.windowKeyRegistration === registration &&
+        capture.document === native.ownerDocument &&
+        capture.ownerWindow === native.ownerWindow &&
+        capture.keyboardAuthority === native.keyboardAuthority &&
+        registration.active &&
+        !registration.removed &&
+        registration.document === native.ownerDocument &&
+        registration.target === native.ownerWindow &&
+        registration.keyboardAuthority === native.keyboardAuthority &&
+        registration.listener === listener.listener &&
+        listener.publication === native.publication &&
+        listener.event === native.event &&
+        listener.receiver === listener.currentTarget &&
+        listener.receiver === listener.intrinsicCurrentTarget &&
+        listener.receiver === listener.terminal &&
+        native.currentTarget === listener.currentTarget &&
+        native.intrinsicCurrentTarget ===
+          listener.intrinsicCurrentTarget &&
+        native.path.at(-1) === listener.terminal,
+    );
+  }
+
   directionalNativeIsExact(
     publication: StatsDisclosurePublication,
     native: StatsDirectionalNativeEvent,
@@ -3420,7 +3552,10 @@ class StatsDisclosureCoordinator {
     const key = direction === "first" ? "ArrowDown" : "ArrowUp";
     return Boolean(
       trigger &&
+        this.#current === publication &&
         native.publication === publication &&
+        this.directionalListenerIsCurrent(native) &&
+        !native.listener.claimed &&
         native.ownerDocument === trigger.ownerDocument &&
         native.ownerWindow === trigger.ownerDocument.defaultView &&
         native.ownerWindow === keyboardAuthority.ownerWindow &&
@@ -3446,9 +3581,9 @@ class StatsDisclosureCoordinator {
         native.trusted &&
         native.type === "keydown" &&
         native.target === trigger &&
-        native.currentTarget === native.ownerWindowCapture &&
-        native.intrinsicCurrentTarget === native.ownerWindowCapture &&
-        native.path.at(-1) === native.ownerWindowCapture &&
+        native.currentTarget === native.listener.receiver &&
+        native.intrinsicCurrentTarget === native.listener.receiver &&
+        native.path.at(-1) === native.listener.receiver &&
         native.phase === ownerWindow.Event.CAPTURING_PHASE &&
         native.bubbles &&
         native.cancelable &&
@@ -3464,18 +3599,15 @@ class StatsDisclosureCoordinator {
         native.repeat === false &&
         native.composing === false &&
         (native.view === null ||
-          Object.is(native.view, native.ownerWindowCapture)) &&
+          Object.is(native.view, native.listener.receiver)) &&
         (native.intrinsicView === null ||
-          Object.is(
-            native.intrinsicView,
-            native.ownerWindowCapture,
-          )) &&
+          Object.is(native.intrinsicView, native.listener.receiver)) &&
         Object.is(native.view, native.intrinsicView) &&
         statsEventPathIsExact(
           trigger,
           native.path,
           ownerDocument,
-          native.ownerWindowCapture,
+          native.listener.receiver,
         ) &&
         keyboardAuthority.eventType.read(event) === native.type &&
         keyboardAuthority.eventTarget.read(event) === native.target &&
@@ -3540,7 +3672,7 @@ class StatsDisclosureCoordinator {
       event.timeStamp === react.timeStamp &&
       Object.is(event.view, react.view) &&
       (event.view === null ||
-        Object.is(event.view, native.ownerWindowCapture)) &&
+        Object.is(event.view, native.listener.receiver)) &&
       Object.is(event.view, native.intrinsicView) &&
       event.key === react.key &&
       event.code === react.code &&
@@ -3713,6 +3845,8 @@ class StatsDisclosureCoordinator {
       native.event !== event.nativeEvent ||
       native.ownerDocument !== trigger.ownerDocument ||
       native.ownerWindow !== trigger.ownerDocument.defaultView ||
+      !this.directionalListenerIsCurrent(native) ||
+      this.#claimedEvents.has(native.listener) ||
       this.#claimedDirections.has(native) ||
       this.#claimedDestinations.has(destination) ||
       capture.event === bubble.event ||
@@ -3766,8 +3900,12 @@ class StatsDisclosureCoordinator {
       return;
     }
     native.claimed = true;
+    native.listener.claimed = true;
     capture.claimed = true;
     bubble.claimed = true;
+    this.#claimedEvents.add(native.listener);
+    publication.render.visit.claimedEvents.add(native.listener);
+    authority.claimedEvents.add(native.listener);
     this.#claimedEvents.add(capture.event);
     publication.render.visit.claimedEvents.add(capture.event);
     authority.claimedEvents.add(capture.event);
@@ -3779,7 +3917,9 @@ class StatsDisclosureCoordinator {
     keyboardAuthority.apply(bubble.preventDefault, event, []);
     if (
       !keyboardAuthority.eventDefaultPrevented.read(native.event) ||
-      !keyboardAuthority.apply(event.isDefaultPrevented, event, [])
+      !keyboardAuthority.apply(event.isDefaultPrevented, event, []) ||
+      !this.directionalListenerIsCurrent(native) ||
+      this.#directionalIntent !== intent
     ) {
       this.#directionalIntent = null;
       this.requestSuccessor(publication);
@@ -4111,7 +4251,7 @@ class StatsDisclosureCoordinator {
         content,
         authority.eventPath.call(event),
         intent.ownerDocument,
-        intent.native.ownerWindowCapture,
+        intent.native.listener.receiver,
       )
     );
   }
@@ -4143,6 +4283,9 @@ class StatsDisclosureCoordinator {
         intent.publication.consumed &&
         intent.publication.render.visit === intent.visit &&
         intent.native.claimed &&
+        intent.native.listener.claimed &&
+        this.#claimedEvents.has(intent.native.listener) &&
+        this.directionalListenerIsCurrent(intent.native) &&
         intent.capture.claimed &&
         intent.bubble.claimed &&
         this.#claimedDirections.has(intent.native) &&
@@ -4188,6 +4331,14 @@ class StatsDisclosureCoordinator {
     intent.visit.claimedEvents.add(event);
     intent.authority.claimedEvents.add(event);
     intent.keyboardAuthority.eventPreventDefault.call(event);
+    if (
+      !intent.keyboardAuthority.eventDefaultPrevented.read(event) ||
+      !this.directionalListenerIsCurrent(intent.native) ||
+      this.#current !== publication ||
+      publication.render.authority !== intent.authority
+    ) {
+      return;
+    }
     intent.keyboardAuthority.focus.call(connection.element, {
       preventScroll: true,
     });

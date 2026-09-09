@@ -273,12 +273,105 @@ function trackWindowKeydownListeners() {
     nativeRemove(type, listener, options);
   });
 
-  return { active, added, removed };
+  return { active, added, nativeAdd, nativeRemove, removed };
 }
 
-function invokeWindowListener(listener: WindowKeyListener, event: KeyboardEvent) {
-  if (typeof listener === "function") listener(event);
+function invokeWindowListener(
+  listener: WindowKeyListener,
+  event: KeyboardEvent,
+  receiver: EventTarget = window,
+) {
+  if (typeof listener === "function") {
+    Reflect.apply(listener, receiver, [event]);
+  }
   else listener.handleEvent(event);
+}
+
+function observeWindowListenerReceiver(ownerWindow: Window) {
+  const receivers = new WeakMap<Event, Window>();
+  let currentTarget: EventTarget | null = null;
+  let terminal: EventTarget | null = null;
+  const type = `stats-window-receiver-${Math.random()}`;
+  const observe = function (this: Window, event: Event) {
+    receivers.set(event, this);
+    currentTarget = event.currentTarget;
+    terminal = event.composedPath().at(-1) ?? null;
+  };
+  ownerWindow.addEventListener(type, observe, { once: true });
+  const event = new ownerWindow.Event(type);
+  ownerWindow.dispatchEvent(event);
+  const receiver = receivers.get(event);
+  if (!receiver) {
+    throw new Error("Window listener receiver was unavailable");
+  }
+  expect(currentTarget).toBe(receiver);
+  expect(terminal).toBe(receiver);
+  return receiver;
+}
+
+function exposeExactWindowListenerReceiver(ownerDocument: Document) {
+  const publicWindow = ownerDocument.defaultView;
+  if (!publicWindow) {
+    throw new Error("Document default view was unavailable");
+  }
+  const receiver = observeWindowListenerReceiver(publicWindow);
+  const descriptor = Object.getOwnPropertyDescriptor(
+    ownerDocument,
+    "defaultView",
+  );
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: receiver,
+  });
+  return {
+    receiver,
+    restore: () => {
+      if (descriptor) {
+        Object.defineProperty(ownerDocument, "defaultView", descriptor);
+      } else {
+        Reflect.deleteProperty(ownerDocument, "defaultView");
+      }
+    },
+  };
+}
+
+function redirectWindowKeyCaptureReceiver(receiver: EventTarget) {
+  const nativeAdd = window.addEventListener.bind(window);
+  const nativeRemove = window.removeEventListener.bind(window);
+  const wrappers = new Map<WindowKeyListener, EventListener>();
+  const captures = (options?: boolean | AddEventListenerOptions) =>
+    options === true ||
+    (typeof options === "object" && options.capture === true);
+  const add = vi.spyOn(window, "addEventListener").mockImplementation(
+    (type, listener, options) => {
+      if (
+        type === "keydown" &&
+        captures(options) &&
+        typeof listener === "function"
+      ) {
+        const wrapper: EventListener = (event) =>
+          Reflect.apply(listener, receiver, [event]);
+        wrappers.set(listener, wrapper);
+        nativeAdd(type, wrapper, options);
+        return;
+      }
+      nativeAdd(type, listener, options);
+    },
+  );
+  const remove = vi.spyOn(window, "removeEventListener").mockImplementation(
+    (type, listener, options) => {
+      const wrapper =
+        type === "keydown" && captures(options)
+          ? wrappers.get(listener)
+          : undefined;
+      nativeRemove(type, wrapper ?? listener, options);
+      if (wrapper) wrappers.delete(listener);
+    },
+  );
+  return () => {
+    add.mockRestore();
+    remove.mockRestore();
+  };
 }
 
 const emptySelectionCases: { label: string; select: (session: CollabSession) => void }[] = [
@@ -1137,6 +1230,260 @@ describe("StatsPopover directional disclosure authority", () => {
       }
     },
   );
+
+  it.each([
+    ["distinct jsdom", false],
+    ["identical public", true],
+  ] as const)(
+    "binds directional authority to the %s listener receiver",
+    async (_label, exposeReceiver) => {
+      const ownerDocument = document;
+      const publicWindow = ownerDocument.defaultView;
+      if (!publicWindow) {
+        throw new Error("Document default view was unavailable");
+      }
+      let receiver = observeWindowListenerReceiver(publicWindow);
+      let restore = () => {};
+      if (exposeReceiver) {
+        const exact = exposeExactWindowListenerReceiver(ownerDocument);
+        receiver = exact.receiver;
+        restore = exact.restore;
+        expect(ownerDocument.defaultView).toBe(receiver);
+      } else {
+        expect(receiver).not.toBe(publicWindow);
+      }
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const mounted = renderStrictStats(
+        makeSession(`direction-listener-${_label}`),
+        () => {},
+      );
+      try {
+        const trigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = statsKey(trigger, "ArrowDown");
+
+        await act(async () => {
+          trigger.dispatchEvent(event);
+          await Promise.resolve();
+        });
+
+        expect(event.view).toBe(receiver);
+        expect(event.defaultPrevented).toBe(true);
+        expect(screen.getByTestId("goal-mode")).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === event,
+          ),
+        ).toHaveLength(1);
+        expect(focus).toHaveBeenCalledOnce();
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+        restore();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+      }
+    },
+  );
+
+  it("rejects a same-prototype Window-shaped callback receiver", async () => {
+    const publicWindow = document.defaultView;
+    if (!publicWindow) {
+      throw new Error("Document default view was unavailable");
+    }
+    const genuineReceiver =
+      observeWindowListenerReceiver(publicWindow);
+    const structuralReceiver = Object.create(
+      Object.getPrototypeOf(genuineReceiver),
+    ) as Window;
+    Object.defineProperties(structuralReceiver, {
+      constructor: {
+        configurable: true,
+        value: genuineReceiver.constructor,
+      },
+      document: { configurable: true, value: document },
+      self: {
+        configurable: true,
+        value: structuralReceiver,
+      },
+      window: {
+        configurable: true,
+        value: structuralReceiver,
+      },
+    });
+    expect(Object.getPrototypeOf(structuralReceiver)).toBe(
+      Object.getPrototypeOf(genuineReceiver),
+    );
+    expect(structuralReceiver.constructor).toBe(
+      genuineReceiver.constructor,
+    );
+    expect(structuralReceiver.document).toBe(document);
+    const restoreReceiver =
+      redirectWindowKeyCaptureReceiver(structuralReceiver);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const mounted = renderStrictStats(
+      makeSession("direction-structural-listener"),
+      () => {},
+    );
+    try {
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = statsKey(trigger, "ArrowDown");
+
+      await act(async () => {
+        trigger.dispatchEvent(event);
+        await Promise.resolve();
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (context) => context === event,
+        ),
+      ).toHaveLength(0);
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      restoreReceiver();
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("invalidates a removed Strict listener and accepts a clean successor", async () => {
+    const listeners = trackWindowKeydownListeners();
+    let replayListener: WindowKeyListener | null = null;
+    const first = renderStrictStats(
+      makeSession("direction-stale-listener"),
+      () => {
+        replayListener ??= [...listeners.active][0] ?? null;
+      },
+    );
+    let firstMounted = true;
+    let relay: ((this: Window, event: KeyboardEvent) => void) | null =
+      null;
+    let second:
+      | ReturnType<typeof renderStrictStats>
+      | null = null;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    try {
+      if (!replayListener) {
+        throw new Error("Strict Mode did not expose its first listener");
+      }
+      const currentListener = [...listeners.active][0];
+      if (!currentListener) {
+        throw new Error("Current Window listener was unavailable");
+      }
+      expect(currentListener).not.toBe(replayListener);
+      expect(
+        listeners.added.filter(
+          (listener) => listener === replayListener,
+        ),
+      ).toHaveLength(2);
+      expect(
+        listeners.removed.filter(
+          (listener) => listener === replayListener,
+        ),
+      ).toHaveLength(2);
+      expect(
+        listeners.added.filter(
+          (listener) => listener === currentListener,
+        ),
+      ).toHaveLength(2);
+
+      listeners.nativeRemove(
+        "keydown",
+        currentListener,
+        true,
+      );
+      listeners.nativeRemove("keydown", currentListener);
+      relay = function (this: Window, event: KeyboardEvent) {
+        invokeWindowListener(replayListener!, event, this);
+      };
+      listeners.nativeAdd("keydown", relay, true);
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const rejected = statsKey(trigger, "ArrowDown");
+
+      await act(async () => {
+        trigger.dispatchEvent(rejected);
+        await Promise.resolve();
+      });
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => {
+        first.root.unmount();
+        await Promise.resolve();
+      });
+      firstMounted = false;
+      first.host.remove();
+      listeners.nativeRemove("keydown", relay, true);
+      relay = null;
+      expect(
+        listeners.removed.filter(
+          (listener) => listener === currentListener,
+        ),
+      ).toHaveLength(2);
+
+      second = renderStrictStats(
+        makeSession("direction-clean-listener"),
+        () => {},
+      );
+      const successorTrigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      successorTrigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const successor = statsKey(
+        successorTrigger,
+        "ArrowDown",
+      );
+      await act(async () => {
+        successorTrigger.dispatchEvent(successor);
+        await Promise.resolve();
+      });
+
+      expect(successor.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("goal-mode")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      if (relay) {
+        listeners.nativeRemove("keydown", relay, true);
+      }
+      if (firstMounted) {
+        act(() => first.root.unmount());
+        first.host.remove();
+      }
+      if (second) {
+        act(() => second.root.unmount());
+        second.host.remove();
+      }
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
 
   it.each(["ArrowDown", "ArrowUp"] as const)(
     "rejects untrusted, modified, repeated, composing, malformed, unfocused, and wrong-target %s input",
