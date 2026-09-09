@@ -136,6 +136,36 @@ function markRequestModeEventTrusted(event: Event) {
   if (!event.isTrusted) throw new Error("The request-mode event trust slot did not update");
 }
 
+function replaceReactionPickerPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's reaction keyboard path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The reaction keyboard path terminal did not update");
+  }
+}
+
 function requestModeKeyboardEvent(
   element: HTMLButtonElement,
   key: string,
@@ -4624,6 +4654,310 @@ describe("CommentsPanel", () => {
       expect(publicPrevent).not.toHaveBeenCalled();
       expect(publicFocus).not.toHaveBeenCalled();
     });
+
+    it("authenticates exact group/option capture and bubble wrappers around the backing Window receiver", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const destination = options[1]!;
+      const group = source.parentElement;
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!(group instanceof HTMLDivElement) || !ownerWindow) {
+        throw new Error("The reaction keyboard boundary did not mount");
+      }
+      const groupCapture = reactProperty<
+        (event: ReactKeyboardEvent<HTMLDivElement>) => void
+      >(group, "onKeyDownCapture");
+      const optionCapture = reactProperty<ReactionPickerKeyHandler>(
+        source,
+        "onKeyDownCapture",
+      );
+      const optionBubble = reactProperty<ReactionPickerKeyHandler>(
+        source,
+        "onKeyDown",
+      );
+      const groupBubble = reactProperty<
+        (event: ReactKeyboardEvent<HTMLDivElement>) => void
+      >(group, "onKeyDown");
+      const boundaries: {
+        name: string;
+        wrapper: object;
+        isDefaultPrevented: () => boolean;
+        isPropagationStopped: () => boolean;
+        defaultPrevented: boolean;
+        propagationStopped: boolean;
+      }[] = [];
+      const record = (
+        name: string,
+        event: ReactKeyboardEvent<HTMLElement>,
+      ) => {
+        boundaries.push({
+          name,
+          wrapper: event,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+          defaultPrevented: event.isDefaultPrevented(),
+          propagationStopped: event.isPropagationStopped(),
+        });
+      };
+      const restoreGroup = replaceReactProperties(group, {
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          record("group capture", event);
+          groupCapture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          record("group bubble", event);
+          groupBubble(event);
+        },
+      });
+      const restoreOption = replaceReactProperties(source, {
+        onKeyDownCapture: (
+          event: ReactKeyboardEvent<HTMLButtonElement>,
+        ) => {
+          record("option capture", event);
+          optionCapture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          record("option bubble", event);
+          optionBubble(event);
+        },
+      });
+      const nativeEvent = reactionPickerKeyboardEvent(
+        source,
+        "ArrowRight",
+      );
+      const currentTargetGetter = Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get;
+      const composedPath = ownerWindow.Event.prototype.composedPath;
+      if (!currentTargetGetter) {
+        throw new Error("Event.currentTarget has no intrinsic getter");
+      }
+      const nativeDelivery: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        terminal?: EventTarget;
+      } = {};
+      const observeNativeReceiver = function (
+        this: EventTarget,
+        event: Event,
+      ) {
+        if (event !== nativeEvent) return;
+        nativeDelivery.receiver = this;
+        nativeDelivery.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          event,
+          [],
+        ) as EventTarget | null;
+        nativeDelivery.terminal = Reflect.apply(
+          composedPath,
+          event,
+          [],
+        ).at(-1);
+      };
+      ownerWindow.addEventListener(
+        "keydown",
+        observeNativeReceiver,
+        true,
+      );
+      source.focus();
+      focus.mockClear();
+
+      try {
+        act(() => source.dispatchEvent(nativeEvent));
+      } finally {
+        ownerWindow.removeEventListener(
+          "keydown",
+          observeNativeReceiver,
+          true,
+        );
+        restoreOption();
+        restoreGroup();
+      }
+
+      expect(boundaries.map(({ name }) => name)).toEqual([
+        "group capture",
+        "option capture",
+        "option bubble",
+        "group bubble",
+      ]);
+      expect(boundaries[0]!.wrapper).toBe(boundaries[1]!.wrapper);
+      expect(boundaries[2]!.wrapper).toBe(boundaries[3]!.wrapper);
+      expect(boundaries[0]!.wrapper).not.toBe(boundaries[2]!.wrapper);
+      expect(boundaries[0]!.isDefaultPrevented).toBe(
+        boundaries[1]!.isDefaultPrevented,
+      );
+      expect(boundaries[0]!.isPropagationStopped).toBe(
+        boundaries[1]!.isPropagationStopped,
+      );
+      expect(boundaries[2]!.isDefaultPrevented).toBe(
+        boundaries[3]!.isDefaultPrevented,
+      );
+      expect(boundaries[2]!.isPropagationStopped).toBe(
+        boundaries[3]!.isPropagationStopped,
+      );
+      expect(
+        boundaries.every(
+          ({ defaultPrevented, propagationStopped }) =>
+            defaultPrevented === false && propagationStopped === false,
+        ),
+      ).toBe(true);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+      expect(nativeEvent.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(targetReactions(view, "Comment")).toEqual({});
+    });
+
+    it("rejects a structural Window terminal while retaining exact backing-receiver recovery", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The reaction option has no owner window");
+      const structural = Object.create(
+        ownerWindow.Window.prototype,
+      ) as EventTarget;
+      Object.defineProperties(structural, {
+        document: { value: source.ownerDocument },
+        Window: { value: ownerWindow.Window },
+        Event: { value: ownerWindow.Event },
+        EventTarget: { value: ownerWindow.EventTarget },
+        KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+        Node: { value: ownerWindow.Node },
+        Object: { value: ownerWindow.Object },
+        Reflect: { value: ownerWindow.Reflect },
+        UIEvent: { value: ownerWindow.UIEvent },
+        window: { value: structural },
+        self: { value: structural },
+      });
+      const rejected = reactionPickerKeyboardEvent(
+        source,
+        "ArrowRight",
+      );
+      const currentTargetGetter = Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get;
+      const composedPath = ownerWindow.Event.prototype.composedPath;
+      if (!currentTargetGetter) {
+        throw new Error("Event.currentTarget has no intrinsic getter");
+      }
+      const listenerObservation: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        originalPathTerminal?: EventTarget;
+      } = {};
+      const stageStructuralTerminal = function (
+        this: EventTarget,
+        event: Event,
+      ) {
+        if (event !== rejected) return;
+        listenerObservation.receiver = this;
+        listenerObservation.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          event,
+          [],
+        ) as EventTarget | null;
+        listenerObservation.originalPathTerminal = Reflect.apply(
+          composedPath,
+          event,
+          [],
+        ).at(-1);
+        replaceReactionPickerPathTerminal(event, structural);
+      };
+      ownerWindow.addEventListener(
+        "keydown",
+        stageStructuralTerminal,
+        true,
+      );
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      try {
+        act(() => source.dispatchEvent(rejected));
+      } finally {
+        ownerWindow.removeEventListener(
+          "keydown",
+          stageStructuralTerminal,
+          true,
+        );
+      }
+
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.currentTarget,
+      );
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.originalPathTerminal,
+      );
+      expect(listenerObservation.receiver).not.toBe(structural);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(targetReactions(view, "Comment")).toEqual({});
+
+      const accepted = reactionPickerKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(options[1]).toHaveFocus();
+    });
+
+    it.each([
+      ["capture", "isDefaultPrevented"],
+      ["capture", "isPropagationStopped"],
+      ["bubble", "isDefaultPrevented"],
+      ["bubble", "isPropagationStopped"],
+    ] as const)(
+      "rejects a replaced %s wrapper %s method before a clean successor",
+      async (phase, method) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, "Comment");
+        const source = options[0]!;
+        const property =
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
+        const handler = reactProperty<ReactionPickerKeyHandler>(
+          source,
+          property,
+        );
+        const restore = replaceReactProperties(source, {
+          [property]: (
+            event: ReactKeyboardEvent<HTMLButtonElement>,
+          ) => {
+            handler(event);
+            Object.defineProperty(event, method, {
+              configurable: true,
+              value: () => false,
+            });
+          },
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = reactionPickerKey(source, "ArrowRight");
+        restore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(targetReactions(view, "Comment")).toEqual({});
+
+        const accepted = reactionPickerKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options[1]).toHaveFocus();
+      },
+    );
 
     it.each([
       ["Alt-modified", { altKey: true }],
