@@ -1,6 +1,13 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type RefCallback,
+} from "react";
 import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
@@ -90,6 +97,13 @@ interface BubbleControlFacts {
   canComment: boolean;
   onLink: () => void;
   onComment: () => void;
+  editorState: EditorView["state"];
+  selection: EditorView["state"]["selection"];
+  selectionAnchor: number;
+  selectionHead: number;
+  rovingIndex: number;
+  setRovingIndex: (index: number) => void;
+  isCurrent: (publication: BubbleControlPublication) => boolean;
 }
 
 interface BubbleControlPublication {
@@ -106,6 +120,12 @@ interface BubbleControlPublication {
   claimed: Set<BubbleControl>;
   mutationObserver: MutationObserver | null;
   mutated: boolean;
+  keyboardAuthority: BubbleKeyboardAuthority;
+  controlPaths: ReadonlyMap<BubbleControl, readonly EventTarget[]>;
+  keyboardListeners: readonly BubbleKeyboardListener[];
+  keyboardDelivery: BubbleKeyboardDelivery | null;
+  reactCapture: BubbleReactCapture | null;
+  keyboardEventSeen: boolean;
 }
 
 interface BubbleControl {
@@ -116,6 +136,8 @@ interface BubbleControl {
   binding: BubbleElementBinding<HTMLButtonElement> | null;
   captureButton: RefCallback<HTMLButtonElement>;
   invoke: () => void;
+  index: number;
+  tabStop: boolean;
 }
 
 interface BubbleControls {
@@ -166,6 +188,786 @@ interface BubbleControlReplay {
   released: Set<BubbleElementBinding<HTMLElement>>;
   rebound: Map<BubbleElementBinding<HTMLElement>, BubbleElementBinding<HTMLElement>>;
   invalid: boolean;
+}
+
+type BubbleEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble"
+  | "composed"
+  | "timeStamp";
+type BubbleKeyboardField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey";
+type BubbleNativeGetter = (this: object) => unknown;
+type BubbleNativeMethod = (...args: never[]) => unknown;
+
+interface BubbleDescriptorAuthority {
+  readonly isCurrent: () => boolean;
+}
+
+interface BubbleGetterAuthority<Field extends string> {
+  readonly getters: Readonly<Record<Field, BubbleNativeGetter>>;
+  readonly isCurrent: () => boolean;
+}
+
+interface BubbleMethodAuthority<Method extends BubbleNativeMethod> {
+  readonly method: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface BubbleTrustAuthority {
+  readonly getter: BubbleNativeGetter;
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => unknown;
+  readonly isCurrent: () => boolean;
+}
+
+interface BubbleKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly UIEvent: typeof UIEvent;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly event: Readonly<Record<BubbleEventField, BubbleNativeGetter>>;
+  readonly keyboard: Readonly<Record<BubbleKeyboardField, BubbleNativeGetter>>;
+  readonly ui: Readonly<Record<"detail" | "view", BubbleNativeGetter>>;
+  readonly document: Readonly<Record<"activeElement", BubbleNativeGetter>>;
+  readonly composedPath: Event["composedPath"];
+  readonly preventDefault: Event["preventDefault"];
+  readonly stopPropagation: Event["stopPropagation"];
+  readonly stopImmediatePropagation: Event["stopImmediatePropagation"];
+  readonly focus: HTMLElement["focus"];
+  readonly addEventListener: EventTarget["addEventListener"];
+  readonly removeEventListener: EventTarget["removeEventListener"];
+  readonly apply: typeof Reflect.apply;
+  readonly defineProperty: typeof Reflect.defineProperty;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly trust: BubbleTrustAuthority;
+  readonly historyIsClean: () => boolean;
+}
+
+interface BubbleKeyboardSnapshot {
+  readonly event: KeyboardEvent;
+  readonly publication: BubbleControlPublication;
+  readonly sourceControl: BubbleControl;
+  readonly destinationControl: BubbleControl;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly detail: number;
+  readonly view: Window | null;
+  readonly trustGetter: BubbleNativeGetter;
+  readonly propagationStopped: () => boolean;
+}
+
+interface BubbleReactSnapshot {
+  readonly event: object;
+  readonly descriptors: ReadonlyMap<PropertyKey, PropertyDescriptor>;
+  readonly methods: ReadonlyMap<PropertyKey, unknown>;
+}
+
+interface BubbleReactCapture {
+  readonly event: object;
+  readonly nativeEvent: KeyboardEvent;
+  readonly sourceControl: BubbleControl;
+  readonly source: HTMLButtonElement;
+  readonly methods: ReadonlyMap<PropertyKey, unknown>;
+}
+
+interface BubbleKeyboardDelivery {
+  readonly snapshot: BubbleKeyboardSnapshot;
+  react: BubbleReactSnapshot | null;
+  buttonSeen: number;
+  rootSeen: number;
+  invalid: boolean;
+}
+
+interface BubbleKeyboardListener {
+  readonly target: EventTarget;
+  readonly listener: EventListener;
+  readonly capture: boolean;
+}
+
+const BUBBLE_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
+const BUBBLE_REACT_FIELDS = Object.freeze([
+  "nativeEvent",
+  "type",
+  "target",
+  "currentTarget",
+  "eventPhase",
+  "bubbles",
+  "cancelable",
+  "defaultPrevented",
+  "isTrusted",
+  "timeStamp",
+  "key",
+  "code",
+  "location",
+  "repeat",
+  "ctrlKey",
+  "shiftKey",
+  "altKey",
+  "metaKey",
+  "view",
+  "detail",
+] as const);
+const BUBBLE_REACT_METHODS = Object.freeze([
+  "preventDefault",
+  "stopPropagation",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+  "persist",
+] as const);
+
+function bubbleDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.writable === expected.writable &&
+      current.value === expected.value &&
+      current.get === expected.get &&
+      current.set === expected.set,
+  );
+}
+
+function captureBubbleDescriptor(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  owner: object,
+  property: PropertyKey,
+): BubbleDescriptorAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    isCurrent: () =>
+      bubbleDescriptorsMatch(
+        getOwnPropertyDescriptor(owner, property),
+        expected,
+      ),
+  });
+}
+
+function captureBubbleGetters<const Field extends string>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  prototype: object | null,
+  fields: readonly Field[],
+): BubbleGetterAuthority<Field> | null {
+  const getters = Object.create(null) as Record<Field, BubbleNativeGetter>;
+  const descriptors: {
+    owner: object;
+    property: Field;
+    descriptor: PropertyDescriptor;
+  }[] = [];
+  for (const property of fields) {
+    let owner = prototype;
+    let descriptor: PropertyDescriptor | undefined;
+    while (owner && !descriptor) {
+      descriptor = getOwnPropertyDescriptor(owner, property);
+      if (!descriptor) owner = getPrototypeOf(owner);
+    }
+    if (!owner || !descriptor || typeof descriptor.get !== "function") {
+      return null;
+    }
+    getters[property] = descriptor.get;
+    descriptors.push({
+      owner,
+      property,
+      descriptor: Object.freeze({ ...descriptor }),
+    });
+  }
+  return Object.freeze({
+    getters: Object.freeze(getters),
+    isCurrent: () =>
+      descriptors.every(({ owner, property, descriptor }) =>
+        bubbleDescriptorsMatch(
+          getOwnPropertyDescriptor(owner, property),
+          descriptor,
+        ),
+      ),
+  });
+}
+
+function captureBubbleMethod<Method extends BubbleNativeMethod>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  prototype: object | null,
+  property: PropertyKey,
+): BubbleMethodAuthority<Method> | null {
+  let owner = prototype;
+  let descriptor: PropertyDescriptor | undefined;
+  while (owner && !descriptor) {
+    descriptor = getOwnPropertyDescriptor(owner, property);
+    if (!descriptor) owner = getPrototypeOf(owner);
+  }
+  if (
+    !owner ||
+    !descriptor ||
+    !("value" in descriptor) ||
+    typeof descriptor.value !== "function"
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      bubbleDescriptorsMatch(
+        getOwnPropertyDescriptor(owner, property),
+        expected,
+      ),
+  });
+}
+
+function captureBubbleTrust(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): BubbleTrustAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined ||
+    "value" in descriptor ||
+    "writable" in descriptor
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    bubbleDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    getter: descriptor.get,
+    matches,
+    read: (event: object) => apply(descriptor.get as BubbleNativeGetter, event, []),
+    isCurrent: () => matches(probe),
+  });
+}
+
+function captureBubbleKeyboardAuthority(
+  ownerDocument: Document,
+): BubbleKeyboardAuthority | null {
+  const ownerWindow = ownerDocument.defaultView as
+    | (Window & typeof globalThis)
+    | null;
+  if (!ownerWindow) return null;
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const construct = ownerWindow.Reflect.construct;
+  const defineProperty = ownerWindow.Reflect.defineProperty;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const EventTargetConstructor = ownerWindow.EventTarget;
+  const eventPrototype = EventConstructor.prototype;
+  const uiPrototype = UIEventConstructor.prototype;
+  const keyboardPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const htmlElementPrototype = HTMLElementConstructor.prototype;
+  const eventTargetPrototype = EventTargetConstructor.prototype;
+  const event = captureBubbleGetters(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+      "composed",
+      "timeStamp",
+    ] as const,
+  );
+  const keyboard = captureBubbleGetters(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    keyboardPrototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "shiftKey",
+      "altKey",
+      "metaKey",
+    ] as const,
+  );
+  const ui = captureBubbleGetters(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    uiPrototype,
+    ["detail", "view"] as const,
+  );
+  const document = captureBubbleGetters(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath = captureBubbleMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureBubbleMethod<Event["preventDefault"]>(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    eventPrototype,
+    "preventDefault",
+  );
+  const stopPropagation = captureBubbleMethod<Event["stopPropagation"]>(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    eventPrototype,
+    "stopPropagation",
+  );
+  const stopImmediatePropagation =
+    captureBubbleMethod<Event["stopImmediatePropagation"]>(
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      eventPrototype,
+      "stopImmediatePropagation",
+    );
+  const focus = captureBubbleMethod<HTMLElement["focus"]>(
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    htmlElementPrototype,
+    "focus",
+  );
+  const addEventListener =
+    captureBubbleMethod<EventTarget["addEventListener"]>(
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      eventTargetPrototype,
+      "addEventListener",
+    );
+  const removeEventListener =
+    captureBubbleMethod<EventTarget["removeEventListener"]>(
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      eventTargetPrototype,
+      "removeEventListener",
+    );
+  const realmDescriptors = [
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      EventConstructor,
+      "prototype",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      UIEventConstructor,
+      "prototype",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      KeyboardEventConstructor,
+      "prototype",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      DocumentConstructor,
+      "prototype",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      HTMLElementConstructor,
+      "prototype",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      eventPrototype,
+      "constructor",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      uiPrototype,
+      "constructor",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      keyboardPrototype,
+      "constructor",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      documentPrototype,
+      "constructor",
+    ),
+    captureBubbleDescriptor(
+      getOwnPropertyDescriptor,
+      htmlElementPrototype,
+      "constructor",
+    ),
+  ];
+  if (
+    !event ||
+    !keyboard ||
+    !ui ||
+    !document ||
+    !composedPath ||
+    !preventDefault ||
+    !stopPropagation ||
+    !stopImmediatePropagation ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener ||
+    realmDescriptors.some((descriptor) => !descriptor)
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = apply(construct, ownerWindow.Reflect, [
+      KeyboardEventConstructor,
+      ["selection-bubble-keyboard-intrinsic"],
+      KeyboardEventConstructor,
+    ]) as KeyboardEvent;
+  } catch {
+    return null;
+  }
+  const trust = captureBubbleTrust(getOwnPropertyDescriptor, apply, probe);
+  if (
+    !trust ||
+    getPrototypeOf(probe) !== keyboardPrototype ||
+    trust.read(probe) !== false
+  ) {
+    return null;
+  }
+  let historyIsClean = true;
+  const checkHistory = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerDocument.defaultView === ownerWindow &&
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+      ownerWindow.Reflect.apply === apply &&
+      ownerWindow.Reflect.construct === construct &&
+      ownerWindow.Reflect.defineProperty === defineProperty &&
+      ownerWindow.Event === EventConstructor &&
+      ownerWindow.UIEvent === UIEventConstructor &&
+      ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+      ownerWindow.Document === DocumentConstructor &&
+      ownerWindow.HTMLElement === HTMLElementConstructor &&
+      ownerWindow.EventTarget === EventTargetConstructor &&
+      EventConstructor.prototype === eventPrototype &&
+      UIEventConstructor.prototype === uiPrototype &&
+      KeyboardEventConstructor.prototype === keyboardPrototype &&
+      DocumentConstructor.prototype === documentPrototype &&
+      HTMLElementConstructor.prototype === htmlElementPrototype &&
+      EventTargetConstructor.prototype === eventTargetPrototype &&
+      getPrototypeOf(keyboardPrototype) === uiPrototype &&
+      getPrototypeOf(uiPrototype) === eventPrototype &&
+      event.isCurrent() &&
+      keyboard.isCurrent() &&
+      ui.isCurrent() &&
+      document.isCurrent() &&
+      composedPath.isCurrent() &&
+      preventDefault.isCurrent() &&
+      stopPropagation.isCurrent() &&
+      stopImmediatePropagation.isCurrent() &&
+      focus.isCurrent() &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent() &&
+      trust.isCurrent() &&
+      realmDescriptors.every(
+        (descriptor) => descriptor?.isCurrent() === true,
+      );
+    return historyIsClean;
+  };
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    event: event.getters,
+    keyboard: keyboard.getters,
+    ui: ui.getters,
+    document: document.getters,
+    composedPath: composedPath.method,
+    preventDefault: preventDefault.method,
+    stopPropagation: stopPropagation.method,
+    stopImmediatePropagation: stopImmediatePropagation.method,
+    focus: focus.method,
+    addEventListener: addEventListener.method,
+    removeEventListener: removeEventListener.method,
+    apply,
+    defineProperty,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    trust,
+    historyIsClean: checkHistory,
+  });
+}
+
+function bubbleNativeValue<Value>(
+  authority: BubbleKeyboardAuthority,
+  getter: BubbleNativeGetter,
+  event: Event,
+): Value {
+  return authority.apply(getter, event, []) as Value;
+}
+
+function bubbleActiveElement(authority: BubbleKeyboardAuthority) {
+  return authority.apply(
+    authority.document.activeElement,
+    authority.ownerDocument,
+    [],
+  ) as Element | null;
+}
+
+function bubbleEventPath(
+  authority: BubbleKeyboardAuthority,
+  event: Event,
+) {
+  return authority.apply(authority.composedPath, event, []) as EventTarget[];
+}
+
+function bubbleControlPath(
+  ownerDocument: Document,
+  element: HTMLElement,
+): readonly EventTarget[] | null {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow || element.ownerDocument !== ownerDocument) return null;
+  const path: EventTarget[] = [];
+  let current: Node | null = element;
+  while (current) {
+    path.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  if (path.at(-1) !== ownerDocument) return null;
+  path.push(ownerWindow);
+  return Object.freeze(path);
+}
+
+function bubblePathsMatch(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+  ownerDocument: Document,
+) {
+  const expectedWindow = expected.at(-1);
+  const actualWindow = actual.at(-1);
+  const hasOwnerWindow =
+    actualWindow === expectedWindow ||
+    (typeof actualWindow === "object" &&
+      actualWindow !== null &&
+      "document" in actualWindow &&
+      actualWindow.document === ownerDocument &&
+      "window" in actualWindow &&
+      actualWindow.window === actualWindow);
+  return (
+    expected.length === actual.length &&
+    hasOwnerWindow &&
+    actual
+      .slice(0, -1)
+      .every((entry, index) => entry === expected[index])
+  );
+}
+
+function bubbleOwnDescriptor(
+  authority: BubbleKeyboardAuthority,
+  value: object,
+  property: PropertyKey,
+) {
+  const descriptor = authority.getOwnPropertyDescriptor(value, property);
+  return descriptor && "value" in descriptor ? descriptor : null;
+}
+
+function bubbleReactMethod(
+  value: object,
+  property: PropertyKey,
+) {
+  const method = Reflect.get(value, property);
+  return typeof method === "function" ? method : null;
+}
+
+function captureBubbleReactSnapshot(
+  authority: BubbleKeyboardAuthority,
+  event: object,
+  native: BubbleKeyboardSnapshot,
+  currentTarget: HTMLElement,
+): BubbleReactSnapshot | null {
+  const expected = {
+    nativeEvent: native.event,
+    type: "keydown",
+    target: native.source,
+    currentTarget,
+    eventPhase: authority.Event.BUBBLING_PHASE,
+    bubbles: native.bubbles,
+    cancelable: native.cancelable,
+    defaultPrevented: false,
+    isTrusted: true,
+    timeStamp: native.timeStamp,
+    key: native.key,
+    code: native.code,
+    location: native.location,
+    repeat: native.repeat,
+    ctrlKey: native.ctrlKey,
+    shiftKey: native.shiftKey,
+    altKey: native.altKey,
+    metaKey: native.metaKey,
+    view: native.view,
+    detail: native.detail,
+  } as const;
+  const descriptors = new Map<PropertyKey, PropertyDescriptor>();
+  for (const property of BUBBLE_REACT_FIELDS) {
+    const descriptor = bubbleOwnDescriptor(authority, event, property);
+    if (!descriptor || descriptor.value !== expected[property]) return null;
+    descriptors.set(property, Object.freeze({ ...descriptor }));
+  }
+  const methods = new Map<PropertyKey, unknown>();
+  for (const property of BUBBLE_REACT_METHODS) {
+    const method = bubbleReactMethod(event, property);
+    if (!method) return null;
+    methods.set(property, method);
+  }
+  const isDefaultPrevented = methods.get("isDefaultPrevented");
+  const isPropagationStopped = methods.get("isPropagationStopped");
+  if (
+    typeof isDefaultPrevented !== "function" ||
+    typeof isPropagationStopped !== "function" ||
+    authority.apply(isDefaultPrevented, event, []) !== false ||
+    authority.apply(isPropagationStopped, event, []) !== false
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    event,
+    descriptors,
+    methods,
+  });
+}
+
+function bubbleReactSnapshotMatches(
+  authority: BubbleKeyboardAuthority,
+  snapshot: BubbleReactSnapshot,
+  native: BubbleKeyboardSnapshot,
+  currentTarget: HTMLElement | null,
+) {
+  for (const property of BUBBLE_REACT_FIELDS) {
+    const expected = snapshot.descriptors.get(property);
+    const current = bubbleOwnDescriptor(authority, snapshot.event, property);
+    if (!expected || !current) return false;
+    const expectedValue =
+      property === "currentTarget" ? currentTarget : expected.value;
+    if (
+      current.configurable !== expected.configurable ||
+      current.enumerable !== expected.enumerable ||
+      current.writable !== expected.writable ||
+      current.value !== expectedValue
+    ) {
+      return false;
+    }
+  }
+  for (const [property, method] of snapshot.methods) {
+    if (bubbleReactMethod(snapshot.event, property) !== method) return false;
+  }
+  const isDefaultPrevented = snapshot.methods.get("isDefaultPrevented");
+  const isPropagationStopped = snapshot.methods.get("isPropagationStopped");
+  return (
+    typeof isDefaultPrevented === "function" &&
+    typeof isPropagationStopped === "function" &&
+    authority.apply(isDefaultPrevented, snapshot.event, []) === false &&
+    authority.apply(isPropagationStopped, snapshot.event, []) === false &&
+    bubbleNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      native.event,
+    ) === native.source
+  );
+}
+
+function bubbleRovingIndex(
+  requested: number,
+  enabled: readonly boolean[],
+) {
+  if (enabled[requested]) return requested;
+  const start = requested >= 0 && requested < enabled.length ? requested : -1;
+  for (let offset = 1; offset <= enabled.length; offset++) {
+    const index = (start + offset) % enabled.length;
+    if (enabled[index]) return index;
+  }
+  return -1;
+}
+
+function bubbleKeyDestination(
+  controls: readonly BubbleControl[],
+  source: BubbleControl,
+  key: string,
+) {
+  if (!controls[source.index]?.enabled || controls[source.index] !== source) {
+    return null;
+  }
+  if (key === "Home" || key === "End") {
+    const ordered = key === "Home" ? controls : [...controls].reverse();
+    const destination = ordered.find((control) => control.enabled) ?? null;
+    return destination === source ? null : destination;
+  }
+  const step =
+    key === "ArrowRight" || key === "ArrowDown"
+      ? 1
+      : key === "ArrowLeft" || key === "ArrowUp"
+        ? -1
+        : 0;
+  if (!step) return null;
+  for (let offset = 1; offset <= controls.length; offset++) {
+    const index =
+      (source.index + step * offset + controls.length) % controls.length;
+    const destination = controls[index];
+    if (destination?.enabled) return destination;
+  }
+  return null;
 }
 
 const ControlMutationObserver = typeof MutationObserver === "function" ? MutationObserver : null;
@@ -235,6 +1037,8 @@ class BubbleControlCurrent {
       !facts.view.isDestroyed &&
       facts.editor.isConnected &&
       facts.scroller.isConnected &&
+      facts.editor.ownerDocument === facts.geometry.layer.ownerDocument &&
+      facts.scroller.ownerDocument === facts.geometry.layer.ownerDocument &&
       this.#readContainer?.() === facts.scroller &&
       facts.authority.owner === facts.owner &&
       facts.authority.view === facts.view &&
@@ -286,6 +1090,12 @@ class BubbleControlCoordinator {
   #elementOwners = new WeakMap<HTMLElement, BubbleElementOwner>();
   #publishedGenerations = new WeakSet<BubbleControlGeneration>();
   #replayedGenerations = new WeakSet<BubbleControlGeneration>();
+  #claimedKeyboardPublications = new WeakSet<BubbleControlPublication>();
+  #claimedKeyboardControls = new WeakSet<BubbleControl>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedNativeEvents = new WeakSet<Event>();
+  #attemptedReactEvents = new WeakSet<object>();
+  #attemptedNativeEvents = new WeakSet<Event>();
   #replay: BubbleControlReplay | null = null;
 
   publish(publication: BubbleControlPublication) {
@@ -305,6 +1115,7 @@ class BubbleControlCoordinator {
       if (layerParent) observer.observe(layerParent, { childList: true });
       publication.mutationObserver = observer;
     }
+    this.#connectKeyboard(publication);
     return true;
   }
 
@@ -470,6 +1281,649 @@ class BubbleControlCoordinator {
     return publication?.generation === generation && !publication.retired ? publication : null;
   }
 
+  captureRootKey(
+    generation: BubbleControlGeneration,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    const publication = this.current(generation);
+    if (
+      !publication ||
+      !event ||
+      typeof event !== "object" ||
+      publication.reactCapture ||
+      this.#attemptedReactEvents.has(event) ||
+      this.#claimedReactEvents.has(event) ||
+      !this.#keyboardPublicationMatches(publication)
+    ) {
+      return;
+    }
+    const authority = publication.keyboardAuthority;
+    const nativeEvent = event.nativeEvent;
+    const source = event.target;
+    const sourceControl = publication.generation.controls.find(
+      (control) =>
+        publication.controlBindings.get(control)?.element === source,
+    );
+    if (
+      !sourceControl ||
+      !(source instanceof authority.ownerWindow.HTMLButtonElement) ||
+      authority.getPrototypeOf(nativeEvent) !==
+        authority.KeyboardEvent.prototype ||
+      event.type !== "keydown" ||
+      event.currentTarget !== publication.rootBinding.element ||
+      event.isTrusted !== true ||
+      event.defaultPrevented ||
+      event.isDefaultPrevented() ||
+      event.isPropagationStopped() ||
+      bubbleActiveElement(authority) !== source ||
+      !publication.controlPaths.get(sourceControl) ||
+      !bubblePathsMatch(
+        publication.controlPaths.get(sourceControl)!,
+        bubbleEventPath(authority, nativeEvent),
+        authority.ownerDocument,
+      ) ||
+      !bubbleKeyDestination(
+        publication.generation.controls,
+        sourceControl,
+        event.key,
+      )
+    ) {
+      return;
+    }
+    let trusted = false;
+    try {
+      trusted =
+        authority.trust.matches(nativeEvent) &&
+        authority.trust.read(nativeEvent) === true;
+    } catch {
+      return;
+    }
+    if (!trusted) return;
+    this.#attemptedReactEvents.add(event);
+    const methods = new Map<PropertyKey, unknown>();
+    for (const property of BUBBLE_REACT_METHODS) {
+      const method = bubbleReactMethod(event, property);
+      if (!method) return;
+      methods.set(property, method);
+    }
+    const capture: BubbleReactCapture = Object.freeze({
+      event,
+      nativeEvent,
+      sourceControl,
+      source,
+      methods,
+    });
+    publication.reactCapture = capture;
+    queueMicrotask(() => {
+      if (
+        publication.reactCapture === capture &&
+        publication.keyboardDelivery === null
+      ) {
+        publication.reactCapture = null;
+      }
+    });
+  }
+
+  stageControlKey(
+    generation: BubbleControlGeneration,
+    control: BubbleControl,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    const current = this.current(generation);
+    const active = current?.keyboardDelivery;
+    const captureEvent = current?.reactCapture?.event;
+    if (
+      !event ||
+      typeof event !== "object" ||
+      (this.#attemptedReactEvents.has(event) && captureEvent !== event) ||
+      this.#claimedReactEvents.has(event)
+    ) {
+      if (active?.react?.event === event) active.invalid = true;
+      return;
+    }
+    if (!this.#attemptedReactEvents.has(event)) {
+      this.#attemptedReactEvents.add(event);
+    }
+    const publication = current;
+    const nativeEvent = event.nativeEvent;
+    const delivery = publication?.keyboardDelivery;
+    if (
+      !publication ||
+      !delivery ||
+      delivery.snapshot.event !== nativeEvent ||
+      delivery.snapshot.sourceControl !== control ||
+      delivery.react ||
+      publication.reactCapture?.nativeEvent !== nativeEvent ||
+      publication.reactCapture.sourceControl !== control ||
+      !this.#keyboardPublicationMatches(publication)
+    ) {
+      if (delivery) delivery.invalid = true;
+      return;
+    }
+    const react = captureBubbleReactSnapshot(
+      publication.keyboardAuthority,
+      event,
+      delivery.snapshot,
+      delivery.snapshot.source,
+    );
+    if (!react) {
+      delivery.invalid = true;
+      return;
+    }
+    for (const [property, method] of publication.reactCapture.methods) {
+      if (react.methods.get(property) !== method) {
+        delivery.invalid = true;
+        return;
+      }
+    }
+    delivery.react = react;
+    delivery.buttonSeen++;
+    if (delivery.buttonSeen !== 1) delivery.invalid = true;
+  }
+
+  stageRootKey(
+    generation: BubbleControlGeneration,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    const publication = this.current(generation);
+    const delivery = publication?.keyboardDelivery;
+    const react = delivery?.react;
+    if (
+      !publication ||
+      !delivery ||
+      !react ||
+      delivery.invalid ||
+      react.event !== event ||
+      delivery.snapshot.event !== event.nativeEvent ||
+      !bubbleReactSnapshotMatches(
+        publication.keyboardAuthority,
+        react,
+        delivery.snapshot,
+        publication.rootBinding.element,
+      ) ||
+      !this.#keyboardPublicationMatches(publication)
+    ) {
+      if (delivery) delivery.invalid = true;
+      return;
+    }
+    delivery.rootSeen++;
+    if (delivery.rootSeen !== 1) delivery.invalid = true;
+  }
+
+  #keyboardPublicationMatches(publication: BubbleControlPublication) {
+    const authority = publication.keyboardAuthority;
+    const facts = publication.facts;
+    return (
+      this.#current === publication &&
+      !publication.retired &&
+      facts.isCurrent(publication) &&
+      facts.view.state === facts.editorState &&
+      facts.editorState.selection === facts.selection &&
+      facts.selection.anchor === facts.selectionAnchor &&
+      facts.selection.head === facts.selectionHead &&
+      !facts.selection.empty &&
+      authority.historyIsClean() &&
+      this.#mutationFree(publication) &&
+      this.#ownsElements(publication)
+    );
+  }
+
+  #nativeSnapshotMatches(
+    delivery: BubbleKeyboardDelivery,
+    currentTarget: EventTarget,
+    eventPhase: number,
+  ) {
+    const snapshot = delivery.snapshot;
+    const publication = snapshot.publication;
+    const authority = publication.keyboardAuthority;
+    const { event, keyboard, ui } = authority;
+    const path = bubbleEventPath(authority, snapshot.event);
+    let trusted = false;
+    try {
+      trusted =
+        authority.trust.matches(snapshot.event) &&
+        authority.trust.read(snapshot.event) === true;
+    } catch {
+      return false;
+    }
+    return (
+      trusted &&
+      snapshot.trustGetter === authority.trust.getter &&
+      authority.getPrototypeOf(snapshot.event) ===
+        authority.KeyboardEvent.prototype &&
+      bubbleNativeValue<string>(
+        authority,
+        event.type,
+        snapshot.event,
+      ) === "keydown" &&
+      bubbleNativeValue<EventTarget | null>(
+        authority,
+        event.target,
+        snapshot.event,
+      ) === snapshot.source &&
+      bubbleNativeValue<EventTarget | null>(
+        authority,
+        event.currentTarget,
+        snapshot.event,
+      ) === currentTarget &&
+      bubbleNativeValue<number>(
+        authority,
+        event.eventPhase,
+        snapshot.event,
+      ) === eventPhase &&
+      bubbleNativeValue<boolean>(
+        authority,
+        event.bubbles,
+        snapshot.event,
+      ) === snapshot.bubbles &&
+      bubbleNativeValue<boolean>(
+        authority,
+        event.cancelable,
+        snapshot.event,
+      ) === snapshot.cancelable &&
+      bubbleNativeValue<boolean>(
+        authority,
+        event.defaultPrevented,
+        snapshot.event,
+      ) === false &&
+      bubbleNativeValue<boolean>(
+        authority,
+        event.cancelBubble,
+        snapshot.event,
+      ) === false &&
+      bubbleNativeValue<boolean>(
+        authority,
+        event.composed,
+        snapshot.event,
+      ) === snapshot.composed &&
+      bubbleNativeValue<number>(
+        authority,
+        event.timeStamp,
+        snapshot.event,
+      ) === snapshot.timeStamp &&
+      bubbleNativeValue<string>(
+        authority,
+        keyboard.key,
+        snapshot.event,
+      ) === snapshot.key &&
+      bubbleNativeValue<string>(
+        authority,
+        keyboard.code,
+        snapshot.event,
+      ) === snapshot.code &&
+      bubbleNativeValue<number>(
+        authority,
+        keyboard.location,
+        snapshot.event,
+      ) === snapshot.location &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.repeat,
+        snapshot.event,
+      ) === snapshot.repeat &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.isComposing,
+        snapshot.event,
+      ) === snapshot.isComposing &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.ctrlKey,
+        snapshot.event,
+      ) === snapshot.ctrlKey &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.shiftKey,
+        snapshot.event,
+      ) === snapshot.shiftKey &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.altKey,
+        snapshot.event,
+      ) === snapshot.altKey &&
+      bubbleNativeValue<boolean>(
+        authority,
+        keyboard.metaKey,
+        snapshot.event,
+      ) === snapshot.metaKey &&
+      bubbleNativeValue<number>(
+        authority,
+        ui.detail,
+        snapshot.event,
+      ) === snapshot.detail &&
+      bubbleNativeValue<Window | null>(
+        authority,
+        ui.view,
+        snapshot.event,
+      ) === snapshot.view &&
+      bubblePathsMatch(snapshot.path, path, authority.ownerDocument)
+    );
+  }
+
+  #captureKeyboard(
+    publication: BubbleControlPublication,
+    control: BubbleControl,
+    event: Event,
+  ) {
+    publication.keyboardEventSeen = true;
+    if (
+      this.#attemptedNativeEvents.has(event) ||
+      this.#claimedNativeEvents.has(event)
+    ) {
+      return;
+    }
+    this.#attemptedNativeEvents.add(event);
+    const competing = publication.keyboardDelivery;
+    if (
+      publication.reactCapture &&
+      publication.reactCapture.nativeEvent !== event
+    ) {
+      publication.reactCapture = null;
+      if (competing) competing.invalid = true;
+      return;
+    }
+    if (competing) {
+      competing.invalid = true;
+      return;
+    }
+    const authority = publication.keyboardAuthority;
+    const binding = publication.controlBindings.get(control);
+    const reactCapture = publication.reactCapture;
+    if (
+      !binding ||
+      !reactCapture ||
+      reactCapture.nativeEvent !== event ||
+      reactCapture.sourceControl !== control ||
+      reactCapture.source !== binding.element ||
+      authority.getPrototypeOf(event) !== authority.KeyboardEvent.prototype ||
+      !this.#keyboardPublicationMatches(publication)
+    ) {
+      return;
+    }
+    let trusted = false;
+    try {
+      trusted =
+        authority.trust.matches(event) &&
+        authority.trust.read(event) === true;
+    } catch {
+      return;
+    }
+    if (!trusted) return;
+    const { event: eventGetters, keyboard, ui } = authority;
+    const key = bubbleNativeValue<string>(authority, keyboard.key, event);
+    const destinationControl = bubbleKeyDestination(
+      publication.generation.controls,
+      control,
+      key,
+    );
+    const destinationBinding = destinationControl
+      ? publication.controlBindings.get(destinationControl)
+      : null;
+    const path = bubbleEventPath(authority, event);
+    const expectedPath = publication.controlPaths.get(control);
+    const bubbles = bubbleNativeValue<boolean>(
+      authority,
+      eventGetters.bubbles,
+      event,
+    );
+    const cancelable = bubbleNativeValue<boolean>(
+      authority,
+      eventGetters.cancelable,
+      event,
+    );
+    const repeat = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.repeat,
+      event,
+    );
+    const isComposing = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.isComposing,
+      event,
+    );
+    const ctrlKey = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.ctrlKey,
+      event,
+    );
+    const shiftKey = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.shiftKey,
+      event,
+    );
+    const altKey = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.altKey,
+      event,
+    );
+    const metaKey = bubbleNativeValue<boolean>(
+      authority,
+      keyboard.metaKey,
+      event,
+    );
+    const view = bubbleNativeValue<Window | null>(
+      authority,
+      ui.view,
+      event,
+    );
+    if (
+      !destinationControl ||
+      !destinationBinding ||
+      !destinationControl.enabled ||
+      destinationBinding.element.disabled ||
+      !expectedPath ||
+      bubbleNativeValue<string>(
+        authority,
+        eventGetters.type,
+        event,
+      ) !== "keydown" ||
+      bubbleNativeValue<EventTarget | null>(
+        authority,
+        eventGetters.target,
+        event,
+      ) !== binding.element ||
+      bubbleNativeValue<EventTarget | null>(
+        authority,
+        eventGetters.currentTarget,
+        event,
+      ) !== binding.element ||
+      bubbleNativeValue<number>(
+        authority,
+        eventGetters.eventPhase,
+        event,
+      ) !== authority.Event.AT_TARGET ||
+      !bubbles ||
+      !cancelable ||
+      bubbleNativeValue<boolean>(
+        authority,
+        eventGetters.defaultPrevented,
+        event,
+      ) ||
+      bubbleNativeValue<boolean>(
+        authority,
+        eventGetters.cancelBubble,
+        event,
+      ) ||
+      repeat ||
+      isComposing ||
+      ctrlKey ||
+      shiftKey ||
+      altKey ||
+      metaKey ||
+      (view !== null && view !== authority.ownerWindow) ||
+      bubbleActiveElement(authority) !== binding.element ||
+      !bubblePathsMatch(expectedPath, path, authority.ownerDocument) ||
+      authority.getOwnPropertyDescriptor(event, "stopPropagation") ||
+      authority.getOwnPropertyDescriptor(event, "stopImmediatePropagation")
+    ) {
+      return;
+    }
+    let propagationStopped = false;
+    if (
+      !authority.defineProperty(event, "stopPropagation", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: () => {
+          propagationStopped = true;
+          authority.apply(authority.stopPropagation, event, []);
+        },
+      }) ||
+      !authority.defineProperty(event, "stopImmediatePropagation", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: () => {
+          propagationStopped = true;
+          authority.apply(authority.stopImmediatePropagation, event, []);
+        },
+      })
+    ) {
+      return;
+    }
+    const snapshot: BubbleKeyboardSnapshot = Object.freeze({
+      event: event as KeyboardEvent,
+      publication,
+      sourceControl: control,
+      destinationControl,
+      source: binding.element,
+      destination: destinationBinding.element,
+      path: Object.freeze([...path]),
+      key,
+      code: bubbleNativeValue<string>(authority, keyboard.code, event),
+      location: bubbleNativeValue<number>(
+        authority,
+        keyboard.location,
+        event,
+      ),
+      repeat,
+      isComposing,
+      ctrlKey,
+      shiftKey,
+      altKey,
+      metaKey,
+      bubbles,
+      cancelable,
+      composed: bubbleNativeValue<boolean>(
+        authority,
+        eventGetters.composed,
+        event,
+      ),
+      timeStamp: bubbleNativeValue<number>(
+        authority,
+        eventGetters.timeStamp,
+        event,
+      ),
+      detail: bubbleNativeValue<number>(authority, ui.detail, event),
+      view,
+      trustGetter: authority.trust.getter,
+      propagationStopped: () => propagationStopped,
+    });
+    const delivery: BubbleKeyboardDelivery = {
+      snapshot,
+      react: null,
+      buttonSeen: 0,
+      rootSeen: 0,
+      invalid: false,
+    };
+    publication.keyboardDelivery = delivery;
+    queueMicrotask(() => {
+      if (publication.keyboardDelivery === delivery) {
+        publication.keyboardDelivery = null;
+      }
+    });
+  }
+
+  #settleKeyboard(
+    publication: BubbleControlPublication,
+    event: Event,
+  ) {
+    const delivery = publication.keyboardDelivery;
+    const snapshot = delivery?.snapshot;
+    const react = delivery?.react;
+    const reactCapture = publication.reactCapture;
+    const authority = publication.keyboardAuthority;
+    if (
+      !delivery ||
+      !snapshot ||
+      !react ||
+      !reactCapture ||
+      reactCapture.nativeEvent !== event ||
+      snapshot.event !== event ||
+      delivery.invalid ||
+      delivery.buttonSeen !== 1 ||
+      delivery.rootSeen !== 1 ||
+      snapshot.propagationStopped() ||
+      !this.#nativeSnapshotMatches(
+        delivery,
+        authority.ownerDocument,
+        authority.Event.BUBBLING_PHASE,
+      ) ||
+      !bubbleReactSnapshotMatches(authority, react, snapshot, null) ||
+      bubbleActiveElement(authority) !== snapshot.source ||
+      !this.#keyboardPublicationMatches(publication) ||
+      this.#claimedKeyboardPublications.has(publication) ||
+      this.#claimedKeyboardControls.has(snapshot.sourceControl) ||
+      this.#claimedReactEvents.has(reactCapture.event) ||
+      this.#claimedReactEvents.has(react.event) ||
+      this.#claimedNativeEvents.has(snapshot.event)
+    ) {
+      if (delivery) {
+        delivery.invalid = true;
+        publication.keyboardDelivery = null;
+        publication.reactCapture = null;
+      }
+      return;
+    }
+    this.#claimedKeyboardPublications.add(publication);
+    this.#claimedKeyboardControls.add(snapshot.sourceControl);
+    this.#claimedReactEvents.add(reactCapture.event);
+    this.#claimedReactEvents.add(react.event);
+    this.#claimedNativeEvents.add(snapshot.event);
+    publication.keyboardDelivery = null;
+    publication.reactCapture = null;
+    authority.apply(authority.preventDefault, snapshot.event, []);
+    if (
+      bubbleNativeValue<boolean>(
+        authority,
+        authority.event.defaultPrevented,
+        snapshot.event,
+      ) !== true
+    ) {
+      return;
+    }
+    authority.apply(authority.focus, snapshot.destination, [
+      BUBBLE_PREVENT_SCROLL,
+    ]);
+    publication.facts.setRovingIndex(snapshot.destinationControl.index);
+  }
+
+  #connectKeyboard(publication: BubbleControlPublication) {
+    const authority = publication.keyboardAuthority;
+    for (const { target, listener, capture } of publication.keyboardListeners) {
+      authority.apply(authority.addEventListener, target, [
+        "keydown",
+        listener,
+        capture,
+      ]);
+    }
+  }
+
+  #disconnectKeyboard(publication: BubbleControlPublication) {
+    const authority = publication.keyboardAuthority;
+    const delivery = publication.keyboardDelivery;
+    if (delivery) delivery.invalid = true;
+    publication.keyboardDelivery = null;
+    publication.reactCapture = null;
+    for (const { target, listener, capture } of publication.keyboardListeners) {
+      authority.apply(authority.removeEventListener, target, [
+        "keydown",
+        listener,
+        capture,
+      ]);
+    }
+  }
+
   #release(
     binding: BubbleElementBinding<HTMLElement>,
     source: "cleanup" | "null" | "replace",
@@ -546,6 +2000,10 @@ class BubbleControlCoordinator {
         control.binding !== binding ||
         !this.#ownsBinding(binding) ||
         !binding.element.isConnected ||
+        binding.element.ownerDocument !==
+          publication.keyboardAuthority.ownerDocument ||
+        binding.element.disabled === control.enabled ||
+        binding.element.tabIndex !== (control.tabStop ? 0 : -1) ||
         !root.contains(binding.element) ||
         !bubble.contains(binding.element) ||
         !facts.geometry.layer.contains(binding.element)
@@ -553,7 +2011,15 @@ class BubbleControlCoordinator {
         return false;
       }
     }
-    return true;
+    return (
+      root.ownerDocument === publication.keyboardAuthority.ownerDocument &&
+      bubble.ownerDocument === publication.keyboardAuthority.ownerDocument &&
+      facts.geometry.layer.ownerDocument ===
+        publication.keyboardAuthority.ownerDocument &&
+      !root.hasAttribute("tabindex") &&
+      generation.controls.filter((control) => control.tabStop).length === 1 &&
+      generation.controls[facts.rovingIndex]?.tabStop === true
+    );
   }
 
   #createPublication(
@@ -583,6 +2049,25 @@ class BubbleControlCoordinator {
     ) {
       return null;
     }
+    const ownerDocument = rootBinding.element.ownerDocument;
+    const keyboardAuthority =
+      captureBubbleKeyboardAuthority(ownerDocument);
+    if (
+      !keyboardAuthority ||
+      generation.controls.filter((control) => control.tabStop).length !== 1 ||
+      generation.controls[generation.facts.rovingIndex]?.tabStop !== true
+    ) {
+      return null;
+    }
+    const controlPaths = new Map<
+      BubbleControl,
+      readonly EventTarget[]
+    >();
+    for (const [control, binding] of controlBindings) {
+      const path = bubbleControlPath(ownerDocument, binding.element);
+      if (!path) return null;
+      controlPaths.set(control, path);
+    }
     const topology = controlTopology(bubbleBinding.element, facts.geometry.layer);
     if (
       expectedTopology &&
@@ -594,7 +2079,26 @@ class BubbleControlCoordinator {
     ) {
       return null;
     }
-    const publication: BubbleControlPublication = {
+    let publication: BubbleControlPublication;
+    const keyboardListeners: BubbleKeyboardListener[] = [
+      ...generation.controls.map((control) => {
+        const binding = controlBindings.get(control)!;
+        const listener: EventListener = (event) =>
+          this.#captureKeyboard(publication, control, event);
+        return Object.freeze({
+          target: binding.element,
+          listener,
+          capture: true,
+        });
+      }),
+      Object.freeze({
+        target: keyboardAuthority.ownerDocument,
+        listener: ((event: Event) =>
+          this.#settleKeyboard(publication, event)) as EventListener,
+        capture: false,
+      }),
+    ];
+    publication = {
       identity: Symbol("selection-bubble-control-publication"),
       retired: false,
       generation,
@@ -608,6 +2112,12 @@ class BubbleControlCoordinator {
       claimed: new Set(),
       mutationObserver: null,
       mutated: false,
+      keyboardAuthority,
+      controlPaths,
+      keyboardListeners: Object.freeze(keyboardListeners),
+      keyboardDelivery: null,
+      reactCapture: null,
+      keyboardEventSeen: false,
     };
     return this.#ownsElements(publication) ? publication : null;
   }
@@ -617,16 +2127,25 @@ class BubbleControlCoordinator {
       !this.#replayedGenerations.has(publication.generation) &&
       publication.claimed.size === 0 &&
       !publication.mouseEventSeen &&
+      !publication.keyboardEventSeen &&
       this.#mutationFree(publication) &&
       this.#ownsElements(publication)
     );
   }
 
   #mutationFree(publication: BubbleControlPublication) {
-    return !publication.mutated && (publication.mutationObserver?.takeRecords().length ?? 0) === 0;
+    if (
+      publication.mutated ||
+      (publication.mutationObserver?.takeRecords().length ?? 0) > 0
+    ) {
+      publication.mutated = true;
+      return false;
+    }
+    return true;
   }
 
   #disconnect(publication: BubbleControlPublication) {
+    this.#disconnectKeyboard(publication);
     publication.mutationObserver?.disconnect();
     publication.mutationObserver = null;
   }
@@ -645,6 +2164,9 @@ function createControlGeneration({
   canComment,
   onLink,
   onComment,
+  rovingIndex,
+  setRovingIndex,
+  isCurrent,
 }: {
   coordinator: BubbleControlCoordinator;
   mount: symbol;
@@ -658,12 +2180,17 @@ function createControlGeneration({
   canComment: boolean;
   onLink: () => void;
   onComment: () => void;
+  rovingIndex: number;
+  setRovingIndex: (index: number) => void;
+  isCurrent: (publication: BubbleControlPublication) => boolean;
 }): {
   generation: BubbleControlGeneration;
   controls: BubbleControls;
   captureBubble: RefCallback<HTMLDivElement>;
   captureRoot: RefCallback<HTMLDivElement>;
 } {
+  const editorState = view.state;
+  const selection = editorState.selection;
   const facts = Object.freeze({
     mount,
     geometry,
@@ -688,6 +2215,13 @@ function createControlGeneration({
     canComment,
     onLink,
     onComment,
+    editorState,
+    selection,
+    selectionAnchor: selection.anchor,
+    selectionHead: selection.head,
+    rovingIndex,
+    setRovingIndex,
+    isCurrent,
   } satisfies BubbleControlFacts);
   const generation: BubbleControlGeneration = {
     identity: Symbol("selection-bubble-control-generation"),
@@ -696,10 +2230,12 @@ function createControlGeneration({
     rootBinding: null,
     controls: [],
   };
+  let nextIndex = 0;
   const control = (
     permission: BubbleControlPermission,
     invoke: () => void,
   ): BubbleControl => {
+    const index = nextIndex++;
     const owned: BubbleControl = {
       identity: Symbol("selection-bubble-control"),
       generation,
@@ -708,6 +2244,8 @@ function createControlGeneration({
       binding: null,
       captureButton: (element) => coordinator.bindControl(owned, element),
       invoke,
+      index,
+      tabStop: index === rovingIndex,
     };
     return owned;
   };
@@ -738,6 +2276,8 @@ function BubbleButton({
   captureButton,
   onMouseDown,
   onClick,
+  onKeyDown,
+  tabIndex,
   children,
   disabled,
 }: {
@@ -746,6 +2286,8 @@ function BubbleButton({
   captureButton: RefCallback<HTMLButtonElement>;
   onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  tabIndex: 0 | -1;
   children: React.ReactNode;
   disabled?: boolean;
 }) {
@@ -756,6 +2298,8 @@ function BubbleButton({
       className={cn("flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-md text-white/85 hover:bg-white/15 hover:text-white disabled:opacity-30", active && "bg-white/20 text-white")}
       onMouseDown={onMouseDown}
       onClick={onClick}
+      onKeyDown={onKeyDown}
+      tabIndex={tabIndex}
       aria-label={label}
       title={label}
       disabled={disabled}
@@ -792,6 +2336,14 @@ function SelectionBubbleControls({
   controlCoordinator: BubbleControlCoordinator;
   controlCurrent: BubbleControlCurrent;
 }) {
+  const enabled = [canEdit, canEdit, canEdit, canEdit, canEdit, canComment];
+  const [requestedRovingIndex, setRovingIndex] = useState(() =>
+    bubbleRovingIndex(-1, enabled),
+  );
+  const rovingIndex = bubbleRovingIndex(requestedRovingIndex, enabled);
+  useLayoutEffect(() => {
+    if (requestedRovingIndex !== rovingIndex) setRovingIndex(rovingIndex);
+  }, [requestedRovingIndex, rovingIndex]);
   const controlSet = createControlGeneration({
     coordinator: controlCoordinator,
     mount: controlMount,
@@ -805,6 +2357,10 @@ function SelectionBubbleControls({
     canComment,
     onLink,
     onComment,
+    rovingIndex,
+    setRovingIndex,
+    isCurrent: (publication) =>
+      controlCurrent.matches(publication, geometry, controlMount),
   });
   const { generation, controls, captureBubble, captureRoot } = controlSet;
 
@@ -848,6 +2404,18 @@ function SelectionBubbleControls({
     publication.claimed.add(control);
     control.invoke();
   };
+  const onKeyDown = (control: BubbleControl) =>
+    (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      controlCoordinator.stageControlKey(generation, control, event);
+    };
+  const onRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    controlCoordinator.stageRootKey(generation, event);
+  };
+  const onRootKeyDownCapture = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    controlCoordinator.captureRootKey(generation, event);
+  };
   const { position: pos, placement, layer } = geometry;
 
   return createPortal(
@@ -861,28 +2429,29 @@ function SelectionBubbleControls({
       <div
         ref={captureRoot}
         className="selection-bubble-scroll flex items-center gap-[2px] overflow-x-auto overflow-y-hidden rounded-lg p-[4px]"
-        tabIndex={0}
         role="toolbar"
         aria-label="Selection"
         aria-orientation="horizontal"
+        onKeyDownCapture={onRootKeyDownCapture}
+        onKeyDown={onRootKeyDown}
       >
-        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} captureButton={controls.bold.captureButton} onMouseDown={onMouseDown(controls.bold)} onClick={onClick(controls.bold)}>
+        <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} captureButton={controls.bold.captureButton} onMouseDown={onMouseDown(controls.bold)} onClick={onClick(controls.bold)} onKeyDown={onKeyDown(controls.bold)} tabIndex={controls.bold.tabStop ? 0 : -1}>
           <Bold size={16} strokeWidth={2.6} />
         </BubbleButton>
-        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} captureButton={controls.italic.captureButton} onMouseDown={onMouseDown(controls.italic)} onClick={onClick(controls.italic)}>
+        <BubbleButton label="Italic" active={format.em} disabled={!canEdit} captureButton={controls.italic.captureButton} onMouseDown={onMouseDown(controls.italic)} onClick={onClick(controls.italic)} onKeyDown={onKeyDown(controls.italic)} tabIndex={controls.italic.tabStop ? 0 : -1}>
           <Italic size={16} />
         </BubbleButton>
-        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} captureButton={controls.strike.captureButton} onMouseDown={onMouseDown(controls.strike)} onClick={onClick(controls.strike)}>
+        <BubbleButton label="Strikethrough" active={format.strike} disabled={!canEdit} captureButton={controls.strike.captureButton} onMouseDown={onMouseDown(controls.strike)} onClick={onClick(controls.strike)} onKeyDown={onKeyDown(controls.strike)} tabIndex={controls.strike.tabStop ? 0 : -1}>
           <Strikethrough size={16} />
         </BubbleButton>
-        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} captureButton={controls.code.captureButton} onMouseDown={onMouseDown(controls.code)} onClick={onClick(controls.code)}>
+        <BubbleButton label="Inline code" active={format.code} disabled={!canEdit} captureButton={controls.code.captureButton} onMouseDown={onMouseDown(controls.code)} onClick={onClick(controls.code)} onKeyDown={onKeyDown(controls.code)} tabIndex={controls.code.tabStop ? 0 : -1}>
           <Code size={16} />
         </BubbleButton>
-        <BubbleButton label="Link" active={format.link} disabled={!canEdit} captureButton={controls.link.captureButton} onMouseDown={onMouseDown(controls.link)} onClick={onClick(controls.link)}>
+        <BubbleButton label="Link" active={format.link} disabled={!canEdit} captureButton={controls.link.captureButton} onMouseDown={onMouseDown(controls.link)} onClick={onClick(controls.link)} onKeyDown={onKeyDown(controls.link)} tabIndex={controls.link.tabStop ? 0 : -1}>
           <LinkIcon size={16} />
         </BubbleButton>
         <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
-        <BubbleButton label="Comment" disabled={!canComment} captureButton={controls.comment.captureButton} onMouseDown={onMouseDown(controls.comment)} onClick={onClick(controls.comment)}>
+        <BubbleButton label="Comment" disabled={!canComment} captureButton={controls.comment.captureButton} onMouseDown={onMouseDown(controls.comment)} onClick={onClick(controls.comment)} onKeyDown={onKeyDown(controls.comment)} tabIndex={controls.comment.tabStop ? 0 : -1}>
           <MessageSquarePlus size={16} />
         </BubbleButton>
       </div>
