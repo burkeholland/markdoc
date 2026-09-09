@@ -4317,58 +4317,361 @@ function modeSwitcherOpenPlacementMatches(
   );
 }
 
-function modeSwitcherOpeningMutationIsExpected(
+function modeSwitcherTriggerOpeningMutationIsExpected(
   record: MutationRecord,
+  trigger: HTMLButtonElement,
+  content: HTMLDivElement,
+) {
+  if (record.type !== "attributes" || record.target !== trigger) return false;
+  if (record.attributeName === "aria-expanded") {
+    return record.oldValue === "false" && trigger.getAttribute("aria-expanded") === "true";
+  }
+  if (record.attributeName === "data-state") {
+    return record.oldValue === "closed" && trigger.getAttribute("data-state") === "open";
+  }
+  if (record.attributeName === "aria-controls") {
+    return record.oldValue === null && trigger.getAttribute("aria-controls") === content.id;
+  }
+  if (record.attributeName === "data-radix-popper-align") {
+    return (
+      record.oldValue === null
+      && trigger.getAttribute("data-radix-popper-align") === content.getAttribute("data-align")
+    );
+  }
+  if (record.attributeName === "data-radix-popper-side") {
+    return (
+      record.oldValue === null
+      && trigger.getAttribute("data-radix-popper-side") === content.getAttribute("data-side")
+    );
+  }
+  return false;
+}
+
+type ModeSwitcherFocusGuardEdge = "start" | "end";
+type ModeSwitcherFocusGuardDecoration =
+  | "inserted"
+  | "marker-set"
+  | "decorated"
+  | "aria-cleared"
+  | "cleared";
+type ModeSwitcherFocusGuardIdentityState =
+  | "initial-start"
+  | "initial-end"
+  | "initial-live"
+  | "initial-end-removal"
+  | "rebound-start"
+  | "rebound-end"
+  | "complete";
+
+interface ModeSwitcherFocusGuardHistory {
+  readonly node: HTMLSpanElement;
+  readonly edge: ModeSwitcherFocusGuardEdge;
+  decoration: ModeSwitcherFocusGuardDecoration;
+}
+
+function modeSwitcherFocusGuardHasAttributes(
+  guard: HTMLSpanElement,
+  decorated: boolean,
+) {
+  const expected = new Map<string, string>([
+    ["data-radix-focus-guard", ""],
+    ["style", "outline: none; opacity: 0; position: fixed; pointer-events: none;"],
+    ["tabindex", "0"],
+  ]);
+  if (decorated) {
+    expected.set("aria-hidden", "true");
+    expected.set("data-aria-hidden", "true");
+  }
+  return (
+    guard.attributes.length === expected.size
+    && Array.from(guard.attributes).every(
+      (attribute) => expected.get(attribute.name) === attribute.value,
+    )
+  );
+}
+
+function modeSwitcherFocusGuardShapeMatches(
+  node: Node,
+  document: Document,
+  decorated: boolean,
+): node is HTMLSpanElement {
+  const ownerWindow = document.defaultView;
+  return Boolean(
+    ownerWindow
+    && node instanceof ownerWindow.HTMLSpanElement
+    && node.ownerDocument === document
+    && node.tabIndex === 0
+    && node.childNodes.length === 0
+    && node.style.length === 4
+    && node.style.outline === "none"
+    && node.style.opacity === "0"
+    && node.style.position === "fixed"
+    && node.style.pointerEvents === "none"
+    && modeSwitcherFocusGuardHasAttributes(node, decorated)
+  );
+}
+
+function modeSwitcherFocusGuardEdgeForRecord(
+  record: MutationRecord,
+): ModeSwitcherFocusGuardEdge | null {
+  const atStart = record.previousSibling === null;
+  const atEnd = record.nextSibling === null;
+  if (atStart === atEnd) return null;
+  return atStart ? "start" : "end";
+}
+
+function modeSwitcherFocusGuardDecorationIsExpected(
+  record: MutationRecord,
+  guard: ModeSwitcherFocusGuardHistory,
+) {
+  if (record.type !== "attributes" || record.target !== guard.node) return false;
+  if (
+    guard.decoration === "inserted"
+    && record.attributeName === "data-aria-hidden"
+    && record.oldValue === null
+  ) {
+    guard.decoration = "marker-set";
+    return true;
+  }
+  if (
+    guard.decoration === "marker-set"
+    && record.attributeName === "aria-hidden"
+    && record.oldValue === null
+  ) {
+    guard.decoration = "decorated";
+    return true;
+  }
+  if (
+    guard.decoration === "decorated"
+    && record.attributeName === "aria-hidden"
+    && record.oldValue === "true"
+  ) {
+    guard.decoration = "aria-cleared";
+    return true;
+  }
+  if (
+    guard.decoration === "aria-cleared"
+    && record.attributeName === "data-aria-hidden"
+    && record.oldValue === "true"
+  ) {
+    guard.decoration = "cleared";
+    return true;
+  }
+  return false;
+}
+
+function modeSwitcherOpeningHistory(
+  records: readonly MutationRecord[],
   source: ModeSwitcherPublication,
   successor: ModeSwitcherPublication,
-  openingNodes: Set<Node>,
-) {
+): ReadonlySet<Node> | null {
   const trigger = source.dom.trigger;
   const content = successor.dom.content;
-  if (!content) return false;
-  if (record.type === "attributes" && record.target === trigger) {
-    if (record.attributeName === "aria-expanded") {
-      return record.oldValue === "false" && trigger.getAttribute("aria-expanded") === "true";
-    }
-    if (record.attributeName === "data-state") {
-      return record.oldValue === "closed" && trigger.getAttribute("data-state") === "open";
-    }
-    if (record.attributeName === "aria-controls") {
-      return record.oldValue === null && trigger.getAttribute("aria-controls") === content.id;
-    }
-    if (record.attributeName === "data-radix-popper-align") {
-      return (
-        record.oldValue === null
-        && trigger.getAttribute("data-radix-popper-align") === content.getAttribute("data-align")
-      );
-    }
-    if (record.attributeName === "data-radix-popper-side") {
-      return (
-        record.oldValue === null
-        && trigger.getAttribute("data-radix-popper-side") === content.getAttribute("data-side")
-      );
-    }
-    return false;
-  }
-  const addedNode = record.addedNodes.item(0);
   const ownerWindow = source.document.defaultView;
-  const expectedFocusGuard = Boolean(
-    ownerWindow
-    && record.target === source.document.body
-    && addedNode instanceof ownerWindow.HTMLSpanElement
-    && addedNode.parentNode === source.document.body
-    && addedNode.hasAttribute("data-radix-focus-guard")
-    && addedNode.tabIndex === 0
-    && addedNode.childNodes.length === 0
+  if (!content || !ownerWindow) return null;
+
+  const openingNodes = new Set<Node>();
+  const guardHistory = new Map<HTMLSpanElement, ModeSwitcherFocusGuardHistory>();
+  const generations: Array<{
+    start?: ModeSwitcherFocusGuardHistory;
+    end?: ModeSwitcherFocusGuardHistory;
+  }> = [{}, {}];
+  let identityState: ModeSwitcherFocusGuardIdentityState = "initial-start";
+  let contentInsertion: Node | null = null;
+
+  for (const record of records) {
+    if (record.type === "attributes" && record.target === trigger) {
+      if (!modeSwitcherTriggerOpeningMutationIsExpected(record, trigger, content)) return null;
+      continue;
+    }
+
+    if (record.type === "attributes") {
+      if (!(record.target instanceof ownerWindow.HTMLSpanElement)) return null;
+      const guard = guardHistory.get(record.target);
+      if (!guard || !modeSwitcherFocusGuardDecorationIsExpected(record, guard)) return null;
+      continue;
+    }
+
+    if (
+      record.type !== "childList"
+      || (record.addedNodes.length === 0) === (record.removedNodes.length === 0)
+      || record.addedNodes.length > 1
+      || record.removedNodes.length > 1
+    ) {
+      return null;
+    }
+
+    const addedNode = record.addedNodes.item(0);
+    if (addedNode?.contains(content)) {
+      if (
+        contentInsertion
+        || record.removedNodes.length !== 0
+        || addedNode.parentNode !== record.target
+      ) {
+        return null;
+      }
+      contentInsertion = addedNode;
+      openingNodes.add(addedNode);
+      continue;
+    }
+
+    const node = addedNode ?? record.removedNodes.item(0);
+    const edge = modeSwitcherFocusGuardEdgeForRecord(record);
+    if (
+      !node
+      || !edge
+      || record.target !== source.document.body
+      || !(node instanceof ownerWindow.HTMLSpanElement)
+    ) {
+      return null;
+    }
+
+    if (record.addedNodes.length === 1) {
+      let generationIndex: number;
+      let expectedEdge: ModeSwitcherFocusGuardEdge;
+      let nextState: ModeSwitcherFocusGuardIdentityState;
+      if (identityState === "initial-start") {
+        generationIndex = 0;
+        expectedEdge = "start";
+        nextState = "initial-end";
+      } else if (identityState === "initial-end") {
+        generationIndex = 0;
+        expectedEdge = "end";
+        nextState = "initial-live";
+      } else if (identityState === "rebound-start") {
+        generationIndex = 1;
+        expectedEdge = "start";
+        nextState = "rebound-end";
+      } else if (identityState === "rebound-end") {
+        generationIndex = 1;
+        expectedEdge = "end";
+        nextState = "complete";
+      } else {
+        return null;
+      }
+      const initial = generations[0]!;
+      if (
+        edge !== expectedEdge
+        || guardHistory.has(node)
+        || (
+          !modeSwitcherFocusGuardShapeMatches(node, source.document, false)
+          && !modeSwitcherFocusGuardShapeMatches(node, source.document, true)
+        )
+        || (
+          generationIndex === 1
+          && (node === initial.start?.node || node === initial.end?.node)
+        )
+      ) {
+        return null;
+      }
+      const guard: ModeSwitcherFocusGuardHistory = {
+        node,
+        edge,
+        decoration: "inserted",
+      };
+      generations[generationIndex]![edge] = guard;
+      guardHistory.set(node, guard);
+      identityState = nextState;
+      continue;
+    }
+
+    const initial = generations[0]!;
+    const expected = identityState === "initial-live"
+      ? initial.start
+      : identityState === "initial-end-removal"
+        ? initial.end
+        : null;
+    if (
+      !expected
+      || node !== expected.node
+      || edge !== expected.edge
+      || initial.start?.decoration !== "cleared"
+      || initial.end?.decoration !== "cleared"
+    ) {
+      return null;
+    }
+    identityState = identityState === "initial-live"
+      ? "initial-end-removal"
+      : "rebound-start";
+  }
+
+  if (contentInsertion && !contentInsertion.contains(content)) return null;
+  if (identityState === "initial-start") return openingNodes;
+  const finalGeneration = identityState === "initial-live"
+    ? generations[0]
+    : identityState === "complete"
+      ? generations[1]
+      : null;
+  const retiredGeneration = identityState === "complete" ? generations[0] : null;
+  const finalStart = finalGeneration?.start;
+  const finalEnd = finalGeneration?.end;
+  const retiredStart = retiredGeneration?.start;
+  const retiredEnd = retiredGeneration?.end;
+  if (
+    !finalStart
+    || !finalEnd
+    || finalStart.decoration !== "decorated"
+    || finalEnd.decoration !== "decorated"
+    || !modeSwitcherFocusGuardShapeMatches(finalStart.node, source.document, true)
+    || !modeSwitcherFocusGuardShapeMatches(finalEnd.node, source.document, true)
+    || finalStart.node.parentNode !== source.document.body
+    || finalEnd.node.parentNode !== source.document.body
+    || source.document.body.firstElementChild !== finalStart.node
+    || source.document.body.lastElementChild !== finalEnd.node
+    || (
+      retiredGeneration
+      && (
+        !retiredStart
+        || !retiredEnd
+        || retiredStart.decoration !== "cleared"
+        || retiredEnd.decoration !== "cleared"
+        || !modeSwitcherFocusGuardShapeMatches(
+          retiredStart.node,
+          source.document,
+          false,
+        )
+        || !modeSwitcherFocusGuardShapeMatches(
+          retiredEnd.node,
+          source.document,
+          false,
+        )
+        || retiredStart.node.parentNode !== null
+        || retiredEnd.node.parentNode !== null
+      )
+    )
+  ) {
+    return null;
+  }
+  openingNodes.add(finalStart.node);
+  openingNodes.add(finalEnd.node);
+  return openingNodes;
+}
+
+function modeSwitcherOpeningMutationShouldBeRecorded(
+  record: MutationRecord,
+  trigger: HTMLButtonElement,
+  document: Document,
+  potentialGuards: WeakSet<Node>,
+) {
+  const ownerWindow = document.defaultView;
+  if (!ownerWindow) return false;
+  if (record.type !== "attributes") {
+    for (const node of [...record.addedNodes, ...record.removedNodes]) {
+      if (node instanceof ownerWindow.HTMLSpanElement) potentialGuards.add(node);
+    }
+    return true;
+  }
+  return (
+    record.target === trigger
+    || trigger.contains(record.target)
+    || (
+      record.target instanceof ownerWindow.HTMLSpanElement
+      && (
+        potentialGuards.has(record.target)
+        || record.target.hasAttribute("data-radix-focus-guard")
+      )
+    )
   );
-  const expected = Boolean(
-    record.type === "childList"
-    && record.removedNodes.length === 0
-    && record.addedNodes.length === 1
-    && (addedNode?.contains(content) || expectedFocusGuard)
-  );
-  if (expected && addedNode) openingNodes.add(addedNode);
-  return expected;
 }
 
 function createModeSwitcherOpenFocusGuard(
@@ -4379,8 +4682,20 @@ function createModeSwitcherOpenFocusGuard(
   if (!MutationObserverConstructor || !source.isExact()) return null;
   const placements = snapshotModeSwitcherPlacement([trigger]);
   const records: MutationRecord[] = [];
+  const potentialGuards = new WeakSet<Node>();
   let observer: MutationObserver | null = new MutationObserverConstructor((pending) => {
-    records.push(...pending);
+    for (const record of pending) {
+      if (
+        modeSwitcherOpeningMutationShouldBeRecorded(
+          record,
+          trigger,
+          source.document,
+          potentialGuards,
+        )
+      ) {
+        records.push(record);
+      }
+    }
   });
   observer.observe(trigger, {
     attributeOldValue: true,
@@ -4391,18 +4706,35 @@ function createModeSwitcherOpenFocusGuard(
     subtree: true,
   });
   for (let ancestor = trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
-    observer.observe(ancestor, { childList: true });
+    observer.observe(
+      ancestor,
+      ancestor === source.document.body
+        ? { attributeOldValue: true, attributes: true, childList: true, subtree: true }
+        : { childList: true },
+    );
   }
   let invalid = false;
   return Object.freeze({
     isExact: (successor: ModeSwitcherPublication) => {
-      if (observer) records.push(...observer.takeRecords());
-      const openingNodes = new Set<Node>();
+      if (observer) {
+        for (const record of observer.takeRecords()) {
+          if (
+            modeSwitcherOpeningMutationShouldBeRecorded(
+              record,
+              trigger,
+              source.document,
+              potentialGuards,
+            )
+          ) {
+            records.push(record);
+          }
+        }
+      }
+      const openingNodes = modeSwitcherOpeningHistory(records, source, successor);
       if (
         invalid
         || !successor.dom.content
-        || !records.every((record) =>
-          modeSwitcherOpeningMutationIsExpected(record, source, successor, openingNodes))
+        || !openingNodes
         || !placements.every((snapshot) =>
           modeSwitcherOpenPlacementMatches(
             snapshot,

@@ -231,6 +231,86 @@ function modeArrow(
   return event;
 }
 
+function openingFocusGuard(record: MutationRecord) {
+  const node = record.addedNodes.item(0) ?? record.removedNodes.item(0);
+  return node instanceof HTMLSpanElement
+    && node.hasAttribute("data-radix-focus-guard")
+    ? node
+    : null;
+}
+
+function mutationRecordWith(
+  record: MutationRecord,
+  overrides: Partial<MutationRecord>,
+): MutationRecord {
+  return new Proxy(record, {
+    get(target, property, receiver) {
+      return Object.prototype.hasOwnProperty.call(overrides, property)
+        ? Reflect.get(overrides, property, overrides)
+        : Reflect.get(target, property, target);
+    },
+  });
+}
+
+function mutationNodeList(nodes: readonly Node[]): NodeList {
+  const list = [...nodes] as Node[] & { item(index: number): Node | null };
+  list.item = (index) => list[index] ?? null;
+  return list as unknown as NodeList;
+}
+
+function observeOpeningMutations(
+  transform: (records: MutationRecord[]) => MutationRecord[],
+) {
+  const NativeMutationObserver = window.MutationObserver;
+  const descriptor = Object.getOwnPropertyDescriptor(window, "MutationObserver");
+  class OpeningMutationObserver implements MutationObserver {
+    readonly #observer: MutationObserver;
+    #opening = false;
+
+    constructor(callback: MutationCallback) {
+      this.#observer = new NativeMutationObserver((records) => {
+        callback(this.#records(records), this);
+      });
+    }
+
+    disconnect() {
+      this.#observer.disconnect();
+    }
+
+    observe(target: Node, options?: MutationObserverInit) {
+      if (
+        target === document.body
+        && options?.attributes
+        && options.attributeOldValue
+        && options.childList
+        && options.subtree
+      ) {
+        this.#opening = true;
+      }
+      this.#observer.observe(target, options);
+    }
+
+    takeRecords() {
+      return this.#records(this.#observer.takeRecords());
+    }
+
+    #records(records: MutationRecord[]) {
+      return this.#opening ? transform(records) : records;
+    }
+  }
+  Object.defineProperty(window, "MutationObserver", {
+    configurable: true,
+    value: OpeningMutationObserver,
+  });
+  return () => {
+    if (descriptor) {
+      Object.defineProperty(window, "MutationObserver", descriptor);
+    } else {
+      Reflect.deleteProperty(window, "MutationObserver");
+    }
+  };
+}
+
 async function waitForOutsideListener() {
   await act(async () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -835,6 +915,214 @@ describe("ModeSwitcher trusted arrow disclosure", () => {
       }
     },
   );
+
+  it.each([
+    ["non-Strict add pair", false, 2, 0],
+    ["Strict add, retire, and distinct rebind", true, 4, 2],
+  ] as const)("accepts the exact %s opening history", async (_name, strict, addCount, removeCount) => {
+    const session = new ModeSession(`arrow-${strict ? "strict" : "plain"}-history`, "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const additions: HTMLSpanElement[] = [];
+    const removals: HTMLSpanElement[] = [];
+    const decorations = new Map<HTMLSpanElement, Set<string>>();
+    let restoreObserver = () => undefined;
+
+    try {
+      act(() => root.render(
+        strict
+          ? <StrictMode><ModeSwitcher session={session.asCollabSession()} /></StrictMode>
+          : <ModeSwitcher session={session.asCollabSession()} />,
+      ));
+      restoreObserver = observeOpeningMutations((records) => {
+        for (const record of records) {
+          const guard = openingFocusGuard(record);
+          if (guard && record.type === "childList") {
+            if (record.addedNodes.length === 1) additions.push(guard);
+            if (record.removedNodes.length === 1) removals.push(guard);
+          }
+          if (
+            record.type === "attributes"
+            && record.target instanceof HTMLSpanElement
+            && (
+              record.attributeName === "aria-hidden"
+              || record.attributeName === "data-aria-hidden"
+            )
+          ) {
+            const names = decorations.get(record.target) ?? new Set<string>();
+            names.add(`${record.attributeName}:${record.oldValue ?? "null"}`);
+            decorations.set(record.target, names);
+          }
+        }
+        return records;
+      });
+      const modeTrigger = trigger();
+      modeTrigger.focus();
+      const event = modeArrow(modeTrigger, "ArrowUp");
+      await waitFor(() => expect(screen.getByTestId("mode-reader")).toHaveFocus());
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(additions).toHaveLength(addCount);
+      expect(removals).toHaveLength(removeCount);
+      expect(new Set(additions).size).toBe(addCount);
+      expect(removals).toEqual(additions.slice(0, removeCount));
+      for (const guard of additions.slice(-2)) {
+        expect(decorations.get(guard)).toEqual(new Set([
+          "aria-hidden:null",
+          "data-aria-hidden:null",
+        ]));
+      }
+      expectNoModeAction(session);
+    } finally {
+      act(() => root.unmount());
+      restoreObserver();
+    }
+  });
+
+  it.each([
+    "one-sided removal",
+    "one-sided addition",
+    "repeated cycle",
+    "reused identity",
+    "swapped edge",
+    "wrong parent",
+    "unrelated insertion",
+    "wrong aria name",
+    "wrong aria value",
+    "wrong aria oldValue",
+    "duplicate decoration",
+    "malformed final guard",
+  ] as const)("rejects a %s opening history and admits a fresh opening", async (fault) => {
+    const session = new ModeSession(`arrow-guard-${fault}`, "owner", "editing");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let poisoned = false;
+    let restoreObserver = () => undefined;
+
+    try {
+      act(() => root.render(
+        <StrictMode>
+          <ModeSwitcher session={session.asCollabSession()} />
+        </StrictMode>,
+      ));
+      restoreObserver = observeOpeningMutations((records) => {
+        if (poisoned) return records;
+        const additions = records.filter(
+          (record) => record.type === "childList"
+            && record.addedNodes.length === 1
+            && openingFocusGuard(record),
+        );
+        const removals = records.filter(
+          (record) => record.type === "childList"
+            && record.removedNodes.length === 1
+            && openingFocusGuard(record),
+        );
+        if (additions.length !== 4 || removals.length !== 2) return records;
+        const finalStartRecord = additions[2]!;
+        const finalEndRecord = additions[3]!;
+        const finalStart = openingFocusGuard(finalStartRecord)!;
+        const finalAttributes = records.filter(
+          (record) => record.type === "attributes" && record.target === finalStart,
+        );
+        const finalMarker = finalAttributes.find(
+          (record) => record.attributeName === "data-aria-hidden",
+        )!;
+        const finalAria = finalAttributes.find(
+          (record) => record.attributeName === "aria-hidden",
+        )!;
+        poisoned = true;
+
+        if (fault === "one-sided removal") {
+          return records.filter((record) => record !== removals[1]);
+        }
+        if (fault === "one-sided addition") {
+          return records.filter((record) => record !== finalEndRecord);
+        }
+        if (fault === "repeated cycle") {
+          return [...records, mutationRecordWith(removals[0]!, {
+            removedNodes: finalStartRecord.addedNodes,
+          })];
+        }
+        if (fault === "reused identity") {
+          return records.map((record) => record === finalStartRecord
+            ? mutationRecordWith(record, { addedNodes: removals[0]!.removedNodes })
+            : record);
+        }
+        if (fault === "swapped edge") {
+          return records.map((record) => record === finalStartRecord
+            ? mutationRecordWith(record, {
+                nextSibling: null,
+                previousSibling: document.body.firstChild,
+              })
+            : record);
+        }
+        if (fault === "wrong parent") {
+          return records.map((record) => record === finalStartRecord
+            ? mutationRecordWith(record, { target: host })
+            : record);
+        }
+        if (fault === "unrelated insertion") {
+          const unrelated = document.createElement("div");
+          return [
+            ...records,
+            mutationRecordWith(finalEndRecord, {
+              addedNodes: mutationNodeList([unrelated]),
+            }),
+          ];
+        }
+        if (fault === "wrong aria name") {
+          return records.map((record) => record === finalMarker
+            ? mutationRecordWith(record, { attributeName: "aria-label" })
+            : record);
+        }
+        if (fault === "wrong aria value") {
+          finalStart.setAttribute("aria-hidden", "false");
+          return records;
+        }
+        if (fault === "wrong aria oldValue") {
+          return records.map((record) => record === finalAria
+            ? mutationRecordWith(record, { oldValue: "false" })
+            : record);
+        }
+        if (fault === "duplicate decoration") {
+          const index = records.indexOf(finalMarker);
+          return [...records.slice(0, index + 1), finalMarker, ...records.slice(index + 1)];
+        }
+        finalStart.style.opacity = "0.5";
+        return records;
+      });
+
+      const modeTrigger = trigger();
+      modeTrigger.focus();
+      focus.mockClear();
+      const rejected = modeArrow(modeTrigger, "ArrowUp");
+      const rejectedReader = screen.getByTestId("mode-reader");
+
+      expect(poisoned).toBe(true);
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(rejectedReader).not.toHaveFocus();
+      expect(focus.mock.contexts.filter((context) => context === rejectedReader)).toHaveLength(0);
+      expectNoModeAction(session);
+
+      pointerDown(modeTrigger);
+      expect(screen.queryByRole("menu")).toBeNull();
+      modeTrigger.focus();
+      focus.mockClear();
+      const recovered = modeArrow(modeTrigger, "ArrowUp");
+      const recoveredReader = screen.getByTestId("mode-reader");
+      await waitFor(() => expect(recoveredReader).toHaveFocus());
+
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(focus.mock.contexts.filter((context) => context === recoveredReader)).toHaveLength(1);
+      expectNoModeAction(session);
+    } finally {
+      act(() => root.unmount());
+      restoreObserver();
+    }
+  });
 
   it.each([
     ["Control", { ctrlKey: true }],
