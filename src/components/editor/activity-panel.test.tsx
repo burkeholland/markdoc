@@ -2401,112 +2401,151 @@ describe("ActivityPanel header focus movement", () => {
     },
   );
 
-  it("authenticates the backing Window receiver and distinct React wrappers with shared method identities", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    activity.mockResolvedValue(headerPage());
-    await mountHeaderView("header-window-receiver");
-    const refresh = headerControl("Refresh activity");
-    const close = headerControl("Close activity");
-    const capture = reactHandler<ActivityKeyHandler>(
-      refresh,
-      "onKeyDownCapture",
-    );
-    const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
-    const captures: ReactKeyboardEvent<HTMLButtonElement>[] = [];
-    const bubbles: ReactKeyboardEvent<HTMLButtonElement>[] = [];
-    const captureMethods: unknown[][] = [];
-    const bubbleMethods: unknown[][] = [];
-    const propsKey = Object.keys(refresh).find((key) =>
-      key.startsWith("__reactProps$"),
-    );
-    if (!propsKey) {
-      throw new Error("React props were not attached to the Activity control");
-    }
-    const record = refresh as unknown as Record<
-      string,
-      Record<string, unknown>
-    >;
-    const originalProps = record[propsKey];
-    record[propsKey] = {
-      ...originalProps,
-      onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-        captures.push(event);
-        captureMethods.push([
-          event.preventDefault,
-          event.stopPropagation,
-          event.isDefaultPrevented,
-          event.isPropagationStopped,
-          event.persist,
-        ]);
-        capture(event);
-      },
-      onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-        bubbles.push(event);
-        bubbleMethods.push([
-          event.preventDefault,
-          event.stopPropagation,
-          event.isDefaultPrevented,
-          event.isPropagationStopped,
-          event.persist,
-        ]);
-        bubble(event);
-      },
-    };
-    const ownerWindow = refresh.ownerDocument.defaultView;
-    const currentTargetGetter = ownerWindow
-      ? Object.getOwnPropertyDescriptor(
-          ownerWindow.Event.prototype,
-          "currentTarget",
-        )?.get
-      : undefined;
-    const composedPath = ownerWindow?.Event.prototype.composedPath;
-    if (!ownerWindow || !currentTargetGetter || !composedPath) {
-      throw new Error("Activity Window event intrinsics were unavailable");
-    }
-    const nativeDelivery: {
-      receiver?: EventTarget;
-      currentTarget?: EventTarget | null;
-      terminal?: EventTarget;
-    } = {};
-    const event = activityKeyboardEvent(refresh, "ArrowRight");
-    const observeReceiver = function (this: EventTarget, nativeEvent: Event) {
-      if (nativeEvent !== event) return;
-      nativeDelivery.receiver = this;
-      nativeDelivery.currentTarget = Reflect.apply(
-        currentTargetGetter,
-        nativeEvent,
-        [],
-      ) as EventTarget | null;
-      nativeDelivery.terminal = Reflect.apply(
-        composedPath,
-        nativeEvent,
-        [],
-      ).at(-1);
-    };
-    ownerWindow.addEventListener("keydown", observeReceiver, true);
-    refresh.focus();
-    focus.mockClear();
+  it.each(["present", "absent", "mutated"] as const)(
+    "authenticates the backing Window receiver when private React metadata is %s",
+    async (privateMetadata) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      activity.mockResolvedValue(headerPage());
+      await mountHeaderView(`header-window-receiver-${privateMetadata}`);
+      const refresh = headerControl("Refresh activity");
+      const close = headerControl("Close activity");
+      const capture = reactHandler<ActivityKeyHandler>(
+        refresh,
+        "onKeyDownCapture",
+      );
+      const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+      const captures: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+      const bubbles: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+      const captureMethods: unknown[][] = [];
+      const bubbleMethods: unknown[][] = [];
+      const cancellationStates: boolean[][] = [];
+      const phaseFacts: Array<readonly [number, EventTarget | null]> = [];
+      const stagePrivateMetadata = (
+        event: ReactKeyboardEvent<HTMLButtonElement>,
+      ) => {
+        if (privateMetadata === "absent") {
+          Reflect.deleteProperty(event, "_reactName");
+        } else if (privateMetadata === "mutated") {
+          Object.defineProperty(event, "_reactName", {
+            configurable: true,
+            value: "onPrivateMetadataChanged",
+          });
+        }
+      };
+      const propsKey = Object.keys(refresh).find((key) =>
+        key.startsWith("__reactProps$"),
+      );
+      if (!propsKey) {
+        throw new Error(
+          "React props were not attached to the Activity control",
+        );
+      }
+      const record = refresh as unknown as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const originalProps = record[propsKey];
+      record[propsKey] = {
+        ...originalProps,
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          stagePrivateMetadata(event);
+          captures.push(event);
+          captureMethods.push([
+            event.preventDefault,
+            event.stopPropagation,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+            event.persist,
+          ]);
+          cancellationStates.push([
+            event.isDefaultPrevented(),
+            event.isPropagationStopped(),
+          ]);
+          phaseFacts.push([event.eventPhase, event.currentTarget]);
+          capture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          stagePrivateMetadata(event);
+          bubbles.push(event);
+          bubbleMethods.push([
+            event.preventDefault,
+            event.stopPropagation,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+            event.persist,
+          ]);
+          cancellationStates.push([
+            event.isDefaultPrevented(),
+            event.isPropagationStopped(),
+          ]);
+          phaseFacts.push([event.eventPhase, event.currentTarget]);
+          bubble(event);
+        },
+      };
+      const ownerWindow = refresh.ownerDocument.defaultView;
+      const currentTargetGetter = ownerWindow
+        ? Object.getOwnPropertyDescriptor(
+            ownerWindow.Event.prototype,
+            "currentTarget",
+          )?.get
+        : undefined;
+      const composedPath = ownerWindow?.Event.prototype.composedPath;
+      if (!ownerWindow || !currentTargetGetter || !composedPath) {
+        throw new Error("Activity Window event intrinsics were unavailable");
+      }
+      const nativeDelivery: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        terminal?: EventTarget;
+      } = {};
+      const event = activityKeyboardEvent(refresh, "ArrowRight");
+      const observeReceiver = function (this: EventTarget, nativeEvent: Event) {
+        if (nativeEvent !== event) return;
+        nativeDelivery.receiver = this;
+        nativeDelivery.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          nativeEvent,
+          [],
+        ) as EventTarget | null;
+        nativeDelivery.terminal = Reflect.apply(
+          composedPath,
+          nativeEvent,
+          [],
+        ).at(-1);
+      };
+      ownerWindow.addEventListener("keydown", observeReceiver, true);
+      refresh.focus();
+      focus.mockClear();
 
-    try {
-      act(() => refresh.dispatchEvent(event));
-    } finally {
-      ownerWindow.removeEventListener("keydown", observeReceiver, true);
-      record[propsKey] = originalProps;
-    }
+      try {
+        act(() => refresh.dispatchEvent(event));
+      } finally {
+        ownerWindow.removeEventListener("keydown", observeReceiver, true);
+        record[propsKey] = originalProps;
+      }
 
-    expect(captures).toHaveLength(1);
-    expect(bubbles).toHaveLength(1);
-    expect(captures[0]).not.toBe(bubbles[0]);
-    expect(captures[0]!.nativeEvent).toBe(event);
-    expect(bubbles[0]!.nativeEvent).toBe(event);
-    expect(captureMethods).toHaveLength(1);
-    expect(bubbleMethods).toEqual(captureMethods);
-    expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
-    expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
-    expect(event.defaultPrevented).toBe(true);
-    expect(close).toHaveFocus();
-    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
-  });
+      expect(captures).toHaveLength(1);
+      expect(bubbles).toHaveLength(1);
+      expect(captures[0]).not.toBe(bubbles[0]);
+      expect(captures[0]!.nativeEvent).toBe(event);
+      expect(bubbles[0]!.nativeEvent).toBe(event);
+      expect(captureMethods).toHaveLength(1);
+      expect(bubbleMethods).toEqual(captureMethods);
+      expect(cancellationStates).toEqual([
+        [false, false],
+        [false, false],
+      ]);
+      expect(phaseFacts).toEqual([
+        [Event.CAPTURING_PHASE, refresh],
+        [Event.BUBBLING_PHASE, refresh],
+      ]);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+      expect(event.defaultPrevented).toBe(true);
+      expect(close).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
 
   it("rejects a structural Window terminal while retaining the genuine backing receiver", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");

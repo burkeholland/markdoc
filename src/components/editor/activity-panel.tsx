@@ -1644,9 +1644,6 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
     return null;
   }
   const nativeEvent = event.nativeEvent;
-  const reactEvent = event as ReactKeyboardEvent<Element> & {
-    _reactName?: unknown;
-  };
   if (
     !nativeEvent ||
     typeof nativeEvent !== "object" ||
@@ -1729,7 +1726,6 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
       event.eventPhase === nativePhase &&
       event.isTrusted === trusted &&
       Object.is(event.view, nativeView) &&
-      reactEvent._reactName === "onKeyDown" &&
       methods
       ? Object.freeze({
           nativeEvent,
