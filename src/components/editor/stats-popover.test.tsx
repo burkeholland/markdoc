@@ -8,6 +8,7 @@ import * as Y from "yjs";
 type PopoverOpenChange = (open: boolean) => void;
 interface StatsContentCallbacks {
   escape?: (event: KeyboardEvent) => void;
+  openAutoFocus?: (event: Event) => void;
   closeAutoFocus?: (event: Event) => void;
   pointerOutside?: (
     event: CustomEvent<{ originalEvent: PointerEvent }>,
@@ -69,6 +70,7 @@ vi.mock("@/components/ui/primitives", async (importOriginal) => {
     ) => {
       capturedStatsContentCallbacks.push({
         escape: props.onEscapeKeyDown,
+        openAutoFocus: props.onOpenAutoFocus,
         closeAutoFocus: props.onCloseAutoFocus,
         pointerOutside: props.onPointerDownOutside,
         focusOutside: props.onFocusOutside,
@@ -475,10 +477,15 @@ function directClear(
 type StatsTriggerHandler = (
   event: React.MouseEvent<HTMLButtonElement>,
 ) => void;
+type StatsTriggerKeyHandler = (
+  event: React.KeyboardEvent<HTMLButtonElement>,
+) => void;
 
 interface CapturedStatsTrigger {
   element: HTMLButtonElement;
   click: StatsTriggerHandler;
+  keyDownCapture: StatsTriggerKeyHandler;
+  keyDown: StatsTriggerKeyHandler;
   ref: RefCallback<HTMLButtonElement>;
 }
 
@@ -489,8 +496,75 @@ function captureStatsTrigger(): CapturedStatsTrigger {
   return {
     element,
     click: reactProp(element, "onClick"),
+    keyDownCapture: reactProp(element, "onKeyDownCapture"),
+    keyDown: reactProp(element, "onKeyDown"),
     ref: reactProp(element, "ref"),
   };
+}
+
+function trustStatsKeyboardEvent(
+  event: KeyboardEvent,
+  ownerWindow: Window,
+) {
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  if (!implementationSymbol) {
+    throw new Error("Keyboard event implementation slot was not available");
+  }
+  const implementation = (
+    event as unknown as Record<symbol, { isTrusted: boolean }>
+  )[implementationSymbol];
+  const descriptor = Object.getOwnPropertyDescriptor(
+    implementation,
+    "isTrusted",
+  );
+  if (!descriptor?.writable) {
+    throw new Error("Keyboard event trust slot was not writable");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  expect(event.isTrusted).toBe(true);
+  expect(event.view).toBe(ownerWindow);
+}
+
+function statsKey(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) {
+    throw new Error("Statistics trigger owner window was unavailable");
+  }
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    target.ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  const nativeOwnerWindow = (
+    target.ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window }
+    >
+  )[implementationSymbol]._globalObject;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    code: key,
+    key,
+    view: nativeOwnerWindow,
+    ...init,
+  });
+  if (trusted) trustStatsKeyboardEvent(event, nativeOwnerWindow);
+  return event;
 }
 
 function dispatchStatsClick(
@@ -520,6 +594,49 @@ function dispatchStatsClick(
   properties[propsKey] = wrapped;
   try {
     fireEvent.click(trigger.element);
+  } finally {
+    if (properties[propsKey] === wrapped) {
+      properties[propsKey] = props;
+    }
+  }
+}
+
+function dispatchStatsKey(
+  trigger: CapturedStatsTrigger,
+  event: KeyboardEvent,
+  captureHandlers: readonly StatsTriggerKeyHandler[],
+  bubbleHandlers: readonly StatsTriggerKeyHandler[],
+) {
+  const propsKey = Object.keys(trigger.element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to stats-button");
+  }
+  const properties = trigger.element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  if (!props) {
+    throw new Error("React props were not attached to stats-button");
+  }
+  const wrapped = {
+    ...props,
+    onKeyDownCapture: (
+      reactEvent: React.KeyboardEvent<HTMLButtonElement>,
+    ) => {
+      for (const handler of captureHandlers) handler(reactEvent);
+    },
+    onKeyDown: (
+      reactEvent: React.KeyboardEvent<HTMLButtonElement>,
+    ) => {
+      for (const handler of bubbleHandlers) handler(reactEvent);
+    },
+  };
+  properties[propsKey] = wrapped;
+  try {
+    trigger.element.dispatchEvent(event);
   } finally {
     if (properties[propsKey] === wrapped) {
       properties[propsKey] = props;
@@ -845,6 +962,625 @@ describe("StatsPopover local selection authority", () => {
     expect(screen.queryByTestId("selection-count")).toBeNull();
     expect(screen.queryByRole("columnheader", { name: "Selection" })).toBeNull();
   });
+});
+
+describe("StatsPopover directional disclosure authority", () => {
+  it.each([
+    ["empty", null, "ArrowDown", "goal-mode"],
+    ["empty", null, "ArrowUp", "goal-kind"],
+    [
+      "existing",
+      goal("words", "min", 250),
+      "ArrowDown",
+      "goal-mode",
+    ],
+    [
+      "existing",
+      goal("words", "min", 250),
+      "ArrowUp",
+      "goal-clear",
+    ],
+  ] as const)(
+    "opens an %s goal with %s and focuses the exact %s once without document work or scroll",
+    async (_state, existingGoal, key, testId) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const documentScroll = vi
+        .spyOn(window, "scrollTo")
+        .mockImplementation(() => {});
+      const scrollIntoView = vi.fn();
+      const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        "scrollIntoView",
+      );
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+        writable: true,
+      });
+      const session = makeSession(
+        `direction-${_state}-${key}`,
+        "owner",
+        existingGoal,
+      );
+      let goalWrites = 0;
+      let textWrites = 0;
+      session.meta.observe(() => goalWrites++);
+      session.ytext.observe(() => textWrites++);
+      const mounted = renderStrictStats(session, () => {});
+      try {
+        const trigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const before = {
+          goal: getGoal(session),
+          mode: session.mode,
+          source: session.ytext.toString(),
+          bodyLeft: document.body.scrollLeft,
+          bodyTop: document.body.scrollTop,
+          documentLeft: document.documentElement.scrollLeft,
+          documentTop: document.documentElement.scrollTop,
+          x: window.scrollX,
+          y: window.scrollY,
+        };
+        const event = statsKey(trigger, key);
+
+        await act(async () => {
+          trigger.dispatchEvent(event);
+          await Promise.resolve();
+        });
+
+        const destination = screen.getByTestId(testId);
+        expect(screen.getAllByTestId("stats-popover")).toHaveLength(1);
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(destination).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === event,
+          ),
+        ).toHaveLength(1);
+        expect(
+          focus.mock.contexts.filter(
+            (context) => context === destination,
+          ),
+        ).toHaveLength(1);
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+        expect(goalWrites).toBe(0);
+        expect(textWrites).toBe(0);
+        expect(getGoal(session)).toEqual(before.goal);
+        expect(session.mode).toBe(before.mode);
+        expect(session.ytext.toString()).toBe(before.source);
+        expect(documentScroll).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({
+          bodyLeft: document.body.scrollLeft,
+          bodyTop: document.body.scrollTop,
+          documentLeft: document.documentElement.scrollLeft,
+          documentTop: document.documentElement.scrollTop,
+          x: window.scrollX,
+          y: window.scrollY,
+        }).toEqual({
+          bodyLeft: before.bodyLeft,
+          bodyTop: before.bodyTop,
+          documentLeft: before.documentLeft,
+          documentTop: before.documentTop,
+          x: before.x,
+          y: before.y,
+        });
+        expectDraft(
+          existingGoal?.kind ?? "words",
+          existingGoal?.mode ?? "min",
+          existingGoal ? String(existingGoal.value) : "",
+        );
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+        documentScroll.mockRestore();
+        if (originalScrollIntoView) {
+          Object.defineProperty(
+            HTMLElement.prototype,
+            "scrollIntoView",
+            originalScrollIntoView,
+          );
+        } else {
+          Reflect.deleteProperty(
+            HTMLElement.prototype,
+            "scrollIntoView",
+          );
+        }
+      }
+    },
+  );
+
+  it.each(["ArrowDown", "ArrowUp"] as const)(
+    "leaves readonly %s unprevented and closed when no goal control is enabled",
+    async (key) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const mounted = renderStrictStats(
+        makeSession(`direction-readonly-${key}`, "viewer"),
+        () => {},
+      );
+      try {
+        const trigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = statsKey(trigger, key);
+
+        await act(async () => {
+          trigger.dispatchEvent(event);
+          await Promise.resolve();
+        });
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === event,
+          ),
+        ).toHaveLength(0);
+        expect(trigger).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+      }
+    },
+  );
+
+  it.each(["ArrowDown", "ArrowUp"] as const)(
+    "rejects untrusted, modified, repeated, composing, malformed, unfocused, and wrong-target %s input",
+    async (key) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const mounted = renderStrictStats(
+        makeSession(`direction-rejections-${key}`),
+        () => {},
+      );
+      try {
+        const trigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        const child = trigger.querySelector<HTMLElement>(
+          '[data-testid="word-count"]',
+        );
+        if (!child) throw new Error("Word count child was not rendered");
+        const reject = async (
+          event: KeyboardEvent,
+          target: HTMLElement = trigger,
+          alreadyPrevented = false,
+        ) => {
+          focus.mockClear();
+          const calls = preventDefault.mock.contexts.filter(
+            (context) => context === event,
+          ).length;
+          await act(async () => {
+            target.dispatchEvent(event);
+            await Promise.resolve();
+          });
+          expect(event.defaultPrevented).toBe(alreadyPrevented);
+          expect(
+            preventDefault.mock.contexts.filter(
+              (context) => context === event,
+            ),
+          ).toHaveLength(calls);
+          expect(trigger).toHaveAttribute("aria-expanded", "false");
+          expect(screen.queryByTestId("stats-popover")).toBeNull();
+          expect(focus).not.toHaveBeenCalled();
+        };
+
+        trigger.focus();
+        await reject(statsKey(trigger, key, {}, false));
+        for (const init of [
+          { ctrlKey: true },
+          { altKey: true },
+          { metaKey: true },
+          { shiftKey: true },
+          { repeat: true },
+          { isComposing: true },
+          { cancelable: false },
+          { bubbles: false },
+          { code: key === "ArrowDown" ? "ArrowUp" : "ArrowDown" },
+        ] satisfies KeyboardEventInit[]) {
+          trigger.focus();
+          await reject(statsKey(trigger, key, init));
+        }
+
+        trigger.focus();
+        await reject(statsKey(child, key), child);
+
+        trigger.blur();
+        await reject(statsKey(trigger, key));
+
+        trigger.focus();
+        const prevented = statsKey(trigger, key);
+        prevented.preventDefault();
+        await reject(prevented, trigger, true);
+
+        trigger.focus();
+        focus.mockClear();
+        const accepted = statsKey(trigger, key);
+        await act(async () => {
+          trigger.dispatchEvent(accepted);
+          await Promise.resolve();
+        });
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === accepted,
+          ),
+        ).toHaveLength(1);
+        expect(focus).toHaveBeenCalledOnce();
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+      }
+    },
+  );
+
+  it("rejects a structural view lookalike and accepts a distinct exact-view successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const mounted = renderStrictStats(
+      makeSession("direction-view-authority"),
+      () => {},
+    );
+    try {
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const lookalike: Record<string, unknown> = {
+        document: trigger.ownerDocument,
+      };
+      lookalike.window = lookalike;
+      const crossed = statsKey(trigger, "ArrowDown");
+      Object.defineProperty(crossed, "view", {
+        configurable: true,
+        value: lookalike,
+      });
+
+      await act(async () => {
+        trigger.dispatchEvent(crossed);
+        await Promise.resolve();
+      });
+
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = statsKey(trigger, "ArrowDown");
+      await act(async () => {
+        trigger.dispatchEvent(successor);
+        await Promise.resolve();
+      });
+      expect(successor.defaultPrevented).toBe(true);
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByTestId("goal-mode")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (context) => context === successor,
+        ),
+      ).toHaveLength(1);
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("latches restored keyboard descriptors and recovers with a complete clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const mounted = renderStrictStats(
+      makeSession("direction-descriptor-history"),
+      () => {},
+    );
+    const descriptor = Object.getOwnPropertyDescriptor(
+      window.KeyboardEvent.prototype,
+      "key",
+    );
+    if (!descriptor?.get) {
+      throw new Error("KeyboardEvent key getter was unavailable");
+    }
+    try {
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      trigger.focus();
+      Object.defineProperty(window.KeyboardEvent.prototype, "key", {
+        ...descriptor,
+        get(this: KeyboardEvent) {
+          return Reflect.apply(descriptor.get!, this, []);
+        },
+      });
+      trigger.dispatchEvent(statsKey(trigger, "F1"));
+      Object.defineProperty(
+        window.KeyboardEvent.prototype,
+        "key",
+        descriptor,
+      );
+      focus.mockClear();
+      preventDefault.mockClear();
+      const rejected = statsKey(trigger, "ArrowDown");
+
+      await act(async () => {
+        trigger.dispatchEvent(rejected);
+        await Promise.resolve();
+      });
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+
+      const currentTrigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      currentTrigger.focus();
+      focus.mockClear();
+      const successor = statsKey(currentTrigger, "ArrowDown");
+      await act(async () => {
+        currentTrigger.dispatchEvent(successor);
+        await Promise.resolve();
+      });
+      expect(successor.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("goal-mode")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(
+        window.KeyboardEvent.prototype,
+        "key",
+        descriptor,
+      );
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("claims one current native and React pair across Strict replay and reentrancy", async () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const mounted = renderStrictStats(
+      makeSession("direction-pair-replay"),
+      () => {},
+    );
+    try {
+      const stale = captureStatsTrigger();
+      act(() =>
+        mounted.root.render(
+          <StrictMode>
+            <StatsBoundary
+              session={sessions.at(-1)!}
+              source="One two three four."
+            />
+          </StrictMode>,
+        ),
+      );
+      const current = captureStatsTrigger();
+      expect(current.element).toBe(stale.element);
+      expect(current.keyDownCapture).not.toBe(
+        stale.keyDownCapture,
+      );
+      expect(current.keyDown).not.toBe(stale.keyDown);
+      current.element.focus();
+      focus.mockClear();
+      const accepted = statsKey(current.element, "ArrowDown");
+      const crossed = statsKey(current.element, "ArrowUp");
+      preventDefault.mockImplementation(function (this: Event) {
+        nativePreventDefault.call(this);
+        if (this === accepted) current.element.dispatchEvent(crossed);
+      });
+
+      await act(async () => {
+        dispatchStatsKey(
+          current,
+          accepted,
+          [
+            stale.keyDownCapture,
+            current.keyDownCapture,
+            current.keyDownCapture,
+          ],
+          [stale.keyDown, current.keyDown, current.keyDown],
+        );
+        await Promise.resolve();
+      });
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(
+        preventDefault.mock.contexts.filter(
+          (context) => context === accepted,
+        ),
+      ).toHaveLength(1);
+      expect(
+        preventDefault.mock.contexts.filter(
+          (context) => context === crossed,
+        ),
+      ).toHaveLength(0);
+      expect(screen.getAllByTestId("stats-popover")).toHaveLength(1);
+      expect(screen.getByTestId("goal-mode")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it("keeps a mutate-restored trigger retired and accepts a clean keyed successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const mounted = renderStrictStats(
+      makeSession("direction-trigger-history"),
+      () => {},
+    );
+    try {
+      const trigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      trigger.focus();
+      trigger.setAttribute("data-integrity-probe", "changed");
+      trigger.removeAttribute("data-integrity-probe");
+      focus.mockClear();
+      preventDefault.mockClear();
+      const rejected = statsKey(trigger, "ArrowDown");
+      await act(async () => {
+        trigger.dispatchEvent(rejected);
+        await Promise.resolve();
+      });
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByTestId("stats-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+
+      const currentTrigger = screen.getByTestId(
+        "stats-button",
+      ) as HTMLButtonElement;
+      currentTrigger.focus();
+      focus.mockClear();
+      const successor = statsKey(currentTrigger, "ArrowUp");
+      await act(async () => {
+        currentTrigger.dispatchEvent(successor);
+        await Promise.resolve();
+      });
+      expect(successor.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("goal-kind")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      act(() => mounted.root.unmount());
+      mounted.host.remove();
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it.each([
+    "session",
+    "statistics",
+    "selection",
+    "goal",
+    "callbacks",
+  ] as const)(
+    "rejects stale %s wrappers and accepts only the complete current publication",
+    async (change) => {
+      const initial = makeSession(`direction-stale-${change}`);
+      const replacement =
+        change === "session"
+          ? makeSession(`direction-current-${change}`)
+          : initial;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let source = "One two three.";
+      let selection: SourceSelection = null;
+      let mount: "initial" | "replacement" = "initial";
+      const renderCurrent = () =>
+        root.render(
+          <StrictMode>
+            <StatsBoundary
+              session={replacement}
+              source={source}
+              selection={selection}
+              mount={mount}
+            />
+          </StrictMode>,
+        );
+      try {
+        act(() =>
+          root.render(
+            <StrictMode>
+              <StatsBoundary session={initial} />
+            </StrictMode>,
+          ),
+        );
+        const stale = captureStatsTrigger();
+        await act(async () => {
+          if (change === "statistics") {
+            source = "One two three four.";
+          } else if (change === "selection") {
+            selection = { from: 0, to: 3 };
+          } else if (change === "goal") {
+            setGoal(initial, goal("words", "min", 100));
+          } else if (change === "callbacks") {
+            mount = "replacement";
+          }
+          renderCurrent();
+          await Promise.resolve();
+        });
+        const current = captureStatsTrigger();
+        current.element.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const rejected = statsKey(
+          current.element,
+          "ArrowDown",
+        );
+
+        await act(async () => {
+          dispatchStatsKey(
+            current,
+            rejected,
+            [stale.keyDownCapture],
+            [stale.keyDown],
+          );
+          await Promise.resolve();
+        });
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(screen.queryByTestId("stats-popover")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+
+        const successorTrigger = screen.getByTestId(
+          "stats-button",
+        ) as HTMLButtonElement;
+        successorTrigger.focus();
+        focus.mockClear();
+        const successor = statsKey(
+          successorTrigger,
+          "ArrowDown",
+        );
+        await act(async () => {
+          successorTrigger.dispatchEvent(successor);
+          await Promise.resolve();
+        });
+        expect(successor.defaultPrevented).toBe(true);
+        expect(screen.getByTestId("goal-mode")).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter(
+            (context) => context === successor,
+          ),
+        ).toHaveLength(1);
+        expect(focus).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        focus.mockRestore();
+        preventDefault.mockRestore();
+      }
+    },
+  );
 });
 
 describe("StatsPopover disclosure visit authority", () => {
