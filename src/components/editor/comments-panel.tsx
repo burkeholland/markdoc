@@ -3237,27 +3237,862 @@ function LazyMenu({
   );
 }
 
+interface ReactionPickerOwnerFacts {
+  readonly session: CollabSession;
+  readonly documentId: string;
+  readonly visit: CommentPanelVisit;
+  readonly coordinator: CommentRowActionCoordinator;
+  readonly thread: CommentThread;
+  readonly reply: CommentReply | null;
+  readonly targetIdentity: CommentTargetIdentity;
+  readonly threadId: string;
+  readonly replyId: string | null;
+  readonly viewerId: string;
+  readonly reactions: Reactions;
+  readonly canReact: boolean;
+  readonly disabled: boolean;
+  readonly onToggle: (emoji: string) => void;
+}
+
+interface ReactionPickerReactionFact {
+  readonly emoji: string;
+  readonly reactorIds: readonly string[];
+}
+
+interface ReactionPickerOptionFact {
+  readonly index: number;
+  readonly emoji: string;
+  readonly mine: boolean;
+  readonly disabled: boolean;
+}
+
+interface ReactionPickerMovement {
+  readonly identity: symbol;
+  readonly key: RequestModeNavigationKey;
+  readonly source: number;
+  readonly destination: number | null;
+}
+
+interface ReactionPickerAuthority {
+  readonly identity: symbol;
+  readonly owner: ReactionPickerOwnerFacts;
+  readonly armed: boolean;
+  readonly open: boolean;
+  readonly revision: number;
+  readonly reactions: readonly ReactionPickerReactionFact[];
+  readonly options: readonly ReactionPickerOptionFact[];
+  readonly setOpen: (open: boolean) => void;
+  readonly requestSuccessor: () => void;
+}
+
+interface ReactionPickerBinding<ElementType extends HTMLElement> {
+  readonly capture: React.RefCallback<ElementType>;
+  readonly element: () => ElementType | null;
+}
+
+interface ReactionPickerDelivery {
+  readonly publication: ReactionPickerPublication;
+  readonly wrapper: object;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly source: HTMLButtonElement;
+  readonly sourceIndex: number;
+  readonly key: RequestModeNavigationKey;
+  readonly code: string;
+  readonly path: readonly EventTarget[];
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly trusted: boolean;
+  readonly view: Window | null;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly wrapperPrototype: object | null;
+}
+
+interface ReactionPickerPublication {
+  readonly identity: symbol;
+  readonly authority: ReactionPickerAuthority;
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLElement;
+  readonly group: HTMLDivElement;
+  readonly buttons: readonly HTMLButtonElement[];
+  readonly bindings: readonly ReactionPickerBinding<HTMLElement>[];
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboard: LazyMenuKeyboardAuthority;
+  readonly triggerDom: RequestModeDomSnapshot;
+  readonly contentDom: RequestModeDomSnapshot;
+  readonly triggerPlacement: RequestModePlacement;
+  readonly contentPlacement: RequestModePlacement;
+  readonly triggerHistory: RequestModeDomGuard;
+  readonly contentHistory: RequestModeDomGuard;
+  readonly isCurrent: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly retire: () => void;
+}
+
+interface ReactionPickerRowPresentation {
+  readonly authority: ReactionPickerOptionFact;
+  readonly captureButton: React.RefCallback<HTMLButtonElement>;
+  readonly onKeyDownCapture: (event: KeyboardEvent<HTMLButtonElement>) => void;
+}
+
+interface ReactionPickerPresentation {
+  readonly captureTrigger: React.RefCallback<HTMLButtonElement>;
+  readonly captureGroup: React.RefCallback<HTMLDivElement>;
+  readonly onGroupKeyDownCapture: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly rows: readonly ReactionPickerRowPresentation[];
+  readonly establish: () => void | (() => void);
+}
+
+interface ReactionPickerCells {
+  readonly active: { current: ReactionPickerPublication | null };
+  readonly deliveries: WeakMap<Event, ReactionPickerDelivery>;
+  readonly invalidNativeEvents: WeakSet<Event>;
+  readonly claimedPublications: WeakSet<ReactionPickerPublication>;
+  readonly claimedMovements: WeakSet<ReactionPickerMovement>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedDestinations: WeakSet<ReactionPickerBinding<HTMLButtonElement>>;
+}
+
+const claimedReactionPickerMovements = new WeakSet<ReactionPickerMovement>();
+const claimedReactionPickerReactEvents = new WeakSet<object>();
+const claimedReactionPickerNativeEvents = new WeakSet<Event>();
+const claimedReactionPickerDestinations = new WeakSet<ReactionPickerBinding<HTMLButtonElement>>();
+
+function createReactionPickerCells(): ReactionPickerCells {
+  return {
+    active: { current: null },
+    deliveries: new WeakMap(),
+    invalidNativeEvents: new WeakSet(),
+    claimedPublications: new WeakSet(),
+    claimedMovements: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    claimedDestinations: new WeakSet(),
+  };
+}
+
+function snapshotReactionFacts(reactions: Reactions): readonly ReactionPickerReactionFact[] {
+  return Object.freeze(
+    Object.entries(reactions).map(([emoji, reactorIds]) =>
+      Object.freeze({
+        emoji,
+        reactorIds: Object.freeze([...reactorIds]),
+      }),
+    ),
+  );
+}
+
+function reactionFactsMatch(
+  expected: readonly ReactionPickerReactionFact[],
+  reactions: Reactions,
+) {
+  const current = Object.entries(reactions);
+  return (
+    current.length === expected.length &&
+    expected.every((fact, index) => {
+      const entry = current[index];
+      return Boolean(
+        entry &&
+          entry[0] === fact.emoji &&
+          entry[1].length === fact.reactorIds.length &&
+          entry[1].every((id, reactorIndex) => id === fact.reactorIds[reactorIndex]),
+      );
+    })
+  );
+}
+
+function currentReactionPickerBusy(owner: ReactionPickerOwnerFacts) {
+  const { coordinator, threadId, replyId } = owner;
+  const ownKey = commentTargetKey(threadId, replyId);
+  const ownBusy = coordinator.owners.has(ownKey) || coordinator.batchTargets.has(ownKey);
+  if (replyId !== null) {
+    const rootDeleting =
+      coordinator.owners.get(commentTargetKey(threadId, null))?.action.type === "delete";
+    return ownBusy || rootDeleting;
+  }
+  return ownBusy;
+}
+
+function reactionPickerOwnerFactsAreCurrent(
+  owner: ReactionPickerOwnerFacts,
+  reactionFacts: readonly ReactionPickerReactionFact[],
+) {
+  const {
+    coordinator,
+    session,
+    threadId,
+    replyId,
+    targetIdentity,
+  } = owner;
+  const currentThread = session.comments
+    .list()
+    .find((candidate) => candidate.id === threadId);
+  const currentReply =
+    replyId === null
+      ? null
+      : currentThread?.replies.find((candidate) => candidate.id === replyId) ?? null;
+  const currentIdentity = storedCommentTargetIdentity(session, threadId, replyId);
+  const currentReactions = currentReply?.reactions ?? currentThread?.reactions;
+  return (
+    coordinator.mounted &&
+    coordinator.session === session &&
+    coordinator.documentId === owner.documentId &&
+    coordinator.visit === owner.visit &&
+    coordinator.targets.has(commentTargetKey(threadId, replyId)) &&
+    session.docId === owner.documentId &&
+    session.user.id === owner.viewerId &&
+    session.canComment === owner.canReact &&
+    owner.canReact &&
+    currentThread !== undefined &&
+    (replyId === null || currentReply !== null) &&
+    currentIdentity?.thread === targetIdentity.thread &&
+    currentIdentity.reply === targetIdentity.reply &&
+    owner.thread.id === threadId &&
+    (replyId === null
+      ? owner.reply === null && owner.reactions === owner.thread.reactions
+      : owner.reply?.id === replyId && owner.reactions === owner.reply.reactions) &&
+    Boolean(currentReactions) &&
+    reactionFactsMatch(reactionFacts, owner.reactions) &&
+    reactionFactsMatch(reactionFacts, currentReactions!) &&
+    currentReactionPickerBusy(owner) === owner.disabled &&
+    !owner.disabled &&
+    typeof owner.onToggle === "function"
+  );
+}
+
+function reactionPickerOptionsAreCurrent(authority: ReactionPickerAuthority) {
+  return (
+    authority.armed &&
+    authority.open &&
+    authority.options.length === QUICK_REACTIONS.length &&
+    authority.options.length > 1 &&
+    authority.options.every((option, index) => {
+      const emoji = QUICK_REACTIONS[index];
+      return (
+        option.index === index &&
+        option.emoji === emoji &&
+        option.mine === Boolean(authority.owner.reactions[option.emoji]?.includes(authority.owner.viewerId)) &&
+        option.disabled === authority.owner.disabled &&
+        !option.disabled
+      );
+    })
+  );
+}
+
+function createReactionPickerBinding<ElementType extends HTMLElement>(
+  cells: ReactionPickerCells,
+): ReactionPickerBinding<ElementType> {
+  let current: ElementType | null = null;
+  let last: ElementType | null = null;
+  let invalid = false;
+  const binding: ReactionPickerBinding<ElementType> = Object.freeze({
+    capture: (element: ElementType | null) => {
+      if (element === current) return;
+      const publication = cells.active.current;
+      if (
+        publication &&
+        publication.bindings.includes(binding as ReactionPickerBinding<HTMLElement>)
+      ) {
+        publication.retire();
+      }
+      if (element && last && element !== last) invalid = true;
+      current = element;
+      if (element) last = element;
+    },
+    element: () => (invalid ? null : current),
+  });
+  return binding;
+}
+
+function reactionPickerEventPathMatches(
+  path: readonly EventTarget[],
+  publication: ReactionPickerPublication,
+  source: HTMLButtonElement,
+) {
+  const { contentPlacement, group, ownerDocument, ownerWindow } = publication;
+  return (
+    path.length === contentPlacement.chain.length + 4 &&
+    path[0] === source &&
+    path[1] === group &&
+    contentPlacement.chain.every(({ node }, index) => path[index + 2] === node) &&
+    path.at(-2) === ownerDocument &&
+    path.at(-1) !== null &&
+    path.at(-1) !== undefined &&
+    keyboardWindowMatches(path.at(-1)!, ownerWindow)
+  );
+}
+
+function keyboardWindowMatches(
+  candidate: EventTarget,
+  ownerWindow: Window & typeof globalThis,
+) {
+  try {
+    return (
+      (candidate as Window).window === candidate &&
+      (candidate as Window).self === candidate &&
+      (candidate as Window).document === ownerWindow.document &&
+      (candidate as Window & typeof globalThis).Event === ownerWindow.Event &&
+      (candidate as Window & typeof globalThis).UIEvent === ownerWindow.UIEvent &&
+      (candidate as Window & typeof globalThis).KeyboardEvent === ownerWindow.KeyboardEvent &&
+      (candidate as Window & typeof globalThis).Node === ownerWindow.Node
+    );
+  } catch {
+    return false;
+  }
+}
+
+function exactReactionPickerDelivery(
+  event: KeyboardEvent<HTMLElement>,
+  publication: ReactionPickerPublication,
+  currentTarget: HTMLElement,
+): ReactionPickerDelivery | null {
+  if (!event || typeof event !== "object" || !publication.keyboard.isCurrent()) return null;
+  const keyboard = publication.keyboard;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    keyboard.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    if (
+      key !== "ArrowRight" &&
+      key !== "ArrowDown" &&
+      key !== "ArrowLeft" &&
+      key !== "ArrowUp" &&
+      key !== "Home" &&
+      key !== "End"
+    ) {
+      return null;
+    }
+    const code = keyboard.code.read(nativeEvent);
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const sourceIndex = publication.buttons.findIndex((button) => button === target);
+    const source = publication.buttons[sourceIndex];
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const phase = keyboard.eventPhase.read(nativeEvent);
+    const bubbles = keyboard.eventBubbles.read(nativeEvent);
+    const cancelable = keyboard.eventCancelable.read(nativeEvent);
+    const defaultPrevented = keyboard.eventDefaultPrevented.read(nativeEvent);
+    const cancelBubble = keyboard.eventCancelBubble.read(nativeEvent);
+    const view = keyboard.eventView.read(nativeEvent);
+    const repeat = keyboard.repeat.read(nativeEvent);
+    const composing = keyboard.composing.read(nativeEvent);
+    const altKey = keyboard.altKey.read(nativeEvent);
+    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
+    const metaKey = keyboard.metaKey.read(nativeEvent);
+    const shiftKey = keyboard.shiftKey.read(nativeEvent);
+    const trusted = keyboard.trusted.read(nativeEvent);
+    const reactEvent = event as KeyboardEvent<HTMLElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    return source &&
+      code === key &&
+      keyboard.eventType.read(nativeEvent) === "keydown" &&
+      phase === keyboard.Event.CAPTURING_PHASE &&
+      bubbles &&
+      cancelable &&
+      !defaultPrevented &&
+      !cancelBubble &&
+      trusted &&
+      (view === null ||
+        (view === path.at(-1) &&
+          keyboardWindowMatches(view, publication.ownerWindow))) &&
+      !repeat &&
+      !composing &&
+      !altKey &&
+      !ctrlKey &&
+      !metaKey &&
+      !shiftKey &&
+      target === source &&
+      reactionPickerEventPathMatches(path, publication, source) &&
+      keyboard.activeElement.read(publication.ownerDocument) === source &&
+      event.type === "keydown" &&
+      event.currentTarget === currentTarget &&
+      event.target === source &&
+      event.nativeEvent === nativeEvent &&
+      event.key === key &&
+      event.code === code &&
+      event.eventPhase === phase &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === bubbles &&
+      event.cancelable === cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, view) &&
+      reactEvent._reactName === "onKeyDown" &&
+      typeof reactEvent.isDefaultPrevented === "function" &&
+      reactEvent.isDefaultPrevented() === defaultPrevented &&
+      typeof reactEvent.isPropagationStopped === "function" &&
+      reactEvent.isPropagationStopped() === cancelBubble &&
+      typeof reactEvent.persist === "function"
+      ? Object.freeze({
+          publication,
+          wrapper: event,
+          nativeEvent,
+          source,
+          sourceIndex,
+          key,
+          code,
+          path: Object.freeze([...path]),
+          phase,
+          bubbles,
+          cancelable,
+          defaultPrevented,
+          cancelBubble,
+          trusted,
+          view,
+          repeat,
+          composing,
+          altKey,
+          ctrlKey,
+          metaKey,
+          shiftKey,
+          wrapperPrototype: keyboard.getPrototypeOf(event),
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function reactionPickerDeliveriesMatch(
+  capture: ReactionPickerDelivery,
+  current: ReactionPickerDelivery,
+) {
+  return (
+    capture.publication === current.publication &&
+    capture.wrapper === current.wrapper &&
+    capture.nativeEvent === current.nativeEvent &&
+    capture.source === current.source &&
+    capture.sourceIndex === current.sourceIndex &&
+    capture.key === current.key &&
+    capture.code === current.code &&
+    capture.path.length === current.path.length &&
+    capture.path.every((entry, index) => entry === current.path[index]) &&
+    capture.phase === current.phase &&
+    capture.bubbles === current.bubbles &&
+    capture.cancelable === current.cancelable &&
+    capture.defaultPrevented === current.defaultPrevented &&
+    capture.cancelBubble === current.cancelBubble &&
+    capture.trusted === current.trusted &&
+    capture.view === current.view &&
+    capture.repeat === current.repeat &&
+    capture.composing === current.composing &&
+    capture.altKey === current.altKey &&
+    capture.ctrlKey === current.ctrlKey &&
+    capture.metaKey === current.metaKey &&
+    capture.shiftKey === current.shiftKey &&
+    capture.wrapperPrototype === current.wrapperPrototype
+  );
+}
+
+function currentReactionPickerElements(
+  authority: ReactionPickerAuthority,
+  triggerBinding: ReactionPickerBinding<HTMLButtonElement>,
+  groupBinding: ReactionPickerBinding<HTMLDivElement>,
+  rows: readonly (ReactionPickerRowPresentation & {
+    readonly buttonBinding: ReactionPickerBinding<HTMLButtonElement>;
+  })[],
+) {
+  const trigger = triggerBinding.element();
+  const group = groupBinding.element();
+  const content = group?.parentElement ?? null;
+  const buttons = rows.map((row) => row.buttonBinding.element());
+  if (!trigger || !content || !group || buttons.some((button) => !button)) return null;
+  const exactButtons = buttons as HTMLButtonElement[];
+  if (
+    !trigger.isConnected ||
+    trigger.tagName !== "BUTTON" ||
+    trigger.type !== "button" ||
+    trigger.disabled ||
+    trigger.className !== "reaction-add" ||
+    trigger.getAttribute("aria-label") !== "Add reaction" ||
+    trigger.getAttribute("title") !== "Add reaction" ||
+    trigger.getAttribute("aria-haspopup") !== "dialog" ||
+    trigger.getAttribute("aria-expanded") !== "true" ||
+    trigger.getAttribute("data-state") !== "open" ||
+    !content.isConnected ||
+    content.ownerDocument !== trigger.ownerDocument ||
+    content.getAttribute("role") !== "dialog" ||
+    content.getAttribute("data-state") !== "open" ||
+    content.dataset.testid !== "reaction-picker" ||
+    trigger.getAttribute("aria-controls") !== content.id ||
+    !group.isConnected ||
+    group.ownerDocument !== trigger.ownerDocument ||
+    group.parentElement !== content ||
+    content.children.length !== 1 ||
+    content.children.item(0) !== group ||
+    group.className !== "reaction-picker" ||
+    group.getAttribute("role") !== "group" ||
+    group.getAttribute("aria-label") !== "Pick a reaction" ||
+    group.childNodes.length !== authority.options.length ||
+    group.children.length !== authority.options.length
+  ) {
+    return null;
+  }
+  for (const [index, button] of exactButtons.entries()) {
+    const option = authority.options[index];
+    if (
+      !option ||
+      rows[index]?.authority !== option ||
+      !button.isConnected ||
+      button.ownerDocument !== trigger.ownerDocument ||
+      button.parentElement !== group ||
+      group.childNodes.item(index) !== button ||
+      group.children.item(index) !== button ||
+      button.tagName !== "BUTTON" ||
+      button.type !== "button" ||
+      button.disabled ||
+      button.matches(":disabled") ||
+      button.getAttribute("aria-label") !== `React with ${option.emoji}` ||
+      button.getAttribute("data-mine") !== (option.mine ? "true" : null) ||
+      button.dataset.testid !== "reaction-option" ||
+      button.dataset.emoji !== option.emoji ||
+      button.textContent !== option.emoji
+    ) {
+      return null;
+    }
+  }
+  return Object.freeze({
+    trigger,
+    content,
+    group,
+    buttons: Object.freeze(exactButtons),
+  });
+}
+
+function createReactionPickerPresentation(
+  authority: ReactionPickerAuthority,
+  cells: ReactionPickerCells,
+): ReactionPickerPresentation {
+  const triggerBinding = createReactionPickerBinding<HTMLButtonElement>(cells);
+  const groupBinding = createReactionPickerBinding<HTMLDivElement>(cells);
+  let establishAttempted = false;
+  let portalSuccessorRequested = false;
+  const captureGroup: React.RefCallback<HTMLDivElement> = (element) => {
+    groupBinding.capture(element);
+    if (element && establishAttempted && !portalSuccessorRequested) {
+      portalSuccessorRequested = true;
+      queueMicrotask(authority.requestSuccessor);
+    }
+  };
+  const rowPresentations = authority.options.map((option) => {
+    const buttonBinding = createReactionPickerBinding<HTMLButtonElement>(cells);
+    const movements = Object.freeze(
+      Object.fromEntries(
+        (["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"] as const).map(
+          (key) => [
+            key,
+            Object.freeze({
+              identity: Symbol(`reaction-picker-${key}-movement`),
+              key,
+              source: option.index,
+              destination: requestModeDestination(key, option.index, authority.options.length),
+            } satisfies ReactionPickerMovement),
+          ],
+        ),
+      ) as Record<RequestModeNavigationKey, ReactionPickerMovement>,
+    );
+    const onKeyDownCapture = (event: KeyboardEvent<HTMLButtonElement>) => {
+      const publication = cells.active.current;
+      if (
+        !publication ||
+        publication.isRetired() ||
+        publication.authority !== authority ||
+        publication.authority.identity !== authority.identity
+      ) {
+        return;
+      }
+      if (!publication.isCurrent()) {
+        publication.retire();
+        return;
+      }
+      const source = buttonBinding.element();
+      const capture = cells.deliveries.get(event.nativeEvent);
+      const current =
+        source && capture
+          ? exactReactionPickerDelivery(event, publication, source)
+          : null;
+      const movement = current ? movements[current.key] : null;
+      const destinationIndex = movement?.destination ?? null;
+      const destinationRow =
+        destinationIndex === null ? null : rowPresentations[destinationIndex];
+      const destination =
+        destinationIndex === null ? null : destinationRow?.buttonBinding.element();
+      if (
+        !source ||
+        !capture ||
+        !current ||
+        !reactionPickerDeliveriesMatch(capture, current) ||
+        capture.source !== source ||
+        capture.sourceIndex !== option.index ||
+        cells.invalidNativeEvents.has(current.nativeEvent) ||
+        !movement ||
+        movement.source !== option.index ||
+        destinationIndex === null ||
+        !destinationRow ||
+        destinationRow.authority !== authority.options[destinationIndex] ||
+        !destination ||
+        publication.buttons[destinationIndex] !== destination ||
+        destination.parentElement !== publication.group ||
+        publication.group.children.item(destinationIndex) !== destination ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedMovements.has(movement) ||
+        cells.claimedReactEvents.has(current.wrapper) ||
+        cells.claimedNativeEvents.has(current.nativeEvent) ||
+        cells.claimedDestinations.has(destinationRow.buttonBinding) ||
+        claimedReactionPickerMovements.has(movement) ||
+        claimedReactionPickerReactEvents.has(current.wrapper) ||
+        claimedReactionPickerNativeEvents.has(current.nativeEvent) ||
+        claimedReactionPickerDestinations.has(destinationRow.buttonBinding) ||
+        cells.active.current !== publication ||
+        !publication.isCurrent()
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedMovements.add(movement);
+      cells.claimedReactEvents.add(current.wrapper);
+      cells.claimedNativeEvents.add(current.nativeEvent);
+      cells.claimedDestinations.add(destinationRow.buttonBinding);
+      claimedReactionPickerMovements.add(movement);
+      claimedReactionPickerReactEvents.add(current.wrapper);
+      claimedReactionPickerNativeEvents.add(current.nativeEvent);
+      claimedReactionPickerDestinations.add(destinationRow.buttonBinding);
+      publication.keyboard.eventPreventDefault.invoke(current.nativeEvent);
+      if (!publication.keyboard.eventDefaultPrevented.read(current.nativeEvent)) return;
+      publication.keyboard.focus.invoke(destination, { preventScroll: true });
+      if (
+        publication.keyboard.activeElement.read(publication.ownerDocument) !== destination
+      ) {
+        return;
+      }
+      authority.requestSuccessor();
+    };
+    return Object.freeze({
+      authority: option,
+      captureButton: buttonBinding.capture,
+      buttonBinding,
+      onKeyDownCapture,
+    });
+  });
+  const onGroupKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+    const publication = cells.active.current;
+    if (
+      !publication ||
+      publication.isRetired() ||
+      publication.authority !== authority ||
+      publication.authority.identity !== authority.identity
+    ) {
+      return;
+    }
+    if (!publication.isCurrent()) {
+      publication.retire();
+      return;
+    }
+    const nativeEvent = event.nativeEvent;
+    if (
+      cells.invalidNativeEvents.has(nativeEvent) ||
+      cells.deliveries.has(nativeEvent)
+    ) {
+      cells.invalidNativeEvents.add(nativeEvent);
+      return;
+    }
+    const delivery = exactReactionPickerDelivery(event, publication, publication.group);
+    if (delivery) cells.deliveries.set(nativeEvent, delivery);
+  };
+  const bindings: readonly ReactionPickerBinding<HTMLElement>[] = Object.freeze([
+    triggerBinding,
+    groupBinding,
+    ...rowPresentations.map((row) => row.buttonBinding),
+  ]);
+  const establish = () => {
+    establishAttempted = true;
+    if (!reactionPickerOwnerFactsAreCurrent(authority.owner, authority.reactions)) return;
+    if (!reactionPickerOptionsAreCurrent(authority)) return;
+    const elements = currentReactionPickerElements(
+      authority,
+      triggerBinding,
+      groupBinding,
+      rowPresentations,
+    );
+    const ownerWindow = elements?.trigger.ownerDocument.defaultView;
+    const keyboard =
+      elements && ownerWindow
+        ? captureLazyMenuKeyboardAuthority(elements.trigger.ownerDocument, ownerWindow)
+        : null;
+    const triggerPlacement = elements
+      ? captureRequestModePlacement(elements.trigger)
+      : null;
+    const contentPlacement = elements
+      ? captureRequestModePlacement(elements.content)
+      : null;
+    const triggerHistory =
+      elements && triggerPlacement
+        ? createRequestModeDomGuard(elements.trigger, triggerPlacement)
+        : null;
+    const contentHistory =
+      elements && contentPlacement
+        ? createRequestModeDomGuard(elements.content, contentPlacement)
+        : null;
+    if (
+      !elements ||
+      !ownerWindow ||
+      !keyboard ||
+      !triggerPlacement ||
+      !contentPlacement ||
+      !triggerHistory ||
+      !contentHistory
+    ) {
+      triggerHistory?.release();
+      contentHistory?.release();
+      return;
+    }
+    const triggerDom = snapshotRequestModeDom(elements.trigger);
+    const contentDom = snapshotRequestModeDom(elements.content);
+    let retired = false;
+    const publication: ReactionPickerPublication = Object.freeze({
+      identity: Symbol("reaction-picker-publication"),
+      authority,
+      trigger: elements.trigger,
+      content: elements.content,
+      group: elements.group,
+      buttons: elements.buttons,
+      bindings,
+      ownerDocument: elements.trigger.ownerDocument,
+      ownerWindow,
+      keyboard,
+      triggerDom,
+      contentDom,
+      triggerPlacement,
+      contentPlacement,
+      triggerHistory,
+      contentHistory,
+      isCurrent: () =>
+        !retired &&
+        cells.active.current === publication &&
+        publication.authority === authority &&
+        reactionPickerOwnerFactsAreCurrent(authority.owner, authority.reactions) &&
+        reactionPickerOptionsAreCurrent(authority) &&
+        triggerHistory.isClean() &&
+        contentHistory.isClean() &&
+        requestModePlacementMatches(elements.trigger, triggerPlacement) &&
+        requestModePlacementMatches(elements.content, contentPlacement) &&
+        requestModeDomMatches(triggerDom) &&
+        requestModeDomMatches(contentDom) &&
+        currentReactionPickerElements(
+          authority,
+          triggerBinding,
+          groupBinding,
+          rowPresentations,
+        )?.buttons.every((button, index) => button === elements.buttons[index]) === true,
+      isRetired: () => retired,
+      retire: () => {
+        if (retired) return;
+        retired = true;
+        if (cells.active.current === publication) cells.active.current = null;
+        triggerHistory.release();
+        contentHistory.release();
+      },
+    });
+    cells.active.current?.retire();
+    cells.active.current = publication;
+    if (!publication.isCurrent()) {
+      publication.retire();
+      return;
+    }
+    return publication.retire;
+  };
+  return Object.freeze({
+    captureTrigger: triggerBinding.capture,
+    captureGroup,
+    onGroupKeyDownCapture,
+    rows: Object.freeze(rowPresentations),
+    establish,
+  });
+}
+
 /** Reaction chips plus the quick picker for one thread body or reply. */
 function ReactionRow({
-  reactions,
+  owner,
   names,
-  me,
-  canReact,
-  disabled = false,
-  onToggle,
 }: {
-  reactions: Reactions;
+  owner: ReactionPickerOwnerFacts;
   names: Record<string, string>;
-  me: string;
-  canReact: boolean;
-  disabled?: boolean;
-  onToggle: (emoji: string) => void;
 }) {
   const { armed, open, setOpen, plainProps } = useLazyTrigger();
+  const [keyboardRevision, setKeyboardRevision] = useState(0);
+  const [keyboardCells] = useState(createReactionPickerCells);
+  const requestKeyboardSuccessor = useCallback(
+    () => setKeyboardRevision((revision) => revision + 1),
+    [],
+  );
+  const { reactions, viewerId: me, canReact, disabled, onToggle } = owner;
+  const keyboardAuthority = armed
+    ? Object.freeze({
+        identity: Symbol("reaction-picker-authority"),
+        owner,
+        armed,
+        open,
+        revision: keyboardRevision,
+        reactions: snapshotReactionFacts(reactions),
+        options: Object.freeze(
+          QUICK_REACTIONS.map((emoji, index) =>
+            Object.freeze({
+              index,
+              emoji,
+              mine: Boolean(reactions[emoji]?.includes(me)),
+              disabled,
+            }),
+          ),
+        ),
+        setOpen,
+        requestSuccessor: requestKeyboardSuccessor,
+      } satisfies ReactionPickerAuthority)
+    : null;
+  const keyboardPresentation = useMemo(
+    () =>
+      keyboardAuthority
+        ? createReactionPickerPresentation(keyboardAuthority, keyboardCells)
+        : null,
+    [keyboardAuthority, keyboardCells],
+  );
+  useLayoutEffect(
+    () => keyboardPresentation?.establish(),
+    [keyboardPresentation],
+  );
   const entries = Object.entries(reactions).filter(([, ids]) => ids.length > 0);
   if (entries.length === 0 && !canReact) return null;
   const addButton = (
-    <button type="button" className="reaction-add" aria-label="Add reaction" title="Add reaction" disabled={disabled} data-testid="reaction-add">
+    <button
+      ref={keyboardPresentation?.captureTrigger}
+      type="button"
+      className="reaction-add"
+      aria-label="Add reaction"
+      title="Add reaction"
+      disabled={disabled}
+      data-testid="reaction-add"
+    >
       <SmilePlus size={14} />
     </button>
   );
@@ -3289,23 +4124,36 @@ function ReactionRow({
         ) : (
           <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>{addButton}</PopoverTrigger>
-            <PopoverContent side="top" align="start" className="p-1" data-testid="reaction-picker">
-              <div className="reaction-picker" role="group" aria-label="Pick a reaction">
-                {QUICK_REACTIONS.map((emoji) => (
+            <PopoverContent
+              side="top"
+              align="start"
+              className="p-1"
+              data-testid="reaction-picker"
+            >
+              <div
+                ref={keyboardPresentation?.captureGroup}
+                className="reaction-picker"
+                role="group"
+                aria-label="Pick a reaction"
+                onKeyDownCapture={keyboardPresentation?.onGroupKeyDownCapture}
+              >
+                {keyboardAuthority?.options.map((option, index) => (
                   <button
-                    key={emoji}
+                    ref={keyboardPresentation?.rows[index]?.captureButton}
+                    key={option.emoji}
                     type="button"
-                    data-mine={reactions[emoji]?.includes(me) ? "true" : undefined}
-                    aria-label={`React with ${emoji}`}
+                    data-mine={option.mine ? "true" : undefined}
+                    aria-label={`React with ${option.emoji}`}
                     disabled={disabled}
+                    onKeyDownCapture={keyboardPresentation?.rows[index]?.onKeyDownCapture}
                     onClick={() => {
-                      onToggle(emoji);
+                      onToggle(option.emoji);
                       setOpen(false);
                     }}
                     data-testid="reaction-option"
-                    data-emoji={emoji}
+                    data-emoji={option.emoji}
                   >
-                    {emoji}
+                    {option.emoji}
                   </button>
                 ))}
               </div>
@@ -7147,6 +7995,22 @@ const ThreadCard = memo(function ThreadCard({
     deleteDisabled: rootDeleteBlocked,
     items: rootMenuItems,
   } satisfies LazyMenuOwnerFacts);
+  const rootReactionOwner = Object.freeze({
+    session,
+    documentId: session.docId,
+    visit: actionCoordinator.visit,
+    coordinator: actionCoordinator,
+    thread,
+    reply: null,
+    targetIdentity: rootTargetIdentity,
+    threadId: thread.id,
+    replyId: null,
+    viewerId: me,
+    reactions: thread.reactions,
+    canReact: canComment,
+    disabled: rootBusy,
+    onToggle: (emoji: string) => reactTo(null, thread.reactions, emoji),
+  } satisfies ReactionPickerOwnerFacts);
 
   return (
     <div
@@ -7221,7 +8085,7 @@ const ThreadCard = memo(function ThreadCard({
                   />
                 </div>
               )}
-              <ReactionRow reactions={thread.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={rootBusy} onToggle={(emoji) => reactTo(null, thread.reactions, emoji)} />
+              <ReactionRow owner={rootReactionOwner} names={thread.reactorNames} />
             </>
           )}
         </div>
@@ -7329,6 +8193,22 @@ const ThreadCard = memo(function ThreadCard({
               deleteDisabled: replyBlocked,
               items: replyMenuItems,
             } satisfies LazyMenuOwnerFacts);
+            const replyReactionOwner = Object.freeze({
+              session,
+              documentId: session.docId,
+              visit: actionCoordinator.visit,
+              coordinator: actionCoordinator,
+              thread,
+              reply: r,
+              targetIdentity: replyTargetIdentity,
+              threadId: thread.id,
+              replyId: r.id,
+              viewerId: me,
+              reactions: r.reactions,
+              canReact: canComment,
+              disabled: replyBlocked,
+              onToggle: (emoji: string) => reactTo(r.id, r.reactions, emoji),
+            } satisfies ReactionPickerOwnerFacts);
             return (
               <div key={r.id} data-testid="comment-reply" data-reply-id={r.id} data-state={state ?? undefined}>
                 <div className="flex items-start gap-2.5">
@@ -7371,7 +8251,7 @@ const ThreadCard = memo(function ThreadCard({
                             />
                           </div>
                         )}
-                        <ReactionRow reactions={r.reactions} names={thread.reactorNames} me={me} canReact={canComment} disabled={replyBlocked} onToggle={(emoji) => reactTo(r.id, r.reactions, emoji)} />
+                        <ReactionRow owner={replyReactionOwner} names={thread.reactorNames} />
                       </>
                     )}
                   </div>
