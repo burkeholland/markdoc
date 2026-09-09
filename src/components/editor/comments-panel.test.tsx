@@ -5468,7 +5468,15 @@ describe("CommentsPanel", () => {
 
       it("keeps accepting wrapped arrows when the only suggestion remains selected", async () => {
         const { box, options } = await mountDirectMentions({
-          collaborators: [{ login: "bob", name: "Bob", image: null }],
+          collaborators: [
+            {
+              login: "bob",
+              role: "editor",
+              createdAt: "2026-09-08T00:00:00.000Z",
+              name: "Bob",
+              image: null,
+            },
+          ],
           agents: [],
           expectedOptions: 1,
         });
@@ -5634,6 +5642,50 @@ describe("CommentsPanel", () => {
           );
         },
       );
+
+      it("rejects a trusted owner-realm event whose public view is a self-window-shaped owner-document lookalike", async () => {
+        const preventDefault = vi.spyOn(
+          window.Event.prototype,
+          "preventDefault",
+        );
+        const { box, options } = await mountDirectMentions();
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const activeDescendant = box.getAttribute("aria-activedescendant");
+        const lookalike: Record<string, unknown> = {
+          document: box.ownerDocument,
+        };
+        lookalike.window = lookalike;
+        const crossed = mentionKeyboardEvent(box, "End");
+        Object.defineProperty(crossed, "view", {
+          configurable: true,
+          value: lookalike,
+        });
+        const intrinsicView = Object.getOwnPropertyDescriptor(
+          window.UIEvent.prototype,
+          "view",
+        )?.get;
+        if (!intrinsicView) throw new Error("No owner-realm UIEvent view getter");
+        expect(intrinsicView.call(crossed)).toBeNull();
+        expect(crossed.view).toBe(lookalike);
+        preventDefault.mockClear();
+
+        act(() => {
+          box.dispatchEvent(crossed);
+        });
+
+        expect(crossed.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(options()[1]).toHaveAttribute("aria-selected", "true");
+        expect(box).toHaveAttribute("aria-activedescendant", activeDescendant);
+
+        const clean = mentionKey(box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
 
       it.each(["Home", "End"] as const)(
         "%s binds its exact highlight and React callbacks, claims replay once, and lets the current successor act",

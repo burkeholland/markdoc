@@ -2724,6 +2724,7 @@ interface MentionReactMethods {
 interface MentionReactProof {
   readonly event: object;
   readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly nativeView: Window | null;
   readonly key: MentionNavigationKey;
   readonly methods: MentionReactMethods;
 }
@@ -4178,22 +4179,6 @@ function createMentionDomEvidence(
   });
 }
 
-function mentionIsOwnerWindow(
-  candidate: unknown,
-  ownerDocument: Document,
-  ownerWindow: Window,
-) {
-  return (
-    candidate === ownerWindow ||
-    (typeof candidate === "object" &&
-      candidate !== null &&
-      "document" in candidate &&
-      candidate.document === ownerDocument &&
-      "window" in candidate &&
-      candidate.window === candidate)
-  );
-}
-
 function mentionNativeKey(
   event: KeyboardEvent<HTMLElement>,
   publication: MentionPublication,
@@ -4220,7 +4205,7 @@ function mentionNativeKey(
     }
     const target = keyboard.eventTarget.read(nativeEvent);
     const path = keyboard.eventPath.invoke(nativeEvent);
-    const view = keyboard.eventView.read(nativeEvent);
+    const nativeView = keyboard.eventView.read(nativeEvent);
     return keyboard.isCurrent() &&
       keyboard.eventType.read(nativeEvent) === "keydown" &&
       keyboard.eventPhase.read(nativeEvent) !== keyboard.Event.NONE &&
@@ -4228,12 +4213,7 @@ function mentionNativeKey(
       keyboard.eventCancelable.read(nativeEvent) &&
       !keyboard.eventDefaultPrevented.read(nativeEvent) &&
       !keyboard.eventCancelBubble.read(nativeEvent) &&
-      (view === null ||
-        mentionIsOwnerWindow(
-          view,
-          publication.ownerDocument,
-          publication.ownerWindow,
-        )) &&
+      (nativeView === null || nativeView === publication.ownerWindow) &&
       keyboard.trusted.read(nativeEvent) &&
       !keyboard.repeat.read(nativeEvent) &&
       !keyboard.composing.read(nativeEvent) &&
@@ -4250,7 +4230,7 @@ function mentionNativeKey(
       path.includes(publication.ownerDocument) &&
       keyboard.activeElement.read(publication.ownerDocument) ===
         publication.textarea
-      ? Object.freeze({ event: nativeEvent, key })
+      ? Object.freeze({ event: nativeEvent, nativeView, key })
       : null;
   } catch {
     return null;
@@ -4307,12 +4287,7 @@ function readMentionReactProof(
         publication.keyboard.eventCancelable.read(native.event) &&
       !event.defaultPrevented &&
       event.isTrusted &&
-      (event.view === null ||
-        mentionIsOwnerWindow(
-          event.view,
-          publication.ownerDocument,
-          publication.ownerWindow,
-        )) &&
+      Object.is(event.view, native.nativeView) &&
       event.eventPhase ===
         publication.keyboard.eventPhase.read(native.event) &&
       !event.repeat &&
@@ -4335,6 +4310,7 @@ function readMentionReactProof(
       ? Object.freeze({
           event,
           nativeEvent: native.event,
+          nativeView: native.nativeView,
           key: native.key,
           methods,
         })
