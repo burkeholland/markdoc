@@ -11398,14 +11398,15 @@ function PublishMenu({ props }: { props: HeaderProps }) {
           </button>
         </MenuTrigger>
       </div>
-      <MenuContent
-        ref={captureContent}
-        align="end"
-        className="w-72"
-        {...openAutoFocusProps}
-      >
-        {linked ? (
-          <>
+      {state.open && (
+        <MenuContent
+          ref={captureContent}
+          align="end"
+          className="w-72"
+          {...openAutoFocusProps}
+        >
+          {linked ? (
+            <>
             <MenuLabel>
               {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
               {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
@@ -11432,9 +11433,9 @@ function PublishMenu({ props }: { props: HeaderProps }) {
                 </MenuItem>
               </>
             )}
-          </>
-        ) : (
-          <>
+            </>
+          ) : (
+            <>
             <MenuLabel>Publish to GitHub</MenuLabel>
             <MenuItem
               ref={captureActions.connect}
@@ -11453,10 +11454,11 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             <MenuItem ref={captureActions.share} icon={<Share2 size={15} />} onSelect={props.onShare}>
               Share link…
             </MenuItem>
-          </>
-        )}
-        <PublishMenuOpenCommit presentation={presentation} />
-      </MenuContent>
+            </>
+          )}
+          <PublishMenuOpenCommit presentation={presentation} />
+        </MenuContent>
+      )}
     </Menu>
   );
 }
