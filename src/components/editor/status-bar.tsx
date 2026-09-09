@@ -2814,10 +2814,11 @@ function activateGeneration(
   });
   if (ownerWindow) {
     const listener = function (
-      this: Window & typeof globalThis,
+      this: Window,
       event: KeyboardEvent,
     ) {
-      recordNativeEvent(generation, event, this);
+      if (this !== ownerWindow) return;
+      recordNativeEvent(generation, event, ownerWindow);
     };
     ownerWindow.addEventListener("keydown", listener, true);
     generation.removeEventListeners.push(() => ownerWindow.removeEventListener("keydown", listener, true));
