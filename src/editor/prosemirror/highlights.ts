@@ -210,14 +210,20 @@ function isPlainPrimaryEvent(event: MouseEvent): boolean {
     !event.shiftKey;
 }
 
-function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlightTarget | null): boolean {
-  return !!b &&
-    a.kind === b.kind &&
+function sameHighlightDecoration(a: PositionedHighlightTarget, b: PositionedHighlightTarget): boolean {
+  return a.kind === b.kind &&
     a.id === b.id &&
-    a.sourcePosition === b.sourcePosition &&
-    a.editorPosition === b.editorPosition &&
     a.from === b.from &&
-    a.to === b.to;
+    a.to === b.to &&
+    (
+      (a.sourcePosition === b.sourcePosition && a.editorPosition === b.editorPosition) ||
+      (
+        a.editorPosition >= a.from &&
+        a.editorPosition < a.to &&
+        b.editorPosition >= b.from &&
+        b.editorPosition < b.to
+      )
+    );
 }
 
 function movedPastClickTolerance(start: MouseEvent, current: MouseEvent): boolean {
@@ -354,17 +360,20 @@ function installRichHighlightActivation(
   };
   const up = (event: MouseEvent) => {
     const current = press;
+    const releaseTarget = richHighlightAtPointer(view, session, event);
     if (
       !current ||
       !isPlainPrimaryEvent(event) ||
       event.buttons !== 0 ||
       movedPastClickTolerance(current.down, event) ||
       current.signature !== currentSignature() ||
-      !samePositionedTarget(current.target, richHighlightAtPointer(view, session, event))
+      !releaseTarget ||
+      !sameHighlightDecoration(current.target, releaseTarget)
     ) {
       clearPress();
       return;
     }
+    current.target = releaseTarget;
     current.released = true;
     stopPressTracking();
     schedule(current);
@@ -391,14 +400,17 @@ function installRichHighlightActivation(
   };
   const click = (event: MouseEvent) => {
     const current = press;
+    const clickTarget = richHighlightAtPointer(view, session, event);
     clearPress();
     if (
       event.defaultPrevented ||
       !current?.released ||
       !isPlainPrimaryEvent(event) ||
       event.buttons !== 0 ||
+      movedPastClickTolerance(current.down, event) ||
       current.signature !== currentSignature() ||
-      !samePositionedTarget(current.target, richHighlightAtPointer(view, session, event))
+      !clickTarget ||
+      !sameHighlightDecoration(current.target, clickTarget)
     ) {
       clearPending();
       return;
@@ -407,6 +419,7 @@ function installRichHighlightActivation(
       clearPending();
       return;
     }
+    pending.target = clickTarget;
     pending.selection = view.state.selection;
     pending.confirmed = true;
   };
@@ -422,15 +435,31 @@ function installRichHighlightActivation(
   return {
     update(currentView, previousState) {
       if (press && currentView.state.doc !== previousState.doc) clearPress();
+      const previousHighlights = key.getState(previousState);
+      const currentHighlights = key.getState(currentView.state);
+      const selectionUpdated = !!previousHighlights &&
+        !!currentHighlights &&
+        currentHighlights.selectionVersion === previousHighlights.selectionVersion + 1;
+      if (
+        press &&
+        !press.released &&
+        selectionUpdated &&
+        !isPointerSelectionUpdateInsideTarget(currentView, previousState, press.target)
+      ) {
+        clearPress();
+      }
       if (
         pending &&
         !pending.confirmed &&
         press?.released &&
         pending.target === press.target &&
-        !pending.selection.eq(currentView.state.selection) &&
-        isPointerSelectionUpdateInsideTarget(currentView, previousState, pending.target)
+        selectionUpdated
       ) {
-        pending.selection = currentView.state.selection;
+        if (isPointerSelectionUpdateInsideTarget(currentView, previousState, pending.target)) {
+          pending.selection = currentView.state.selection;
+        } else {
+          clearPending();
+        }
       }
       if (
         pending &&
