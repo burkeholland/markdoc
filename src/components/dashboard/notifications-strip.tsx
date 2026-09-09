@@ -38,7 +38,7 @@ interface NotificationStripAuthority {
   readonly rows: readonly NotificationRowAuthority[];
 }
 
-type NotificationActionKind = "read-all" | "open" | "dismiss";
+type NotificationActionKind = "read-all" | "open" | "dismiss" | "browse";
 
 interface NotificationActionPublication {
   readonly identity: symbol;
@@ -56,6 +56,7 @@ interface NotificationRowPublication {
   readonly dismiss: HTMLButtonElement;
   readonly openAction: NotificationActionPublication;
   readonly dismissAction: NotificationActionPublication;
+  readonly browseAction: NotificationActionPublication;
 }
 
 interface NotificationDomSnapshot {
@@ -83,8 +84,9 @@ interface NotificationDomGuard {
   readonly release: () => void;
 }
 
-interface NotificationNativeKeyboardFacts {
+interface NotificationNativeEventFacts {
   readonly type: string;
+  readonly currentTarget: EventTarget | null;
   readonly phase: number;
   readonly bubbles: boolean;
   readonly cancelable: boolean;
@@ -94,7 +96,12 @@ interface NotificationNativeKeyboardFacts {
   readonly path: readonly EventTarget[];
   readonly isTrusted: boolean;
   readonly view: Window | null;
+}
+
+interface NotificationNativeKeyboardFacts extends NotificationNativeEventFacts {
   readonly key: string;
+  readonly code: string;
+  readonly location: number;
   readonly ctrlKey: boolean;
   readonly altKey: boolean;
   readonly metaKey: boolean;
@@ -103,8 +110,28 @@ interface NotificationNativeKeyboardFacts {
   readonly isComposing: boolean;
 }
 
-interface NotificationKeyboardIntrinsics {
-  readonly read: (event: object) => NotificationNativeKeyboardFacts | null;
+interface NotificationNativeClickFacts extends NotificationNativeEventFacts {
+  readonly button: number;
+  readonly buttons: number;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}
+
+interface NotificationEventIntrinsics {
+  readonly readKeyboard: (event: object) => NotificationNativeKeyboardFacts | null;
+  readonly readClick: (event: object) => NotificationNativeClickFacts | null;
+  readonly ownDataMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly methodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
   readonly defaultWasPrevented: (event: Event) => boolean;
   readonly activeElement: () => Element | null | undefined;
   readonly preventDefault: (event: Event) => boolean;
@@ -132,7 +159,7 @@ interface NotificationStripPublication {
   readonly dom: NotificationDomSnapshot;
   readonly placement: NotificationPlacement;
   readonly focusCustody: NotificationFocusCustody;
-  readonly keyboard: NotificationKeyboardIntrinsics | null;
+  readonly events: NotificationEventIntrinsics | null;
 }
 
 interface ElementOwnerView {
@@ -314,19 +341,27 @@ class NotificationStripCoordinator {
 
   claimKeyboard(
     publication: NotificationStripPublication,
+    action: NotificationActionPublication,
     event: object,
     nativeEvent: KeyboardEvent,
   ) {
     if (
       !this.isCurrent(publication) ||
       this.#claimedPublications.has(publication) ||
+      this.#claimedActions.has(action) ||
       this.#claimedEvents.has(event) ||
-      this.#claimedEvents.has(nativeEvent)
+      this.#claimedEvents.has(nativeEvent) ||
+      action.publicationIdentity !== publication.identity ||
+      action.kind !== "browse" ||
+      action.rowIndex === null ||
+      publication.rows[action.rowIndex]?.browseAction !== action
     ) {
       return false;
     }
+    this.#claimedActions.add(action);
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
+    this.#claimedPublications.add(publication);
     return true;
   }
 }
@@ -536,10 +571,6 @@ function createNotificationDomGuard(
   });
 }
 
-const NOTIFICATION_GET_DESCRIPTOR =
-  Object.getOwnPropertyDescriptor.bind(Object);
-const NOTIFICATION_REFLECT_APPLY = Reflect.apply;
-
 interface NotificationStableGetter<T> {
   readonly prototype: object;
   readonly property: PropertyKey;
@@ -568,30 +599,53 @@ interface NotificationStableMethod<T extends (...args: never[]) => unknown> {
   readonly isCurrent: () => boolean;
 }
 
+function notificationDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
 function captureStableGetter<T>(
   prototype: object | null,
   property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
 ): NotificationStableGetter<T> | null {
   if (!prototype) return null;
-  const descriptor = NOTIFICATION_GET_DESCRIPTOR(prototype, property);
+  const descriptor = getOwnPropertyDescriptor(prototype, property);
   if (!descriptor?.get) return null;
+  const expected = Object.freeze({ ...descriptor });
   const getter = descriptor.get as () => T;
   return Object.freeze({
     prototype,
     property,
     getter,
-    read: Function.prototype.call.bind(getter) as (value: object) => T,
+    read: (value: object) => apply(getter, value, []) as T,
     isCurrent: () =>
-      NOTIFICATION_GET_DESCRIPTOR(prototype, property)?.get === getter,
+      notificationDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, property),
+        expected,
+      ),
   });
 }
 
 function captureStableMethod<T extends (...args: never[]) => unknown>(
   prototype: object | null,
   property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
 ): NotificationStableMethod<T> | null {
   if (!prototype) return null;
-  const descriptor = NOTIFICATION_GET_DESCRIPTOR(prototype, property);
+  const descriptor = getOwnPropertyDescriptor(prototype, property);
   if (
     !descriptor ||
     !("value" in descriptor) ||
@@ -599,30 +653,37 @@ function captureStableMethod<T extends (...args: never[]) => unknown>(
   ) {
     return null;
   }
+  const expected = Object.freeze({ ...descriptor });
   const method = descriptor.value as (...args: never[]) => unknown;
   return Object.freeze({
     prototype,
     property,
     method,
-    invoke: Function.prototype.call.bind(method) as unknown as T,
+    invoke: ((value: object, ...args: unknown[]) =>
+      apply(method, value, args)) as unknown as T,
     isCurrent: () =>
-      NOTIFICATION_GET_DESCRIPTOR(prototype, property)?.value === method,
+      notificationDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, property),
+        expected,
+      ),
   });
 }
 
 function captureUnforgeableGetter<T>(
   owner: object | null,
   property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
 ): NotificationUnforgeableGetter<T> | null {
   if (!owner) return null;
-  const descriptor = NOTIFICATION_GET_DESCRIPTOR(owner, property);
+  const descriptor = getOwnPropertyDescriptor(owner, property);
   if (!descriptor?.get || "value" in descriptor) return null;
   const getter = descriptor.get as () => T;
   const setter = descriptor.set as undefined | ((value: T) => void);
   const configurable = descriptor.configurable === true;
   const enumerable = descriptor.enumerable === true;
   const matches = (value: object) => {
-    const current = NOTIFICATION_GET_DESCRIPTOR(value, property);
+    const current = getOwnPropertyDescriptor(value, property);
     return (
       !!current &&
       !("value" in current) &&
@@ -642,268 +703,406 @@ function captureUnforgeableGetter<T>(
     isCurrent: () => matches(owner),
     matches,
     read: (value: object) =>
-      NOTIFICATION_REFLECT_APPLY(getter, value, []) as T,
+      apply(getter, value, []) as T,
   });
 }
 
-const NOTIFICATION_EVENT_CONSTRUCTOR =
-  typeof Event === "undefined" ? null : Event;
-const NOTIFICATION_EVENT_PROTOTYPE =
-  NOTIFICATION_EVENT_CONSTRUCTOR?.prototype ?? null;
-const NOTIFICATION_UI_EVENT_PROTOTYPE =
-  typeof UIEvent === "undefined" ? null : UIEvent.prototype;
-const NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE =
-  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent.prototype;
-const NOTIFICATION_DOCUMENT_PROTOTYPE =
-  typeof Document === "undefined" ? null : Document.prototype;
-const NOTIFICATION_HTML_ELEMENT_PROTOTYPE =
-  typeof HTMLElement === "undefined" ? null : HTMLElement.prototype;
-
-const NOTIFICATION_EVENT_TYPE = captureStableGetter<string>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "type",
-);
-const NOTIFICATION_EVENT_PHASE = captureStableGetter<number>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "eventPhase",
-);
-const NOTIFICATION_EVENT_BUBBLES = captureStableGetter<boolean>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "bubbles",
-);
-const NOTIFICATION_EVENT_CANCELABLE = captureStableGetter<boolean>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "cancelable",
-);
-const NOTIFICATION_EVENT_DEFAULT_PREVENTED = captureStableGetter<boolean>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "defaultPrevented",
-);
-const NOTIFICATION_EVENT_CANCEL_BUBBLE = captureStableGetter<boolean>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "cancelBubble",
-);
-const NOTIFICATION_EVENT_TARGET = captureStableGetter<EventTarget | null>(
-  NOTIFICATION_EVENT_PROTOTYPE,
-  "target",
-);
-const NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR =
-  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent;
-const NOTIFICATION_KEYBOARD_EVENT_INSTANCE = (() => {
-  if (!NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR) return null;
+function captureNotificationEventIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): NotificationEventIntrinsics | null {
+  const objectConstructor = ownerWindow.Object;
+  const reflectObject = ownerWindow.Reflect;
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const eventConstructor = ownerWindow.Event;
+  const uiEventConstructor = ownerWindow.UIEvent;
+  const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const mouseConstructor = ownerWindow.MouseEvent;
+  const documentConstructor = ownerWindow.Document;
+  const htmlElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = eventConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const mousePrototype = mouseConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const objectPrototype = ownerWindow.Object.prototype;
+  const getter = <T,>(prototype: object, property: PropertyKey) =>
+    captureStableGetter<T>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      apply,
+    );
+  const method = <T extends (...args: never[]) => unknown>(
+    prototype: object,
+    property: PropertyKey,
+  ) =>
+    captureStableMethod<T>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      apply,
+    );
+  const type = getter<string>(eventPrototype, "type");
+  const currentTarget = getter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const phase = getter<number>(eventPrototype, "eventPhase");
+  const bubbles = getter<boolean>(eventPrototype, "bubbles");
+  const cancelable = getter<boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = getter<boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = getter<boolean>(eventPrototype, "cancelBubble");
+  const target = getter<EventTarget | null>(eventPrototype, "target");
+  const composedPath = method<(event: Event) => EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = method<(event: Event) => void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const view = getter<Window | null>(uiEventPrototype, "view");
+  const key = getter<string>(keyboardPrototype, "key");
+  const code = getter<string>(keyboardPrototype, "code");
+  const location = getter<number>(keyboardPrototype, "location");
+  const keyboardCtrl = getter<boolean>(keyboardPrototype, "ctrlKey");
+  const keyboardAlt = getter<boolean>(keyboardPrototype, "altKey");
+  const keyboardMeta = getter<boolean>(keyboardPrototype, "metaKey");
+  const keyboardShift = getter<boolean>(keyboardPrototype, "shiftKey");
+  const repeat = getter<boolean>(keyboardPrototype, "repeat");
+  const composing = getter<boolean>(keyboardPrototype, "isComposing");
+  const button = getter<number>(mousePrototype, "button");
+  const buttons = getter<number>(mousePrototype, "buttons");
+  const mouseCtrl = getter<boolean>(mousePrototype, "ctrlKey");
+  const mouseAlt = getter<boolean>(mousePrototype, "altKey");
+  const mouseMeta = getter<boolean>(mousePrototype, "metaKey");
+  const mouseShift = getter<boolean>(mousePrototype, "shiftKey");
+  const activeElement = getter<Element | null>(
+    documentPrototype,
+    "activeElement",
+  );
+  const focus = method<(element: HTMLElement) => void>(
+    htmlElementPrototype,
+    "focus",
+  );
+  const isPrototypeOf = method<(prototype: object, value: object) => boolean>(
+    objectPrototype,
+    "isPrototypeOf",
+  );
+  let keyboardProbe: KeyboardEvent;
+  let mouseProbe: MouseEvent;
   try {
-    return new NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR(
+    keyboardProbe = new keyboardConstructor(
       "notification-keyboard-intrinsic",
     );
+    mouseProbe = new mouseConstructor("notification-click-intrinsic");
   } catch {
     return null;
   }
-})();
-const NOTIFICATION_EVENT_TRUSTED = captureUnforgeableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_INSTANCE,
-  "isTrusted",
-);
-const NOTIFICATION_EVENT_COMPOSED_PATH = captureStableMethod<
-  (event: Event) => EventTarget[]
->(NOTIFICATION_EVENT_PROTOTYPE, "composedPath");
-const NOTIFICATION_PREVENT_DEFAULT = captureStableMethod<
-  (event: Event) => void
->(NOTIFICATION_EVENT_PROTOTYPE, "preventDefault");
-const NOTIFICATION_UI_VIEW = captureStableGetter<Window | null>(
-  NOTIFICATION_UI_EVENT_PROTOTYPE,
-  "view",
-);
-const NOTIFICATION_KEY = captureStableGetter<string>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "key",
-);
-const NOTIFICATION_CTRL = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "ctrlKey",
-);
-const NOTIFICATION_ALT = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "altKey",
-);
-const NOTIFICATION_META = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "metaKey",
-);
-const NOTIFICATION_SHIFT = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "shiftKey",
-);
-const NOTIFICATION_REPEAT = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "repeat",
-);
-const NOTIFICATION_COMPOSING = captureStableGetter<boolean>(
-  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
-  "isComposing",
-);
-const NOTIFICATION_ACTIVE_ELEMENT = captureStableGetter<Element | null>(
-  NOTIFICATION_DOCUMENT_PROTOTYPE,
-  "activeElement",
-);
-const NOTIFICATION_FOCUS = captureStableMethod<
-  (element: HTMLElement) => void
->(NOTIFICATION_HTML_ELEMENT_PROTOTYPE, "focus");
-
-const NOTIFICATION_KEYBOARD_GETTERS = Object.freeze([
-  NOTIFICATION_EVENT_TYPE,
-  NOTIFICATION_EVENT_PHASE,
-  NOTIFICATION_EVENT_BUBBLES,
-  NOTIFICATION_EVENT_CANCELABLE,
-  NOTIFICATION_EVENT_DEFAULT_PREVENTED,
-  NOTIFICATION_EVENT_CANCEL_BUBBLE,
-  NOTIFICATION_EVENT_TARGET,
-  NOTIFICATION_UI_VIEW,
-  NOTIFICATION_KEY,
-  NOTIFICATION_CTRL,
-  NOTIFICATION_ALT,
-  NOTIFICATION_META,
-  NOTIFICATION_SHIFT,
-  NOTIFICATION_REPEAT,
-  NOTIFICATION_COMPOSING,
-  NOTIFICATION_ACTIVE_ELEMENT,
-]);
-
-const NOTIFICATION_KEYBOARD_METHODS = Object.freeze([
-  NOTIFICATION_EVENT_COMPOSED_PATH,
-  NOTIFICATION_PREVENT_DEFAULT,
-  NOTIFICATION_FOCUS,
-]);
-
-function captureNotificationKeyboardIntrinsics(
-  ownerWindow: Window & typeof globalThis,
-): NotificationKeyboardIntrinsics | null {
+  const keyboardTrusted = captureUnforgeableGetter<boolean>(
+    keyboardProbe,
+    "isTrusted",
+    getOwnPropertyDescriptor,
+    apply,
+  );
+  const clickTrusted = captureUnforgeableGetter<boolean>(
+    mouseProbe,
+    "isTrusted",
+    getOwnPropertyDescriptor,
+    apply,
+  );
+  const commonGetters = Object.freeze([
+    type,
+    currentTarget,
+    phase,
+    bubbles,
+    cancelable,
+    defaultPrevented,
+    cancelBubble,
+    target,
+    view,
+  ]);
+  const keyboardGetters = Object.freeze([
+    key,
+    code,
+    location,
+    keyboardCtrl,
+    keyboardAlt,
+    keyboardMeta,
+    keyboardShift,
+    repeat,
+    composing,
+    activeElement,
+  ]);
+  const clickGetters = Object.freeze([
+    button,
+    buttons,
+    mouseCtrl,
+    mouseAlt,
+    mouseMeta,
+    mouseShift,
+  ]);
+  const commonMethods = Object.freeze([
+    composedPath,
+    preventDefault,
+    isPrototypeOf,
+  ]);
+  const keyboardMethods = Object.freeze([focus]);
   if (
-    NOTIFICATION_EVENT_CONSTRUCTOR !== ownerWindow.Event ||
-    NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR !== ownerWindow.KeyboardEvent ||
-    NOTIFICATION_EVENT_PROTOTYPE !== ownerWindow.Event.prototype ||
-    NOTIFICATION_UI_EVENT_PROTOTYPE !== ownerWindow.UIEvent.prototype ||
-    NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE !==
-      ownerWindow.KeyboardEvent.prototype ||
-    NOTIFICATION_DOCUMENT_PROTOTYPE !== ownerWindow.Document.prototype ||
-    NOTIFICATION_HTML_ELEMENT_PROTOTYPE !==
-      ownerWindow.HTMLElement.prototype ||
-    NOTIFICATION_KEYBOARD_GETTERS.some(
+    [...commonGetters, ...keyboardGetters, ...clickGetters].some(
       (intrinsic) => !intrinsic || !intrinsic.isCurrent(),
     ) ||
-    NOTIFICATION_KEYBOARD_METHODS.some(
+    [...commonMethods, ...keyboardMethods].some(
       (intrinsic) => !intrinsic || !intrinsic.isCurrent(),
     ) ||
-    !NOTIFICATION_EVENT_TRUSTED ||
-    !NOTIFICATION_EVENT_TRUSTED.isCurrent() ||
-    !NOTIFICATION_EVENT_TYPE ||
-    !NOTIFICATION_EVENT_PHASE ||
-    !NOTIFICATION_EVENT_BUBBLES ||
-    !NOTIFICATION_EVENT_CANCELABLE ||
-    !NOTIFICATION_EVENT_DEFAULT_PREVENTED ||
-    !NOTIFICATION_EVENT_CANCEL_BUBBLE ||
-    !NOTIFICATION_EVENT_TARGET ||
-    !NOTIFICATION_EVENT_COMPOSED_PATH ||
-    !NOTIFICATION_PREVENT_DEFAULT ||
-    !NOTIFICATION_UI_VIEW ||
-    !NOTIFICATION_KEY ||
-    !NOTIFICATION_CTRL ||
-    !NOTIFICATION_ALT ||
-    !NOTIFICATION_META ||
-    !NOTIFICATION_SHIFT ||
-    !NOTIFICATION_REPEAT ||
-    !NOTIFICATION_COMPOSING ||
-    !NOTIFICATION_ACTIVE_ELEMENT ||
-    !NOTIFICATION_FOCUS
+    !keyboardTrusted ||
+    !keyboardTrusted.isCurrent() ||
+    !clickTrusted ||
+    !clickTrusted.isCurrent() ||
+    !type ||
+    !currentTarget ||
+    !phase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !target ||
+    !composedPath ||
+    !preventDefault ||
+    !view ||
+    !key ||
+    !code ||
+    !location ||
+    !keyboardCtrl ||
+    !keyboardAlt ||
+    !keyboardMeta ||
+    !keyboardShift ||
+    !repeat ||
+    !composing ||
+    !button ||
+    !buttons ||
+    !mouseCtrl ||
+    !mouseAlt ||
+    !mouseMeta ||
+    !mouseShift ||
+    !activeElement ||
+    !focus ||
+    !isPrototypeOf
   ) {
     return null;
   }
   const ownerRealmIsCurrent = () =>
-    NOTIFICATION_EVENT_CONSTRUCTOR === ownerWindow.Event &&
-    NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR === ownerWindow.KeyboardEvent &&
-    NOTIFICATION_EVENT_PROTOTYPE === ownerWindow.Event.prototype &&
-    NOTIFICATION_UI_EVENT_PROTOTYPE === ownerWindow.UIEvent.prototype &&
-    NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ===
-      ownerWindow.KeyboardEvent.prototype &&
-    NOTIFICATION_DOCUMENT_PROTOTYPE === ownerWindow.Document.prototype &&
-    NOTIFICATION_HTML_ELEMENT_PROTOTYPE ===
-      ownerWindow.HTMLElement.prototype;
-  let trustedHistoryIsClean = true;
-  const descriptorsAreCurrent = () => {
-    if (!trustedHistoryIsClean) return false;
-    trustedHistoryIsClean =
+    objectConstructor === ownerWindow.Object &&
+    reflectObject === ownerWindow.Reflect &&
+    eventConstructor === ownerWindow.Event &&
+    uiEventConstructor === ownerWindow.UIEvent &&
+    documentConstructor === ownerWindow.Document &&
+    htmlElementConstructor === ownerWindow.HTMLElement &&
+    eventPrototype === eventConstructor.prototype &&
+    uiEventPrototype === uiEventConstructor.prototype &&
+    documentPrototype === documentConstructor.prototype &&
+    htmlElementPrototype === htmlElementConstructor.prototype &&
+    objectPrototype === ownerWindow.Object.prototype &&
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.apply === apply;
+  let commonHistoryIsClean = true;
+  let keyboardHistoryIsClean = true;
+  let clickHistoryIsClean = true;
+  const commonDescriptorsAreCurrent = () => {
+    if (!commonHistoryIsClean) return false;
+    commonHistoryIsClean =
       ownerRealmIsCurrent() &&
-      NOTIFICATION_KEYBOARD_GETTERS.every(
+      commonGetters.every(
         (intrinsic) => intrinsic?.isCurrent() === true,
       ) &&
-      NOTIFICATION_KEYBOARD_METHODS.every(
+      commonMethods.every(
+        (intrinsic) => intrinsic?.isCurrent() === true,
+      );
+    return commonHistoryIsClean;
+  };
+  const keyboardDescriptorsAreCurrent = () => {
+    if (!keyboardHistoryIsClean) return false;
+    keyboardHistoryIsClean =
+      commonDescriptorsAreCurrent() &&
+      keyboardConstructor === ownerWindow.KeyboardEvent &&
+      keyboardPrototype === keyboardConstructor.prototype &&
+      keyboardGetters.every(
         (intrinsic) => intrinsic?.isCurrent() === true,
       ) &&
-      NOTIFICATION_EVENT_TRUSTED.isCurrent();
-    return trustedHistoryIsClean;
+      keyboardMethods.every(
+        (intrinsic) => intrinsic?.isCurrent() === true,
+      ) &&
+      keyboardTrusted.isCurrent();
+    return keyboardHistoryIsClean;
+  };
+  const clickDescriptorsAreCurrent = () => {
+    if (!clickHistoryIsClean) return false;
+    clickHistoryIsClean =
+      commonDescriptorsAreCurrent() &&
+      mouseConstructor === ownerWindow.MouseEvent &&
+      mousePrototype === mouseConstructor.prototype &&
+      clickGetters.every(
+        (intrinsic) => intrinsic?.isCurrent() === true,
+      ) &&
+      clickTrusted.isCurrent();
+    return clickHistoryIsClean;
+  };
+  const isOwnerPrototype = (prototype: object, event: object) =>
+    isPrototypeOf.invoke(prototype, event);
+  const readBase = (
+    event: object,
+    trusted: NotificationUnforgeableGetter<boolean>,
+    descriptorsAreCurrent: () => boolean,
+  ): NotificationNativeEventFacts | null => {
+    if (!descriptorsAreCurrent() || !trusted.matches(event)) return null;
+    const isTrusted = trusted.read(event);
+    const eventView = view.read(event);
+    if (
+      isTrusted !== true ||
+      (eventView !== null && eventView !== ownerWindow)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: type.read(event),
+      currentTarget: currentTarget.read(event),
+      phase: phase.read(event),
+      bubbles: bubbles.read(event),
+      cancelable: cancelable.read(event),
+      defaultPrevented: defaultPrevented.read(event),
+      cancelBubble: cancelBubble.read(event),
+      target: target.read(event),
+      path: Object.freeze([
+        ...composedPath.invoke(event as Event),
+      ]),
+      isTrusted,
+      view: eventView,
+    });
   };
   return Object.freeze({
-    read: (event: object) => {
-      if (!descriptorsAreCurrent()) return null;
+    readKeyboard: (event: object) => {
       try {
-        if (!NOTIFICATION_EVENT_TRUSTED.matches(event)) return null;
-        const isTrusted = NOTIFICATION_EVENT_TRUSTED.read(event);
-        const view = NOTIFICATION_UI_VIEW.read(event);
-        if (isTrusted !== true || view !== ownerWindow) return null;
+        if (!isOwnerPrototype(keyboardPrototype, event)) return null;
+        const base = readBase(
+          event,
+          keyboardTrusted,
+          keyboardDescriptorsAreCurrent,
+        );
+        if (!base) return null;
         return Object.freeze({
-          type: NOTIFICATION_EVENT_TYPE.read(event),
-          phase: NOTIFICATION_EVENT_PHASE.read(event),
-          bubbles: NOTIFICATION_EVENT_BUBBLES.read(event),
-          cancelable: NOTIFICATION_EVENT_CANCELABLE.read(event),
-          defaultPrevented:
-            NOTIFICATION_EVENT_DEFAULT_PREVENTED.read(event),
-          cancelBubble: NOTIFICATION_EVENT_CANCEL_BUBBLE.read(event),
-          target: NOTIFICATION_EVENT_TARGET.read(event),
-          path: Object.freeze([
-            ...NOTIFICATION_EVENT_COMPOSED_PATH.invoke(event as Event),
-          ]),
-          isTrusted,
-          view,
-          key: NOTIFICATION_KEY.read(event),
-          ctrlKey: NOTIFICATION_CTRL.read(event),
-          altKey: NOTIFICATION_ALT.read(event),
-          metaKey: NOTIFICATION_META.read(event),
-          shiftKey: NOTIFICATION_SHIFT.read(event),
-          repeat: NOTIFICATION_REPEAT.read(event),
-          isComposing: NOTIFICATION_COMPOSING.read(event),
+          ...base,
+          key: key.read(event),
+          code: code.read(event),
+          location: location.read(event),
+          ctrlKey: keyboardCtrl.read(event),
+          altKey: keyboardAlt.read(event),
+          metaKey: keyboardMeta.read(event),
+          shiftKey: keyboardShift.read(event),
+          repeat: repeat.read(event),
+          isComposing: composing.read(event),
         });
       } catch {
         return null;
       }
     },
-    defaultWasPrevented: (event: Event) => {
-      if (!descriptorsAreCurrent()) return false;
+    readClick: (event: object) => {
       try {
-        return NOTIFICATION_EVENT_DEFAULT_PREVENTED.read(event);
+        if (!isOwnerPrototype(mousePrototype, event)) return null;
+        const base = readBase(
+          event,
+          clickTrusted,
+          clickDescriptorsAreCurrent,
+        );
+        if (!base) return null;
+        return Object.freeze({
+          ...base,
+          button: button.read(event),
+          buttons: buttons.read(event),
+          ctrlKey: mouseCtrl.read(event),
+          altKey: mouseAlt.read(event),
+          metaKey: mouseMeta.read(event),
+          shiftKey: mouseShift.read(event),
+        });
+      } catch {
+        return null;
+      }
+    },
+    ownDataMatches: (
+      event: object,
+      property: PropertyKey,
+      value: unknown,
+    ) => {
+      if (!commonDescriptorsAreCurrent()) return false;
+      try {
+        const descriptor = getOwnPropertyDescriptor(event, property);
+        return Boolean(
+          descriptor &&
+            "value" in descriptor &&
+            descriptor.value === value,
+        );
+      } catch {
+        return false;
+      }
+    },
+    methodMatches: (
+      event: object,
+      property: PropertyKey,
+      value: unknown,
+    ) => {
+      if (!commonDescriptorsAreCurrent() || typeof value !== "function") {
+        return false;
+      }
+      try {
+        let owner: object | null = event;
+        while (owner) {
+          const descriptor = getOwnPropertyDescriptor(owner, property);
+          if (descriptor) {
+            return "value" in descriptor && descriptor.value === value;
+          }
+          owner = getPrototypeOf(owner);
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    defaultWasPrevented: (event: Event) => {
+      if (!keyboardDescriptorsAreCurrent()) return false;
+      try {
+        return defaultPrevented.read(event);
       } catch {
         return false;
       }
     },
     activeElement: () => {
-      if (!descriptorsAreCurrent()) return undefined;
+      if (!keyboardDescriptorsAreCurrent()) return undefined;
       try {
-        return NOTIFICATION_ACTIVE_ELEMENT.read(ownerWindow.document);
+        return activeElement.read(ownerWindow.document);
       } catch {
         return undefined;
       }
     },
     preventDefault: (event: Event) => {
-      if (!descriptorsAreCurrent()) return false;
+      if (!keyboardDescriptorsAreCurrent()) return false;
       try {
-        NOTIFICATION_PREVENT_DEFAULT.invoke(event);
+        preventDefault.invoke(event);
         return true;
       } catch {
         return false;
       }
     },
     focus: (element: HTMLElement) => {
-      if (!descriptorsAreCurrent()) return false;
+      if (!keyboardDescriptorsAreCurrent()) return false;
       try {
-        NOTIFICATION_FOCUS.invoke(element);
+        focus.invoke(element);
         return true;
       } catch {
         return false;
@@ -925,6 +1124,93 @@ function captureNotificationEventPath(
   }
   if (path[path.length - 1] !== ownerDocument) return null;
   return Object.freeze(path);
+}
+
+function notificationNativeDispatchMatches(
+  facts: NotificationNativeEventFacts,
+  target: Node,
+  publication: NotificationStripPublication,
+) {
+  const expected = captureNotificationEventPath(
+    target,
+    publication.ownerDocument,
+  );
+  const currentTarget = facts.currentTarget;
+  const terminal = facts.path.at(-1);
+  return Boolean(
+    expected &&
+      facts.phase === publication.ownerWindow.Event.BUBBLING_PHASE &&
+      facts.path.length === expected.length + 1 &&
+      expected.every((entry, index) => facts.path[index] === entry) &&
+      (terminal === publication.ownerWindow ||
+        (typeof terminal === "object" &&
+          terminal !== null &&
+          "document" in terminal &&
+          terminal.document === publication.ownerDocument)) &&
+      currentTarget instanceof publication.ownerWindow.Node &&
+      currentTarget.ownerDocument === publication.ownerDocument &&
+      facts.path.includes(currentTarget) &&
+      currentTarget.contains(publication.section)
+  );
+}
+
+type NotificationReactEvent = {
+  readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
+  readonly isDefaultPrevented?: unknown;
+  readonly isPropagationStopped?: unknown;
+  readonly persist?: unknown;
+  readonly preventDefault?: unknown;
+  readonly stopPropagation?: unknown;
+};
+
+function notificationReactMethodsMatch(
+  event: object,
+  proof: NotificationReactEvent,
+  facts: NotificationNativeEventFacts,
+  intrinsics: NotificationEventIntrinsics,
+) {
+  const isDefaultPrevented = proof.isDefaultPrevented;
+  const isPropagationStopped = proof.isPropagationStopped;
+  const isPersistent = proof.isPersistent;
+  const persist = proof.persist;
+  const preventDefault = proof.preventDefault;
+  const stopPropagation = proof.stopPropagation;
+  return (
+    typeof isDefaultPrevented === "function" &&
+    typeof isPropagationStopped === "function" &&
+    isDefaultPrevented === isPropagationStopped &&
+    intrinsics.methodMatches(
+      event,
+      "isDefaultPrevented",
+      isDefaultPrevented,
+    ) &&
+    intrinsics.methodMatches(
+      event,
+      "isPropagationStopped",
+      isPropagationStopped,
+    ) &&
+    isDefaultPrevented.call(event) === facts.defaultPrevented &&
+    isPropagationStopped.call(event) === facts.cancelBubble &&
+    typeof isPersistent === "function" &&
+    intrinsics.methodMatches(event, "isPersistent", isPersistent) &&
+    isPersistent.call(event) === true &&
+    typeof persist === "function" &&
+    intrinsics.methodMatches(event, "persist", persist) &&
+    typeof preventDefault === "function" &&
+    intrinsics.methodMatches(event, "preventDefault", preventDefault) &&
+    typeof stopPropagation === "function" &&
+    intrinsics.methodMatches(event, "stopPropagation", stopPropagation)
+  );
+}
+
+function notificationReactOwnPropertiesMatch(
+  event: object,
+  entries: readonly (readonly [PropertyKey, unknown])[],
+  intrinsics: NotificationEventIntrinsics,
+) {
+  return entries.every(([property, value]) =>
+    intrinsics.ownDataMatches(event, property, value));
 }
 
 function isNotificationNavigationKey(
@@ -1191,7 +1477,7 @@ function createNotificationStripPublication(
     const ownerWindow = ownerDocument.defaultView;
     const placement = captureNotificationPlacement(section);
     if (!ownerWindow || !placement) return null;
-    const keyboard = captureNotificationKeyboardIntrinsics(ownerWindow);
+    const events = captureNotificationEventIntrinsics(ownerWindow);
     const domGuard = createNotificationDomGuard(section, placement);
     if (!domGuard) return null;
     const identity = Symbol("notification-strip-publication");
@@ -1229,15 +1515,16 @@ function createNotificationStripPublication(
           dismiss,
           openAction: action("open", index),
           dismissAction: action("dismiss", index),
+          browseAction: action("browse", index),
         });
       }),
     );
     const openControls = Object.freeze(publishedRows.map((row) => row.open));
     const focusCustody: NotificationFocusCustody = Object.freeze({
       controls: openControls,
-      activeElement: () => keyboard?.activeElement(),
+      activeElement: () => events?.activeElement(),
       focus: (element: HTMLButtonElement) =>
-        keyboard?.focus(element) === true,
+        events?.focus(element) === true,
     });
     const publication: NotificationStripPublication = Object.freeze({
       identity,
@@ -1254,7 +1541,7 @@ function createNotificationStripPublication(
       dom,
       placement,
       focusCustody,
-      keyboard,
+      events,
     });
     let retired = false;
     let retirement: Retirement | null = null;
@@ -1396,46 +1683,86 @@ function createNotificationStripPublication(
     event: ReactMouseEvent<HTMLButtonElement>,
   ): MouseEvent | null => {
     if (!event || typeof event !== "object") return null;
-    const ownerWindow = publication.ownerDocument.defaultView;
-    const nativeEvent = event.nativeEvent;
-    const target = event.target;
-    const reactEvent = event as ReactMouseEvent<HTMLButtonElement> & {
-      _reactName?: unknown;
-      isDefaultPrevented?: unknown;
-      isPropagationStopped?: unknown;
-      persist?: unknown;
-    };
-    const reactEventPrototype = Object.getPrototypeOf(event) as {
-      constructor?: { name?: unknown };
-    } | null;
-    if (
-      !ownerWindow ||
-      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
-      nativeEvent.type !== "click" ||
-      nativeEvent.button !== 0 ||
-      nativeEvent.eventPhase === ownerWindow.Event.NONE ||
-      event.type !== "click" ||
-      event.button !== 0 ||
-      !event.bubbles ||
-      event.currentTarget !== source ||
-      target !== nativeEvent.target ||
-      !(target instanceof ownerWindow.Node) ||
-      target.ownerDocument !== publication.ownerDocument ||
-      !source.contains(target) ||
-      !nativeEvent.composedPath().includes(source) ||
-      !nativeEvent.composedPath().includes(publication.section) ||
-      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
-      reactEvent._reactName !== "onClick" ||
-      typeof reactEvent.isDefaultPrevented !== "function" ||
-      typeof reactEvent.isPropagationStopped !== "function" ||
-      typeof reactEvent.persist !== "function"
-    ) {
+    const intrinsics = publication.events;
+    if (!intrinsics) return null;
+    try {
+      const nativeEvent = event.nativeEvent;
+      if (!nativeEvent || typeof nativeEvent !== "object") return null;
+      const facts = intrinsics.readClick(nativeEvent);
+      if (!facts) return null;
+      const target = facts.target;
+      const proof = event as ReactMouseEvent<HTMLButtonElement> &
+        NotificationReactEvent;
+      if (
+        facts.type !== "click" ||
+        !facts.bubbles ||
+        !facts.cancelable ||
+        facts.defaultPrevented ||
+        facts.cancelBubble ||
+        facts.button !== 0 ||
+        facts.buttons !== 0 ||
+        facts.ctrlKey ||
+        facts.altKey ||
+        facts.metaKey ||
+        facts.shiftKey ||
+        !(target instanceof publication.ownerWindow.Node) ||
+        target.ownerDocument !== publication.ownerDocument ||
+        !source.contains(target) ||
+        !publication.section.contains(source) ||
+        !notificationNativeDispatchMatches(facts, target, publication) ||
+        event.nativeEvent !== nativeEvent ||
+        event.type !== facts.type ||
+        event.currentTarget !== source ||
+        event.target !== target ||
+        event.eventPhase !== facts.phase ||
+        event.bubbles !== facts.bubbles ||
+        event.cancelable !== facts.cancelable ||
+        event.defaultPrevented !== facts.defaultPrevented ||
+        event.isTrusted !== facts.isTrusted ||
+        !Object.is(event.view, facts.view) ||
+        event.button !== facts.button ||
+        event.buttons !== facts.buttons ||
+        event.ctrlKey !== facts.ctrlKey ||
+        event.altKey !== facts.altKey ||
+        event.metaKey !== facts.metaKey ||
+        event.shiftKey !== facts.shiftKey ||
+        proof._reactName !== "onClick" ||
+        !notificationReactOwnPropertiesMatch(
+          event,
+          [
+            ["_reactName", proof._reactName],
+            ["nativeEvent", nativeEvent],
+            ["type", event.type],
+            ["currentTarget", event.currentTarget],
+            ["target", event.target],
+            ["eventPhase", event.eventPhase],
+            ["bubbles", event.bubbles],
+            ["cancelable", event.cancelable],
+            ["defaultPrevented", event.defaultPrevented],
+            ["isTrusted", event.isTrusted],
+            ["view", event.view],
+            ["button", event.button],
+            ["buttons", event.buttons],
+            ["ctrlKey", event.ctrlKey],
+            ["altKey", event.altKey],
+            ["metaKey", event.metaKey],
+            ["shiftKey", event.shiftKey],
+          ],
+          intrinsics,
+        ) ||
+        !notificationReactMethodsMatch(event, proof, facts, intrinsics)
+      ) {
+        return null;
+      }
+      const targetWasCommitted = (
+        snapshot: NotificationDomSnapshot,
+      ): boolean =>
+        snapshot.node === target ||
+        snapshot.children.some(targetWasCommitted);
+      return targetWasCommitted(publication.dom) ? nativeEvent : null;
+    } catch {
       return null;
     }
-    const targetWasCommitted = (snapshot: NotificationDomSnapshot): boolean =>
-      snapshot.node === target ||
-      snapshot.children.some(targetWasCommitted);
-    return targetWasCommitted(publication.dom) ? nativeEvent : null;
   };
 
   const claim = (
@@ -1530,122 +1857,145 @@ function createNotificationStripPublication(
     if (!event || typeof event !== "object") return null;
     const source = row.open;
     const sourceIndex = row.authority.index;
-    const nativeEvent = event.nativeEvent;
-    const reactEvent = event as ReactKeyboardEvent<HTMLButtonElement> & {
-      _reactName?: unknown;
-      isDefaultPrevented?: unknown;
-      isPropagationStopped?: unknown;
-      persist?: unknown;
-    };
-    const reactEventPrototype = Object.getPrototypeOf(event) as {
-      constructor?: { name?: unknown };
-    } | null;
-    const keyboard = publication.keyboard;
-    if (
-      !keyboard ||
-      !nativeEvent ||
-      typeof nativeEvent !== "object"
-    ) {
+    const intrinsics = publication.events;
+    if (!intrinsics) return null;
+    try {
+      const nativeEvent = event.nativeEvent;
+      if (!nativeEvent || typeof nativeEvent !== "object") return null;
+      const nativeFacts = intrinsics.readKeyboard(nativeEvent);
+      if (!nativeFacts) return null;
+      const {
+        key,
+        code,
+        location,
+        ctrlKey,
+        altKey,
+        metaKey,
+        shiftKey,
+        repeat,
+        isComposing,
+        target,
+        path,
+      } = nativeFacts;
+      if (!isNotificationNavigationKey(key)) return null;
+      const proof = event as ReactKeyboardEvent<HTMLButtonElement> &
+        NotificationReactEvent;
+      const reactIsComposing = (
+        event as ReactKeyboardEvent<HTMLButtonElement> & {
+          isComposing?: unknown;
+        }
+      ).isComposing;
+      if (
+        nativeFacts.type !== "keydown" ||
+        !nativeFacts.bubbles ||
+        !nativeFacts.cancelable ||
+        nativeFacts.defaultPrevented ||
+        nativeFacts.cancelBubble ||
+        ctrlKey ||
+        altKey ||
+        metaKey ||
+        shiftKey ||
+        repeat ||
+        isComposing ||
+        target !== source ||
+        path.length !== row.openPath.length + 1 ||
+        row.openPath.some((entry, index) => entry !== path[index]) ||
+        !notificationNativeDispatchMatches(
+          nativeFacts,
+          source,
+          publication,
+        ) ||
+        event.nativeEvent !== nativeEvent ||
+        event.type !== nativeFacts.type ||
+        event.currentTarget !== source ||
+        event.target !== target ||
+        event.eventPhase !== nativeFacts.phase ||
+        event.bubbles !== nativeFacts.bubbles ||
+        event.cancelable !== nativeFacts.cancelable ||
+        event.defaultPrevented !== nativeFacts.defaultPrevented ||
+        event.isTrusted !== nativeFacts.isTrusted ||
+        event.key !== key ||
+        event.code !== code ||
+        event.location !== location ||
+        event.ctrlKey !== ctrlKey ||
+        event.altKey !== altKey ||
+        event.metaKey !== metaKey ||
+        event.shiftKey !== shiftKey ||
+        event.repeat !== repeat ||
+        (reactIsComposing !== undefined &&
+          reactIsComposing !== isComposing) ||
+        proof._reactName !== "onKeyDown" ||
+        !notificationReactOwnPropertiesMatch(
+          event,
+          [
+            ["_reactName", proof._reactName],
+            ["nativeEvent", nativeEvent],
+            ["type", event.type],
+            ["currentTarget", event.currentTarget],
+            ["target", event.target],
+            ["eventPhase", event.eventPhase],
+            ["bubbles", event.bubbles],
+            ["cancelable", event.cancelable],
+            ["defaultPrevented", event.defaultPrevented],
+            ["isTrusted", event.isTrusted],
+            ["key", event.key],
+            ["code", event.code],
+            ["location", event.location],
+            ["ctrlKey", event.ctrlKey],
+            ["altKey", event.altKey],
+            ["metaKey", event.metaKey],
+            ["shiftKey", event.shiftKey],
+            ["repeat", event.repeat],
+          ],
+          intrinsics,
+        ) ||
+        !notificationReactMethodsMatch(
+          event,
+          proof,
+          nativeFacts,
+          intrinsics,
+        ) ||
+        publication.focusCustody.activeElement() !== source ||
+        publication.openControls[sourceIndex] !== source
+      ) {
+        return null;
+      }
+      let destinationIndex = sourceIndex;
+      if (key === "ArrowDown") {
+        destinationIndex = (sourceIndex + 1) % publication.rows.length;
+      } else if (key === "ArrowUp") {
+        destinationIndex =
+          (sourceIndex - 1 + publication.rows.length) %
+          publication.rows.length;
+      } else if (key === "Home") {
+        destinationIndex = 0;
+      } else if (key === "End") {
+        destinationIndex = publication.rows.length - 1;
+      }
+      const destinationRow = publication.rows[destinationIndex];
+      const destination = publication.openControls[destinationIndex];
+      if (
+        !destinationRow ||
+        !destination ||
+        destinationRow.open !== destination ||
+        destinationRow.authority !== rows[destinationIndex] ||
+        !destination.isConnected ||
+        !isEffectivelyEnabled(destination)
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        publicationIdentity: publication.identity,
+        nativeEvent,
+        source,
+        sourceIndex,
+        destination,
+        destinationIndex,
+        key,
+      });
+    } catch {
       return null;
     }
-    const nativeFacts = keyboard.read(nativeEvent);
-    if (!nativeFacts) return null;
-    const {
-      key,
-      ctrlKey,
-      altKey,
-      metaKey,
-      shiftKey,
-      repeat,
-      isComposing,
-      target,
-      path,
-    } = nativeFacts;
-    if (!isNotificationNavigationKey(key)) return null;
-    const reactIsComposing = (
-      event as unknown as { isComposing?: unknown }
-    ).isComposing;
-    if (
-      nativeFacts.type !== "keydown" ||
-      nativeFacts.phase === publication.ownerWindow.Event.NONE ||
-      !nativeFacts.bubbles ||
-      !nativeFacts.cancelable ||
-      nativeFacts.defaultPrevented ||
-      nativeFacts.cancelBubble ||
-      nativeFacts.isTrusted !== true ||
-      nativeFacts.view !== publication.ownerWindow ||
-      ctrlKey ||
-      altKey ||
-      metaKey ||
-      repeat ||
-      isComposing ||
-      target !== source ||
-      path.length !== row.openPath.length + 1 ||
-      row.openPath.some((entry, index) => entry !== path[index]) ||
-      event.type !== "keydown" ||
-      event.currentTarget !== source ||
-      event.target !== target ||
-      event.key !== key ||
-      event.ctrlKey !== ctrlKey ||
-      event.altKey !== altKey ||
-      event.metaKey !== metaKey ||
-      event.shiftKey !== shiftKey ||
-      event.repeat !== repeat ||
-      (reactIsComposing !== undefined &&
-        reactIsComposing !== isComposing) ||
-      event.defaultPrevented ||
-      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
-      reactEvent._reactName !== "onKeyDown" ||
-      typeof reactEvent.isDefaultPrevented !== "function" ||
-      reactEvent.isDefaultPrevented() ||
-      typeof reactEvent.isPropagationStopped !== "function" ||
-      reactEvent.isPropagationStopped() ||
-      typeof reactEvent.persist !== "function" ||
-      publication.focusCustody.activeElement() !== source ||
-      publication.openControls[sourceIndex] !== source
-    ) {
-      return null;
-    }
-    let destinationIndex = sourceIndex;
-    if (key === "ArrowDown") {
-      destinationIndex = (sourceIndex + 1) % publication.rows.length;
-    } else if (key === "ArrowUp") {
-      destinationIndex =
-        (sourceIndex - 1 + publication.rows.length) % publication.rows.length;
-    } else if (key === "Home") {
-      destinationIndex = 0;
-    } else if (key === "End") {
-      destinationIndex = publication.rows.length - 1;
-    }
-    const destinationRow = publication.rows[destinationIndex];
-    const destination = publication.openControls[destinationIndex];
-    if (
-      !destinationRow ||
-      !destination ||
-      destinationRow.open !== destination ||
-      destinationRow.authority !== rows[destinationIndex] ||
-      !destination.isConnected ||
-      !isEffectivelyEnabled(destination)
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      publicationIdentity: publication.identity,
-      nativeEvent,
-      source,
-      sourceIndex,
-      destination,
-      destinationIndex,
-      key,
-      ctrlKey,
-      altKey,
-      metaKey,
-      shiftKey,
-      repeat,
-      isComposing,
-      target,
-      path: Object.freeze([...path]),
-    });
   };
 
   const establish = () => {
@@ -1749,15 +2099,20 @@ function createNotificationStripPublication(
     if (
       !facts ||
       facts.publicationIdentity !== publication.identity ||
-      !coordinator.claimKeyboard(publication, event, facts.nativeEvent)
+      !coordinator.claimKeyboard(
+        publication,
+        publishedRow.browseAction,
+        event,
+        facts.nativeEvent,
+      )
     ) {
       return;
     }
-    const keyboard = publication.keyboard;
+    const events = publication.events;
     if (
-      !keyboard ||
-      !keyboard.preventDefault(facts.nativeEvent) ||
-      !keyboard.defaultWasPrevented(facts.nativeEvent) ||
+      !events ||
+      !events.preventDefault(facts.nativeEvent) ||
+      !events.defaultWasPrevented(facts.nativeEvent) ||
       runtime.isRetired() ||
       !coordinator.isCurrent(publication) ||
       !factsAreCurrent() ||
