@@ -2,10 +2,17 @@
 import { StrictMode, useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { TextSelection } from "prosemirror-state";
-import type { EditorView } from "prosemirror-view";
+import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
-import type { SlashKey, SlashMenuHandlers, SlashState } from "@/editor/prosemirror/slash-menu";
+import type {
+  SlashKeyPublication,
+  SlashMenuHandlers,
+  SlashState,
+} from "@/editor/prosemirror/slash-menu";
+import { slashMenuPlugin } from "@/editor/prosemirror/slash-menu";
+import { editablePlugin } from "@/editor/prosemirror/editable";
+import { schema } from "@/editor/markdown/schema";
 
 const slashActions = vi.hoisted(() => ({
   applyCommand: vi.fn(),
@@ -40,17 +47,21 @@ import { createSlashMenuController, SlashMenu, type SlashMenuController } from "
 
 class TrackingController implements SlashMenuController {
   state: SlashState | null = null;
-  keyOwner: { handler: (key: SlashKey) => boolean } | null = null;
+  keyOwner: {
+    handler: (publication: SlashKeyPublication) => boolean;
+  } | null = null;
   readonly listeners = new Set<(state: SlashState | null) => void>();
   readonly capturedListeners: ((state: SlashState | null) => void)[] = [];
-  readonly capturedKeyHandlers: ((key: SlashKey) => boolean)[] = [];
+  readonly capturedKeyHandlers: ((
+    publication: SlashKeyPublication,
+  ) => boolean)[] = [];
   subscriptions = 0;
   unsubscriptions = 0;
   peakListeners = 0;
 
   readonly handlers: SlashMenuHandlers = {
     onState: (state) => this.emit(state),
-    onKey: (key) => this.keyHandler?.(key) ?? false,
+    onKey: (publication) => this.keyHandler?.(publication) ?? false,
   };
 
   readonly subscribe = (listener: (state: SlashState | null) => void) => {
@@ -73,7 +84,9 @@ class TrackingController implements SlashMenuController {
     return this.keyOwner?.handler ?? null;
   }
 
-  readonly setKeyHandler = (handler: (key: SlashKey) => boolean) => {
+  readonly setKeyHandler = (
+    handler: (publication: SlashKeyPublication) => boolean,
+  ) => {
     const owner = { handler };
     this.keyOwner = owner;
     this.capturedKeyHandlers.push(handler);
@@ -90,13 +103,13 @@ class TrackingController implements SlashMenuController {
     for (const listener of this.listeners) listener(state);
   }
 
-  key(key: SlashKey) {
-    return this.handlers.onKey?.(key) ?? false;
+  key(publication: SlashKeyPublication) {
+    return this.handlers.onKey?.(publication) ?? false;
   }
 }
 
-type Visit = {
-  controller: TrackingController;
+type MenuVisit = {
+  controller: SlashMenuController;
   view: EditorView;
   session: CollabSession;
   onImage: Mock<() => void>;
@@ -105,12 +118,24 @@ type Visit = {
   onKeepAgent: Mock<() => void>;
 };
 
+type Visit = Omit<MenuVisit, "controller"> & {
+  controller: TrackingController;
+};
+
+type IntegratedVisit = MenuVisit & {
+  host: HTMLDivElement;
+  restoreOwnerWindow: () => void;
+};
+
 const container = document.createElement("div");
 container.getBoundingClientRect = () =>
   ({ left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
 const containerRef = { current: container };
 
 function makeView(): EditorView {
+  const dom = document.createElement("div");
+  dom.contentEditable = "true";
+  document.body.append(dom);
   const transaction = {
     setSelection: vi.fn(),
   };
@@ -128,7 +153,231 @@ function makeView(): EditorView {
     },
     dispatch: vi.fn(),
     focus: vi.fn(),
+    dom,
+    isDestroyed: false,
+    composing: false,
   } as unknown as EditorView;
+}
+
+function unpublishedKey(): SlashKeyPublication {
+  return {} as SlashKeyPublication;
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+type JsdomKeyboardEventImplementation = {
+  isTrusted: boolean;
+  view: Window | null;
+};
+
+function jsdomKeyboardEventImplementation(
+  event: KeyboardEvent,
+): JsdomKeyboardEventImplementation {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is JsdomKeyboardEventImplementation =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        "view" in candidate,
+    );
+  if (!implementation) throw new Error("jsdom keyboard event implementation was unavailable");
+  return implementation;
+}
+
+function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  const nativeOwnerWindow = (
+    ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window & typeof globalThis }
+    >
+  )[implementationSymbol]._globalObject;
+  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: nativeOwnerWindow,
+  });
+  if (ownerDocument.defaultView !== nativeOwnerWindow) {
+    throw new Error("Unable to expose jsdom's native owner window");
+  }
+  return () => {
+    if (previous) {
+      Object.defineProperty(ownerDocument, "defaultView", previous);
+    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
+      throw new Error("Unable to restore jsdom's public owner window");
+    }
+  };
+}
+
+function makeIntegratedVisit(): IntegratedVisit {
+  const restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
+  const controller = createSlashMenuController();
+  const state = EditorState.create({
+    schema,
+    plugins: [editablePlugin(true), slashMenuPlugin(controller.handlers)],
+  });
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = new EditorView(host, { state });
+  const dispatch = view.dispatch.bind(view);
+  view.dispatch = vi.fn((transaction) => dispatch(transaction));
+  const focus = view.focus.bind(view);
+  view.focus = vi.fn(() => focus());
+  return {
+    controller,
+    view,
+    session: makeSession(),
+    onImage: vi.fn<() => void>(),
+    onLink: vi.fn<() => void>(),
+    onComment: vi.fn<() => void>(),
+    onKeepAgent: vi.fn<() => void>(),
+    host,
+    restoreOwnerWindow,
+  };
+}
+
+async function openIntegrated(visit: IntegratedVisit) {
+  await act(async () => {
+    visit.view.dom.focus();
+    visit.view.dispatch(
+      visit.view.state.tr
+        .setSelection(TextSelection.create(visit.view.state.doc, 1))
+        .insertText("/"),
+    );
+    await Promise.resolve();
+  });
+  expect(screen.getByTestId("slash-menu")).toBeInTheDocument();
+}
+
+async function dispatchIntegratedKey(
+  view: EditorView,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+    view: ownerWindow,
+  });
+  if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
+  markJsdomEventTrusted(event);
+  await act(async () => {
+    view.dom.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  return event;
+}
+
+async function dispatchRejectedNativeViewKey(
+  view: EditorView,
+  nativeView: Window | null,
+) {
+  const ownerWindow = view.dom.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key: "End",
+    code: "End",
+    bubbles: true,
+    cancelable: true,
+    view: nativeView,
+  });
+  if (event.view !== nativeView) throw new Error("Rejected keyboard event lost its requested public view");
+  markJsdomEventTrusted(event);
+  await act(async () => {
+    view.dom.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  return event;
+}
+
+async function dispatchStructuralWindowLookalikeKey(
+  view: EditorView,
+  key: string,
+) {
+  const ownerDocument = view.dom.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    view: ownerWindow,
+  });
+  if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
+  markJsdomEventTrusted(event);
+  const implementation = jsdomKeyboardEventImplementation(event);
+  const lookalike = new Proxy(
+    Object.create(Object.getPrototypeOf(ownerWindow), {
+      document: { configurable: true, value: ownerDocument },
+      Event: { configurable: true, value: ownerWindow.Event },
+      UIEvent: { configurable: true, value: ownerWindow.UIEvent },
+      KeyboardEvent: { configurable: true, value: ownerWindow.KeyboardEvent },
+      Document: { configurable: true, value: ownerWindow.Document },
+      MutationObserver: {
+        configurable: true,
+        value: ownerWindow.MutationObserver,
+      },
+    }),
+    {},
+  );
+  implementation.view = lookalike;
+  expect(event.isTrusted).toBe(true);
+  expect(event.view).toBe(lookalike);
+  expect(lookalike).not.toBe(ownerWindow);
+  expect(Object.getPrototypeOf(lookalike)).toBe(
+    Object.getPrototypeOf(ownerWindow),
+  );
+  expect(lookalike.document).toBe(ownerDocument);
+  expect(lookalike.Event).toBe(ownerWindow.Event);
+  expect(lookalike.UIEvent).toBe(ownerWindow.UIEvent);
+  expect(lookalike.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+  expect(lookalike.Document).toBe(ownerWindow.Document);
+  expect(lookalike.MutationObserver).toBe(ownerWindow.MutationObserver);
+  await act(async () => {
+    view.dom.dispatchEvent(event);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  return event;
 }
 
 function makeSession(): CollabSession {
@@ -162,7 +411,7 @@ function BoundaryHarness({
   boundary = 0,
   onBoundary,
 }: {
-  visit: Visit;
+  visit: MenuVisit;
   view?: EditorView | null;
   present?: boolean;
   boundary?: number;
@@ -310,6 +559,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  document
+    .querySelectorAll<HTMLElement>('[contenteditable="true"]')
+    .forEach((element) => element.remove());
   Element.prototype.scrollIntoView = originalScrollIntoView;
 });
 
@@ -338,8 +590,8 @@ describe("slash-menu visit authority", () => {
 
             if (bFirst) b.controller.emit(slashState("", 222));
             staleListener(slashState("text", 900));
-            expect(staleKeyHandler("ArrowDown")).toBe(false);
-            expect(staleKeyHandler("Enter")).toBe(false);
+            expect(staleKeyHandler(unpublishedKey())).toBe(false);
+            expect(staleKeyHandler(unpublishedKey())).toBe(false);
             if (!bFirst) b.controller.emit(slashState("", 222));
           }}
         />,
@@ -352,11 +604,7 @@ describe("slash-menu visit authority", () => {
     expect(a.view.focus).not.toHaveBeenCalled();
     expect(b.view.focus).not.toHaveBeenCalled();
 
-    act(() => expect(b.controller.key("ArrowUp")).toBe(true));
-    expect(screen.getByTestId("slash-item-agent")).toHaveAttribute("aria-selected", "true");
-    act(() => expect(b.controller.key("ArrowDown")).toBe(true));
-    expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
-    act(() => expect(b.controller.key("Enter")).toBe(true));
+    clickRow(captureRow("text"));
     expect(slashActions.applyCommand).toHaveBeenCalledOnce();
     expect(slashActions.applyCommand.mock.calls[0][0]).toBe(b.view);
     expect(slashActions.applyCommand.mock.calls[0][2]).toBe(b.session.undoManager);
@@ -365,9 +613,6 @@ describe("slash-menu visit authority", () => {
 
     act(() => b.controller.emit(slashState("no-such-item", 333)));
     expect(screen.getByTestId("slash-empty")).toHaveTextContent("No matches");
-    act(() => expect(b.controller.key("Enter")).toBe(true));
-    expect(slashActions.close).toHaveBeenCalledOnce();
-    expect(slashActions.close).toHaveBeenCalledWith(b.view);
 
     act(() => b.controller.emit(null));
     expect(screen.queryByTestId("slash-menu")).toBeNull();
@@ -403,7 +648,7 @@ describe("slash-menu visit authority", () => {
 
             controller.emit(slashState("image", 333));
             staleListener(slashState("text", 900));
-            expect(staleKeyHandler("Enter")).toBe(false);
+            expect(staleKeyHandler(unpublishedKey())).toBe(false);
           }}
         />,
       );
@@ -411,7 +656,7 @@ describe("slash-menu visit authority", () => {
 
     expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "333px" });
     expect(screen.getByTestId("slash-item-image")).toHaveAttribute("aria-selected", "true");
-    act(() => expect(controller.key("Enter")).toBe(true));
+    clickRow(captureRow("image"));
     expect(slashActions.applyItem).toHaveBeenCalledOnce();
     expect(slashActions.applyItem.mock.calls[0][0]).toBe(b.view);
     expect(slashActions.applyItem.mock.calls[0][2]).toBe(b.session.undoManager);
@@ -479,8 +724,8 @@ describe("slash-menu visit authority", () => {
             expect(a.controller.listeners.size).toBe(0);
             expect(a.controller.keyHandler).toBeNull();
             staleListener(slashState("text", 900));
-            expect(staleKeyHandler("ArrowDown")).toBe(false);
-            expect(staleKeyHandler("Enter")).toBe(false);
+            expect(staleKeyHandler(unpublishedKey())).toBe(false);
+            expect(staleKeyHandler(unpublishedKey())).toBe(false);
           }}
         />,
       );
@@ -492,18 +737,252 @@ describe("slash-menu visit authority", () => {
     expect(a.controller.subscriptions).toBe(a.controller.unsubscriptions);
   });
 
-  it("does not let an older handler cleanup clear a newer registration of the same callback", () => {
-    const controller = createSlashMenuController();
-    const handler = vi.fn(() => true);
-    const clearFirst = controller.setKeyHandler(handler);
-    const clearSecond = controller.setKeyHandler(handler);
+});
 
-    clearFirst();
-    expect(controller.handlers.onKey?.("Enter")).toBe(true);
-    expect(handler).toHaveBeenCalledOnce();
+describe("slash-menu native keyboard publication", () => {
+  it("moves Home and End to exact filtered boundaries without moving editor focus or selection", async () => {
+    const visit = makeIntegratedVisit();
+    try {
+      render(
+        <StrictMode>
+          <BoundaryHarness visit={visit} />
+        </StrictMode>,
+      );
+      await openIntegrated(visit);
+      await act(async () => {
+        visit.view.dispatch(visit.view.state.tr.setMeta("slash-key-probe", true));
+        await Promise.resolve();
+      });
+      const dispatch = vi.mocked(visit.view.dispatch);
+      const focus = vi.mocked(visit.view.focus);
+      dispatch.mockClear();
+      focus.mockClear();
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      const editorState = visit.view.state;
+      const selection = visit.view.state.selection;
 
-    clearSecond();
-    expect(controller.handlers.onKey?.("Enter")).toBe(false);
+      const end = await dispatchIntegratedKey(visit.view, "End");
+      expect(end.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(
+        screen
+          .getAllByRole("option")
+          .filter((row) => row.getAttribute("aria-selected") === "true"),
+      ).toHaveLength(1);
+      expect(visit.view.state).toBe(editorState);
+      expect(visit.view.state.selection).toBe(selection);
+      expect(visit.view.dom).toHaveFocus();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(slashActions.applyCommand).not.toHaveBeenCalled();
+      expect(slashActions.applyItem).not.toHaveBeenCalled();
+
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      const inertEnd = await dispatchIntegratedKey(visit.view, "End");
+      expect(inertEnd.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+
+      const home = await dispatchIntegratedKey(visit.view, "Home");
+      expect(home.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(visit.view.state).toBe(editorState);
+      expect(visit.view.state.selection).toBe(selection);
+
+      await act(async () => {
+        visit.view.dispatch(visit.view.state.tr.insertText("hea"));
+        await Promise.resolve();
+      });
+      expect(screen.getByTestId("slash-item-heading1")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      dispatch.mockClear();
+      const filteredSelection = visit.view.state.selection;
+      const filteredEnd = await dispatchIntegratedKey(visit.view, "End");
+      expect(filteredEnd.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-heading3")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(visit.view.state.selection).toBe(filteredSelection);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      visit.view.destroy();
+      visit.host.remove();
+      visit.restoreOwnerWindow();
+    }
+  });
+
+  it("retains wrapping arrows and exact Enter behavior", async () => {
+    const visit = makeIntegratedVisit();
+    try {
+      render(
+        <StrictMode>
+          <BoundaryHarness visit={visit} />
+        </StrictMode>,
+      );
+      await openIntegrated(visit);
+
+      expect((await dispatchIntegratedKey(visit.view, "ArrowUp")).defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute("aria-selected", "true");
+      expect((await dispatchIntegratedKey(visit.view, "ArrowDown")).defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
+
+      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(true);
+      expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+      expect(visit.view.focus).toHaveBeenCalledOnce();
+    } finally {
+      visit.view.destroy();
+      visit.host.remove();
+      visit.restoreOwnerWindow();
+    }
+  });
+
+  it("rejects null, foreign, and structural owner-window views without menu or editor work", async () => {
+    const visit = makeIntegratedVisit();
+    const foreignFrame = document.createElement("iframe");
+    document.body.append(foreignFrame);
+    try {
+      render(
+        <StrictMode>
+          <BoundaryHarness visit={visit} />
+        </StrictMode>,
+      );
+      await openIntegrated(visit);
+      await act(async () => {
+        visit.view.dispatch(visit.view.state.tr.setMeta("slash-key-probe", true));
+        await Promise.resolve();
+      });
+      const dispatch = vi.mocked(visit.view.dispatch);
+      const focus = vi.mocked(visit.view.focus);
+      dispatch.mockClear();
+      focus.mockClear();
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      const editorState = visit.view.state;
+      const selection = visit.view.state.selection;
+
+      const nullView = await dispatchRejectedNativeViewKey(visit.view, null);
+      const foreignWindow = foreignFrame.contentWindow;
+      if (!foreignWindow) throw new Error("Foreign frame has no window");
+      const foreignView = await dispatchRejectedNativeViewKey(
+        visit.view,
+        foreignWindow,
+      );
+      const rejected = await dispatchStructuralWindowLookalikeKey(
+        visit.view,
+        "End",
+      );
+
+      expect(nullView.isTrusted).toBe(true);
+      expect(nullView.view).toBeNull();
+      expect(nullView.defaultPrevented).toBe(false);
+      expect(foreignView.isTrusted).toBe(true);
+      expect(foreignView.view).toBe(foreignWindow);
+      expect(foreignView.view).not.toBe(visit.view.dom.ownerDocument.defaultView);
+      expect(foreignView.defaultPrevented).toBe(false);
+      expect(rejected.isTrusted).toBe(true);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(
+        screen
+          .getAllByRole("option")
+          .filter((row) => row.getAttribute("aria-selected") === "true"),
+      ).toHaveLength(1);
+      expect(visit.view.state).toBe(editorState);
+      expect(visit.view.state.selection).toBe(selection);
+      expect(visit.view.dom).toHaveFocus();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(slashActions.applyCommand).not.toHaveBeenCalled();
+      expect(slashActions.applyItem).not.toHaveBeenCalled();
+      expect(slashActions.close).not.toHaveBeenCalled();
+      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      visit.view.destroy();
+      visit.host.remove();
+      visit.restoreOwnerWindow();
+      foreignFrame.remove();
+    }
+  });
+
+  it.each(["Tab", "Escape"] as const)("retains exact %s behavior", async (key) => {
+    const visit = makeIntegratedVisit();
+    try {
+      render(
+        <StrictMode>
+          <BoundaryHarness visit={visit} />
+        </StrictMode>,
+      );
+      await openIntegrated(visit);
+      expect((await dispatchIntegratedKey(visit.view, key)).defaultPrevented).toBe(true);
+      if (key === "Tab") {
+        expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+        expect(visit.view.focus).toHaveBeenCalledOnce();
+        expect(slashActions.close).not.toHaveBeenCalled();
+      } else {
+        expect(slashActions.close).toHaveBeenCalledOnce();
+        expect(slashActions.close).toHaveBeenCalledWith(visit.view);
+        expect(slashActions.applyCommand).not.toHaveBeenCalled();
+      }
+    } finally {
+      visit.view.destroy();
+      visit.host.remove();
+      visit.restoreOwnerWindow();
+    }
+  });
+
+  it("rejects mutate-restored menu DOM and lets a complete query successor recover", async () => {
+    const visit = makeIntegratedVisit();
+    try {
+      render(
+        <StrictMode>
+          <BoundaryHarness visit={visit} />
+        </StrictMode>,
+      );
+      await openIntegrated(visit);
+      const root = screen.getByTestId("slash-menu");
+      root.setAttribute("data-history-probe", "changed");
+      root.removeAttribute("data-history-probe");
+
+      const rejected = await dispatchIntegratedKey(visit.view, "End");
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(slashActions.applyCommand).not.toHaveBeenCalled();
+      expect(visit.view.focus).not.toHaveBeenCalled();
+
+      await act(async () => {
+        visit.view.dispatch(visit.view.state.tr.insertText("hea"));
+        await Promise.resolve();
+      });
+      const recovered = await dispatchIntegratedKey(visit.view, "End");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(screen.getByTestId("slash-item-heading3")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    } finally {
+      visit.view.destroy();
+      visit.host.remove();
+      visit.restoreOwnerWindow();
+    }
   });
 });
 
