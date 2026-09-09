@@ -47,7 +47,13 @@ vi.mock("@/components/ui/primitives", async () => {
         </MenuContext.Provider>
       );
     },
-    MenuTrigger: ({ children }: { children: ReactNode }) => {
+    MenuTrigger: ({
+      children,
+      onKeyDown: onTriggerKeyDown,
+    }: {
+      children: ReactNode;
+      onKeyDown?: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+    }) => {
       const context = React.useContext(MenuContext);
       if (!context || !React.isValidElement<Record<string, unknown>>(children)) {
         return children;
@@ -59,6 +65,7 @@ vi.mock("@/components/ui/primitives", async () => {
       }>;
       const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
         child.props.onKeyDown?.(event);
+        onTriggerKeyDown?.(event);
         if (event.defaultPrevented || child.props.disabled) return;
         if (event.key === "Enter" || event.key === " ") {
           context.change(!context.open);
@@ -73,7 +80,10 @@ vi.mock("@/components/ui/primitives", async () => {
           event.preventDefault();
         }
       };
-      Object.assign(onKeyDown, { childHandler: child.props.onKeyDown });
+      Object.assign(onKeyDown, {
+        captureHandler: child.props.onKeyDown,
+        actionHandler: onTriggerKeyDown,
+      });
       return React.cloneElement(child, {
         "aria-haspopup": "menu",
         "aria-expanded": context.open,
@@ -310,14 +320,20 @@ function reactHandler<T>(element: HTMLElement, name: string): T {
   return handler as T;
 }
 
-function headingChildKeyHandler(element: HTMLButtonElement) {
+function headingKeyHandlers(element: HTMLButtonElement) {
   const handler = reactHandler<
-    HeadingKeyHandler & { childHandler?: HeadingKeyHandler }
+    HeadingKeyHandler & {
+      captureHandler?: HeadingKeyHandler;
+      actionHandler?: HeadingKeyHandler;
+    }
   >(element, "onKeyDown");
-  if (!handler.childHandler) {
-    throw new Error("Text style did not retain its child key handler");
+  if (!handler.captureHandler || !handler.actionHandler) {
+    throw new Error("Text style did not retain its cross-boundary key handlers");
   }
-  return handler.childHandler;
+  return {
+    capture: handler.captureHandler,
+    action: handler.actionHandler,
+  };
 }
 
 function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
@@ -896,7 +912,7 @@ describe("Toolbar Text style trusted arrows", () => {
     const f = fixture();
     strictRenderToolbar(f.props);
     const trigger = textStyle();
-    const handler = headingChildKeyHandler(trigger);
+    const handlers = headingKeyHandlers(trigger);
     const event = headingKeyEvent(trigger, "ArrowUp");
     trigger.focus();
     focus.mockClear();
@@ -916,7 +932,8 @@ describe("Toolbar Text style trusted arrows", () => {
         value: "a",
       });
       try {
-        handler(reactEvent);
+        handlers.capture(reactEvent);
+        handlers.action(reactEvent);
       } finally {
         Object.defineProperty(constructor, "name", descriptor);
       }
@@ -1191,15 +1208,36 @@ describe("Toolbar Text style trusted arrows", () => {
     const f = fixture();
     strictRenderToolbar(f.props);
     let trigger = textStyle();
-    const handler = headingChildKeyHandler(trigger);
+    const handlers = headingKeyHandlers(trigger);
     const fabricatedPreventDefault = vi.fn();
-    handler({
+    handlers.action({
       key: "ArrowDown",
       currentTarget: trigger,
       target: trigger,
       preventDefault: fabricatedPreventDefault,
     } as unknown as Parameters<HeadingKeyHandler>[0]);
     expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const captureOnly = headingKeyEvent(trigger, "ArrowDown");
+    dispatchHeadingKeyWithHandler(trigger, captureOnly, (event) => {
+      handlers.capture(event);
+    });
+    expect(captureOnly.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+
+    const bubbleOnly = headingKeyEvent(trigger, "ArrowDown");
+    dispatchHeadingKeyWithHandler(trigger, bubbleOnly, (event) => {
+      handlers.action(event);
+    });
+    expect(bubbleOnly.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
     expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     const iframe = document.createElement("iframe");
@@ -1213,7 +1251,7 @@ describe("Toolbar Text style trusted arrows", () => {
       iframe.contentWindow,
       "ArrowDown",
     );
-    handler({
+    handlers.action({
       key: "ArrowDown",
       currentTarget: trigger,
       target: trigger,
@@ -1237,7 +1275,8 @@ describe("Toolbar Text style trusted arrows", () => {
       const event = headingKeyEvent(trigger, "ArrowDown");
       const crossedNative = headingKeyEvent(trigger, "ArrowDown");
       dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
-        handler(
+        handlers.capture(reactEvent);
+        handlers.action(
           new Proxy(reactEvent, {
             get(target, current, receiver) {
               if (current !== property) {
@@ -1276,13 +1315,14 @@ describe("Toolbar Text style trusted arrows", () => {
     const accepted = headingKeyEvent(trigger, "ArrowUp");
     let activeReactEvent: Parameters<HeadingKeyHandler>[0] | null = null;
     preventDefault.mockImplementation(function (this: Event) {
-      if (activeReactEvent) handler(activeReactEvent);
+      if (activeReactEvent) handlers.action(activeReactEvent);
       Reflect.apply(nativePreventDefault, this, []);
     });
     dispatchHeadingKeyWithHandler(trigger, accepted, (event) => {
+      handlers.capture(event);
       activeReactEvent = event;
-      handler(event);
-      handler(event);
+      handlers.action(event);
+      handlers.action(event);
       activeReactEvent = null;
     });
     expect(accepted.defaultPrevented).toBe(true);
@@ -1333,13 +1373,17 @@ describe("Toolbar Text style trusted arrows", () => {
 
     view.update(f.props, 1);
     trigger = textStyle();
-    const staleClosedHandler = headingChildKeyHandler(trigger);
+    const staleClosedHandlers = headingKeyHandlers(trigger);
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
     trigger = textStyle();
     trigger.focus();
     focus.mockClear();
     const staleOpen = headingKeyEvent(trigger, "ArrowUp");
-    dispatchHeadingKeyWithHandler(trigger, staleOpen, staleClosedHandler);
+    const currentOpenHandlers = headingKeyHandlers(trigger);
+    dispatchHeadingKeyWithHandler(trigger, staleOpen, (event) => {
+      currentOpenHandlers.capture(event);
+      staleClosedHandlers.action(event);
+    });
     expect(staleOpen.defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
@@ -1439,15 +1483,16 @@ describe("Toolbar Text style trusted arrows", () => {
     const f = fixture();
     const view = strictRenderToolbar(f.props);
     let trigger = textStyle();
-    const handler = headingChildKeyHandler(trigger);
+    const handlers = headingKeyHandlers(trigger);
     const ref = reactRef(trigger);
     const event = headingKeyEvent(trigger, "ArrowUp");
     trigger.focus();
     focus.mockClear();
 
     dispatchHeadingKeyWithHandler(trigger, event, (reactEvent) => {
+      handlers.capture(reactEvent);
       ref(null);
-      handler(reactEvent);
+      handlers.action(reactEvent);
     });
     expect(event.defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();

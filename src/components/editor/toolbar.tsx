@@ -113,6 +113,7 @@ type ToolbarPublication = Readonly<{
   isRetired: () => boolean;
   onFocus: (event: FocusEvent<HTMLDivElement>) => void;
   onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
+  onHeadingKeyCapture: (event: KeyboardEvent<HTMLButtonElement>) => void;
   onHeadingKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
   onHeadingOpenChange: (open: boolean) => void;
   onHeadingClose: (event: Event) => void;
@@ -265,10 +266,13 @@ interface ToolbarKeyboardSnapshot {
   readonly view: Window | null;
 }
 
-type HeadingReactKeyEvent = KeyboardEvent<HTMLButtonElement> & {
-  readonly _reactName?: unknown;
-  readonly isPersistent?: unknown;
-};
+interface HeadingKeyPublication {
+  readonly source: ToolbarPublication;
+  readonly reactEvent: KeyboardEvent<HTMLButtonElement>;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly snapshot: ToolbarKeyboardSnapshot;
+  readonly preventDefault: KeyboardEvent<HTMLButtonElement>["preventDefault"];
+}
 
 interface HeadingCloseVisit {
   readonly source: ToolbarPublication;
@@ -726,60 +730,6 @@ function captureToolbarKeyboardIntrinsics(
   });
 }
 
-interface ToolbarReactMethods {
-  readonly preventDefault: HeadingReactKeyEvent["preventDefault"];
-}
-
-function captureToolbarReactMethods(
-  event: object,
-  proof: HeadingReactKeyEvent,
-  snapshot: ToolbarKeyboardSnapshot,
-  intrinsics: ToolbarKeyboardIntrinsics,
-): ToolbarReactMethods | null {
-  try {
-    const candidate = event as HeadingReactKeyEvent;
-    const isDefaultPrevented = candidate.isDefaultPrevented;
-    const isPropagationStopped = candidate.isPropagationStopped;
-    const isPersistent = proof.isPersistent;
-    const persist = candidate.persist;
-    const preventDefault = candidate.preventDefault;
-    const stopPropagation = candidate.stopPropagation;
-    if (
-      typeof isDefaultPrevented === "function" &&
-      typeof isPropagationStopped === "function" &&
-      isDefaultPrevented === isPropagationStopped &&
-      intrinsics.methodMatches(
-        event,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) &&
-      intrinsics.methodMatches(
-        event,
-        "isPropagationStopped",
-        isPropagationStopped,
-      ) &&
-      intrinsics.apply(isDefaultPrevented, event, []) ===
-        snapshot.defaultPrevented &&
-      intrinsics.apply(isPropagationStopped, event, []) ===
-        snapshot.cancelBubble &&
-      typeof isPersistent === "function" &&
-      intrinsics.methodMatches(event, "isPersistent", isPersistent) &&
-      intrinsics.apply(isPersistent, event, []) === true &&
-      typeof persist === "function" &&
-      intrinsics.methodMatches(event, "persist", persist) &&
-      typeof preventDefault === "function" &&
-      intrinsics.methodMatches(event, "preventDefault", preventDefault) &&
-      typeof stopPropagation === "function" &&
-      intrinsics.methodMatches(event, "stopPropagation", stopPropagation)
-    ) {
-      return Object.freeze({ preventDefault });
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function readToolbarKeyboardEvent(
   event: Event,
   intrinsics: ToolbarKeyboardIntrinsics,
@@ -846,6 +796,69 @@ function toolbarKeyboardPathMatches(
     expected.every((entry, index) => path[index] === entry) &&
     terminal === ownerWindow
   );
+}
+
+function toolbarKeyboardSnapshotsMatch(
+  captured: ToolbarKeyboardSnapshot,
+  current: ToolbarKeyboardSnapshot,
+): boolean {
+  return (
+    captured.type === current.type &&
+    captured.target === current.target &&
+    captured.currentTarget === current.currentTarget &&
+    captured.eventPhase === current.eventPhase &&
+    captured.bubbles === current.bubbles &&
+    captured.cancelable === current.cancelable &&
+    captured.defaultPrevented === current.defaultPrevented &&
+    captured.cancelBubble === current.cancelBubble &&
+    captured.key === current.key &&
+    captured.code === current.code &&
+    captured.location === current.location &&
+    captured.altKey === current.altKey &&
+    captured.ctrlKey === current.ctrlKey &&
+    captured.metaKey === current.metaKey &&
+    captured.shiftKey === current.shiftKey &&
+    captured.repeat === current.repeat &&
+    captured.isComposing === current.isComposing &&
+    captured.isTrusted === current.isTrusted &&
+    Object.is(captured.view, current.view) &&
+    captured.path.length === current.path.length &&
+    captured.path.every((entry, index) => current.path[index] === entry)
+  );
+}
+
+function headingReactEventMatches(
+  event: KeyboardEvent<HTMLButtonElement>,
+  nativeEvent: globalThis.KeyboardEvent,
+  snapshot: ToolbarKeyboardSnapshot,
+  trigger: HTMLButtonElement,
+): boolean {
+  try {
+    return (
+      event.type === snapshot.type &&
+      event.type === "keydown" &&
+      event.nativeEvent === nativeEvent &&
+      event.currentTarget === trigger &&
+      event.target === trigger &&
+      event.eventPhase === snapshot.eventPhase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.altKey === snapshot.altKey &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      event.isComposing === snapshot.isComposing &&
+      Object.is(event.view, snapshot.view)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -1074,9 +1087,11 @@ function createToolbarPublication({
   let headingFocusClaimed = false;
   let headingOpenChanged = false;
   let blockedRadixOpen: object | null = null;
+  let headingKeyPublication: HeadingKeyPublication | null = null;
   let keyboard: ToolbarKeyboardIntrinsics | null = null;
   let establishmentDeferred = false;
   const claimed = new Set<symbol>();
+  const headingKeyAction = Symbol("heading-key");
   const identity = new PublicationIdentity();
   const owners: ElementOwnerView[] = [];
 
@@ -1317,12 +1332,14 @@ function createToolbarPublication({
     if (
       !publication ||
       claimedHeadingPublications.has(publication) ||
+      claimed.has(headingKeyAction) ||
       claimedReactEvents.has(event) ||
       claimedEvents.has(nativeEvent)
     ) {
       return false;
     }
     claimedHeadingPublications.add(publication);
+    claimed.add(headingKeyAction);
     claimedReactEvents.add(event);
     claimedEvents.add(nativeEvent);
     consumed = true;
@@ -1886,6 +1903,7 @@ function createToolbarPublication({
     if (retired) return false;
     if (domObserver) recordMutations(domObserver.takeRecords());
     retired = true;
+    headingKeyPublication = null;
     const wasActive = active.current === publication;
     if (wasActive) {
       active.current = null;
@@ -2034,14 +2052,87 @@ function createToolbarPublication({
     event.preventDefault();
     items[next]?.element.focus();
   };
+  const scheduleRadixOpenBlock = (event: object) => {
+    blockedRadixOpen = event;
+    queueMicrotask(() => {
+      if (blockedRadixOpen === event) blockedRadixOpen = null;
+    });
+  };
+  const onHeadingKeyCapture = (
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    headingKeyPublication = null;
+    if (!event || typeof event !== "object") return;
+    if (keyboard && !keyboard.isCurrent()) {
+      retire("other");
+      return;
+    }
+    const source = identity.current;
+    const trigger = buttons.heading.element();
+    const nativeEvent = event.nativeEvent;
+    const snapshot =
+      keyboard && nativeEvent
+        ? readToolbarKeyboardEvent(nativeEvent, keyboard)
+        : null;
+    const preventDefault = event.preventDefault;
+    if (
+      !source ||
+      !keyboard ||
+      !snapshot ||
+      !trigger ||
+      active.current !== source ||
+      !ownsControl(buttons.heading) ||
+      !headingReactEventMatches(event, nativeEvent, snapshot, trigger) ||
+      snapshot.target !== trigger ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== keyboard.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      (snapshot.key !== "ArrowDown" && snapshot.key !== "ArrowUp") ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== trigger.ownerDocument.defaultView) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !toolbarKeyboardPathMatches(
+        snapshot.path,
+        trigger,
+        trigger.ownerDocument,
+        trigger.ownerDocument.defaultView!,
+      ) ||
+      keyboard.apply(
+        keyboard.activeElement,
+        trigger.ownerDocument,
+        [],
+      ) !== trigger ||
+      typeof preventDefault !== "function" ||
+      !keyboard.isCurrent()
+    ) {
+      if (keyboard && !keyboard.isCurrent()) retire("other");
+      return;
+    }
+    headingKeyPublication = Object.freeze({
+      source,
+      reactEvent: event,
+      nativeEvent,
+      snapshot,
+      preventDefault,
+    });
+  };
   const onHeadingKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (!event || typeof event !== "object") return;
     if (event.key === "ArrowDown") {
-      blockedRadixOpen = event;
-      queueMicrotask(() => {
-        if (blockedRadixOpen === event) blockedRadixOpen = null;
-      });
+      scheduleRadixOpenBlock(event);
     }
+    const captured = headingKeyPublication;
+    headingKeyPublication = null;
     if (keyboard && !keyboard.isCurrent()) {
       retire("other");
       return;
@@ -2059,13 +2150,6 @@ function createToolbarPublication({
           ? headingItems.at(-1)
           : null;
     const destinationElement = destination?.control.element();
-    const proof = event as HeadingReactKeyEvent;
-    const reactPrototype =
-      keyboard && event ? keyboard.getPrototypeOf(event) : null;
-    const reactMethods =
-      keyboard && snapshot
-        ? captureToolbarReactMethods(event, proof, snapshot, keyboard)
-        : null;
     if (keyboard && !keyboard.isCurrent()) {
       retire("other");
       return;
@@ -2075,39 +2159,18 @@ function createToolbarPublication({
       !snapshot ||
       !destination ||
       !trigger ||
+      !captured ||
+      captured.source !== identity.current ||
+      captured.reactEvent !== event ||
+      captured.nativeEvent !== nativeEvent ||
+      captured.preventDefault !== event.preventDefault ||
+      !toolbarKeyboardSnapshotsMatch(captured.snapshot, snapshot) ||
       active.current !== identity.current ||
       !ownsControl(buttons.heading) ||
       (authority.headingOpen &&
         (!destinationElement ||
           !ownsControl(destination.control))) ||
-      !reactPrototype ||
-      reactPrototype === keyboard.objectPrototype ||
-      !reactMethods ||
-      event.type !== snapshot.type ||
-      event.type !== "keydown" ||
-      event.nativeEvent !== nativeEvent ||
-      event.currentTarget !== trigger ||
-      event.target !== trigger ||
-      event.eventPhase !== snapshot.eventPhase ||
-      event.bubbles !== snapshot.bubbles ||
-      event.cancelable !== snapshot.cancelable ||
-      event.defaultPrevented ||
-      event.isTrusted !== snapshot.isTrusted ||
-      event.key !== snapshot.key ||
-      event.code !== snapshot.code ||
-      event.location !== snapshot.location ||
-      event.altKey !== snapshot.altKey ||
-      event.ctrlKey !== snapshot.ctrlKey ||
-      event.metaKey !== snapshot.metaKey ||
-      event.shiftKey !== snapshot.shiftKey ||
-      event.repeat !== snapshot.repeat ||
-      !Object.is(event.view, snapshot.view) ||
-      proof._reactName !== "onKeyDown" ||
-      !keyboard.ownDataMatches(event, "_reactName", "onKeyDown") ||
-      !keyboard.ownDataMatches(event, "nativeEvent", nativeEvent) ||
-      !keyboard.ownDataMatches(event, "type", snapshot.type) ||
-      !keyboard.ownDataMatches(event, "target", trigger) ||
-      !keyboard.ownDataMatches(event, "currentTarget", trigger) ||
+      !headingReactEventMatches(event, nativeEvent, snapshot, trigger) ||
       snapshot.target !== trigger ||
       snapshot.currentTarget === null ||
       snapshot.eventPhase !== keyboard.bubblingPhase ||
@@ -2143,21 +2206,13 @@ function createToolbarPublication({
       if (keyboard && !keyboard.isCurrent()) retire("other");
       return;
     }
-    keyboard.apply(reactMethods.preventDefault, event, []);
+    keyboard.apply(captured.preventDefault, event, []);
     if (!keyboard.isCurrent()) {
       retire("other");
       return;
     }
-    const preventedPredicate = proof.isDefaultPrevented;
     if (
       !event.defaultPrevented ||
-      typeof preventedPredicate !== "function" ||
-      !keyboard.methodMatches(
-        event,
-        "isDefaultPrevented",
-        preventedPredicate,
-      ) ||
-      !keyboard.apply(preventedPredicate, event, []) ||
       !keyboard.apply(
         keyboard.event.defaultPrevented,
         nativeEvent,
@@ -2275,6 +2330,7 @@ function createToolbarPublication({
     isRetired: () => retired,
     onFocus,
     onKeyDown,
+    onHeadingKeyCapture,
     onHeadingKeyDown,
     onHeadingOpenChange,
     onHeadingClose,
@@ -2418,6 +2474,7 @@ export const Toolbar = memo(function Toolbar({
     captureHeadingContent,
     onFocus: onToolbarFocus,
     onKeyDown: onToolbarKeyDown,
+    onHeadingKeyCapture,
     onHeadingKeyDown,
     onHeadingOpenChange,
     onHeadingClose,
@@ -2463,14 +2520,14 @@ export const Toolbar = memo(function Toolbar({
     >
       <Group>
         <Menu open={headingState.open} onOpenChange={onHeadingOpenChange}>
-          <MenuTrigger asChild>
+          <MenuTrigger asChild onKeyDown={onHeadingKeyDown}>
             <button
               ref={captureHeading}
               type="button"
               className="icon-btn w-auto gap-1 px-2.5 font-semibold"
               disabled={dis}
               onMouseDown={onHeadingMouseDown}
-              onKeyDown={onHeadingKeyDown}
+              onKeyDown={onHeadingKeyCapture}
               aria-label="Text style"
               data-testid="heading-menu"
             >
