@@ -2,7 +2,7 @@
 
 import { Children, cloneElement, createContext, isValidElement, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
-import { composeRefs } from "radix-ui/internal";
+import { composeRefs, useComposedRefs } from "radix-ui/internal";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -2295,7 +2295,6 @@ function createLazyMenuListenerRegistration(
   let claimed: LazyMenuListenerProof | null = null;
   let active = false;
   let released = false;
-  let registration!: LazyMenuListenerRegistration;
 
   const listener: EventListener = function (this: EventTarget, event: Event) {
     const current = publication;
@@ -2381,7 +2380,7 @@ function createLazyMenuListenerRegistration(
     }
   };
 
-  registration = Object.freeze({
+  const registration: LazyMenuListenerRegistration = Object.freeze({
     identity,
     listener,
     activate: (current: LazyMenuPublication) => {
@@ -3200,9 +3199,9 @@ function LazyMenu({
       ref?: React.Ref<HTMLButtonElement>;
     }
   ).ref;
-  const composedTriggerRef = useMemo(
-    () => composeRefs(suppliedTriggerRef, captureTrigger),
-    [captureTrigger, suppliedTriggerRef],
+  const composedTriggerRef = useComposedRefs(
+    suppliedTriggerRef,
+    captureTrigger,
   );
   const renderedTrigger = cloneElement(trigger, {
     ref: composedTriggerRef,
