@@ -2478,8 +2478,10 @@ interface SearchControlPublicationCells {
   readonly claimedActions: WeakSet<SearchControlActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedAutoFocusEvents: WeakSet<Event>;
   readonly attemptedReactEvents: WeakSet<object>;
   readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly attemptedAutoFocusEvents: WeakSet<Event>;
 }
 
 interface SearchNativeEventProof {
@@ -8849,6 +8851,7 @@ interface AccountPublicationRuntime {
   readonly routeKeyDown: (
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
 }
 
 interface AccountPublicationCells {
@@ -8884,6 +8887,7 @@ interface AccountPublicationSet {
   readonly routeKeyDown: (
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
 }
 
 class AccountElementOwner<T extends HTMLElement>
@@ -9100,12 +9104,13 @@ function accountElementsAreExact(
     settings: AccountElementOwner<HTMLDivElement>;
     signOut: AccountElementOwner<HTMLDivElement>;
   },
+  requireCurrentRender = true,
 ) {
   const trigger = owners.trigger.element();
   const ownerDocument = trigger?.ownerDocument;
   const ownerWindow = ownerDocument?.defaultView;
   if (
-    !accountRenderIsExact(render) ||
+    (requireCurrentRender && !accountRenderIsExact(render)) ||
     !ownerDocument ||
     !ownerWindow ||
     !(trigger instanceof ownerWindow.HTMLButtonElement) ||
@@ -9391,6 +9396,18 @@ function createAccountPublication(
 
     const exactDomMatches = () =>
       accountElementsAreExact(render, owners) &&
+      templateGridDomMatches(triggerDom) &&
+      searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
+      (render.open
+        ? Boolean(
+            contentDom &&
+              contentPlacement &&
+              templateGridDomMatches(contentDom) &&
+              searchControlPlacementMatches(ownerDocument, contentPlacement),
+          )
+        : true);
+    const replayDomMatches = () =>
+      accountElementsAreExact(render, owners, false) &&
       templateGridDomMatches(triggerDom) &&
       searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
       (render.open
@@ -9722,9 +9739,17 @@ function createAccountPublication(
       cells.claimedReactEvents.add(bubble);
       return true;
     };
-    const completePendingFocus = () => {
+    const openAutoFocus = (event: Event) => {
       const pending = cells.pendingFocus;
-      if (!pending) return;
+      if (
+        !pending ||
+        !(event instanceof ownerWindow.CustomEvent) ||
+        cells.attemptedAutoFocusEvents.has(event) ||
+        cells.claimedAutoFocusEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedAutoFocusEvents.add(event);
       const destination =
         pending.direction.destination === "settings" ? settings : signOut;
       if (
@@ -9752,11 +9777,22 @@ function createAccountPublication(
         !cells.claimedReactEvents.has(pending.reactBubbleEvent) ||
         cells.active !== publication ||
         cells.delivery !== null ||
-        !publicationOwnsCurrentDom()
+        !publicationOwnsCurrentDom() ||
+        keyboard.base.type(event) !== "focusScope.autoFocusOnMount" ||
+        keyboard.base.target(event) !== content ||
+        keyboard.base.currentTarget(event) !== content ||
+        keyboard.base.phase(event) !== ownerWindow.Event.AT_TARGET ||
+        keyboard.base.bubbles(event) ||
+        !keyboard.base.cancelable(event) ||
+        keyboard.base.defaultPrevented(event) ||
+        keyboard.base.cancelBubble(event) ||
+        keyboard.base.activeElement.read(ownerDocument) !== trigger
       ) {
-        cells.pendingFocus = null;
         return;
       }
+      cells.claimedAutoFocusEvents.add(event);
+      keyboard.base.preventDefault(event);
+      if (!keyboard.base.defaultPrevented(event)) return;
       cells.pendingFocus = null;
       pending.source.focus(destination, { preventScroll: true });
     };
@@ -9994,7 +10030,6 @@ function createAccountPublication(
           );
           keyboard.addEventListener(trigger, "keydown", onNativeBoundary);
         }
-        completePendingFocus();
         return true;
       },
       retireForElement: () => {
@@ -10035,7 +10070,7 @@ function createAccountPublication(
             entry.state === "reattached" &&
             entry.owner.element() === entry.element,
         ) &&
-        exactDomMatches() &&
+        replayDomMatches() &&
         Boolean(guard?.unchanged()),
       isExactNoRefLayoutReplay: () =>
         retired &&
@@ -10056,11 +10091,20 @@ function createAccountPublication(
       releaseReplayGuard: releaseGuard,
       captureKeyDown,
       routeKeyDown,
+      openAutoFocus,
     });
     return runtime;
   };
 
   const establish = () => {
+    if (
+      currentRuntime &&
+      currentRuntime === lastRuntime &&
+      cells.active === currentRuntime.publication &&
+      !currentRuntime.publication.isRetired()
+    ) {
+      return currentRuntime.retireForLayout;
+    }
     if (lastRuntime) {
       if (
         !noRefLayoutReplayUsed &&
@@ -10115,6 +10159,10 @@ function createAccountPublication(
       currentRuntime?.captureKeyDown(event),
     routeKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
       currentRuntime?.routeKeyDown(event) ?? "block",
+    openAutoFocus: (event: Event) => {
+      if (!currentRuntime) establish();
+      currentRuntime?.openAutoFocus(event);
+    },
   });
 }
 
@@ -10220,8 +10268,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     claimedDirections: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    claimedAutoFocusEvents: new WeakSet(),
     attemptedReactEvents: new WeakSet(),
     attemptedNativeEvents: new WeakSet(),
+    attemptedAutoFocusEvents: new WeakSet(),
   }));
   const [, setAccountRevision] = useState(0);
   const requestAccountSuccessor = useCallback(() => {
@@ -11181,6 +11231,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     captureSignOut: captureAccountSignOut,
     captureKeyDown: captureAccountKeyDown,
     routeKeyDown: routeAccountKeyDown,
+    openAutoFocus: openAccountAutoFocus,
   } = createAccountPublication(
     accountRender,
     accountCells,
@@ -11258,7 +11309,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   <Avatar name={user.name} src={user.image} size={36} />
                 </AccountMenuTrigger>
               </MenuTrigger>
-              <MenuContent ref={captureAccountContent} align="end" className="w-56">
+              <MenuContent
+                ref={captureAccountContent}
+                align="end"
+                className="w-56"
+                onOpenAutoFocus={openAccountAutoFocus}
+              >
                 <div className="px-2.5 py-2">
                   <div className="truncate text-sm font-medium text-ink">{user.name}</div>
                   {user.login && <div className="truncate text-xs text-ink-3">@{user.login}</div>}

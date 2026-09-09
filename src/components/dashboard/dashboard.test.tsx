@@ -1430,6 +1430,13 @@ describe("dashboard Account menu directional publication", () => {
         expect(
           preventDefault.mock.contexts.filter((receiver) => receiver === event),
         ).toHaveLength(1);
+        expect(
+          preventDefault.mock.contexts.filter(
+            (receiver) =>
+              receiver instanceof Event &&
+              receiver.type === "focusScope.autoFocusOnMount",
+          ),
+        ).toHaveLength(1);
         const destinationFocuses = focus.mock.calls.filter(
           (_, index) => focus.mock.contexts[index] === destination,
         );
@@ -1458,6 +1465,7 @@ describe("dashboard Account menu directional publication", () => {
       item.focus();
       fireEvent.keyDown(item, { key: "Escape", code: "Escape" });
       await act(async () => {
+        vi.advanceTimersByTime(0);
         await Promise.resolve();
       });
       expect(screen.queryByRole("menu")).toBeNull();
@@ -1478,20 +1486,24 @@ describe("dashboard Account menu directional publication", () => {
         );
       });
       let trigger = accountTrigger(host);
+      trigger.focus();
       fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
       expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(screen.getByRole("menu")).toHaveFocus();
       await closeWithEscape();
 
       trigger = accountTrigger(host);
       trigger.focus();
       fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
       expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
       await closeWithEscape();
 
       trigger = accountTrigger(host);
       trigger.focus();
       fireEvent.keyDown(trigger, { key: " ", code: "Space" });
       expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
       fireEvent.click(accountMenuItem("Agents & API tokens"));
       expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
       expect(screen.queryByRole("menu")).toBeNull();
@@ -1735,11 +1747,40 @@ describe("dashboard Account menu directional publication", () => {
   });
 
   it("retains descriptor, DOM, callback, and ref history while a complete clean successor recovers", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
+    const activeKeydownListeners = (element: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) => {
+          if (
+            addEventListener.mock.contexts[index] !== element ||
+            type !== "keydown" ||
+            typeof listener !== "function"
+          ) {
+            return [];
+          }
+          const capture = eventCapture(options);
+          const removed = removeEventListener.mock.calls.some(
+            ([removedType, removedListener, removedOptions], removedIndex) =>
+              removeEventListener.mock.contexts[removedIndex] === element &&
+              removedType === type &&
+              removedListener === listener &&
+              eventCapture(removedOptions) === capture,
+          );
+          return removed ? [] : [{ listener, capture }];
+        },
+      );
 
     try {
       await act(async () => {
@@ -1823,7 +1864,10 @@ describe("dashboard Account menu directional publication", () => {
       trigger = accountTrigger(host);
       const retiredHandler = captureReactHandler(trigger, "onKeyDown");
       const triggerRef = captureReactRef(trigger);
+      const retiredListeners = activeKeydownListeners(trigger);
+      expect(retiredListeners).toHaveLength(2);
       act(() => triggerRef(null));
+      expect(activeKeydownListeners(trigger)).toHaveLength(0);
       retiredHandler({
         _reactName: "onKeyDown",
         type: "keydown",
@@ -1838,6 +1882,26 @@ describe("dashboard Account menu directional publication", () => {
       act(() => triggerRef(trigger));
       await act(async () => Promise.resolve());
       trigger = accountTrigger(host);
+      expect(captureReactHandler(trigger, "onKeyDown")).not.toBe(
+        retiredHandler,
+      );
+      const replayedListeners = activeKeydownListeners(trigger);
+      expect(replayedListeners).toHaveLength(2);
+      expect(replayedListeners.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+      ]);
+      expect(
+        new Set(replayedListeners.map(({ listener }) => listener)).size,
+      ).toBe(2);
+      expect(
+        replayedListeners.every(
+          ({ listener }) =>
+            !retiredListeners.some(
+              ({ listener: retired }) => listener === retired,
+            ),
+        ),
+      ).toBe(true);
       trigger.focus();
       focus.mockClear();
       preventDefault.mockClear();
