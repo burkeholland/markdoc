@@ -132,6 +132,17 @@ const ITEM_THREE: NotificationDto = {
   snippet: "A third notification",
   createdAt: "2026-09-07T14:00:00.000Z",
 };
+const PAGE_ITEMS: NotificationDto[] = Array.from({ length: 14 }, (_, index) => ({
+  ...ITEM,
+  id: `notification-page-${index + 1}`,
+  documentId: `document-page-${index + 1}`,
+  documentTitle: `Page document ${index + 1}`,
+  actorLogin: `page-actor-${index + 1}`,
+  actorName: `Page actor ${index + 1}`,
+  refId: `page-thread-${index + 1}`,
+  snippet: `Page notification ${index + 1}`,
+  createdAt: `2026-09-08T${String(index).padStart(2, "0")}:00:00.000Z`,
+}));
 const REPLACEMENT_ITEM: NotificationDto = {
   ...ITEM,
   kind: "reply",
@@ -1408,6 +1419,114 @@ describe("notification row keyboard browsing", () => {
     expect(screen.getByTestId("notifications-popover")).toBeVisible();
   }
 
+  function pageScrollSnapshot(list: HTMLElement) {
+    return {
+      listTop: list.scrollTop,
+      listLeft: list.scrollLeft,
+      documentTop: document.documentElement.scrollTop,
+      documentLeft: document.documentElement.scrollLeft,
+      bodyTop: document.body.scrollTop,
+      bodyLeft: document.body.scrollLeft,
+      windowX: window.scrollX,
+      windowY: window.scrollY,
+      pageX: window.pageXOffset,
+      pageY: window.pageYOffset,
+    };
+  }
+
+  function seedPageScroll(list: HTMLElement) {
+    list.scrollTop = 41;
+    list.scrollLeft = 9;
+    document.documentElement.scrollTop = 23;
+    document.documentElement.scrollLeft = 7;
+    document.body.scrollTop = 17;
+    document.body.scrollLeft = 5;
+  }
+
+  it.each([
+    ["forward ten", "PageDown", 1, 11],
+    ["backward ten", "PageUp", 12, 2],
+    ["forward clamp", "PageDown", 5, 13],
+    ["backward clamp", "PageUp", 7, 0],
+  ] as const)(
+    "moves one exact Page destination for %s without scrolling, actions, or tab-order changes",
+    (_label, key, sourceIndex, destinationIndex) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const pageState = {
+        ...EMPTY,
+        items: PAGE_ITEMS,
+        unreadCount: PAGE_ITEMS.length,
+        loaded: true,
+      };
+      const { onOpen, actions } = openStrictKeyboardBell(pageState);
+      const list = screen.getByRole("list", { name: "Notifications" });
+      const source = actions.rows[sourceIndex]!.element;
+      const destination = actions.rows[destinationIndex]!.element;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      seedPageScroll(list);
+      const scroll = pageScrollSnapshot(list);
+
+      const event = nativeKey(source, key);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(1);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(pageScrollSnapshot(list)).toEqual(scroll);
+      expect(actions.rows.map(({ element }) => element.tabIndex)).toEqual(
+        PAGE_ITEMS.map(() => 0),
+      );
+      expect(actions.readAll.element.tabIndex).toBe(0);
+      expectNoKeyboardActions(onOpen);
+    },
+  );
+
+  it.each([
+    ["PageUp", 0],
+    ["PageDown", PAGE_ITEMS.length - 1],
+  ] as const)(
+    "leaves the exact %s boundary unprevented and inert",
+    (key, sourceIndex) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const pageState = {
+        ...EMPTY,
+        items: PAGE_ITEMS,
+        unreadCount: PAGE_ITEMS.length,
+        loaded: true,
+      };
+      const { onOpen, actions } = openStrictKeyboardBell(pageState);
+      const list = screen.getByRole("list", { name: "Notifications" });
+      const source = actions.rows[sourceIndex]!.element;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      seedPageScroll(list);
+      const scroll = pageScrollSnapshot(list);
+
+      const event = nativeKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+      expect(pageScrollSnapshot(list)).toEqual(scroll);
+      expect(actions.rows.map(({ element }) => element.tabIndex)).toEqual(
+        PAGE_ITEMS.map(() => 0),
+      );
+      expect(actions.readAll.element.tabIndex).toBe(0);
+      expectNoKeyboardActions(onOpen);
+    },
+  );
+
   it("recognizes the exact unforgeable KeyboardEvent trust descriptor from independent probes", () => {
     const firstProbe = new window.KeyboardEvent("keydown");
     const secondProbe = new window.KeyboardEvent("keydown");
@@ -1784,6 +1903,8 @@ describe("notification row keyboard browsing", () => {
     ["ArrowUp", 0],
     ["Home", 0],
     ["End", 2],
+    ["PageDown", 2],
+    ["PageUp", 0],
   ] as const)(
     "rejects a same-realm constructed %s before accepting trusted input",
     (key, destinationIndex) => {
@@ -1905,24 +2026,25 @@ describe("notification row keyboard browsing", () => {
   });
 
   it.each([
-    ["Control", { ctrlKey: true }],
-    ["Shift", { shiftKey: true }],
-    ["Alt", { altKey: true }],
-    ["Meta", { metaKey: true }],
-    ["repeat", { repeat: true }],
-    ["composition", { isComposing: true }],
-    ["non-bubbling", { bubbles: false }],
-    ["non-cancelable", { cancelable: false }],
-  ] as const)("rejects %s keydown before prevention or focus", (_label, init) => {
+    ["Control PageDown", "PageDown", { ctrlKey: true }],
+    ["Shift PageUp", "PageUp", { shiftKey: true }],
+    ["Alt PageDown", "PageDown", { altKey: true }],
+    ["Meta PageUp", "PageUp", { metaKey: true }],
+    ["repeated PageDown", "PageDown", { repeat: true }],
+    ["composing PageUp", "PageUp", { isComposing: true }],
+    ["non-bubbling PageDown", "PageDown", { bubbles: false }],
+    ["non-cancelable PageUp", "PageUp", { cancelable: false }],
+  ] as const)("rejects %s before prevention or focus", (_label, key, init) => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const { onOpen, actions } = openStrictKeyboardBell();
-    const source = actions.rows[0]!.element;
+    const source =
+      actions.rows[key === "PageUp" ? actions.rows.length - 1 : 0]!.element;
     source.focus();
     focus.mockClear();
     preventDefault.mockClear();
 
-    const event = nativeKey(source, "ArrowDown", init);
+    const event = nativeKey(source, key, init);
 
     expect(event.defaultPrevented).toBe(false);
     expect(source).toHaveFocus();
@@ -1931,14 +2053,14 @@ describe("notification row keyboard browsing", () => {
     expectNoKeyboardActions(onOpen);
   });
 
-  it("rejects an already canceled keydown before another prevention or focus", () => {
+  it("rejects already canceled and stopped PageDown input before prevention or focus", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const { onOpen, actions } = openStrictKeyboardBell();
     const source = actions.rows[0]!.element;
     const view = source.ownerDocument.defaultView!;
     const event = new view.KeyboardEvent("keydown", {
-      key: "ArrowDown",
+      key: "PageDown",
       bubbles: true,
       cancelable: true,
     });
@@ -1955,9 +2077,22 @@ describe("notification row keyboard browsing", () => {
     expect(preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
     expectNoKeyboardActions(onOpen);
+
+    const stopped = new view.KeyboardEvent("keydown", {
+      key: "PageDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    markJsdomEventTrusted(stopped);
+    stopped.stopPropagation();
+    fireEvent(source, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(source).toHaveFocus();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
   });
 
-  it("rejects footer, retry, and outside sources without spending a row key", () => {
+  it("rejects footer, retry, and outside PageDown sources without spending a row key", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const currentState = {
       ...state,
@@ -1975,7 +2110,7 @@ describe("notification row keyboard browsing", () => {
     for (const control of controls) {
       control.focus();
       focus.mockClear();
-      const event = nativeKey(control, "ArrowDown");
+      const event = nativeKey(control, "PageDown");
       expect(event.defaultPrevented).toBe(false);
       expect(control).toHaveFocus();
       expect(focus).not.toHaveBeenCalled();
@@ -1988,7 +2123,7 @@ describe("notification row keyboard browsing", () => {
     const loadRetry = screen.getByTestId("notifications-load-retry");
     loadRetry.focus();
     focus.mockClear();
-    expect(nativeKey(loadRetry, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(loadRetry, "PageDown").defaultPrevented).toBe(false);
     expect(loadRetry).toHaveFocus();
     expect(focus).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId("notifications-bell"));
@@ -1997,12 +2132,12 @@ describe("notification row keyboard browsing", () => {
     const currentRows = captureActions().rows;
     const row = currentRows[0]!.element;
     row.focus();
-    nativeKey(row, "ArrowDown");
-    expect(currentRows[1]!.element).toHaveFocus();
+    nativeKey(row, "PageDown");
+    expect(currentRows[2]!.element).toHaveFocus();
     outside.remove();
   });
 
-  it("rejects forged and foreign events before prevention or focus", () => {
+  it("requires exact native, React, and owner-window authority for PageDown", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const { onOpen, actions } = openStrictKeyboardBell();
@@ -2011,7 +2146,7 @@ describe("notification row keyboard browsing", () => {
     focus.mockClear();
     preventDefault.mockClear();
     const nativeEvent = new KeyboardEvent("keydown", {
-      key: "ArrowDown",
+      key: "PageDown",
       bubbles: true,
       cancelable: true,
     });
@@ -2020,7 +2155,7 @@ describe("notification row keyboard browsing", () => {
       type: "keydown",
       currentTarget: source.element,
       target: source.element,
-      key: "ArrowDown",
+      key: "PageDown",
       code: "",
       location: 0,
       repeat: false,
@@ -2046,14 +2181,14 @@ describe("notification row keyboard browsing", () => {
           source.keyDown?.(cloneSyntheticKey(event));
         },
       ],
-      { key: "ArrowDown" },
+      { key: "PageDown" },
     );
 
     const iframe = document.createElement("iframe");
     document.body.append(iframe);
     const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
     const foreign = new foreignWindow.KeyboardEvent("keydown", {
-      key: "ArrowDown",
+      key: "PageDown",
       bubbles: true,
       cancelable: true,
     });
@@ -2067,16 +2202,16 @@ describe("notification row keyboard browsing", () => {
     expectNoKeyboardActions(onOpen);
     iframe.remove();
 
-    nativeKey(source.element, "ArrowDown");
-    expect(actions.rows[1]!.element).toHaveFocus();
+    nativeKey(source.element, "PageDown");
+    expect(actions.rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("uses captured prevention and focus authority instead of mutable public methods", () => {
+  it("uses captured prevention and focus authority for PageDown instead of mutable public methods", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const { actions } = openStrictKeyboardBell();
     const source = actions.rows[0]!.element;
-    const destination = actions.rows[1]!.element;
+    const destination = actions.rows[2]!.element;
     const dynamicPreventDefault = vi.fn();
     const dynamicFocus = vi.fn();
     source.focus();
@@ -2087,7 +2222,7 @@ describe("notification row keyboard browsing", () => {
     });
     const view = source.ownerDocument.defaultView!;
     const event = new view.KeyboardEvent("keydown", {
-      key: "ArrowDown",
+      key: "PageDown",
       bubbles: true,
       cancelable: true,
     });
@@ -2107,7 +2242,7 @@ describe("notification row keyboard browsing", () => {
     expect(dynamicFocus).not.toHaveBeenCalled();
   });
 
-  it("rejects a crossed row handler and lets the exact row move once", () => {
+  it("rejects crossed and reentrant PageDown handlers before one exact move", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const { onOpen, actions } = openStrictKeyboardBell();
     const source = actions.rows[1]!;
@@ -2117,15 +2252,59 @@ describe("notification row keyboard browsing", () => {
     dispatchKeyWithHandlers(
       source,
       [actions.rows[0]!.keyDown!, source.keyDown!, source.keyDown!],
-      { key: "ArrowDown" },
+      { key: "PageDown" },
     );
 
     expect(source.element).toHaveFocus();
     expect(focus).not.toHaveBeenCalled();
     expectNoKeyboardActions(onOpen);
 
-    nativeKey(source.element, "ArrowDown");
+    nativeKey(source.element, "PageDown");
     expect(actions.rows[2]!.element).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("rejects PageDown when ordered facts change between native and React delivery", () => {
+    const items = [{ ...ITEM }, { ...ITEM_TWO }, { ...ITEM_THREE }];
+    const mutableState = {
+      ...EMPTY,
+      items,
+      unreadCount: items.length,
+      loaded: true,
+    };
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const onOpen = vi.fn();
+    const { root, actions } = openStrictKeyboardBell(mutableState, onOpen);
+    const stale = actions.rows[0]!;
+    stale.element.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    dispatchKeyWithHandlers(
+      stale,
+      [
+        () => {
+          mutableState.loading = true;
+        },
+        stale.keyDown!,
+      ],
+      { key: "PageDown" },
+    );
+
+    expect(stale.element).toHaveFocus();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoKeyboardActions(onOpen);
+
+    mutableState.loading = false;
+    expect(nativeKey(stale.element, "PageDown").defaultPrevented).toBe(false);
+    renderStrictBellRoot(root, mutableState, { onOpen });
+    const current = captureActions().rows[0]!.element;
+    current.focus();
+    focus.mockClear();
+    expect(nativeKey(current, "PageDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
@@ -2135,7 +2314,7 @@ describe("notification row keyboard browsing", () => {
     "row replacement and restore",
     "attribute mutation and restore",
   ] as const)(
-    "retires %s history before prevention and admits a clean successor",
+    "retires PageDown after %s history before a clean successor",
     (change) => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
@@ -2178,7 +2357,7 @@ describe("notification row keyboard browsing", () => {
         source.dataset.notificationId = ITEM.id;
       }
 
-      const rejected = nativeKey(source, "ArrowDown");
+      const rejected = nativeKey(source, "PageDown");
       expect(rejected.defaultPrevented).toBe(false);
       expect(preventDefault).not.toHaveBeenCalled();
       expect(focus).not.toHaveBeenCalled();
@@ -2188,14 +2367,14 @@ describe("notification row keyboard browsing", () => {
       const current = captureActions().rows[0]!.element;
       current.focus();
       focus.mockClear();
-      const accepted = nativeKey(current, "ArrowDown");
+      const accepted = nativeKey(current, "PageDown");
       expect(accepted.defaultPrevented).toBe(true);
-      expect(captureActions().rows[1]!.element).toHaveFocus();
+      expect(captureActions().rows[2]!.element).toHaveFocus();
       expect(focus).toHaveBeenCalledOnce();
     },
   );
 
-  it("retires in-place store drift and rejects restoration until a fresh render", () => {
+  it("retires PageDown on restored fact drift until a fresh render", () => {
     const first = { ...ITEM };
     const items = [first, { ...ITEM_TWO }, { ...ITEM_THREE }];
     const mutableState = {
@@ -2212,9 +2391,9 @@ describe("notification row keyboard browsing", () => {
     focus.mockClear();
     first.documentTitle = "Producer drift";
 
-    expect(nativeKey(stale, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(stale, "PageDown").defaultPrevented).toBe(false);
     first.documentTitle = ITEM.documentTitle;
-    expect(nativeKey(stale, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(stale, "PageDown").defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
     expectNoKeyboardActions(onOpen);
 
@@ -2222,12 +2401,12 @@ describe("notification row keyboard browsing", () => {
     const current = captureActions().rows[0]!.element;
     current.focus();
     focus.mockClear();
-    expect(nativeKey(current, "ArrowDown").defaultPrevented).toBe(true);
-    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(nativeKey(current, "PageDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("rejects callback drift and gives the replacement visit fresh authority", () => {
+  it("rejects stale PageDown callbacks and gives the replacement visit fresh authority", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const firstOpen = vi.fn();
     const nextOpen = vi.fn();
@@ -2237,7 +2416,7 @@ describe("notification row keyboard browsing", () => {
     renderStrictBellRoot(root, state, { onOpen: nextOpen });
     stale.element.focus();
     focus.mockClear();
-    expect(nativeKey(stale.element, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(stale.element, "PageDown").defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
     expect(firstOpen).not.toHaveBeenCalled();
     expect(nextOpen).not.toHaveBeenCalled();
@@ -2246,12 +2425,12 @@ describe("notification row keyboard browsing", () => {
     const current = captureActions().rows[0]!.element;
     current.focus();
     focus.mockClear();
-    expect(nativeKey(current, "ArrowDown").defaultPrevented).toBe(true);
-    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(nativeKey(current, "PageDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("rejects stale and replaced disclosures while a fresh disclosure remains usable", () => {
+  it("rejects stale and replaced PageDown disclosures before fresh recovery", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const { actions } = openStrictKeyboardBell();
     const stale = actions.rows[0]!;
@@ -2262,7 +2441,7 @@ describe("notification row keyboard browsing", () => {
     stale.element.focus();
     stale.keyDown?.({
       nativeEvent: new KeyboardEvent("keydown", {
-        key: "ArrowDown",
+        key: "PageDown",
         bubbles: true,
         cancelable: true,
       }),
@@ -2275,13 +2454,13 @@ describe("notification row keyboard browsing", () => {
     current.element.focus();
     focus.mockClear();
     dispatchKeyWithHandlers(current, [stale.keyDown!, current.keyDown!], {
-      key: "ArrowDown",
+      key: "PageDown",
     });
-    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("rejects partial Strict Mode ref replay and recovers on a clean successor", () => {
+  it("rejects partial Strict Mode PageDown replay and recovers on a clean successor", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const { root, onOpen, actions } = openStrictKeyboardBell();
     const stale = actions.rows[0]!;
@@ -2292,7 +2471,7 @@ describe("notification row keyboard browsing", () => {
       stale.ref(null);
       stale.ref(stale.element);
     });
-    expect(nativeKey(stale.element, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(stale.element, "PageDown").defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
     expectNoKeyboardActions(onOpen);
 
@@ -2300,12 +2479,12 @@ describe("notification row keyboard browsing", () => {
     const current = captureActions().rows[0]!.element;
     current.focus();
     focus.mockClear();
-    expect(nativeKey(current, "ArrowDown").defaultPrevented).toBe(true);
-    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(nativeKey(current, "PageDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("ignores old cleanup and stale handlers before one current focus move", () => {
+  it("ignores old cleanup and stale PageDown handlers before one current move", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const { root, onOpen, actions: stale } = openStrictKeyboardBell();
     let current!: ReturnType<typeof captureActions>;
@@ -2325,15 +2504,15 @@ describe("notification row keyboard browsing", () => {
     dispatchKeyWithHandlers(
       current.rows[0]!,
       [stale.rows[0]!.keyDown!, current.rows[0]!.keyDown!],
-      { key: "ArrowDown" },
+      { key: "PageDown" },
     );
 
-    expect(current.rows[1]!.element).toHaveFocus();
+    expect(current.rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
     expectNoKeyboardActions(onOpen);
   });
 
-  it("removes row key listeners on cleanup and leaves a fresh mount usable", () => {
+  it("removes PageDown row listeners on cleanup and leaves a fresh mount usable", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const add = vi.spyOn(EventTarget.prototype, "addEventListener");
     const remove = vi.spyOn(EventTarget.prototype, "removeEventListener");
@@ -2357,7 +2536,7 @@ describe("notification row keyboard browsing", () => {
     focus.mockClear();
     stale.focus();
     focus.mockClear();
-    expect(nativeKey(stale, "ArrowDown").defaultPrevented).toBe(false);
+    expect(nativeKey(stale, "PageDown").defaultPrevented).toBe(false);
     expect(focus).not.toHaveBeenCalled();
 
     renderStrictBellRoot(root, state, { onOpen, present: true });
@@ -2365,8 +2544,8 @@ describe("notification row keyboard browsing", () => {
     const current = captureActions().rows[0]!.element;
     current.focus();
     focus.mockClear();
-    expect(nativeKey(current, "ArrowDown").defaultPrevented).toBe(true);
-    expect(captureActions().rows[1]!.element).toHaveFocus();
+    expect(nativeKey(current, "PageDown").defaultPrevented).toBe(true);
+    expect(captureActions().rows[2]!.element).toHaveFocus();
     expect(focus).toHaveBeenCalledOnce();
   });
 });

@@ -25,7 +25,7 @@ import {
   sentence,
   type NotificationReadError,
 } from "@/lib/notifications-store";
-import { cn } from "@/lib/utils";
+import { clamp, cn } from "@/lib/utils";
 
 const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; className?: string }>> = {
   mention: AtSign,
@@ -85,6 +85,7 @@ type BellActionKind = "read-retry" | "load-retry" | "read-all" | "row";
 type BellLayoutDomain = "trigger" | "portal";
 type BellRetirement = "element" | "layout" | "mutation" | "other";
 const TOOLTIP_TRIGGER_DESCRIPTION_ATTRIBUTE = "aria-describedby";
+const NOTIFICATION_PAGE_ROW_OFFSET = 10;
 
 interface NotificationBellVisit {
   identity: symbol;
@@ -251,6 +252,7 @@ interface NotificationRowKeyboardSnapshot
   extends NotificationKeyboardSnapshotBase {
   readonly kind: "row";
   readonly action: NotificationAction;
+  readonly movement: NotificationRowMovement;
   readonly destinationAction: NotificationAction;
   readonly destination: HTMLButtonElement;
 }
@@ -265,10 +267,26 @@ type NotificationKeyboardSnapshot =
   | NotificationRowKeyboardSnapshot
   | NotificationTriggerKeyboardSnapshot;
 
+type NotificationRowNavigationKey =
+  | "ArrowDown"
+  | "ArrowUp"
+  | "Home"
+  | "End"
+  | "PageDown"
+  | "PageUp";
+
+interface NotificationRowMovement {
+  readonly key: NotificationRowNavigationKey;
+  readonly sourceIndex: number;
+  readonly destinationIndex: number;
+}
+
 interface NotificationKeyboardClaim {
   readonly publication: symbol;
   readonly source: symbol;
   readonly key: string;
+  readonly movement: NotificationRowMovement | null;
+  readonly destination: symbol | null;
   readonly reactEvent: object;
   readonly nativeEvent: KeyboardEvent;
 }
@@ -1086,6 +1104,45 @@ function isEffectivelyEnabled(element: HTMLElement) {
   return true;
 }
 
+function notificationRowMovement(
+  key: string,
+  sourceIndex: number,
+  rowCount: number,
+): NotificationRowMovement | null {
+  if (rowCount === 0 || sourceIndex < 0 || sourceIndex >= rowCount) return null;
+  let destinationIndex: number;
+  if (key === "ArrowDown") {
+    destinationIndex = (sourceIndex + 1) % rowCount;
+  } else if (key === "ArrowUp") {
+    destinationIndex = (sourceIndex - 1 + rowCount) % rowCount;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else if (key === "End") {
+    destinationIndex = rowCount - 1;
+  } else if (key === "PageDown") {
+    destinationIndex = clamp(
+      sourceIndex + NOTIFICATION_PAGE_ROW_OFFSET,
+      0,
+      rowCount - 1,
+    );
+    if (destinationIndex === sourceIndex) return null;
+  } else if (key === "PageUp") {
+    destinationIndex = clamp(
+      sourceIndex - NOTIFICATION_PAGE_ROW_OFFSET,
+      0,
+      rowCount - 1,
+    );
+    if (destinationIndex === sourceIndex) return null;
+  } else {
+    return null;
+  }
+  return Object.freeze({
+    key,
+    sourceIndex,
+    destinationIndex,
+  });
+}
+
 class NotificationBellCurrent {
   #visit: NotificationBellVisit | null = null;
   #disclosure: NotificationDisclosureAuthority | null = null;
@@ -1831,6 +1888,7 @@ class NotificationPublicationCoordinator {
       snapshot.kind === "row"
         ? this.actionMatches(publication, snapshot.action) &&
           this.actionMatches(publication, snapshot.destinationAction) &&
+          this.rowMovementMatches(publication, snapshot) &&
           snapshot.action.element === source &&
           snapshot.destinationAction.element === snapshot.destination
         : !publication.open &&
@@ -1889,6 +1947,29 @@ class NotificationPublicationCoordinator {
       notificationNativeValue<Window | null>(ui.view, event) === snapshot.view &&
       path.length === snapshot.path.length &&
       path.every((entry, index) => entry === snapshot.path[index])
+    );
+  }
+
+  rowMovementMatches(
+    publication: NotificationPublication,
+    snapshot: NotificationRowKeyboardSnapshot,
+  ) {
+    const { action, destinationAction, movement } = snapshot;
+    const currentMovement =
+      action.rowIndex === null
+        ? null
+        : notificationRowMovement(
+            snapshot.key,
+            action.rowIndex,
+            publication.rows.length,
+          );
+    return Boolean(
+      currentMovement &&
+        currentMovement.key === movement.key &&
+        currentMovement.sourceIndex === movement.sourceIndex &&
+        currentMovement.destinationIndex === movement.destinationIndex &&
+        publication.rows[movement.sourceIndex] === action &&
+        publication.rows[movement.destinationIndex] === destinationAction,
     );
   }
 
@@ -2044,21 +2125,14 @@ class NotificationPublicationCoordinator {
     const { event: eventGetters, keyboard, ui } = authority;
     const key = notificationNativeValue<string>(keyboard.key, event);
     const rowIndex = action.rowIndex;
-    let destinationIndex: number;
     if (rowIndex === null || publication.rows.length === 0) return;
-    if (key === "ArrowDown") {
-      destinationIndex = (rowIndex + 1) % publication.rows.length;
-    } else if (key === "ArrowUp") {
-      destinationIndex =
-        (rowIndex - 1 + publication.rows.length) % publication.rows.length;
-    } else if (key === "Home") {
-      destinationIndex = 0;
-    } else if (key === "End") {
-      destinationIndex = publication.rows.length - 1;
-    } else {
-      return;
-    }
-    const destinationAction = publication.rows[destinationIndex];
+    const movement = notificationRowMovement(
+      key,
+      rowIndex,
+      publication.rows.length,
+    );
+    if (!movement) return;
+    const destinationAction = publication.rows[movement.destinationIndex];
     const destination = destinationAction?.element;
     const path = notificationEventPath(authority, event);
     const target = notificationNativeValue<EventTarget | null>(
@@ -2128,6 +2202,7 @@ class NotificationPublicationCoordinator {
       publication,
       action,
       source,
+      movement,
       destinationAction,
       destination,
       path: Object.freeze([...path]),
@@ -2298,6 +2373,8 @@ class NotificationPublicationCoordinator {
       publication: publication.identity,
       source: snapshot.action.identity,
       key: snapshot.key,
+      movement: snapshot.movement,
+      destination: snapshot.destinationAction.identity,
       reactEvent: event,
       nativeEvent,
     });
@@ -2368,6 +2445,8 @@ class NotificationPublicationCoordinator {
       publication: publication.identity,
       source: publication.identity,
       key: snapshot.key,
+      movement: null,
+      destination: null,
       reactEvent,
       nativeEvent: event,
     });
