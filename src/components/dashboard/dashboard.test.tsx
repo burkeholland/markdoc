@@ -1072,6 +1072,151 @@ afterEach(() => {
 });
 
 describe("dashboard Account menu directional publication", () => {
+  it("re-establishes exactly one zero-ref Strict layout replay with distinct listener ownership", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    const addedTo = (trigger: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          addEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+    const removedFrom = (trigger: HTMLButtonElement) =>
+      removeEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          removeEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const added = addedTo(trigger);
+      const removed = removedFrom(trigger);
+
+      expect(added).toHaveLength(4);
+      expect(new Set(added.map(({ listener }) => listener)).size).toBe(4);
+      expect(added.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+        true,
+        false,
+      ]);
+      expect(removed).toEqual(added.slice(0, 2));
+
+      trigger.focus();
+      const event = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(event.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+
+      await act(async () => root.unmount());
+      expect(removedFrom(trigger)).toEqual(added);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects partial ref replay after the zero-ref Strict replay and permits a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      const content = screen.getByRole("menu");
+      const contentRef = captureReactRef(content);
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      preventDefault.mockClear();
+
+      act(() => {
+        contentRef(null);
+        contentRef(content);
+      });
+      await act(async () => {});
+      const staleNative = accountKeyEvent(trigger, "ArrowDown");
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: staleNative,
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(staleNative.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+
+      const settings = accountMenuItem("Agents & API tokens");
+      settings.focus();
+      fireEvent.keyDown(settings, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each([
     ["ArrowDown", "Agents & API tokens"],
     ["ArrowUp", "Sign out"],

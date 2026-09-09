@@ -8835,6 +8835,8 @@ interface AccountPublicationRuntime {
     previous: HTMLElement | null,
   ) => void;
   readonly isExactReplay: () => boolean;
+  readonly isExactNoRefLayoutReplay: () => boolean;
+  readonly releaseReplayGuard: () => void;
   readonly captureKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   readonly routeKeyDown: (
     event: ReactKeyboardEvent<HTMLButtonElement>,
@@ -9209,6 +9211,7 @@ function createAccountPublication(
   let currentRuntime: AccountPublicationRuntime | null = null;
   let lastRuntime: AccountPublicationRuntime | null = null;
   let successorRequested = false;
+  let noRefLayoutReplayUsed = false;
 
   const onElementChange = (
     owner: AccountElementOwnerView,
@@ -9972,6 +9975,23 @@ function createAccountPublication(
         ) &&
         exactDomMatches() &&
         Boolean(guard?.unchanged()),
+      isExactNoRefLayoutReplay: () =>
+        retired &&
+        established &&
+        retirement === "layout" &&
+        layoutRetired &&
+        publication.render === render &&
+        publication.render.authority === render.authority &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "attached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        intrinsicsAreCurrent() &&
+        exactDomMatches() &&
+        Boolean(guard?.unchanged()),
+      releaseReplayGuard: releaseGuard,
       captureKeyDown,
       routeKeyDown,
     });
@@ -9980,6 +10000,24 @@ function createAccountPublication(
 
   const establish = () => {
     if (lastRuntime) {
+      if (
+        !noRefLayoutReplayUsed &&
+        lastRuntime.isExactNoRefLayoutReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        noRefLayoutReplayUsed = true;
+        lastRuntime.releaseReplayGuard();
+        const runtime = createRuntime();
+        if (!runtime) return;
+        currentRuntime = runtime;
+        lastRuntime = runtime;
+        if (!runtime.publish()) {
+          runtime.retireForElement();
+          currentRuntime = null;
+          return;
+        }
+        return runtime.retireForLayout;
+      }
       if (
         !successorRequested &&
         lastRuntime.isExactReplay() &&
