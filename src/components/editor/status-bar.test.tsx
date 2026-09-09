@@ -473,7 +473,10 @@ function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
   if (!implementationSymbol)
     throw new Error("Keyboard event implementation slot was not available");
   const implementation = (
-    event as unknown as Record<symbol, { isTrusted: boolean }>
+    event as unknown as Record<
+      symbol,
+      { isTrusted: boolean; view: Window | null }
+    >
   )[implementationSymbol];
   const descriptor = Object.getOwnPropertyDescriptor(
     implementation,
@@ -481,6 +484,7 @@ function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
   );
   if (!descriptor?.writable)
     throw new Error("Keyboard event trust slot was not writable");
+  implementation.view = ownerWindow;
   Object.defineProperty(implementation, "isTrusted", {
     configurable: true,
     enumerable: true,
@@ -499,13 +503,24 @@ function menuKey(
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("Menu trigger owner window was unavailable");
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    target.ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol)
+    throw new Error("Document implementation slot was not available");
+  const nativeOwnerWindow = (
+    target.ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window }
+    >
+  )[implementationSymbol]._globalObject;
   const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
     composed: true,
     code: key,
     key,
-    view: ownerWindow,
+    view: nativeOwnerWindow,
     ...init,
   });
   if (trusted) trustKeyboardEvent(event, ownerWindow);
