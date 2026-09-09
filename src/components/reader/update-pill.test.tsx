@@ -2240,6 +2240,89 @@ describe("UpdatePill polling", () => {
       }
     });
 
+    it.each(["present", "absent", "mutated"] as const)(
+      "does not use %s private _reactName metadata as key authority",
+      async (state) => {
+        const preventDefault = vi.spyOn(
+          Event.prototype,
+          "preventDefault",
+        );
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        fetchMock.mockResolvedValue(response("hash-after"));
+        const { host, root } = await mountDirectStrict();
+        let captured:
+          | ReactKeyboardEvent<HTMLButtonElement>
+          | null = null;
+        const setPrivateName = (
+          wrapper: ReactKeyboardEvent<HTMLButtonElement>,
+          value: unknown,
+        ) => {
+          if (state === "absent") {
+            if (!Reflect.deleteProperty(wrapper, "_reactName")) {
+              throw new Error(
+                "Unable to remove private React metadata",
+              );
+            }
+            expect("_reactName" in wrapper).toBe(false);
+            return;
+          }
+          if (
+            !Reflect.defineProperty(wrapper, "_reactName", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value:
+                state === "present" ? "onKeyDown" : value,
+            })
+          ) {
+            throw new Error(
+              "Unable to stage private React metadata",
+            );
+          }
+        };
+        try {
+          await advance(0);
+          const current = controls(host);
+          const handlers = updateKeyHandlers(current.button);
+          current.button.focus();
+          focus.mockClear();
+          preventDefault.mockClear();
+          const event = updateKeyEvent(
+            current.button,
+            "ArrowRight",
+          );
+
+          dispatchUpdateKeyWithHandlers(current.button, event, {
+            capture: (wrapper) => {
+              captured = wrapper;
+              setPrivateName(wrapper, "capture-before");
+              handlers.capture(wrapper);
+            },
+            bubble: (wrapper) => {
+              if (!captured) {
+                throw new Error(
+                  "The React capture wrapper was not observed",
+                );
+              }
+              setPrivateName(captured, "capture-after");
+              setPrivateName(wrapper, "bubble");
+              handlers.bubble(wrapper);
+            },
+          });
+
+          expect(event.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(current.dismissButton).toHaveFocus();
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
     it("uses the genuine Window callback receiver as current target and path terminal", async () => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       fetchMock.mockResolvedValue(response("hash-after"));

@@ -179,7 +179,6 @@ interface RefreshControlKeyboardIntrinsics {
   readonly ownerWindow: Window & typeof globalThis;
   readonly listenerTarget: EventTarget;
   readonly keyboardPrototype: object;
-  readonly objectPrototype: object;
   readonly capturingPhase: number;
   readonly bubblingPhase: number;
   readonly apply: typeof Reflect.apply;
@@ -245,12 +244,6 @@ interface RefreshControlKeyboardSnapshot {
   readonly view: Window | null;
 }
 
-type RefreshControlReactKeyboardEvent =
-  ReactKeyboardEvent<HTMLButtonElement> & {
-    readonly _reactName?: unknown;
-    readonly isPersistent?: unknown;
-  };
-
 type RefreshControlReactCancellation = Readonly<{
   isDefaultPrevented: () => boolean;
   isPropagationStopped: () => boolean;
@@ -290,7 +283,6 @@ type RefreshControlReactKey = Readonly<{
   nativeEvent: KeyboardEvent;
   listenerProof: RefreshControlWindowProof;
   source: HTMLButtonElement;
-  prototype: object;
   snapshot: RefreshControlKeyboardSnapshot;
   cancellation: RefreshControlReactCancellation;
 }>;
@@ -823,7 +815,6 @@ function captureRefreshControlKeyboardIntrinsics(
     ownerWindow,
     listenerTarget,
     keyboardPrototype,
-    objectPrototype: objectConstructor.prototype,
     capturingPhase: eventConstructor.CAPTURING_PHASE,
     bubblingPhase: eventConstructor.BUBBLING_PHASE,
     apply,
@@ -1140,19 +1131,10 @@ function readRefreshControlReactKey(
     kind === "refresh"
       ? publication.refreshButton
       : publication.dismissButton;
-  let prototype: object | null = null;
-  try {
-    prototype = keyboard.getPrototypeOf(event);
-  } catch {
-    return null;
-  }
-  const proof = event as RefreshControlReactKeyboardEvent;
   if (
     !listenerProof ||
     !snapshot ||
     !cancellation ||
-    !prototype ||
-    prototype === keyboard.objectPrototype ||
     !keyboard.isCurrent() ||
     event === (nativeEvent as unknown) ||
     event.type !== "keydown" ||
@@ -1174,12 +1156,6 @@ function readRefreshControlReactKey(
     event.shiftKey !== snapshot.shiftKey ||
     event.repeat !== snapshot.repeat ||
     !Object.is(event.view, snapshot.view) ||
-    proof._reactName !== "onKeyDown" ||
-    typeof proof.isPersistent !== "function" ||
-    !proof.isPersistent() ||
-    typeof event.persist !== "function" ||
-    typeof event.preventDefault !== "function" ||
-    typeof event.stopPropagation !== "function" ||
     snapshot.target !== source ||
     snapshot.currentTarget === null ||
     snapshot.eventPhase !== expectedPhase ||
@@ -1222,7 +1198,6 @@ function readRefreshControlReactKey(
     listenerProof,
     snapshot,
     cancellation,
-    prototype,
   });
 }
 
@@ -1244,7 +1219,6 @@ function refreshControlReactKeyPairMatches(
       capture.listenerProof.currentTarget &&
     capture.listenerProof.receiver ===
       capture.listenerProof.terminal &&
-    capture.prototype === bubble.prototype &&
     capture.snapshot.eventPhase === keyboard.capturingPhase &&
     bubble.snapshot.eventPhase === keyboard.bubblingPhase &&
     refreshControlKeyboardStableFactsMatch(
