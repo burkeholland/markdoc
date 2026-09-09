@@ -198,6 +198,7 @@ interface ToolbarDescriptorEvidence {
 
 interface ToolbarKeyboardIntrinsics {
   readonly ownerWindow: Window & typeof globalThis;
+  readonly windowPrototype: object;
   readonly keyboardPrototype: object;
   readonly objectPrototype: object;
   readonly capturingPhase: number;
@@ -406,12 +407,14 @@ function captureToolbarKeyboardIntrinsics(
 ): ToolbarKeyboardIntrinsics | null {
   const objectConstructor = ownerWindow.Object;
   const reflectObject = ownerWindow.Reflect;
+  const windowConstructor = ownerWindow.Window;
   const eventConstructor = ownerWindow.Event;
   const uiEventConstructor = ownerWindow.UIEvent;
   const keyboardConstructor = ownerWindow.KeyboardEvent;
   const documentConstructor = ownerWindow.Document;
   const htmlElementConstructor = ownerWindow.HTMLElement;
   const objectPrototype = objectConstructor.prototype;
+  const windowPrototype = windowConstructor.prototype;
   const eventPrototype = eventConstructor.prototype;
   const keyboardPrototype = keyboardConstructor.prototype;
   const uiEventPrototype = uiEventConstructor.prototype;
@@ -618,12 +621,14 @@ function captureToolbarKeyboardIntrinsics(
   const ownerRealmIsCurrent = () =>
     ownerWindow.Object === objectConstructor &&
     ownerWindow.Reflect === reflectObject &&
+    ownerWindow.Window === windowConstructor &&
     ownerWindow.Event === eventConstructor &&
     ownerWindow.UIEvent === uiEventConstructor &&
     ownerWindow.KeyboardEvent === keyboardConstructor &&
     ownerWindow.Document === documentConstructor &&
     ownerWindow.HTMLElement === htmlElementConstructor &&
     ownerWindow.Object.prototype === objectPrototype &&
+    windowConstructor.prototype === windowPrototype &&
     eventConstructor.prototype === eventPrototype &&
     uiEventConstructor.prototype === uiEventPrototype &&
     keyboardConstructor.prototype === keyboardPrototype &&
@@ -692,6 +697,7 @@ function captureToolbarKeyboardIntrinsics(
   if (!isCurrent()) return null;
   return Object.freeze({
     ownerWindow,
+    windowPrototype,
     keyboardPrototype,
     objectPrototype,
     capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
@@ -781,7 +787,7 @@ function toolbarKeyboardPathMatches(
   path: readonly EventTarget[],
   trigger: HTMLButtonElement,
   ownerDocument: Document,
-  ownerWindow: Window & typeof globalThis,
+  intrinsics: ToolbarKeyboardIntrinsics,
 ): boolean {
   const expected: EventTarget[] = [];
   let current: Node | null = trigger;
@@ -791,11 +797,21 @@ function toolbarKeyboardPathMatches(
     current = current.parentNode;
   }
   const terminal = path.at(-1);
+  const terminalMatches =
+    terminal === intrinsics.ownerWindow ||
+    Boolean(
+      terminal &&
+        intrinsics.apply(
+          intrinsics.isPrototypeOf,
+          intrinsics.windowPrototype,
+          [terminal],
+        ),
+    );
   return (
     expected.at(-1) === ownerDocument &&
     path.length === expected.length + 1 &&
     expected.every((entry, index) => path[index] === entry) &&
-    terminal === ownerWindow
+    terminalMatches
   );
 }
 
@@ -2109,7 +2125,7 @@ function createToolbarPublication({
         snapshot.path,
         trigger,
         trigger.ownerDocument,
-        trigger.ownerDocument.defaultView!,
+        keyboard,
       ) ||
       keyboard.apply(
         keyboard.activeElement,
@@ -2194,7 +2210,7 @@ function createToolbarPublication({
         snapshot.path,
         trigger,
         trigger.ownerDocument,
-        trigger.ownerDocument.defaultView!,
+        keyboard,
       ) ||
       keyboard.apply(
         keyboard.activeElement,

@@ -851,9 +851,24 @@ describe("Toolbar Text style trusted arrows", () => {
     expect(screen.queryByTestId("heading-content")).toBeNull();
     trigger.focus();
     focus.mockClear();
+    let pathTerminal: EventTarget | undefined;
+    trigger.ownerDocument.addEventListener(
+      "keydown",
+      (event) => {
+        pathTerminal = event.composedPath().at(-1);
+      },
+      { capture: true, once: true },
+    );
 
     const event = dispatchHeadingKey(trigger, "ArrowUp");
 
+    expect(pathTerminal).not.toBe(trigger.ownerDocument.defaultView);
+    if (!pathTerminal) throw new Error("Keyboard path had no window terminal");
+    expect(
+      trigger.ownerDocument.defaultView?.Window.prototype.isPrototypeOf(
+        pathTerminal,
+      ),
+    ).toBe(true);
     expect(event.defaultPrevented).toBe(true);
     expect(textStyle()).toHaveAttribute("aria-expanded", "true");
     expect(headingItem("Heading 6")).toHaveFocus();
