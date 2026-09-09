@@ -1,12 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { EditorView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
 import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
-import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
+import {
+  applySlashCommand,
+  applySlashItem,
+  closeSlashMenu,
+  isSlashKeyPublication,
+  type SlashKeyAction,
+  type SlashKeyPublication,
+  type SlashMenuHandlers,
+  type SlashState,
+} from "@/editor/prosemirror/slash-menu";
 import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems, splitSlashQuery, type SlashGroup, type SlashItem, type SlashWhere } from "@/editor/slash-items";
 import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
@@ -35,30 +44,70 @@ export interface SlashMenuController {
   handlers: SlashMenuHandlers;
   subscribe: (listener: (state: SlashState | null) => void) => () => void;
   getState: () => SlashState | null;
-  setKeyHandler: (handler: (key: SlashKey) => boolean) => () => void;
+  setKeyHandler: (handler: (publication: SlashKeyPublication) => boolean) => () => void;
 }
 
 export function createSlashMenuController(): SlashMenuController {
   let state: SlashState | null = null;
-  let keyOwner: { handler: (key: SlashKey) => boolean } | null = null;
-  const listeners = new Set<(state: SlashState | null) => void>();
+  type ListenerOwner = {
+    readonly identity: symbol;
+    readonly listener: (state: SlashState | null) => void;
+    active: boolean;
+  };
+  type ControllerKeyOwner = {
+    readonly identity: symbol;
+    readonly handler: (publication: SlashKeyPublication) => boolean;
+    readonly listeners: readonly ListenerOwner[];
+    active: boolean;
+  };
+  let keyOwner: ControllerKeyOwner | null = null;
+  const listeners = new Set<ListenerOwner>();
+  const attemptedPublications = new WeakSet<SlashKeyPublication>();
   return {
     handlers: {
       onState: (next) => {
         state = next;
-        for (const l of listeners) l(next);
+        for (const owner of listeners) owner.listener(next);
       },
-      onKey: (key) => keyOwner?.handler(key) ?? false,
+      onKey: (publication) => {
+        const owner = keyOwner;
+        if (
+          !owner ||
+          !owner.active ||
+          !isSlashKeyPublication(publication) ||
+          publication.state !== state ||
+          attemptedPublications.has(publication) ||
+          owner.listeners.length !== listeners.size ||
+          owner.listeners.some((listener) => !listener.active || !listeners.has(listener))
+        ) {
+          return false;
+        }
+        attemptedPublications.add(publication);
+        const accepted = owner.handler(publication);
+        return accepted && keyOwner === owner && owner.active;
+      },
     },
     subscribe: (listener) => {
-      listeners.add(listener);
-      return () => void listeners.delete(listener);
+      const owner: ListenerOwner = { identity: Symbol("slash-state-subscription"), listener, active: true };
+      listeners.add(owner);
+      return () => {
+        if (!owner.active) return;
+        owner.active = false;
+        listeners.delete(owner);
+      };
     },
     getState: () => state,
     setKeyHandler: (handler) => {
-      const owner = { handler };
+      const owner: ControllerKeyOwner = {
+        identity: Symbol("slash-key-handler"),
+        handler,
+        listeners: Object.freeze([...listeners]),
+        active: true,
+      };
       keyOwner = owner;
       return () => {
+        if (!owner.active) return;
+        owner.active = false;
         if (keyOwner === owner) keyOwner = null;
       };
     },
@@ -86,6 +135,13 @@ type SlashMenuAuthority = {
 type SlashMenuSnapshot = {
   authority: SlashMenuAuthority;
   state: SlashState | null;
+  subscription: SubscriptionOwner | null;
+};
+
+type SubscriptionOwner = {
+  readonly authority: SlashMenuAuthority;
+  readonly identity: symbol;
+  active: boolean;
 };
 
 type HighlightOwner = {
@@ -101,6 +157,8 @@ type PositionOwner = {
 
 type KeyOwner = {
   authority: SlashMenuAuthority;
+  readonly identity: symbol;
+  readonly subscription: SubscriptionOwner;
   retire: () => void;
 };
 
@@ -110,6 +168,9 @@ type PositionValue = Readonly<{
   width: number;
   maxHeight: number;
   container: HTMLElement;
+  containerRect: HTMLElement["getBoundingClientRect"];
+  ownerDocument: Document;
+  ownerWindow: Window & typeof globalThis;
   hostLeft: number;
   hostTop: number;
   hostWidth: number;
@@ -205,6 +266,7 @@ interface PointerPresentationRuntime {
   effectReplay: CommittedPointerPresentation | null;
   detachedCommit: CommittedPointerPresentation | null;
   detachedElements: Set<Element>;
+  domHistory: PointerDomHistory | null;
   root: HTMLDivElement | null;
   groups: PointerGroupElements[];
   rows: PointerRowElements[];
@@ -217,6 +279,19 @@ interface PointerPresentationRuntime {
 interface PointerRootOwner {
   candidate: PointerPresentation;
   element: HTMLDivElement;
+}
+
+type PointerDomPlacement = Readonly<{
+  node: Node;
+  parent: Node;
+  previousSibling: Node | null;
+  nextSibling: Node | null;
+  exactSiblings: boolean;
+}>;
+
+interface PointerDomHistory {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
 }
 
 type DomTree = Readonly<{
@@ -290,6 +365,128 @@ function domTreeContains(tree: DomTree, target: Node): boolean {
   return tree.node === target || tree.children.some((child) => domTreeContains(child, target));
 }
 
+function capturePointerPlacement(root: Node): readonly PointerDomPlacement[] | null {
+  if (!root.isConnected) return null;
+  const placements: PointerDomPlacement[] = [];
+  let current: Node = root;
+  while (current !== root.ownerDocument) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    placements.push(
+      Object.freeze({
+        node: current,
+        parent,
+        previousSibling: current.previousSibling,
+        nextSibling: current.nextSibling,
+        exactSiblings: current === root,
+      }),
+    );
+    current = parent;
+  }
+  return Object.freeze(placements);
+}
+
+function pointerPlacementIsCurrent(placements: readonly PointerDomPlacement[]): boolean {
+  return placements.every(
+    (placement) =>
+      placement.node.parentNode === placement.parent &&
+      (!placement.exactSiblings ||
+        (placement.node.previousSibling === placement.previousSibling &&
+          placement.node.nextSibling === placement.nextSibling)),
+  );
+}
+
+function pointerPlacementRecordChanged(record: MutationRecord, placement: PointerDomPlacement): boolean {
+  if (record.type !== "childList" || record.target !== placement.parent) return false;
+  if (
+    placement.exactSiblings &&
+    (record.previousSibling === placement.node || record.nextSibling === placement.node)
+  ) {
+    return true;
+  }
+  return [...record.addedNodes, ...record.removedNodes].some((node) => {
+    let current: Node | null = placement.node;
+    while (current) {
+      if (current === node) return true;
+      current = current.parentNode;
+    }
+    return false;
+  });
+}
+
+function createPointerDomHistory(root: HTMLDivElement): PointerDomHistory | null {
+  const ownerWindow = root.ownerDocument.defaultView;
+  const placements = capturePointerPlacement(root);
+  const MutationObserverConstructor = ownerWindow?.MutationObserver;
+  if (!ownerWindow || !placements || typeof MutationObserverConstructor !== "function") return null;
+  const mutationPrototype = MutationObserverConstructor.prototype;
+  const elementPrototype = ownerWindow.Element.prototype;
+  const nodePrototype = ownerWindow.Node.prototype;
+  const observe = mutationPrototype.observe;
+  const takeRecords = mutationPrototype.takeRecords;
+  const disconnect = mutationPrototype.disconnect;
+  const scrollIntoView = elementPrototype.scrollIntoView;
+  const contains = nodePrototype.contains;
+  if (
+    typeof observe !== "function" ||
+    typeof takeRecords !== "function" ||
+    typeof disconnect !== "function" ||
+    typeof scrollIntoView !== "function" ||
+    typeof contains !== "function"
+  ) {
+    return null;
+  }
+  let changed = false;
+  let released = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some(
+      (record) =>
+        record.target === root ||
+        ownerWindow.Reflect.apply(contains, root, [record.target]) ||
+        placements.some((placement) => pointerPlacementRecordChanged(record, placement)),
+    );
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(root, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (const placement of placements) observer.observe(placement.parent, { childList: true });
+  return Object.freeze({
+    isClean: () => {
+      if (released || changed) return false;
+      if (
+        root.ownerDocument.defaultView !== ownerWindow ||
+        ownerWindow.MutationObserver !== MutationObserverConstructor ||
+        MutationObserverConstructor.prototype !== mutationPrototype ||
+        ownerWindow.Element.prototype !== elementPrototype ||
+        ownerWindow.Node.prototype !== nodePrototype ||
+        mutationPrototype.observe !== observe ||
+        mutationPrototype.takeRecords !== takeRecords ||
+        mutationPrototype.disconnect !== disconnect ||
+        elementPrototype.scrollIntoView !== scrollIntoView ||
+        nodePrototype.contains !== contains
+      ) {
+        changed = true;
+        return false;
+      }
+      recordChanges(observer.takeRecords());
+      if (!root.isConnected || !pointerPlacementIsCurrent(placements)) changed = true;
+      return !changed;
+    },
+    release: () => {
+      if (released) return;
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+      released = true;
+    },
+  });
+}
+
 function snapshotPointerItem(item: SlashItem, index: number, groupIndex: number): PointerItem {
   return Object.freeze({
     source: item,
@@ -359,15 +556,23 @@ export function SlashMenu({
   );
   const authorityRef = useRef<SlashMenuAuthority | null>(null);
   const retiredControllersRef = useRef(new WeakSet<SlashMenuController>());
+  const subscriptionOwnerRef = useRef<SubscriptionOwner | null>(null);
   const keyOwnerRef = useRef<KeyOwner | null>(null);
+  const pendingKeyActionRef = useRef<SlashKeyAction | null>(null);
+  const claimedKeyPublicationsRef = useRef(new WeakSet<SlashKeyPublication>());
+  const claimedKeyActionsRef = useRef(new WeakSet<SlashKeyAction>());
   const pointerRuntimesRef = useRef(new WeakMap<PointerPresentation, PointerPresentationRuntime>());
   const activePointerRef = useRef<CommittedPointerPresentation | null>(null);
   const pointerRootOwnerRef = useRef<PointerRootOwner | null>(null);
   const claimedNativeEventsRef = useRef(new WeakSet<Event>());
   const [snapshot, setSnapshot] = useState<SlashMenuSnapshot | null>(() =>
-    authority ? Object.freeze({ authority, state: controller.getState() }) : null,
+    authority ? Object.freeze({ authority, state: controller.getState(), subscription: null }) : null,
   );
-  const currentSnapshot = snapshot?.authority === authority ? snapshot : null;
+  const currentSnapshot =
+    snapshot?.authority === authority &&
+    snapshot.subscription?.active
+      ? snapshot
+      : null;
   const state = currentSnapshot?.state ?? null;
   const query = state ? `${state.from}:${state.query}` : "";
   const [highlight, setHighlight] = useState<HighlightOwner | null>(null);
@@ -376,6 +581,7 @@ export function SlashMenu({
   const pos = position?.snapshot === currentSnapshot ? position.value : null;
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const canComment = useSessionValue(session, (s) => s.canComment);
+  const editorDocument = view?.dom.ownerDocument ?? null;
 
   useLayoutEffect(() => {
     const retiredControllers = retiredControllersRef.current;
@@ -384,111 +590,73 @@ export function SlashMenu({
       return;
     }
     authorityRef.current = authority;
-    authorityRef.current = authority;
+    const subscription: SubscriptionOwner = {
+      authority,
+      identity: Symbol("slash-menu-subscription"),
+      active: true,
+    };
+    subscriptionOwnerRef.current = subscription;
     const publish = (next: SlashState | null) => {
-      if (authorityRef.current !== authority) return;
-      setSnapshot(Object.freeze({ authority, state: next }));
+      if (
+        authorityRef.current !== authority ||
+        subscriptionOwnerRef.current !== subscription ||
+        !subscription.active
+      ) {
+        return;
+      }
+      setSnapshot(Object.freeze({ authority, state: next, subscription }));
     };
     const unsubscribe = controller.subscribe(publish);
     setSnapshot((current) => {
-      if (current?.authority === authority) return current;
+      if (
+        current?.authority === authority &&
+        current.subscription === subscription
+      ) {
+        return current;
+      }
       // A shared controller still contains the retired view's last publication.
       // Its replacement visit starts closed until that view publishes for itself.
-      const retired = current?.authority.controller === controller || retiredControllers.has(controller);
+      const sameAuthority = current?.authority === authority;
+      const retired =
+        !sameAuthority &&
+        (current?.authority.controller === controller ||
+          retiredControllers.has(controller));
       const next = retired ? null : controller.getState();
-      return Object.freeze({ authority, state: next });
+      return Object.freeze({ authority, state: next, subscription });
     });
     return () => {
       retiredControllers.add(controller);
+      subscription.active = false;
+      if (subscriptionOwnerRef.current === subscription) {
+        subscriptionOwnerRef.current = null;
+      }
       if (authorityRef.current === authority) authorityRef.current = null;
       const keyOwner = keyOwnerRef.current;
       if (keyOwner?.authority === authority) keyOwner.retire();
+      const pending = pendingKeyActionRef.current;
+      if (pending?.publication.view === authority.view) pending.cancel();
       unsubscribe();
     };
   }, [authority, controller]);
 
   const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment }), [view, state, canComment]);
   const items = useMemo(() => (state ? filterSlashItems(state.query, SLASH_ITEMS, where) : []), [state, where]);
-  const open = !!state && canEdit && !!view;
-
-  const setCurrentIndex = useCallback(
-    (update: (current: number) => number) => {
-      if (!authority || authorityRef.current !== authority) return;
-      setHighlight((current) => {
-        if (authorityRef.current !== authority) return current;
-        const value = current?.authority === authority && current.query === query ? current.index : 0;
-        const next = update(value);
-        if (current?.authority === authority && current.query === query && current.index === next) return current;
-        return { authority, query, index: next };
-      });
-    },
-    [authority, query],
-  );
-
-  const apply = useCallback(
-    (item: SlashItem | undefined) => {
-      if (!view || !authority || authorityRef.current !== authority) return;
-      const current = controller.getState();
-      if (!current || current !== state) return;
-      if (!item) return closeSlashMenu(view);
-      const arg = splitSlashQuery(current.query).arg;
-      if (item.command) {
-        // One transaction for the /query removal and the edit: a single undo step.
-        applySlashCommand(view, item.command(arg), session.undoManager);
-        view.focus();
-        return;
-      }
-      applySlashItem(
-        view,
-        () => {
-          const ctx = {
-            view,
-            where,
-            openImage: onImage,
-            openLink: onLink,
-            startComment: () => {
-              selectCurrentBlock(view);
-              onComment();
-            },
-            keepAgent: onKeepAgent,
-          };
-          item.run(ctx, arg);
-        },
-        session.undoManager,
-      );
-    },
-    [view, authority, controller, state, where, onImage, onLink, onComment, onKeepAgent, session],
-  );
-  useLayoutEffect(() => {
-    if (!open || !authority || authorityRef.current !== authority) return;
-    const previous = keyOwnerRef.current;
-    if (previous) previous.retire();
-
-    let active = true;
-    const handler = (key: SlashKey) => {
-      if (!active || authorityRef.current !== authority || keyOwnerRef.current !== owner) return false;
-      if (key === "ArrowDown") setCurrentIndex((i) => (items.length ? (i + 1) % items.length : 0));
-      else if (key === "ArrowUp") setCurrentIndex((i) => (items.length ? (i - 1 + items.length) % items.length : 0));
-      else apply(items[index]);
-      return true;
-    };
-    const clear = controller.setKeyHandler(handler);
-    const owner: KeyOwner = {
-      authority,
-      retire: () => {
-        if (!active) return;
-        active = false;
-        if (keyOwnerRef.current === owner) keyOwnerRef.current = null;
-        clear();
-      },
-    };
-    keyOwnerRef.current = owner;
-    return owner.retire;
-  }, [open, authority, controller, items, index, apply, setCurrentIndex]);
+  const open =
+    !!state &&
+    canEdit &&
+    !!view &&
+    !!currentSnapshot?.subscription &&
+    currentSnapshot.subscription.active;
 
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!open || !state || !currentSnapshot || !container) {
+      setPosition((current) => (current?.snapshot === currentSnapshot ? null : current));
+      return;
+    }
+    const ownerDocument = container.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow || editorDocument !== ownerDocument) {
       setPosition((current) => (current?.snapshot === currentSnapshot ? null : current));
       return;
     }
@@ -497,7 +665,7 @@ export function SlashMenu({
     const groupsShown = new Set(items.map((item) => item.group)).size;
     const listHeight = groupsShown * GROUP_HEADER_HEIGHT + items.reduce((h, item) => h + rowHeight(item), 0);
     const height = Math.min(MENU_MAX_HEIGHT, Math.max(ROW_HEIGHT, listHeight) + 8);
-    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const viewport = { width: ownerWindow.innerWidth, height: ownerWindow.innerHeight };
     const below = state.coords.bottom + 6 + height <= viewport.height - 8;
     const box = clampToViewport({ left: state.coords.left, top: below ? state.coords.bottom + 6 : state.coords.top - 6 - height, width: MENU_WIDTH, height }, viewport);
     const left = Math.max(8, Math.min(host.width - box.width - 8, box.left - host.left));
@@ -510,6 +678,9 @@ export function SlashMenu({
         width: box.width,
         maxHeight: box.height,
         container,
+        containerRect: container.getBoundingClientRect,
+        ownerDocument,
+        ownerWindow,
         hostLeft: host.left,
         hostTop: host.top,
         hostWidth: host.width,
@@ -519,7 +690,7 @@ export function SlashMenu({
         viewportHeight: viewport.height,
       }),
     });
-  }, [open, state, currentSnapshot, items, containerRef]);
+  }, [open, state, currentSnapshot, items, containerRef, editorDocument]);
 
   const pointerPresentation = (() => {
     if (!open || !pos || !authority || !currentSnapshot || !state || !view) return null;
@@ -583,6 +754,7 @@ export function SlashMenu({
       effectReplay: null,
       detachedCommit: null,
       detachedElements: new Set(),
+      domHistory: null,
       root: previous?.root ?? null,
       groups: candidate.groups.map((_, index) => ({
         root: previous?.groups[index]?.root ?? null,
@@ -626,6 +798,8 @@ export function SlashMenu({
       runtime.effectReplay = null;
       runtime.detachedCommit = null;
       runtime.detachedElements.clear();
+      runtime.domHistory?.release();
+      runtime.domHistory = null;
     } else if (reason === "ref" && committed && activePointerRef.current === committed) {
       runtime.detachedCommit = committed;
       if (detachedElement) runtime.detachedElements.add(detachedElement);
@@ -640,6 +814,18 @@ export function SlashMenu({
     runtime.retired = true;
     if (committed && activePointerRef.current === committed) activePointerRef.current = null;
     runtime.committed = null;
+    if (reason !== "ordinary") {
+      queueMicrotask(() => {
+        if (
+          runtime.retired &&
+          pointerRuntimesRef.current.get(candidate) === runtime &&
+          runtime.domHistory
+        ) {
+          runtime.domHistory.release();
+          runtime.domHistory = null;
+        }
+      });
+    }
   }
 
   function bindPointerRoot(candidate: PointerPresentation, element: HTMLDivElement | null): void {
@@ -742,7 +928,14 @@ export function SlashMenu({
       candidate.where.canComment !== candidate.canComment ||
       candidate.snapshot.authority !== owner ||
       candidate.snapshot.state !== stateFacts.source ||
+      !candidate.snapshot.subscription?.active ||
+      subscriptionOwnerRef.current !== candidate.snapshot.subscription ||
       containerRef.current !== geometry.container ||
+      geometry.container.getBoundingClientRect !== geometry.containerRect ||
+      geometry.container.ownerDocument !== geometry.ownerDocument ||
+      geometry.ownerDocument.defaultView !== geometry.ownerWindow ||
+      owner.view.dom.ownerDocument !== geometry.ownerDocument ||
+      owner.view.dom.ownerDocument.defaultView !== geometry.ownerWindow ||
       rootOwner?.candidate !== candidate ||
       rootOwner.element !== pointerRuntimesRef.current.get(candidate)?.root
     ) {
@@ -820,8 +1013,8 @@ export function SlashMenu({
       host.width === geometry.hostWidth &&
       host.height === geometry.hostHeight &&
       geometry.container.scrollTop === geometry.scrollTop &&
-      window.innerWidth === geometry.viewportWidth &&
-      window.innerHeight === geometry.viewportHeight
+      geometry.ownerWindow.innerWidth === geometry.viewportWidth &&
+      geometry.ownerWindow.innerHeight === geometry.viewportHeight
     );
   }
 
@@ -1068,6 +1261,8 @@ export function SlashMenu({
     runtime.detachedCommit = null;
     // The retired runtime remains permanent; an exact replay receives a new one.
     const replacement = createPointerRuntime(candidate, runtime);
+    replacement.domHistory = runtime.domHistory;
+    runtime.domHistory = null;
     pointerRuntimesRef.current.set(candidate, replacement);
     return replacement;
   }
@@ -1081,6 +1276,11 @@ export function SlashMenu({
     const factsCurrent = pointerFactsAreCurrent(candidate);
     const domCurrent = committed ? pointerDomIsCurrent(committed) : false;
     if (!committed || !factsCurrent || !domCurrent) {
+      retirePointer(candidate, runtime);
+      return null;
+    }
+    runtime.domHistory ??= createPointerDomHistory(committed.root);
+    if (!runtime.domHistory?.isClean()) {
       retirePointer(candidate, runtime);
       return null;
     }
@@ -1101,7 +1301,11 @@ export function SlashMenu({
     ) {
       return null;
     }
-    if (!pointerFactsAreCurrent(candidate) || !pointerDomIsCurrent(committed)) {
+    if (
+      !runtime.domHistory?.isClean() ||
+      !pointerFactsAreCurrent(candidate) ||
+      !pointerDomIsCurrent(committed)
+    ) {
       retirePointer(candidate);
       return null;
     }
@@ -1176,6 +1380,172 @@ export function SlashMenu({
     if (!run) return;
     applySlashItem(owner.view, () => run(context, candidate.argument), candidate.sessionUndoManager);
   }
+
+  useLayoutEffect(() => {
+    const candidate = pointerPresentation;
+    const subscription = candidate?.snapshot.subscription;
+    if (
+      !candidate ||
+      !subscription ||
+      !subscription.active ||
+      !authority ||
+      authorityRef.current !== authority ||
+      subscriptionOwnerRef.current !== subscription
+    ) {
+      return;
+    }
+    const previous = keyOwnerRef.current;
+    if (previous) previous.retire();
+
+    let active = true;
+    const keyPublicationIsCurrent = (
+      publication: SlashKeyPublication,
+      owner: KeyOwner,
+    ): boolean => {
+      const committed = currentPointer(candidate);
+      return Boolean(
+        owner.authority === candidate.authority &&
+        owner.subscription === subscription &&
+        owner.subscription.active &&
+        keyOwnerRef.current === owner &&
+        subscriptionOwnerRef.current === subscription &&
+        authorityRef.current === candidate.authority &&
+        candidate.authority.controller === controller &&
+        candidate.authority.view === view &&
+        candidate.authority.session === session &&
+        publication.view === candidate.authority.view &&
+        publication.editorState === candidate.editorState &&
+        publication.pluginState.from === candidate.state.from &&
+        publication.pluginState.to === candidate.state.to &&
+        publication.pluginState.query === candidate.state.query &&
+        publication.state === candidate.state.source &&
+        publication.ownerDocument === candidate.position.ownerDocument &&
+        publication.ownerWindow === candidate.position.ownerWindow &&
+        publication.nativeView === publication.path.at(-1) &&
+        publication.nativeView.document === candidate.position.ownerDocument &&
+        publication.nativeView.KeyboardEvent ===
+          candidate.position.ownerWindow.KeyboardEvent &&
+        publication.editorDom === candidate.authority.view.dom &&
+        publication.activeElement === publication.editorDom &&
+        publication.target === publication.editorDom &&
+        publication.currentTarget === publication.editorDom &&
+        publication.eventPhase === publication.ownerWindow.Event.AT_TARGET &&
+        publication.bubbles &&
+        publication.cancelable &&
+        !publication.defaultPrevented &&
+        !publication.cancelBubble &&
+        !publication.altKey &&
+        !publication.ctrlKey &&
+        !publication.metaKey &&
+        !publication.shiftKey &&
+        !publication.repeat &&
+        !publication.isComposing &&
+        candidate.authority.controller.getState ===
+          candidate.controllerGetState &&
+        candidate.authority.controller.getState() === candidate.state.source &&
+        candidate.highlightedIndex === index &&
+        (candidate.items.length === 0
+          ? candidate.highlightedIndex === 0
+          : candidate.highlightedIndex >= 0 &&
+            candidate.highlightedIndex < candidate.items.length) &&
+        committed?.source === candidate
+      );
+    };
+    const handler = (publication: SlashKeyPublication) => {
+      if (
+        !active ||
+        keyOwnerRef.current !== owner ||
+        pendingKeyActionRef.current ||
+        !isSlashKeyPublication(publication) ||
+        claimedKeyPublicationsRef.current.has(publication) ||
+        claimedNativeEventsRef.current.has(publication.event) ||
+        !keyPublicationIsCurrent(publication, owner)
+      ) {
+        return false;
+      }
+
+      const key = publication.key;
+      let destination = candidate.highlightedIndex;
+      if (key === "ArrowDown" && candidate.items.length) {
+        destination = (candidate.highlightedIndex + 1) % candidate.items.length;
+      } else if (key === "ArrowUp" && candidate.items.length) {
+        destination =
+          (candidate.highlightedIndex - 1 + candidate.items.length) %
+          candidate.items.length;
+      } else if (key === "Home") {
+        destination = 0;
+      } else if (key === "End") {
+        destination = Math.max(0, candidate.items.length - 1);
+      }
+      const selected = candidate.items[candidate.highlightedIndex];
+      const action: SlashKeyAction = Object.freeze({
+        identity: Symbol("slash-key-action"),
+        publication,
+        key,
+        isCurrent: () =>
+          active &&
+          pendingKeyActionRef.current === action &&
+          claimedKeyPublicationsRef.current.has(publication) &&
+          claimedKeyActionsRef.current.has(action) &&
+          claimedNativeEventsRef.current.has(publication.event) &&
+          keyPublicationIsCurrent(publication, owner),
+        commit: () => {
+          if (!action.isCurrent()) {
+            action.cancel();
+            return;
+          }
+          pendingKeyActionRef.current = null;
+          if (
+            key === "ArrowDown" ||
+            key === "ArrowUp" ||
+            key === "Home" ||
+            key === "End"
+          ) {
+            if (destination === candidate.highlightedIndex) return;
+            setHighlight({
+              authority: candidate.authority,
+              query,
+              index: destination,
+            });
+            return;
+          }
+          if (key === "Escape") {
+            closeSlashMenu(candidate.authority.view);
+            return;
+          }
+          if (selected) applyPointerItem(candidate, selected);
+          else closeSlashMenu(candidate.authority.view);
+        },
+        cancel: () => {
+          if (pendingKeyActionRef.current === action) {
+            pendingKeyActionRef.current = null;
+          }
+        },
+      });
+      if (!publication.claim(action)) return false;
+      claimedKeyPublicationsRef.current.add(publication);
+      claimedKeyActionsRef.current.add(action);
+      claimedNativeEventsRef.current.add(publication.event);
+      pendingKeyActionRef.current = action;
+      return true;
+    };
+    const clear = controller.setKeyHandler(handler);
+    const owner: KeyOwner = {
+      authority,
+      identity: Symbol("slash-key-owner"),
+      subscription,
+      retire: () => {
+        if (!active) return;
+        active = false;
+        const pending = pendingKeyActionRef.current;
+        if (pending?.publication.state === candidate.state.source) pending.cancel();
+        if (keyOwnerRef.current === owner) keyOwnerRef.current = null;
+        clear();
+      },
+    };
+    keyOwnerRef.current = owner;
+    return owner.retire;
+  });
 
   useLayoutEffect(() => {
     if (!pointerPresentation) return;
