@@ -3738,14 +3738,17 @@ describe("CommentsPanel", () => {
     });
 
     it("does no work after cleanup and a clean instance recovers", async () => {
+      const ownerWindow = document.defaultView;
+      if (!ownerWindow) throw new Error("The test document has no owner window");
       const addEventListener = vi.spyOn(
-        EventTarget.prototype,
+        ownerWindow,
         "addEventListener",
       );
       const removeEventListener = vi.spyOn(
-        EventTarget.prototype,
+        ownerWindow,
         "removeEventListener",
       );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
       try {
         const stale = await mountMenus();
         const staleTrigger = stale.trigger("Comment actions");
@@ -3754,8 +3757,7 @@ describe("CommentsPanel", () => {
         const windowKeyListeners = (
           spy: typeof addEventListener | typeof removeEventListener,
         ) =>
-          spy.mock.calls.flatMap((call, index) =>
-            spy.mock.contexts[index] === window &&
+          spy.mock.calls.flatMap((call) =>
             call[0] === "keydown" &&
             call[2] === true &&
             typeof call[1] === "function"
@@ -3814,7 +3816,7 @@ describe("CommentsPanel", () => {
         ) {
           staleListeners.forEach((listener) => listener.call(this, event));
         };
-        window.addEventListener("keydown", replayStaleReceivers, true);
+        ownerWindow.addEventListener("keydown", replayStaleReceivers, true);
         const staleReplay = commentMenuKeyboardEvent(
           cleanTrigger,
           "ArrowDown",
@@ -3823,7 +3825,7 @@ describe("CommentsPanel", () => {
         try {
           act(() => cleanTrigger.dispatchEvent(staleReplay));
         } finally {
-          window.removeEventListener(
+          ownerWindow.removeEventListener(
             "keydown",
             replayStaleReceivers,
             true,
@@ -3834,13 +3836,18 @@ describe("CommentsPanel", () => {
         expect(staleReplay.defaultPrevented).toBe(false);
         expect(screen.queryByRole("menu")).toBeNull();
         cleanTrigger.focus();
+        focus.mockClear();
         act(() => commentMenuKey(cleanTrigger, "ArrowDown"));
-        expect(document.activeElement).toBe(
-          await screen.findByRole("menuitem", { name: "Edit" }),
-        );
+        const edit = await screen.findByRole("menuitem", { name: "Edit" });
+        expect(document.activeElement).toBe(edit);
+        expect(screen.getAllByRole("menu")).toHaveLength(1);
+        expect(
+          focus.mock.instances.filter((instance) => instance === edit),
+        ).toHaveLength(1);
       } finally {
         addEventListener.mockRestore();
         removeEventListener.mockRestore();
+        focus.mockRestore();
       }
     });
 
