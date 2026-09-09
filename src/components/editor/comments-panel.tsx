@@ -1,6 +1,6 @@
 "use client";
 
-import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
+import { cloneElement, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 import { markRefsRead, useUnreadRefs } from "@/lib/notifications-store";
 import { ArrowRight, Bot, Check, CheckCheck, ChevronDown, ChevronRight, ExternalLink, FileText, Hourglass, Loader2, Lock, MessageSquare, MessageSquarePlus, MoreHorizontal, Reply, RotateCcw, SmilePlus, Trash2, X, Pencil, Sparkles, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react";
@@ -79,7 +79,7 @@ export function displayNameOf(candidates: MentionCandidate[], login: string): st
 }
 
 /** Candidates matching a picker query: login or name prefix; agents also by their slug. Humans first, then agents. */
-export function filterMentionCandidates(candidates: MentionCandidate[], query: string, max: number): MentionCandidate[] {
+export function filterMentionCandidates(candidates: readonly MentionCandidate[], query: string, max: number): MentionCandidate[] {
   const q = query.toLowerCase();
   const hit = (c: MentionCandidate) => {
     if (c.login.toLowerCase().startsWith(q) || c.name.toLowerCase().startsWith(q)) return true;
@@ -2659,6 +2659,116 @@ interface ComposerSubmissionOwner {
   readonly agentIdentities: readonly string[];
 }
 
+type MentionNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
+
+interface MentionRowAuthority {
+  readonly index: number;
+  readonly candidate: MentionCandidate;
+  readonly login: string;
+  readonly name: string;
+  readonly image: string | null;
+  readonly own: boolean;
+  readonly agent: MentionCandidateAgent | null;
+  readonly ownerLogin: string | null;
+  readonly ownerName: string | null;
+  readonly canAsk: boolean | null;
+  readonly highlighted: boolean;
+  readonly optionId: string;
+}
+
+interface MentionAuthority {
+  readonly mount: symbol;
+  readonly revision: number;
+  readonly value: string;
+  readonly trigger: Readonly<{ start: number; query: string }>;
+  readonly candidates: readonly MentionCandidate[];
+  readonly rows: readonly MentionRowAuthority[];
+  readonly highlight: number;
+  readonly busy: boolean;
+  readonly listId: string;
+  readonly currentVisit: () => ComposerVisit | null;
+  readonly currentSubmission: () => ComposerSubmissionOwner | null;
+  readonly currentRoot: () => HTMLDivElement | null;
+  readonly currentTextarea: () => HTMLTextAreaElement | null;
+  readonly currentList: () => HTMLUListElement | null;
+  readonly currentRows: () => readonly (HTMLLIElement | null)[];
+  readonly setHighlight: (index: number) => void;
+  readonly requestSuccessor: () => void;
+}
+
+interface MentionAction {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly key: MentionNavigationKey;
+  readonly source: number;
+  readonly destination: number | null;
+}
+
+interface MentionDomEvidence {
+  readonly textarea: RequestModeDomSnapshot;
+  readonly list: RequestModeDomSnapshot;
+  readonly textareaPlacement: RequestModePlacement;
+  readonly listPlacement: RequestModePlacement;
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface MentionReactMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly stopPropagation: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+  readonly persist: (...args: never[]) => unknown;
+}
+
+interface MentionReactProof {
+  readonly event: object;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly key: MentionNavigationKey;
+  readonly methods: MentionReactMethods;
+}
+
+interface MentionPublication {
+  readonly identity: symbol;
+  readonly authority: MentionAuthority;
+  readonly visit: ComposerVisit;
+  readonly root: HTMLDivElement;
+  readonly textarea: HTMLTextAreaElement;
+  readonly list: HTMLUListElement;
+  readonly rowElements: readonly HTMLLIElement[];
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboard: RequestModeKeyboardAuthority;
+  readonly dom: MentionDomEvidence;
+  readonly actions: Readonly<Record<MentionNavigationKey, MentionAction>>;
+  readonly captureRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly captureTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly bubbleTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly retire: () => void;
+  readonly isRetired: () => boolean;
+}
+
+interface MentionCells {
+  readonly active: { current: MentionPublication | null };
+  readonly retired: WeakSet<MentionPublication>;
+  readonly claimedPublications: WeakSet<MentionPublication>;
+  readonly claimedActions: WeakSet<MentionAction>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly retireForElement: (
+    element: Element | null,
+    expected: Element | null,
+  ) => void;
+}
+
+interface MentionHandlers {
+  readonly captureRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly captureTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly bubbleTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  readonly bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
+}
+
 type RequestModeNavigationKey = "ArrowRight" | "ArrowDown" | "ArrowLeft" | "ArrowUp" | "Home" | "End";
 
 interface RequestModeRowAuthority {
@@ -3155,7 +3265,7 @@ function requestModeDomMatches(snapshot: RequestModeDomSnapshot): boolean {
   );
 }
 
-function captureRequestModePlacement(root: HTMLDivElement): RequestModePlacement | null {
+function captureRequestModePlacement(root: Element): RequestModePlacement | null {
   const ownerDocument = root.ownerDocument;
   if (!root.isConnected) return null;
   const chain: RequestModeNodePlacement[] = [];
@@ -3177,7 +3287,7 @@ function captureRequestModePlacement(root: HTMLDivElement): RequestModePlacement
   return Object.freeze({ document: ownerDocument, chain: Object.freeze(chain) });
 }
 
-function requestModePlacementMatches(root: HTMLDivElement, placement: RequestModePlacement) {
+function requestModePlacementMatches(root: Element, placement: RequestModePlacement) {
   return (
     root.ownerDocument === placement.document &&
     root.isConnected &&
@@ -3193,7 +3303,7 @@ function requestModePlacementMatches(root: HTMLDivElement, placement: RequestMod
 }
 
 function createRequestModeDomGuard(
-  root: HTMLDivElement,
+  root: Element,
   placement: RequestModePlacement,
 ): RequestModeDomGuard | null {
   const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
@@ -3854,6 +3964,619 @@ function createRequestModePresentation(
   });
 }
 
+const claimedMentionReactEvents = new WeakSet<object>();
+const claimedMentionNativeEvents = new WeakSet<Event>();
+
+function createMentionCells(): MentionCells {
+  const active: MentionCells["active"] = { current: null };
+  return {
+    active,
+    retired: new WeakSet(),
+    claimedPublications: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    retireForElement: (element, expected) => {
+      const publication = active.current;
+      if (publication && expected !== element) publication.retire();
+    },
+  };
+}
+
+function mentionDestination(
+  key: MentionNavigationKey,
+  current: number,
+  count: number,
+) {
+  if (current < 0 || current >= count || count === 0) return null;
+  if (key === "ArrowDown") return (current + 1) % count;
+  if (key === "ArrowUp") return (current - 1 + count) % count;
+  if (key === "Home") return current === 0 ? null : 0;
+  return current === count - 1 ? null : count - 1;
+}
+
+function mentionRowMatches(
+  row: MentionRowAuthority,
+  candidate: MentionCandidate,
+  index: number,
+  highlight: number,
+  listId: string,
+) {
+  return (
+    row.index === index &&
+    row.candidate === candidate &&
+    row.login === candidate.login &&
+    row.name === candidate.name &&
+    row.image === candidate.image &&
+    row.own === Boolean(candidate.own) &&
+    row.agent === (candidate.agent ?? null) &&
+    row.ownerLogin === (candidate.agent?.ownerLogin ?? null) &&
+    row.ownerName === (candidate.agent?.ownerName ?? null) &&
+    row.canAsk === (candidate.agent?.canAsk ?? null) &&
+    row.highlighted === (index === highlight) &&
+    row.optionId === `${listId}-option-${index}`
+  );
+}
+
+function mentionFactsAreCurrent(
+  publication: Pick<
+    MentionPublication,
+    "authority" | "visit" | "root" | "textarea" | "list" | "rowElements"
+  >,
+) {
+  const { authority, visit, root, textarea, list, rowElements } = publication;
+  if (
+    authority.currentVisit() !== visit ||
+    visit.retired ||
+    authority.currentSubmission() !== null ||
+    authority.busy ||
+    authority.currentRoot() !== root ||
+    authority.currentTextarea() !== textarea ||
+    authority.currentList() !== list
+  ) {
+    return false;
+  }
+  const currentRows = authority.currentRows();
+  if (
+    currentRows.length < authority.rows.length ||
+    rowElements.some((row, index) => currentRows[index] !== row)
+  ) {
+    return false;
+  }
+  const selectionStart = textarea.selectionStart;
+  const selectionEnd = textarea.selectionEnd;
+  const trigger =
+    selectionStart === selectionEnd
+      ? mentionTriggerAt(textarea.value, selectionStart)
+      : null;
+  const matches = trigger
+    ? filterMentionCandidates(
+        authority.candidates,
+        trigger.query,
+        MAX_SUGGESTIONS,
+      )
+    : [];
+  return (
+    textarea.value === authority.value &&
+    trigger?.start === authority.trigger.start &&
+    trigger.query === authority.trigger.query &&
+    matches.length === authority.rows.length &&
+    matches.every((candidate, index) => {
+      const row = authority.rows[index];
+      return Boolean(
+        row &&
+          mentionRowMatches(
+            row,
+            candidate,
+            index,
+            authority.highlight,
+            authority.listId,
+          ),
+      );
+    })
+  );
+}
+
+function mentionDomIsExact(publication: MentionPublication) {
+  const {
+    authority,
+    root,
+    textarea,
+    list,
+    rowElements,
+    ownerDocument,
+    dom,
+  } = publication;
+  if (
+    !dom.isClean() ||
+    !requestModePlacementMatches(textarea, dom.textareaPlacement) ||
+    !requestModePlacementMatches(list, dom.listPlacement) ||
+    !requestModeDomMatches(dom.textarea) ||
+    !requestModeDomMatches(dom.list) ||
+    !root.isConnected ||
+    !textarea.isConnected ||
+    !list.isConnected ||
+    root.ownerDocument !== ownerDocument ||
+    textarea.ownerDocument !== ownerDocument ||
+    list.ownerDocument !== ownerDocument ||
+    !root.contains(textarea) ||
+    textarea.tagName !== "TEXTAREA" ||
+    textarea.disabled ||
+    textarea.getAttribute("role") !== "combobox" ||
+    textarea.getAttribute("aria-autocomplete") !== "list" ||
+    textarea.getAttribute("aria-expanded") !== "true" ||
+    textarea.getAttribute("aria-controls") !== authority.listId ||
+    textarea.getAttribute("aria-activedescendant") !==
+      authority.rows[authority.highlight]?.optionId ||
+    list.tagName !== "UL" ||
+    list.id !== authority.listId ||
+    list.getAttribute("role") !== "listbox" ||
+    list.getAttribute("aria-label") !== "Mention someone" ||
+    list.childNodes.length !== authority.rows.length ||
+    list.children.length !== authority.rows.length ||
+    rowElements.length !== authority.rows.length
+  ) {
+    return false;
+  }
+  return rowElements.every((element, index) => {
+    const row = authority.rows[index];
+    if (!row) return false;
+    const locked = row.agent !== null && !row.canAsk;
+    return (
+      element.ownerDocument === ownerDocument &&
+      element.isConnected &&
+      element.tagName === "LI" &&
+      element.parentElement === list &&
+      list.childNodes.item(index) === element &&
+      list.children.item(index) === element &&
+      element.id === row.optionId &&
+      element.getAttribute("role") === "option" &&
+      element.getAttribute("aria-selected") === String(row.highlighted) &&
+      element.getAttribute("aria-disabled") === (locked ? "true" : null) &&
+      element.className ===
+        cn(
+          "menu-item py-1.5",
+          row.highlighted && "bg-surface-3",
+          locked && "text-ink-3",
+        ) &&
+      element.dataset.testid === "mention-option" &&
+      element.dataset.login === row.login &&
+      element.hasAttribute("data-agent") === (row.agent !== null) &&
+      element.hasAttribute("data-own") === row.own &&
+      element.hasAttribute("data-locked") === locked
+    );
+  });
+}
+
+function createMentionDomEvidence(
+  textarea: HTMLTextAreaElement,
+  list: HTMLUListElement,
+): MentionDomEvidence | null {
+  const textareaPlacement = captureRequestModePlacement(textarea);
+  const listPlacement = captureRequestModePlacement(list);
+  if (!textareaPlacement || !listPlacement) return null;
+  const textareaGuard = createRequestModeDomGuard(
+    textarea,
+    textareaPlacement,
+  );
+  if (!textareaGuard) return null;
+  const listGuard = createRequestModeDomGuard(list, listPlacement);
+  if (!listGuard) {
+    textareaGuard.release();
+    return null;
+  }
+  return Object.freeze({
+    textarea: snapshotRequestModeDom(textarea),
+    list: snapshotRequestModeDom(list),
+    textareaPlacement,
+    listPlacement,
+    isClean: () => textareaGuard.isClean() && listGuard.isClean(),
+    release: () => {
+      textareaGuard.release();
+      listGuard.release();
+    },
+  });
+}
+
+function mentionIsOwnerWindow(
+  candidate: unknown,
+  ownerDocument: Document,
+  ownerWindow: Window,
+) {
+  return (
+    candidate === ownerWindow ||
+    (typeof candidate === "object" &&
+      candidate !== null &&
+      "document" in candidate &&
+      candidate.document === ownerDocument &&
+      "window" in candidate &&
+      candidate.window === candidate)
+  );
+}
+
+function mentionNativeKey(
+  event: KeyboardEvent<HTMLElement>,
+  publication: MentionPublication,
+) {
+  const keyboard = publication.keyboard;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    publication.ownerWindow.Object.getPrototypeOf(nativeEvent) !==
+      keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    if (
+      key !== "ArrowDown" &&
+      key !== "ArrowUp" &&
+      key !== "Home" &&
+      key !== "End"
+    ) {
+      return null;
+    }
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const view = keyboard.eventView.read(nativeEvent);
+    return keyboard.isCurrent() &&
+      keyboard.eventType.read(nativeEvent) === "keydown" &&
+      keyboard.eventPhase.read(nativeEvent) !== keyboard.Event.NONE &&
+      keyboard.eventBubbles.read(nativeEvent) &&
+      keyboard.eventCancelable.read(nativeEvent) &&
+      !keyboard.eventDefaultPrevented.read(nativeEvent) &&
+      !keyboard.eventCancelBubble.read(nativeEvent) &&
+      (view === null ||
+        mentionIsOwnerWindow(
+          view,
+          publication.ownerDocument,
+          publication.ownerWindow,
+        )) &&
+      keyboard.trusted.read(nativeEvent) &&
+      !keyboard.repeat.read(nativeEvent) &&
+      !keyboard.composing.read(nativeEvent) &&
+      !keyboard.altKey.read(nativeEvent) &&
+      !keyboard.ctrlKey.read(nativeEvent) &&
+      !keyboard.metaKey.read(nativeEvent) &&
+      !keyboard.shiftKey.read(nativeEvent) &&
+      target === publication.textarea &&
+      target instanceof keyboard.Node &&
+      target.ownerDocument === publication.ownerDocument &&
+      path[0] === publication.textarea &&
+      path.filter((entry) => entry === publication.textarea).length === 1 &&
+      path.includes(publication.root) &&
+      path.includes(publication.ownerDocument) &&
+      keyboard.activeElement.read(publication.ownerDocument) ===
+        publication.textarea
+      ? Object.freeze({ event: nativeEvent, key })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readMentionReactProof(
+  event: KeyboardEvent<HTMLElement>,
+  currentTarget: HTMLElement,
+  publication: MentionPublication,
+  expectedEvent?: object,
+  expectedMethods?: MentionReactMethods,
+): MentionReactProof | null {
+  if (!event || typeof event !== "object") return null;
+  const native = mentionNativeKey(event, publication);
+  if (!native || (expectedEvent && event !== expectedEvent)) return null;
+  const reactEvent = event as KeyboardEvent<HTMLElement> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    isComposing?: unknown;
+    persist?: unknown;
+  };
+  const methods = Object.freeze({
+    preventDefault: reactEvent.preventDefault as (...args: never[]) => unknown,
+    stopPropagation: reactEvent.stopPropagation as (...args: never[]) => unknown,
+    isDefaultPrevented:
+      reactEvent.isDefaultPrevented as (...args: never[]) => unknown,
+    isPropagationStopped:
+      reactEvent.isPropagationStopped as (...args: never[]) => unknown,
+    persist: reactEvent.persist as (...args: never[]) => unknown,
+  });
+  if (
+    typeof methods.preventDefault !== "function" ||
+    typeof methods.stopPropagation !== "function" ||
+    typeof methods.isDefaultPrevented !== "function" ||
+    typeof methods.isPropagationStopped !== "function" ||
+    typeof methods.persist !== "function"
+  ) {
+    return null;
+  }
+  try {
+    const apply = publication.ownerWindow.Reflect.apply;
+    const composing = reactEvent.isComposing;
+    return (
+      reactEvent._reactName === "onKeyDown" &&
+      event.type === "keydown" &&
+      event.currentTarget === currentTarget &&
+      event.target === publication.textarea &&
+      event.nativeEvent === native.event &&
+      event.key === native.key &&
+      event.bubbles === publication.keyboard.eventBubbles.read(native.event) &&
+      event.cancelable ===
+        publication.keyboard.eventCancelable.read(native.event) &&
+      !event.defaultPrevented &&
+      event.isTrusted &&
+      (event.view === null ||
+        mentionIsOwnerWindow(
+          event.view,
+          publication.ownerDocument,
+          publication.ownerWindow,
+        )) &&
+      event.eventPhase ===
+        publication.keyboard.eventPhase.read(native.event) &&
+      !event.repeat &&
+      (composing === undefined || composing === false) &&
+      !event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      apply(methods.isDefaultPrevented, event, []) === false &&
+      apply(methods.isPropagationStopped, event, []) === false &&
+      (!expectedMethods ||
+        (methods.preventDefault === expectedMethods.preventDefault &&
+          methods.stopPropagation === expectedMethods.stopPropagation &&
+          methods.isDefaultPrevented ===
+            expectedMethods.isDefaultPrevented &&
+          methods.isPropagationStopped ===
+            expectedMethods.isPropagationStopped &&
+          methods.persist === expectedMethods.persist))
+    )
+      ? Object.freeze({
+          event,
+          nativeEvent: native.event,
+          key: native.key,
+          methods,
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function createMentionPublication(
+  authority: MentionAuthority,
+  cells: MentionCells,
+): MentionPublication | null {
+  const visit = authority.currentVisit();
+  const root = authority.currentRoot();
+  const textarea = authority.currentTextarea();
+  const list = authority.currentList();
+  const rowElements = authority.currentRows().slice(0, authority.rows.length);
+  const ownerDocument = textarea?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView as
+    | (Window & typeof globalThis)
+    | null;
+  if (
+    !visit ||
+    visit.retired ||
+    authority.currentSubmission() !== null ||
+    authority.busy ||
+    !root ||
+    !textarea ||
+    !list ||
+    !ownerDocument ||
+    !ownerWindow ||
+    rowElements.length !== authority.rows.length ||
+    rowElements.some((row) => !row)
+  ) {
+    return null;
+  }
+  const exactRows = Object.freeze(rowElements as HTMLLIElement[]);
+  const keyboard = captureRequestModeKeyboardAuthority(
+    ownerDocument,
+    ownerWindow,
+  );
+  const dom = createMentionDomEvidence(textarea, list);
+  if (!keyboard || !dom) {
+    dom?.release();
+    return null;
+  }
+  const identity = Symbol("mention-keyboard-publication");
+  const actions = Object.freeze(
+    Object.fromEntries(
+      (["ArrowDown", "ArrowUp", "Home", "End"] as const).map((key) => [
+        key,
+        Object.freeze({
+          identity: Symbol(`mention-${key}-action`),
+          publicationIdentity: identity,
+          key,
+          source: authority.highlight,
+          destination: mentionDestination(
+            key,
+            authority.highlight,
+            authority.rows.length,
+          ),
+        }),
+      ]),
+    ),
+  ) as Readonly<Record<MentionNavigationKey, MentionAction>>;
+  let retired = false;
+  let captureRoot: MentionReactProof | null = null;
+  let captureTextarea: MentionReactProof | null = null;
+  let bubbleTextarea: MentionReactProof | null = null;
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    cells.retired.add(publication);
+    if (cells.active.current === publication) cells.active.current = null;
+    dom.release();
+    captureRoot = null;
+    captureTextarea = null;
+    bubbleTextarea = null;
+  };
+  const invalidate = () => {
+    if (retired) return;
+    retire();
+    authority.requestSuccessor();
+  };
+  const isCurrent = () => {
+    if (
+      !retired &&
+      cells.active.current === publication &&
+      !cells.retired.has(publication) &&
+      mentionFactsAreCurrent(publication) &&
+      mentionDomIsExact(publication) &&
+      keyboard.isCurrent()
+    ) {
+      return true;
+    }
+    if (!retired && cells.active.current === publication) invalidate();
+    return false;
+  };
+  const claim = (
+    action: MentionAction,
+    captureEvent: object,
+    bubbleEvent: object,
+    nativeEvent: Event,
+  ) => {
+    if (
+      action.publicationIdentity !== publication.identity ||
+      publication.actions[action.key] !== action ||
+      cells.claimedPublications.has(publication) ||
+      cells.claimedActions.has(action) ||
+      cells.claimedReactEvents.has(captureEvent) ||
+      cells.claimedReactEvents.has(bubbleEvent) ||
+      cells.claimedNativeEvents.has(nativeEvent) ||
+      claimedMentionReactEvents.has(captureEvent) ||
+      claimedMentionReactEvents.has(bubbleEvent) ||
+      claimedMentionNativeEvents.has(nativeEvent) ||
+      !isCurrent()
+    ) {
+      return false;
+    }
+    cells.claimedPublications.add(publication);
+    cells.claimedActions.add(action);
+    cells.claimedReactEvents.add(captureEvent);
+    cells.claimedReactEvents.add(bubbleEvent);
+    cells.claimedNativeEvents.add(nativeEvent);
+    claimedMentionReactEvents.add(captureEvent);
+    claimedMentionReactEvents.add(bubbleEvent);
+    claimedMentionNativeEvents.add(nativeEvent);
+    return true;
+  };
+  const clearProof = () => {
+    captureRoot = null;
+    captureTextarea = null;
+    bubbleTextarea = null;
+  };
+
+  const publication: MentionPublication = Object.freeze({
+    identity,
+    authority,
+    visit,
+    root,
+    textarea,
+    list,
+    rowElements: exactRows,
+    ownerDocument,
+    ownerWindow,
+    keyboard,
+    dom,
+    actions,
+    captureRoot: (event: KeyboardEvent<HTMLDivElement>) => {
+      clearProof();
+      if (!isCurrent()) return;
+      captureRoot = readMentionReactProof(event, root, publication);
+    },
+    captureTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (!captureRoot || captureTextarea || !isCurrent()) return;
+      captureTextarea = readMentionReactProof(
+        event,
+        textarea,
+        publication,
+        captureRoot.event,
+        captureRoot.methods,
+      );
+    },
+    bubbleTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (
+        !captureRoot ||
+        !captureTextarea ||
+        bubbleTextarea ||
+        !isCurrent()
+      ) {
+        return;
+      }
+      bubbleTextarea = readMentionReactProof(
+        event,
+        textarea,
+        publication,
+      );
+      if (
+        bubbleTextarea?.nativeEvent !== captureRoot.nativeEvent ||
+        bubbleTextarea?.key !== captureRoot.key
+      ) {
+        bubbleTextarea = null;
+      }
+    },
+    bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => {
+      const capture = captureRoot;
+      const capturedTextarea = captureTextarea;
+      const bubbledTextarea = bubbleTextarea;
+      const bubbledRoot =
+        bubbledTextarea &&
+        readMentionReactProof(
+          event,
+          root,
+          publication,
+          bubbledTextarea.event,
+          bubbledTextarea.methods,
+        );
+      clearProof();
+      if (
+        !capture ||
+        !capturedTextarea ||
+        !bubbledTextarea ||
+        !bubbledRoot ||
+        capture.event !== capturedTextarea.event ||
+        capture.nativeEvent !== bubbledTextarea.nativeEvent ||
+        capture.key !== bubbledTextarea.key ||
+        !isCurrent()
+      ) {
+        return;
+      }
+      const action = actions[capture.key];
+      if (
+        action.destination === null ||
+        action.source !== authority.highlight ||
+        !claim(
+          action,
+          capture.event,
+          bubbledTextarea.event,
+          capture.nativeEvent,
+        )
+      ) {
+        return;
+      }
+      keyboard.eventPreventDefault.invoke(capture.nativeEvent);
+      if (!keyboard.eventDefaultPrevented.read(capture.nativeEvent)) return;
+      authority.setHighlight(action.destination);
+      if (action.destination === action.source) authority.requestSuccessor();
+    },
+    retire,
+    isRetired: () => retired,
+  });
+  if (!mentionFactsAreCurrent(publication) || !mentionDomIsExact(publication)) {
+    retire();
+    return null;
+  }
+  const previous = cells.active.current;
+  previous?.retire();
+  cells.active.current = publication;
+  return publication;
+}
+
 function cancelComposerFocusOperation(owner: ComposerFocusOperation) {
   const frame = owner.frame;
   owner.frame = null;
@@ -3907,6 +4630,11 @@ function Composer<Result>({
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
+  const mentionListId = useId();
+  const [mentionMount] = useState(() => Symbol("mention composer"));
+  const [mentionCells] = useState(createMentionCells);
+  const mentionActive = mentionCells.active;
+  const [mentionRevision, setMentionRevision] = useState(0);
   const [requestModeMount] = useState(() => Symbol("request mode composer"));
   const [requestModeCells] = useState(createRequestModeCells);
   const [requestModePresentationCache] = useState(() => new RequestModePresentationCache());
@@ -3915,8 +4643,66 @@ function Composer<Result>({
     setRequestModeRevision((revision) => revision + 1);
   }, []);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const mentionRootRef = useRef<HTMLDivElement>(null);
+  const mentionListRef = useRef<HTMLUListElement>(null);
+  const mentionRowRefs = useRef<(HTMLLIElement | null)[]>([]);
   const activeVisit = useRef<ComposerVisit | null>(null);
   const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
+  const currentComposerVisit = useCallback(() => activeVisit.current, []);
+  const currentComposerSubmission = useCallback(
+    () => activeSubmission.current,
+    [],
+  );
+  const currentMentionRoot = useCallback(() => mentionRootRef.current, []);
+  const currentMentionTextarea = useCallback(() => ref.current, []);
+  const currentMentionList = useCallback(() => mentionListRef.current, []);
+  const currentMentionRows = useCallback(
+    () => mentionRowRefs.current as readonly (HTMLLIElement | null)[],
+    [],
+  );
+  const requestMentionSuccessor = useCallback(() => {
+    setMentionRevision((revision) => revision + 1);
+  }, []);
+  const retireMentionForElement = mentionCells.retireForElement;
+  const captureMentionRoot = useCallback(
+    (element: HTMLDivElement | null) => {
+      retireMentionForElement(element, mentionRootRef.current);
+      mentionRootRef.current = element;
+    },
+    [retireMentionForElement],
+  );
+  const captureMentionTextarea = useCallback(
+    (element: HTMLTextAreaElement | null) => {
+      retireMentionForElement(element, ref.current);
+      ref.current = element;
+    },
+    [retireMentionForElement],
+  );
+  const captureMentionList = useCallback(
+    (element: HTMLUListElement | null) => {
+      retireMentionForElement(element, mentionListRef.current);
+      mentionListRef.current = element;
+    },
+    [retireMentionForElement],
+  );
+  const captureMentionRow = useCallback(
+    (index: number, element: HTMLLIElement | null) => {
+      retireMentionForElement(element, mentionRowRefs.current[index] ?? null);
+      mentionRowRefs.current[index] = element;
+    },
+    [retireMentionForElement],
+  );
+  const captureMentionRows = useMemo(
+    () =>
+      Object.freeze(
+        Array.from(
+          { length: MAX_SUGGESTIONS },
+          (_, index) => (element: HTMLLIElement | null) =>
+            captureMentionRow(index, element),
+        ),
+      ),
+    [captureMentionRow],
+  );
   const requestModeVisitIsCurrent = useCallback(() => {
     const visit = activeVisit.current;
     return !!visit && !visit.retired;
@@ -4124,6 +4910,116 @@ function Composer<Result>({
   // an `@` that finds nothing (#1025). It never opens for an edit, which cannot become a request.
   const connectDue = connect.due && request !== undefined;
   const open = trigger !== null && (matches.length > 0 || connectDue);
+  const mentionListOpen = open && matches.length > 0;
+  const mentionRows = useMemo(
+    () =>
+      Object.freeze(
+        matches.map((candidate, index) =>
+          Object.freeze({
+            index,
+            candidate,
+            login: candidate.login,
+            name: candidate.name,
+            image: candidate.image,
+            own: Boolean(candidate.own),
+            agent: candidate.agent ?? null,
+            ownerLogin: candidate.agent?.ownerLogin ?? null,
+            ownerName: candidate.agent?.ownerName ?? null,
+            canAsk: candidate.agent?.canAsk ?? null,
+            highlighted: index === highlight,
+            optionId: `${mentionListId}-option-${index}`,
+          }),
+        ),
+      ),
+    [highlight, matches, mentionListId],
+  );
+  const mentionAuthority = useMemo<MentionAuthority | null>(
+    () =>
+      mentionListOpen && trigger
+        ? // The publication invokes these ref-backed predicates only after commit.
+          // eslint-disable-next-line react-hooks/refs
+          Object.freeze({
+            mount: mentionMount,
+            revision: mentionRevision,
+            value,
+            trigger: Object.freeze({ ...trigger }),
+            candidates: Object.freeze([...candidates]),
+            rows: mentionRows,
+            highlight,
+            busy,
+            listId: mentionListId,
+            currentVisit: currentComposerVisit,
+            currentSubmission: currentComposerSubmission,
+            currentRoot: currentMentionRoot,
+            currentTextarea: currentMentionTextarea,
+            currentList: currentMentionList,
+            currentRows: currentMentionRows,
+            setHighlight,
+            requestSuccessor: requestMentionSuccessor,
+          })
+        : null,
+    [
+      busy,
+      candidates,
+      currentComposerSubmission,
+      currentComposerVisit,
+      currentMentionList,
+      currentMentionRoot,
+      currentMentionRows,
+      currentMentionTextarea,
+      highlight,
+      mentionListId,
+      mentionListOpen,
+      mentionMount,
+      mentionRevision,
+      mentionRows,
+      requestMentionSuccessor,
+      trigger,
+      value,
+    ],
+  );
+  const mentionHandlers: MentionHandlers = Object.freeze({
+    captureRoot: (event: KeyboardEvent<HTMLDivElement>) => {
+      const publication = mentionActive.current;
+      if (publication?.authority === mentionAuthority) {
+        publication.captureRoot(event);
+      }
+    },
+    captureTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      const publication = mentionActive.current;
+      if (publication?.authority === mentionAuthority) {
+        publication.captureTextarea(event);
+      }
+    },
+    bubbleTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      const publication = mentionActive.current;
+      if (publication?.authority === mentionAuthority) {
+        publication.bubbleTextarea(event);
+      }
+    },
+    bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => {
+      const publication = mentionActive.current;
+      if (publication?.authority === mentionAuthority) {
+        publication.bubbleRoot(event);
+      }
+    },
+  });
+  useLayoutEffect(() => {
+    const previous = mentionActive.current;
+    if (!mentionAuthority) {
+      previous?.retire();
+      return;
+    }
+    if (previous?.authority === mentionAuthority && !previous.isRetired()) {
+      return previous.retire;
+    }
+    previous?.retire();
+    const publication = createMentionPublication(
+      mentionAuthority,
+      mentionCells,
+    );
+    return publication?.retire;
+  }, [mentionActive, mentionAuthority, mentionCells]);
 
   // The mode row: only while the body names an agent the picker knows, and only on composers that can post a request.
   const agents = useMemo(() => (request ? mentionedAgents(value, candidates) : []), [request, value, candidates]);
@@ -4266,16 +5162,31 @@ function Composer<Result>({
     }
   };
   return (
-    <div className="@container flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
+    <div
+      ref={captureMentionRoot}
+      className="@container flex flex-col gap-2"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDownCapture={mentionHandlers.captureRoot}
+      onKeyDown={mentionHandlers.bubbleRoot}
+    >
       <Popover open={open} onOpenChange={(o) => !o && !activeSubmission.current && setTrigger(null)}>
         <PopoverAnchor asChild>
           <textarea
-            ref={ref}
+            ref={captureMentionTextarea}
             className="textarea min-h-[64px] resize-none text-[13px]"
             placeholder={placeholder}
             value={value}
             disabled={busy}
             aria-busy={busy || undefined}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={mentionListOpen}
+            aria-controls={mentionListOpen ? mentionListId : undefined}
+            aria-activedescendant={
+              mentionListOpen
+                ? mentionRows[highlight]?.optionId
+                : undefined
+            }
             onPointerDown={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
             onFocus={(e) => recordCaretAction(e.currentTarget, e.nativeEvent)}
             onChange={(e) => {
@@ -4295,10 +5206,21 @@ function Composer<Result>({
               recordCaretAction(e.currentTarget, e.nativeEvent);
               scheduleBlurDismissal(e.currentTarget);
             }}
+            onKeyDownCapture={mentionHandlers.captureTextarea}
             onKeyDown={(e) => {
+              mentionHandlers.bubbleTextarea(e);
               if (activeSubmission.current) {
                 e.preventDefault();
                 e.stopPropagation();
+                return;
+              }
+              if (
+                mentionListOpen &&
+                (e.key === "ArrowDown" ||
+                  e.key === "ArrowUp" ||
+                  e.key === "Home" ||
+                  e.key === "End")
+              ) {
                 return;
               }
               recordCaretAction(e.currentTarget, e.nativeEvent);
@@ -4322,16 +5244,6 @@ function Composer<Result>({
               }
               if (open) {
                 if (matches.length > 0) {
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    setHighlight((h) => (h + 1) % matches.length);
-                    return;
-                  }
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    setHighlight((h) => (h - 1 + matches.length) % matches.length);
-                    return;
-                  }
                   if ((e.key === "Enter" && !e.metaKey && !e.ctrlKey) || e.key === "Tab") {
                     e.preventDefault();
                     pick(matches[highlight] ?? matches[0]);
@@ -4374,7 +5286,12 @@ function Composer<Result>({
           data-testid="mention-suggestions"
         >
           {matches.length > 0 && (
-            <ul role="listbox" aria-label="Mention someone">
+            <ul
+              ref={captureMentionList}
+              id={mentionListId}
+              role="listbox"
+              aria-label="Mention someone"
+            >
               {matches.map((c, i) => {
                 // Someone else's agent whose owner has not opened it to collaborators: greyed, with a lock and the reason
                 // (#1296). It can still be picked — the mention is legitimate — but the composer will not send a request.
@@ -4383,7 +5300,9 @@ function Composer<Result>({
                 const reason = lockedAgent ? `Only ${agentOwnerName(lockedAgent)} can ask this agent` : undefined;
                 return (
                   <li
+                    ref={captureMentionRows[i]}
                     key={c.login}
+                    id={mentionRows[i]?.optionId}
                     role="option"
                     aria-selected={i === highlight}
                     aria-disabled={busy || lockedRow || undefined}
