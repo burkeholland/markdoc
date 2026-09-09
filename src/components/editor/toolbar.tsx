@@ -198,6 +198,7 @@ interface ToolbarDescriptorEvidence {
 
 interface ToolbarKeyboardIntrinsics {
   readonly ownerWindow: Window & typeof globalThis;
+  readonly listenerTarget: EventTarget;
   readonly keyboardPrototype: object;
   readonly objectPrototype: object;
   readonly capturingPhase: number;
@@ -284,6 +285,7 @@ interface HeadingKeyListenerRegistration {
   readonly source: ToolbarPublication;
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
+  readonly listenerTarget: EventTarget;
   readonly listener: (this: EventTarget, event: Event) => void;
   readonly isCurrent: () => boolean;
   readonly release: () => void;
@@ -490,6 +492,12 @@ function captureToolbarKeyboardIntrinsics(
     apply,
     evidence,
   );
+  const windowReference = toolbarGetter<Window, Window>(
+    getOwnPropertyDescriptor,
+    ownerWindow,
+    "window",
+    evidence,
+  );
   const type = toolbarGetter<Event, string>(
     getOwnPropertyDescriptor,
     eventPrototype,
@@ -634,6 +642,7 @@ function captureToolbarKeyboardIntrinsics(
   );
   if (
     !trusted ||
+    !windowReference ||
     !type ||
     !target ||
     !currentTarget ||
@@ -663,6 +672,12 @@ function captureToolbarKeyboardIntrinsics(
   ) {
     return null;
   }
+  let listenerTarget: EventTarget;
+  try {
+    listenerTarget = apply(windowReference, ownerWindow, []);
+  } catch {
+    return null;
+  }
   let historyIsClean = true;
   const ownerRealmIsCurrent = () =>
     ownerWindow.Object === objectConstructor &&
@@ -686,7 +701,8 @@ function captureToolbarKeyboardIntrinsics(
       getOwnPropertyDescriptor &&
     ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
     ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
-    ownerWindow.Reflect.apply === apply;
+    ownerWindow.Reflect.apply === apply &&
+    apply(windowReference, ownerWindow, []) === listenerTarget;
   const isCurrent = () => {
     if (!historyIsClean) return false;
     try {
@@ -745,6 +761,7 @@ function captureToolbarKeyboardIntrinsics(
   if (!isCurrent()) return null;
   return Object.freeze({
     ownerWindow,
+    listenerTarget,
     keyboardPrototype,
     objectPrototype,
     capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
@@ -1916,6 +1933,7 @@ function createToolbarPublication({
     const ownerDocument = ownedRoot.ownerDocument;
     const ownerWindow = ownerDocument.defaultView;
     if (!ownerWindow || currentKeyboard.ownerWindow !== ownerWindow) return false;
+    const listenerTarget = currentKeyboard.listenerTarget;
     let installed = false;
     let released = false;
     let registration: HeadingKeyListenerRegistration;
@@ -1926,6 +1944,7 @@ function createToolbarPublication({
       if (
         !snapshot ||
         snapshot.type !== "keydown" ||
+        this !== listenerTarget ||
         snapshot.currentTarget !== this ||
         snapshot.eventPhase !== currentKeyboard.capturingPhase ||
         snapshot.path.at(-2) !== ownerDocument ||
@@ -1957,7 +1976,7 @@ function createToolbarPublication({
       if (wasInstalled) {
         currentKeyboard.apply(
           currentKeyboard.eventTarget.removeEventListener,
-          ownerWindow,
+          listenerTarget,
           ["keydown", listener, true],
         );
       }
@@ -1966,6 +1985,7 @@ function createToolbarPublication({
       source: publication,
       ownerDocument,
       ownerWindow,
+      listenerTarget,
       listener,
       isCurrent: () =>
         installed &&
@@ -1980,7 +2000,7 @@ function createToolbarPublication({
     headingKeyListenerRegistration = registration;
     currentKeyboard.apply(
       currentKeyboard.eventTarget.addEventListener,
-      ownerWindow,
+      listenerTarget,
       ["keydown", listener, true],
     );
     installed = true;
@@ -2002,6 +2022,7 @@ function createToolbarPublication({
         nativePublication.nativeEvent === nativeEvent &&
         nativePublication.receiver ===
           nativePublication.snapshot.currentTarget &&
+        nativePublication.receiver === registration.listenerTarget &&
         nativePublication.snapshot.path.at(-2) ===
           registration.ownerDocument &&
         nativePublication.snapshot.path.at(-1) ===
@@ -2009,6 +2030,7 @@ function createToolbarPublication({
         registration.source === identity.current &&
         registration.ownerDocument === trigger.ownerDocument &&
         registration.ownerWindow === keyboard.ownerWindow &&
+        registration.listenerTarget === keyboard.listenerTarget &&
         registration.isCurrent() &&
         toolbarKeyboardFactsMatch(nativePublication.snapshot, snapshot) &&
         toolbarKeyboardPathMatches(
