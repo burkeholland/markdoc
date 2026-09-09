@@ -2483,11 +2483,11 @@ class StatsDisclosureCoordinator {
     const currentRegistration = () =>
       this.#capture?.windowKeyRegistration;
     const consumeShortcut = (
-      publication: StatsClosedPublication,
+      publication: StatsDisclosurePublication,
       event: KeyboardEvent,
     ) => this.consumeShortcut(publication, event);
     const recordDirectionalNative = (
-      publication: StatsClosedPublication,
+      publication: StatsDisclosurePublication,
       event: KeyboardEvent,
       listener: StatsDirectionalListenerProof,
     ) =>

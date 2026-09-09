@@ -287,7 +287,9 @@ function invokeWindowListener(
   else listener.handleEvent(event);
 }
 
-function observeWindowListenerReceiver(ownerWindow: Window) {
+function observeWindowListenerReceiver(
+  ownerWindow: Window & typeof globalThis,
+) {
   const receivers = new WeakMap<Event, Window>();
   let currentTarget: EventTarget | null = null;
   let terminal: EventTarget | null = null;
@@ -1477,8 +1479,9 @@ describe("StatsPopover directional disclosure authority", () => {
         first.host.remove();
       }
       if (second) {
-        act(() => second.root.unmount());
-        second.host.remove();
+        const mountedSecond = second;
+        act(() => mountedSecond.root.unmount());
+        mountedSecond.host.remove();
       }
       focus.mockRestore();
       preventDefault.mockRestore();
