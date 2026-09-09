@@ -859,6 +859,7 @@ function headingReactEventMatches(
       event.bubbles === snapshot.bubbles &&
       event.cancelable === snapshot.cancelable &&
       event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isDefaultPrevented() === snapshot.defaultPrevented &&
       event.isTrusted === snapshot.isTrusted &&
       event.key === snapshot.key &&
       event.code === snapshot.code &&
