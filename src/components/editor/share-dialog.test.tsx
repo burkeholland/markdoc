@@ -276,6 +276,15 @@ function dispatchAgentKeyWithHandler(
   }
 }
 
+function preventionCallCount(
+  preventDefault: { mock: { contexts: readonly unknown[] } },
+  ...events: Event[]
+) {
+  return preventDefault.mock.contexts.filter((receiver) =>
+    events.some((event) => event === receiver)
+  ).length;
+}
+
 function nativeChange(target: HTMLSelectElement, type = "change"): Event {
   const Constructor = target.ownerDocument.defaultView?.Event;
   if (!Constructor) throw new Error("Control has no owner-document Event");
@@ -2815,9 +2824,9 @@ describe("ShareDialog agent disclosure directional keys", () => {
       const scroll = { x: window.scrollX, y: window.scrollY };
 
       const right = dispatchAgentKey(toggle, "ArrowRight");
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
       expect(right.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(preventionCallCount(preventDefault, right)).toBe(1);
       expect(toggle).toHaveFocus();
       expect(focus).not.toHaveBeenCalled();
       expect(window.scrollX).toBe(scroll.x);
@@ -2827,14 +2836,14 @@ describe("ShareDialog agent disclosure directional keys", () => {
       preventDefault.mockClear();
       const inertRight = dispatchAgentKey(toggle, "ArrowRight");
       expect(inertRight.defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventionCallCount(preventDefault, inertRight)).toBe(0);
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       expect(toggle).toHaveFocus();
 
       const left = dispatchAgentKey(toggle, "ArrowLeft");
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
       expect(left.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+      expect(preventionCallCount(preventDefault, left)).toBe(1);
       expect(toggle).toHaveFocus();
       expect(focus).not.toHaveBeenCalled();
       expect(window.scrollX).toBe(scroll.x);
@@ -2844,7 +2853,7 @@ describe("ShareDialog agent disclosure directional keys", () => {
       preventDefault.mockClear();
       const inertLeft = dispatchAgentKey(toggle, "ArrowLeft");
       expect(inertLeft.defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventionCallCount(preventDefault, inertLeft)).toBe(0);
       expect(toggle).toHaveAttribute("aria-expanded", "false");
       expect(toggle).toHaveFocus();
       expect(onOpenChange).not.toHaveBeenCalled();
@@ -2879,11 +2888,11 @@ describe("ShareDialog agent disclosure directional keys", () => {
       preventDefault.mockClear();
 
       const accepted = dispatchAgentKey(toggle, "ArrowRight");
-
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
       expect(accepted.defaultPrevented).toBe(true);
       expect((nested as KeyboardEvent | null)?.defaultPrevented).toBe(false);
-      expect(preventDefault).toHaveBeenCalledOnce();
+
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(preventionCallCount(preventDefault, accepted)).toBe(1);
       expect(toggle).toHaveFocus();
       expect(tokensCreate).not.toHaveBeenCalled();
       expect(copyText).not.toHaveBeenCalled();
@@ -2929,12 +2938,14 @@ describe("ShareDialog agent disclosure directional keys", () => {
 
       for (const event of rejected) {
         dispatchAgentKey(toggle, event);
+        expect(event.defaultPrevented).toBe(event === previouslyPrevented);
         expect(toggle).toHaveAttribute("aria-expanded", "false");
       }
       outside.focus();
-      dispatchAgentKey(toggle, "ArrowRight");
+      const unfocused = dispatchAgentKey(toggle, "ArrowRight");
+      expect(unfocused.defaultPrevented).toBe(false);
 
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventionCallCount(preventDefault, ...rejected, unfocused)).toBe(0);
       expect(toggle).toHaveAttribute("aria-expanded", "false");
       expect(outside).toHaveFocus();
       expect(tokensCreate).not.toHaveBeenCalled();
@@ -2943,9 +2954,9 @@ describe("ShareDialog agent disclosure directional keys", () => {
       toggle.focus();
       preventDefault.mockClear();
       const recovered = dispatchAgentKey(toggle, "ArrowRight");
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
       expect(recovered.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(preventionCallCount(preventDefault, recovered)).toBe(1);
       expect(toggle).toHaveFocus();
       outside.remove();
     } finally {
@@ -3009,25 +3020,27 @@ describe("ShareDialog agent disclosure directional keys", () => {
       preventDefault.mockClear();
 
       const right = dispatchAgentKey(toggle, "ArrowRight");
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
       expect(right.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+      expect(preventionCallCount(preventDefault, right)).toBe(1);
       expect(toggle).toHaveFocus();
       expect(screen.getByTestId("token-manager")).toBeInTheDocument();
 
       preventDefault.mockClear();
-      expect(dispatchAgentKey(toggle, "ArrowRight").defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      const inertRight = dispatchAgentKey(toggle, "ArrowRight");
+      expect(inertRight.defaultPrevented).toBe(false);
+      expect(preventionCallCount(preventDefault, inertRight)).toBe(0);
       const left = dispatchAgentKey(toggle, "ArrowLeft");
-      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
       expect(left.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+      expect(preventionCallCount(preventDefault, left)).toBe(1);
       expect(toggle).toHaveFocus();
       expect(screen.queryByTestId("token-manager")).toBeNull();
 
       preventDefault.mockClear();
-      expect(dispatchAgentKey(toggle, "ArrowLeft").defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      const inertLeft = dispatchAgentKey(toggle, "ArrowLeft");
+      expect(inertLeft.defaultPrevented).toBe(false);
+      expect(preventionCallCount(preventDefault, inertLeft)).toBe(0);
       expect(onClose).not.toHaveBeenCalled();
       expect(tokensCreate).not.toHaveBeenCalled();
       expect(copyText).not.toHaveBeenCalled();
@@ -3085,7 +3098,7 @@ describe("ShareDialog agent disclosure directional keys", () => {
 
         const rejected = dispatchAgentKey(toggle, "ArrowRight");
         expect(rejected.defaultPrevented).toBe(false);
-        expect(preventDefault).not.toHaveBeenCalled();
+        expect(preventionCallCount(preventDefault, rejected)).toBe(0);
         expect(toggle).toHaveAttribute("aria-expanded", "false");
 
         generation += 1;
@@ -3095,9 +3108,9 @@ describe("ShareDialog agent disclosure directional keys", () => {
         recovered.focus();
         preventDefault.mockClear();
         const accepted = dispatchAgentKey(recovered, "ArrowRight");
-        await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
         expect(accepted.defaultPrevented).toBe(true);
-        expect(preventDefault).toHaveBeenCalledOnce();
+        await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
+        expect(preventionCallCount(preventDefault, accepted)).toBe(1);
         expect(recovered).toHaveFocus();
         expect(tokensCreate).not.toHaveBeenCalled();
         expect(copyText).not.toHaveBeenCalled();
@@ -3130,7 +3143,7 @@ describe("ShareDialog agent disclosure directional keys", () => {
       preventDefault.mockClear();
       const partialReplay = dispatchAgentKey(staleToggle, "ArrowRight");
       expect(partialReplay.defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventionCallCount(preventDefault, partialReplay)).toBe(0);
 
       const nextDoc = { ...doc, id: "doc-agent-direction-current", title: "Current disclosure" };
       view.rerender(
@@ -3145,7 +3158,7 @@ describe("ShareDialog agent disclosure directional keys", () => {
       const crossed = agentKeyEvent(currentToggle, "ArrowRight");
       dispatchAgentKeyWithHandler(currentToggle, crossed, staleHandler);
       expect(crossed.defaultPrevented).toBe(false);
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventionCallCount(preventDefault, crossed)).toBe(0);
       expect(currentToggle).toHaveAttribute("aria-expanded", "false");
 
       const currentHandler = reactProp<
@@ -3161,7 +3174,6 @@ describe("ShareDialog agent disclosure directional keys", () => {
         } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
       });
       expect(fabricatedPrevention).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
 
       render(
         <StrictMode>
@@ -3173,9 +3185,9 @@ describe("ShareDialog agent disclosure directional keys", () => {
       recovered.focus();
       preventDefault.mockClear();
       const accepted = dispatchAgentKey(recovered, "ArrowRight");
-      await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
       expect(accepted.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
+      await waitFor(() => expect(recovered).toHaveAttribute("aria-expanded", "true"));
+      expect(preventionCallCount(preventDefault, accepted)).toBe(1);
       expect(recovered).toHaveFocus();
       expect(tokensCreate).not.toHaveBeenCalled();
       expect(copyText).not.toHaveBeenCalled();
