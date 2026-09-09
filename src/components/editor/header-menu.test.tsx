@@ -1607,7 +1607,7 @@ describe("editor header Publish options directional focus", () => {
   it("rejects a structural Window terminal before accepting the exact listener terminal", async () => {
     const nativeComposedPath = window.Event.prototype.composedPath;
     let terminal: EventTarget | null = null;
-    vi.spyOn(window.Event.prototype, "composedPath").mockImplementation(function () {
+    vi.spyOn(window.Event.prototype, "composedPath").mockImplementation(function (this: Event) {
       const path = nativeComposedPath.call(this);
       return terminal ? [...path.slice(0, -1), terminal] : path;
     });
