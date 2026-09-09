@@ -448,13 +448,15 @@ function installRichHighlightActivation(
       ) {
         clearPress();
       }
-      if (
-        pending &&
-        !pending.confirmed &&
-        press?.released &&
-        pending.target === press.target &&
-        selectionUpdated
-      ) {
+      const canFollowPointerSelection = !!pending &&
+        (
+          pending.confirmed ||
+          (
+            press?.released &&
+            pending.target === press.target
+          )
+        );
+      if (pending && canFollowPointerSelection && selectionUpdated) {
         if (isPointerSelectionUpdateInsideTarget(currentView, previousState, pending.target)) {
           pending.selection = currentView.state.selection;
         } else {
