@@ -327,12 +327,16 @@ interface TokenRenameKeyboardAuthority {
   readonly Event: typeof Event;
   readonly UIEvent: typeof UIEvent;
   readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly Document: typeof Document;
+  readonly HTMLElement: typeof HTMLElement;
   readonly Node: typeof Node;
   readonly event: TokenRenameGetterAuthority<TokenRenameEventField>["getters"];
   readonly keyboard: TokenRenameGetterAuthority<TokenRenameKeyboardField>["getters"];
   readonly view: TokenRenameNativeGetter;
+  readonly activeElement: TokenRenameNativeGetter;
   readonly composedPath: Event["composedPath"];
   readonly preventDefault: Event["preventDefault"];
+  readonly focus: HTMLElement["focus"];
   readonly trusted: TokenRenameTrustedAuthority;
   readonly apply: typeof Reflect.apply;
   readonly prototypeOf: typeof Object.getPrototypeOf;
@@ -347,6 +351,21 @@ interface TokenRenameKeyboardSnapshot {
   readonly phase: number;
   readonly view: Window | null;
   readonly trusted: boolean;
+}
+
+const TOKEN_RENAME_NAVIGATION_KEYS = Object.freeze([
+  "ArrowLeft",
+  "ArrowUp",
+  "ArrowRight",
+  "ArrowDown",
+  "Home",
+  "End",
+] as const);
+type TokenRenameNavigationKey = (typeof TOKEN_RENAME_NAVIGATION_KEYS)[number];
+const TOKEN_RENAME_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
+
+interface TokenRenameNavigationSnapshot extends TokenRenameKeyboardSnapshot {
+  readonly key: TokenRenameNavigationKey;
 }
 
 interface SecretNoticePublication {
@@ -653,10 +672,14 @@ function captureTokenRenameKeyboardAuthority(
   const EventConstructor = ownerWindow.Event;
   const UIEventConstructor = ownerWindow.UIEvent;
   const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
   const NodeConstructor = ownerWindow.Node;
   const eventPrototype = EventConstructor.prototype;
   const uiEventPrototype = UIEventConstructor.prototype;
   const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const htmlElementPrototype = HTMLElementConstructor.prototype;
   const event = captureTokenRenameGetters(getOwnPropertyDescriptor, eventPrototype, [
     "type",
     "target",
@@ -683,6 +706,11 @@ function captureTokenRenameKeyboardAuthority(
   const ui = captureTokenRenameGetters(getOwnPropertyDescriptor, uiEventPrototype, [
     "view",
   ] as const);
+  const document = captureTokenRenameGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
   const composedPath = captureTokenRenameMethod<Event["composedPath"]>(
     getOwnPropertyDescriptor,
     eventPrototype,
@@ -693,7 +721,20 @@ function captureTokenRenameKeyboardAuthority(
     eventPrototype,
     "preventDefault",
   );
-  if (!event || !keyboard || !ui || !composedPath || !preventDefault) return null;
+  const focus = captureTokenRenameMethod<HTMLElement["focus"]>(
+    getOwnPropertyDescriptor,
+    htmlElementPrototype,
+    "focus",
+  );
+  if (
+    !event
+    || !keyboard
+    || !ui
+    || !document
+    || !composedPath
+    || !preventDefault
+    || !focus
+  ) return null;
   let probe: KeyboardEvent;
   try {
     probe = new KeyboardEventConstructor("token-rename-keyboard-probe");
@@ -712,17 +753,23 @@ function captureTokenRenameKeyboardAuthority(
     && ownerWindow.Event === EventConstructor
     && ownerWindow.UIEvent === UIEventConstructor
     && ownerWindow.KeyboardEvent === KeyboardEventConstructor
+    && ownerWindow.Document === DocumentConstructor
+    && ownerWindow.HTMLElement === HTMLElementConstructor
     && ownerWindow.Node === NodeConstructor
     && EventConstructor.prototype === eventPrototype
     && UIEventConstructor.prototype === uiEventPrototype
     && KeyboardEventConstructor.prototype === keyboardEventPrototype
+    && DocumentConstructor.prototype === documentPrototype
+    && HTMLElementConstructor.prototype === htmlElementPrototype
     && prototypeOf(keyboardEventPrototype) === uiEventPrototype
     && prototypeOf(uiEventPrototype) === eventPrototype
     && event.isCurrent()
     && keyboard.isCurrent()
     && ui.isCurrent()
+    && document.isCurrent()
     && composedPath.isCurrent()
     && preventDefault.isCurrent()
+    && focus.isCurrent()
     && trusted.isCurrent();
   if (!isCurrent()) return null;
 
@@ -732,12 +779,16 @@ function captureTokenRenameKeyboardAuthority(
     Event: EventConstructor,
     UIEvent: UIEventConstructor,
     KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
     Node: NodeConstructor,
     event: event.getters,
     keyboard: keyboard.getters,
     view: ui.getters.view,
+    activeElement: document.getters.activeElement,
     composedPath: composedPath.method,
     preventDefault: preventDefault.method,
+    focus: focus.method,
     trusted,
     apply,
     prototypeOf,
@@ -844,6 +895,116 @@ function tokenRenameEscapeMatches(
   const current = captureTokenRenameEscape(authority, snapshot.event, input);
   return Boolean(
     current
+    && current.target === snapshot.target
+    && current.currentTarget === snapshot.currentTarget
+    && current.phase === snapshot.phase
+    && current.view === snapshot.view
+    && current.trusted === snapshot.trusted
+    && current.path.length === snapshot.path.length
+    && current.path.every((entry, index) => entry === snapshot.path[index]),
+  );
+}
+
+function isTokenRenameNavigationKey(key: string): key is TokenRenameNavigationKey {
+  return TOKEN_RENAME_NAVIGATION_KEYS.some((candidate) => candidate === key);
+}
+
+function captureTokenRenameNavigation(
+  authority: TokenRenameKeyboardAuthority,
+  event: Event,
+  source: HTMLButtonElement,
+): TokenRenameNavigationSnapshot | null {
+  if (
+    !authority.isCurrent()
+    || authority.prototypeOf(event) !== authority.KeyboardEvent.prototype
+    || !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    const key = tokenRenameNativeValue<string>(authority, authority.keyboard.key, event);
+    const target = tokenRenameNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      event,
+    );
+    const currentTarget = tokenRenameNativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      event,
+    );
+    const phase = tokenRenameNativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      event,
+    );
+    const path = authority.apply(authority.composedPath, event, []) as EventTarget[];
+    const view = tokenRenameNativeValue<Window | null>(authority, authority.view, event);
+    const trusted = authority.trusted.read(event);
+    const activeElement = authority.apply(
+      authority.activeElement,
+      authority.ownerDocument,
+      [],
+    ) as Element | null;
+    const expected: EventTarget[] = [];
+    let node: Node | null = source;
+    while (node) {
+      expected.push(node);
+      if (node === authority.ownerDocument) break;
+      node = node.parentNode;
+    }
+    expected.push(authority.ownerWindow);
+    if (
+      tokenRenameNativeValue<string>(authority, authority.event.type, event) !== "keydown"
+      || !isTokenRenameNavigationKey(key)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.repeat, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.isComposing, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.ctrlKey, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.altKey, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.metaKey, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.keyboard.shiftKey, event)
+      || !tokenRenameNativeValue<boolean>(authority, authority.event.bubbles, event)
+      || !tokenRenameNativeValue<boolean>(authority, authority.event.cancelable, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.event.defaultPrevented, event)
+      || tokenRenameNativeValue<boolean>(authority, authority.event.cancelBubble, event)
+      || (phase !== authority.Event.AT_TARGET && phase !== authority.Event.BUBBLING_PHASE)
+      || target !== source
+      || source.ownerDocument !== authority.ownerDocument
+      || !source.isConnected
+      || view !== authority.ownerWindow
+      || trusted !== true
+      || activeElement !== source
+      || expected.at(-2) !== authority.ownerDocument
+      || path.length !== expected.length
+      || expected.some((entry, index) => path[index] !== entry)
+      || currentTarget !== null && !path.includes(currentTarget)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: event as KeyboardEvent,
+      target,
+      currentTarget,
+      path: Object.freeze([...path]),
+      phase,
+      view,
+      trusted,
+      key,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function tokenRenameNavigationMatches(
+  authority: TokenRenameKeyboardAuthority,
+  snapshot: TokenRenameNavigationSnapshot,
+  source: HTMLButtonElement,
+) {
+  const current = captureTokenRenameNavigation(authority, snapshot.event, source);
+  return Boolean(
+    current
+    && current.key === snapshot.key
     && current.target === snapshot.target
     && current.currentTarget === snapshot.currentTarget
     && current.phase === snapshot.phase
@@ -4187,6 +4348,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   type RenameDraft = Readonly<{ visit: RenameVisit; value: string }>;
   type RowActionKind = "rename" | "replace" | "revoke" | "cancel" | "save";
   type RowActionFacts = Readonly<{ kind: RowActionKind; eligible: boolean }>;
+  type RenameNavigationRole = "save" | "cancel";
   type TokenSnapshot = Readonly<{
     source: ApiTokenDto;
     id: string;
@@ -4315,6 +4477,14 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     revokeTargets: readonly Node[] | null;
     cancelTargets: readonly Node[] | null;
   }>;
+  type RenameNavigationControl = Readonly<{
+    identity: symbol;
+    role: RenameNavigationRole;
+    index: number;
+    ownerIdentity: symbol;
+    action: RowActionFacts;
+    element: HTMLButtonElement;
+  }>;
   interface RenameEscapeAuthority {
     readonly identity: symbol;
     readonly mount: symbol;
@@ -4329,6 +4499,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     readonly update: typeof api.tokens.update;
     readonly input: HTMLInputElement;
     readonly form: HTMLFormElement;
+    readonly controls: readonly RenameNavigationControl[];
     readonly ownerDocument: Document;
     readonly keyboard: TokenRenameKeyboardAuthority;
     readonly dom: SecretNoticeDomSnapshot;
@@ -4341,6 +4512,13 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     authority: RenameEscapeAuthority;
     reactEvent: object;
     native: TokenRenameKeyboardSnapshot;
+  }>;
+  type PendingRenameNavigation = Readonly<{
+    authority: RenameEscapeAuthority;
+    reactEvent: object;
+    native: TokenRenameNavigationSnapshot;
+    source: RenameNavigationControl;
+    destination: RenameNavigationControl;
   }>;
   type RenameRefExpectation = Readonly<{
     role: RenameRefRole;
@@ -4396,8 +4574,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const dispatchingCommits = useRef(new WeakSet<RowCommit>());
   const activeRenameEscape = useRef<RenameEscapeAuthority | null>(null);
   const pendingRenameEscapes = useRef(new Map<Event, PendingRenameEscape>());
+  const pendingRenameNavigations = useRef(new Map<Event, PendingRenameNavigation>());
   const claimedRenameReactEvents = useRef(new WeakSet<object>());
   const claimedRenameNativeEvents = useRef(new WeakSet<Event>());
+  const renameNavigationInProgress = useRef<RenameEscapeAuthority | null>(null);
   const partialRenameRefElements = useRef(new WeakSet<HTMLElement>());
   const renameRefReplay = useRef<RenameRefReplay | null>(null);
   const completedRenameRefReplay = useRef<CompletedRenameRefReplay | null>(null);
@@ -4498,6 +4678,12 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     if (activeRenameEscape.current === authority) activeRenameEscape.current = null;
     for (const [event, pending] of pendingRenameEscapes.current) {
       if (pending.authority === authority) pendingRenameEscapes.current.delete(event);
+    }
+    for (const [event, pending] of pendingRenameNavigations.current) {
+      if (pending.authority === authority) pendingRenameNavigations.current.delete(event);
+    }
+    if (renameNavigationInProgress.current === authority) {
+      renameNavigationInProgress.current = null;
     }
   };
   const retireCandidate = (value: RowCandidate) => {
@@ -4999,13 +5185,18 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       : null;
   };
   const exactRenameReactEvent = (
-    event: ReactKeyboardEvent<HTMLInputElement | HTMLFormElement>,
-    currentTarget: HTMLInputElement | HTMLFormElement,
+    event: ReactKeyboardEvent<HTMLInputElement | HTMLButtonElement | HTMLFormElement>,
+    currentTarget: HTMLInputElement | HTMLButtonElement | HTMLFormElement,
     authority: RenameEscapeAuthority,
     snapshot: TokenRenameKeyboardSnapshot,
+    target: HTMLInputElement | HTMLButtonElement,
+    key: string,
+    requireTrusted = false,
   ) => {
     try {
-      const reactEvent = event as ReactKeyboardEvent<HTMLInputElement | HTMLFormElement> & {
+      const reactEvent = event as ReactKeyboardEvent<
+        HTMLInputElement | HTMLButtonElement | HTMLFormElement
+      > & {
         _reactName?: unknown;
         isComposing?: unknown;
         isDefaultPrevented?: unknown;
@@ -5015,9 +5206,9 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       };
       return reactEvent._reactName === "onKeyDown"
         && event.type === "keydown"
-        && event.key === "Escape"
+        && event.key === key
         && event.currentTarget === currentTarget
-        && event.target === authority.input
+        && event.target === target
         && event.nativeEvent === snapshot.event
         && event.eventPhase === snapshot.phase
         && event.bubbles === true
@@ -5039,6 +5230,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         && event.ctrlKey === false
         && event.metaKey === false
         && event.shiftKey === false
+        && (!requireTrusted || event.isTrusted === true)
+        && (!requireTrusted || Object.is(event.view, authority.keyboard.ownerWindow))
         && typeof reactEvent.preventDefault === "function"
         && typeof reactEvent.stopPropagation === "function"
         && typeof reactEvent.isDefaultPrevented === "function"
@@ -5051,12 +5244,11 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       return false;
     }
   };
-  const renameEscapeIsCurrent = (authority: RenameEscapeAuthority) => {
+  const renameAuthorityIsCurrent = (authority: RenameEscapeAuthority) => {
     const commit = currentCommit(authority.candidate);
     const focus = focusedRename.current;
     return activeRenameEscape.current === authority
       && !authority.retired
-      && !authority.claimed
       && authority.mount === mount
       && authority.panel === panel
       && authority.panel === authority.commit.facts.panel
@@ -5076,11 +5268,28 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       && saveOwner.current === null
       && commit.input === authority.input
       && commit.form === authority.form
+      && commit.save === authority.controls[0]?.element
+      && commit.cancel === authority.controls[1]?.element
+      && authority.controls.length === 2
+      && Object.isFrozen(authority.controls)
+      && authority.controls.every((control, index) => {
+        const role = index === 0 ? "save" : "cancel";
+        const owner = candidate[role];
+        const element = commit[role];
+        const action = commit.facts[role];
+        return Object.isFrozen(control)
+          && control.role === role
+          && control.index === index
+          && control.ownerIdentity === owner.identity
+          && control.action === action
+          && control.element === element
+          && element?.parentElement === commit.form?.children.item(2)
+          && commit.form?.children.item(2)?.children.item(index) === element;
+      })
       && authority.input.form === authority.form
       && authority.input.ownerDocument === authority.ownerDocument
       && authority.form.ownerDocument === authority.ownerDocument
       && authority.ownerDocument.defaultView === authority.keyboard.ownerWindow
-      && authority.ownerDocument.activeElement === authority.input
       && focus?.visit === authority.visit
       && focus.input === authority.input
       && !authority.input.disabled
@@ -5095,6 +5304,59 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       )
       && domIsExact(commit);
   };
+  const renameEscapeIsCurrent = (authority: RenameEscapeAuthority) =>
+    !authority.claimed
+    && authority.ownerDocument.activeElement === authority.input
+    && renameAuthorityIsCurrent(authority);
+  const navigationControlIsEnabled = (
+    authority: RenameEscapeAuthority,
+    control: RenameNavigationControl,
+  ) => control.action.eligible
+    && !control.element.disabled
+    && control.element.getAttribute("aria-disabled") !== "true"
+    && authority.controls[control.index] === control;
+  const renameNavigationDestination = (
+    authority: RenameEscapeAuthority,
+    source: RenameNavigationControl,
+    key: TokenRenameNavigationKey,
+  ): RenameNavigationControl | null => {
+    if (
+      authority.controls.length !== 2
+      || authority.controls[source.index] !== source
+      || !navigationControlIsEnabled(authority, source)
+    ) {
+      return null;
+    }
+    if (key === "Home" || key === "End") {
+      const ordered = key === "Home"
+        ? authority.controls
+        : [...authority.controls].reverse();
+      const destination = ordered.find((control) =>
+        navigationControlIsEnabled(authority, control)) ?? null;
+      return destination === source ? null : destination;
+    }
+    const step = key === "ArrowRight" || key === "ArrowDown" ? 1 : -1;
+    for (
+      let index = source.index + step;
+      index >= 0 && index < authority.controls.length;
+      index += step
+    ) {
+      const destination = authority.controls[index];
+      if (destination && navigationControlIsEnabled(authority, destination)) {
+        return destination;
+      }
+    }
+    return null;
+  };
+  const renameNavigationIsCurrent = (
+    authority: RenameEscapeAuthority,
+    source: RenameNavigationControl,
+    destination: RenameNavigationControl,
+  ) => renameNavigationInProgress.current === null
+    && renameAuthorityIsCurrent(authority)
+    && authority.ownerDocument.activeElement === source.element
+    && navigationControlIsEnabled(authority, source)
+    && navigationControlIsEnabled(authority, destination);
   const establishRenameEscape = (
     commit: RowCommit,
     settlingInput: HTMLInputElement | null = null,
@@ -5103,13 +5365,18 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     const draft = commit.facts.draft;
     const input = commit.input;
     const form = commit.form;
+    const save = commit.save;
+    const cancel = commit.cancel;
     const ownerWindow = commit.ownerDocument.defaultView;
     if (
       !visit
       || draft === null
       || !input
       || !form
+      || !save
+      || !cancel
       || !commit.facts.inputEligible
+      || !commit.facts.save
       || !commit.facts.cancel?.eligible
       || !ownerWindow?.MutationObserver
       || renameRefReplay.current !== null
@@ -5130,6 +5397,24 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       placement,
       settlingInput,
     );
+    const controls = Object.freeze([
+      Object.freeze<RenameNavigationControl>({
+        identity: Symbol("token-rename-save-navigation"),
+        role: "save",
+        index: 0,
+        ownerIdentity: candidate.save.identity,
+        action: commit.facts.save,
+        element: save,
+      }),
+      Object.freeze<RenameNavigationControl>({
+        identity: Symbol("token-rename-cancel-navigation"),
+        role: "cancel",
+        index: 1,
+        ownerIdentity: candidate.cancel.identity,
+        action: commit.facts.cancel,
+        element: cancel,
+      }),
+    ]);
     const authority: RenameEscapeAuthority = {
       identity: Symbol("token-rename-escape-authority"),
       mount,
@@ -5144,6 +5429,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       update: commit.facts.panel.update,
       input,
       form,
+      controls,
       ownerDocument: commit.ownerDocument,
       keyboard,
       dom: snapshotSecretNoticeDom(commit.row),
@@ -5187,7 +5473,14 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     );
     if (
       !snapshot
-      || !exactRenameReactEvent(event, authority.input, authority, snapshot)
+      || !exactRenameReactEvent(
+        event,
+        authority.input,
+        authority,
+        snapshot,
+        authority.input,
+        "Escape",
+      )
       || !renameEscapeIsCurrent(authority)
     ) {
       return;
@@ -5204,6 +5497,147 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       }
     });
   };
+  const stageRenameNavigation = (
+    role: RenameNavigationRole,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (!isTokenRenameNavigationKey(event.key)) return;
+    const authority = activeRenameEscape.current;
+    const nativeEvent = event.nativeEvent;
+    const source = authority?.controls.find((control) => control.role === role) ?? null;
+    if (
+      !authority
+      || !source
+      || source.element !== event.currentTarget
+      || !(nativeEvent instanceof authority.keyboard.Event)
+      || claimedRenameReactEvents.current.has(event)
+      || claimedRenameNativeEvents.current.has(nativeEvent)
+      || pendingRenameNavigations.current.has(nativeEvent)
+      || renameNavigationInProgress.current !== null
+      || !renameAuthorityIsCurrent(authority)
+    ) {
+      return;
+    }
+    const snapshot = captureTokenRenameNavigation(
+      authority.keyboard,
+      nativeEvent,
+      source.element,
+    );
+    const destination = snapshot
+      ? renameNavigationDestination(authority, source, snapshot.key)
+      : null;
+    if (
+      !snapshot
+      || !destination
+      || !exactRenameReactEvent(
+        event,
+        source.element,
+        authority,
+        snapshot,
+        source.element,
+        snapshot.key,
+        true,
+      )
+      || !renameNavigationIsCurrent(authority, source, destination)
+    ) {
+      return;
+    }
+    const pending = Object.freeze<PendingRenameNavigation>({
+      authority,
+      reactEvent: event,
+      native: snapshot,
+      source,
+      destination,
+    });
+    pendingRenameNavigations.current.set(nativeEvent, pending);
+    queueMicrotask(() => {
+      if (pendingRenameNavigations.current.get(nativeEvent) === pending) {
+        pendingRenameNavigations.current.delete(nativeEvent);
+      }
+    });
+  };
+  const deliverRenameNavigation = (event: ReactKeyboardEvent<HTMLFormElement>) => {
+    const nativeEvent = event.nativeEvent;
+    const pending = pendingRenameNavigations.current.get(nativeEvent);
+    if (
+      !pending
+      || pending.reactEvent !== event
+      || pending.authority.form !== event.currentTarget
+      || claimedRenameReactEvents.current.has(event)
+      || claimedRenameNativeEvents.current.has(nativeEvent)
+      || renameNavigationInProgress.current !== null
+    ) {
+      return;
+    }
+    const { authority, native, source, destination } = pending;
+    if (
+      !renameNavigationIsCurrent(authority, source, destination)
+      || !exactRenameReactEvent(
+        event,
+        authority.form,
+        authority,
+        native,
+        source.element,
+        native.key,
+        true,
+      )
+      || !tokenRenameNavigationMatches(authority.keyboard, native, source.element)
+      || renameNavigationDestination(authority, source, native.key) !== destination
+      || !renameNavigationIsCurrent(authority, source, destination)
+    ) {
+      return;
+    }
+
+    claimedRenameReactEvents.current.add(event);
+    claimedRenameNativeEvents.current.add(nativeEvent);
+    pendingRenameNavigations.current.delete(nativeEvent);
+    renameNavigationInProgress.current = authority;
+    try {
+      if (
+        activeRenameEscape.current !== authority
+        || authority.retired
+        || activeCommit.current !== authority.commit
+        || !authority.history.isPristine()
+        || !tokenRenameNavigationMatches(authority.keyboard, native, source.element)
+        || renameNavigationDestination(authority, source, native.key) !== destination
+        || !factsAreCurrent(authority.commit.facts)
+        || !domIsExact(authority.commit)
+      ) {
+        retireRenameEscape(authority);
+        return;
+      }
+      authority.keyboard.apply(
+        authority.keyboard.preventDefault,
+        nativeEvent,
+        [],
+      );
+      if (
+        !tokenRenameNativeValue<boolean>(
+          authority.keyboard,
+          authority.keyboard.event.defaultPrevented,
+          nativeEvent,
+        )
+        || activeRenameEscape.current !== authority
+        || authority.retired
+        || !authority.history.isPristine()
+        || authority.ownerDocument.activeElement !== source.element
+        || renameNavigationDestination(authority, source, native.key) !== destination
+        || !factsAreCurrent(authority.commit.facts)
+        || !domIsExact(authority.commit)
+      ) {
+        return;
+      }
+      authority.keyboard.apply(
+        authority.keyboard.focus,
+        destination.element,
+        [TOKEN_RENAME_PREVENT_SCROLL],
+      );
+    } finally {
+      if (renameNavigationInProgress.current === authority) {
+        renameNavigationInProgress.current = null;
+      }
+    }
+  };
   const deliverRenameEscape = (event: ReactKeyboardEvent<HTMLFormElement>) => {
     const nativeEvent = event.nativeEvent;
     const pending = pendingRenameEscapes.current.get(nativeEvent);
@@ -5219,7 +5653,14 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     const { authority, native } = pending;
     if (
       !renameEscapeIsCurrent(authority)
-      || !exactRenameReactEvent(event, authority.form, authority, native)
+      || !exactRenameReactEvent(
+        event,
+        authority.form,
+        authority,
+        native,
+        authority.input,
+        "Escape",
+      )
       || !tokenRenameEscapeMatches(authority.keyboard, native, authority.input)
       || !renameEscapeIsCurrent(authority)
     ) {
@@ -5481,6 +5922,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   });
 
   useLayoutEffect(() => {
+    const pendingEscapes = pendingRenameEscapes.current;
+    const pendingNavigations = pendingRenameNavigations.current;
     activeMount.current = mount;
     return () => {
       if (activeMount.current === mount) activeMount.current = null;
@@ -5491,7 +5934,9 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       const replay = renameRefReplay.current;
       if (replay?.candidate.facts.mount === mount) quarantineRenameRefReplay(replay);
       controlledInputUpdate.current = null;
-      pendingRenameEscapes.current.clear();
+      pendingEscapes.clear();
+      pendingNavigations.clear();
+      renameNavigationInProgress.current = null;
       if (saveOwner.current?.mount === mount) saveOwner.current = null;
       if (returnFocus.current?.mount === mount) returnFocus.current = null;
     };
@@ -5601,7 +6046,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
           }} aria-label={facts.revokeLabel} data-testid="token-revoke">Revoke</button>
       </div>}
       {facts.renameVisit && <><form ref={(element) => bindElement(candidate.form, element)} className="flex min-w-0 flex-col gap-2"
-        onKeyDown={deliverRenameEscape}
+        onKeyDown={(event) => {
+          deliverRenameNavigation(event);
+          deliverRenameEscape(event);
+        }}
         onSubmit={(event) => {
           const commit = claimSubmit(event);
           const visit = commit?.facts.renameVisit;
@@ -5644,9 +6092,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
           }} /></label>
         <p className="text-xs text-ink-3">This changes the agent name and @mention, not its secret or permissions.</p>
         <div className="flex flex-wrap gap-2">
-          <button ref={(element) => bindElement(candidate.save, element)} type="submit" className="btn btn-primary btn-sm" disabled={!facts.save?.eligible}>Save name</button>
+          <button ref={(element) => bindElement(candidate.save, element)} type="submit" className="btn btn-primary btn-sm" disabled={!facts.save?.eligible}
+            onKeyDown={(event) => stageRenameNavigation("save", event)}>Save name</button>
           <button ref={(element) => bindElement(candidate.cancel, element)} type="button" className="btn btn-ghost btn-sm"
-            disabled={!facts.cancel?.eligible} onClick={(event) => {
+            disabled={!facts.cancel?.eligible} onKeyDown={(event) => stageRenameNavigation("cancel", event)} onClick={(event) => {
               const commit = claimClick(event, "cancel", true);
               if (commit) closeRename(commit);
             }}>Cancel rename</button>
