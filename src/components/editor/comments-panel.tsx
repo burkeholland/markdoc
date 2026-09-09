@@ -93,7 +93,7 @@ export function filterMentionCandidates(candidates: MentionCandidate[], query: s
 }
 
 /** The agents a body mentions that the picker knows (`@owner/slug` matched case-insensitively), in order of first mention. */
-export function mentionedAgents(body: string, candidates: MentionCandidate[]): MentionCandidate[] {
+export function mentionedAgents(body: string, candidates: readonly MentionCandidate[]): MentionCandidate[] {
   const agents = candidates.filter((c) => c.agent);
   if (agents.length === 0) return [];
   const out: MentionCandidate[] = [];
@@ -2659,6 +2659,1201 @@ interface ComposerSubmissionOwner {
   readonly agentIdentities: readonly string[];
 }
 
+type RequestModeNavigationKey = "ArrowRight" | "ArrowDown" | "ArrowLeft" | "ArrowUp" | "Home" | "End";
+
+interface RequestModeRowAuthority {
+  readonly index: number;
+  readonly id: AgentRequestMode;
+  readonly label: string;
+  readonly checked: boolean;
+  readonly disabled: boolean;
+  readonly tabIndex: 0 | -1;
+}
+
+interface RequestModeAuthority {
+  readonly mount: symbol;
+  readonly revision: number;
+  readonly request: ComposerRequestOptions;
+  readonly canEdit: boolean;
+  readonly defaultMode: AgentRequestMode;
+  readonly value: string;
+  readonly candidates: readonly MentionCandidate[];
+  readonly agents: readonly MentionCandidate[];
+  readonly agentIdentities: readonly string[];
+  readonly viewerLogin: string | null;
+  readonly mode: AgentRequestMode;
+  readonly effectiveMode: AgentRequestMode;
+  readonly rowLabel: string;
+  readonly busy: boolean;
+  readonly rows: readonly RequestModeRowAuthority[];
+  readonly visitIsCurrent: () => boolean;
+  readonly submissionIsIdle: () => boolean;
+  readonly setMode: (mode: AgentRequestMode) => void;
+  readonly requestSuccessor: () => void;
+}
+
+interface RequestModeDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly RequestModeDomSnapshot[];
+}
+
+interface RequestModeNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+  readonly exactSiblings: boolean;
+}
+
+interface RequestModePlacement {
+  readonly document: Document;
+  readonly chain: readonly RequestModeNodePlacement[];
+}
+
+interface RequestModeDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface RequestModeElementOwnerView {
+  readonly element: () => Element | null;
+}
+
+interface RequestModeRefReplay {
+  readonly owner: RequestModeElementOwnerView;
+  readonly element: Element;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface RequestModeKeyboardFacts {
+  readonly event: globalThis.KeyboardEvent;
+  readonly key: RequestModeNavigationKey;
+}
+
+interface RequestModeCapturedGetter<Value> {
+  readonly read: (target: object) => Value;
+  readonly isCurrent: () => boolean;
+}
+
+interface RequestModeCapturedMethod<Args extends readonly unknown[], Result> {
+  readonly invoke: (target: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface RequestModeTrustedGetter {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface RequestModeKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof globalThis.Event;
+  readonly UIEvent: typeof globalThis.UIEvent;
+  readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
+  readonly Node: typeof globalThis.Node;
+  readonly eventType: RequestModeCapturedGetter<string>;
+  readonly eventTarget: RequestModeCapturedGetter<EventTarget | null>;
+  readonly eventPhase: RequestModeCapturedGetter<number>;
+  readonly eventBubbles: RequestModeCapturedGetter<boolean>;
+  readonly eventCancelable: RequestModeCapturedGetter<boolean>;
+  readonly eventDefaultPrevented: RequestModeCapturedGetter<boolean>;
+  readonly eventCancelBubble: RequestModeCapturedGetter<boolean>;
+  readonly eventPath: RequestModeCapturedMethod<readonly [], EventTarget[]>;
+  readonly eventPreventDefault: RequestModeCapturedMethod<readonly [], void>;
+  readonly eventView: RequestModeCapturedGetter<Window | null>;
+  readonly key: RequestModeCapturedGetter<string>;
+  readonly repeat: RequestModeCapturedGetter<boolean>;
+  readonly composing: RequestModeCapturedGetter<boolean>;
+  readonly altKey: RequestModeCapturedGetter<boolean>;
+  readonly ctrlKey: RequestModeCapturedGetter<boolean>;
+  readonly metaKey: RequestModeCapturedGetter<boolean>;
+  readonly shiftKey: RequestModeCapturedGetter<boolean>;
+  readonly activeElement: RequestModeCapturedGetter<Element | null>;
+  readonly focus: RequestModeCapturedMethod<readonly [FocusOptions?], void>;
+  readonly trusted: RequestModeTrustedGetter;
+  readonly isCurrent: () => boolean;
+}
+
+interface RequestModePublication {
+  readonly identity: symbol;
+  readonly authority: RequestModeAuthority;
+  readonly root: HTMLDivElement;
+  readonly buttons: readonly HTMLButtonElement[];
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly dom: RequestModeDomSnapshot;
+  readonly placement: RequestModePlacement;
+  readonly keyboard: RequestModeKeyboardAuthority;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+}
+
+interface RequestModeReplay {
+  readonly source: RequestModePublication;
+  readonly dom: RequestModeDomSnapshot;
+  readonly placement: RequestModePlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface RequestModeRuntime {
+  readonly publication: RequestModePublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: RequestModeElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isRetired: () => boolean;
+  readonly publishedDomMatches: () => boolean;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly replay: () => RequestModeReplay | null;
+}
+
+interface RequestModeRowPresentation {
+  readonly authority: RequestModeRowAuthority;
+  readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+}
+
+interface RequestModePresentation {
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly rows: readonly RequestModeRowPresentation[];
+  readonly establish: () => void | (() => void);
+}
+
+const EMPTY_REQUEST_MODE_PRESENTATION: RequestModePresentation = Object.freeze({
+  captureRoot: () => undefined,
+  rows: Object.freeze([]),
+  establish: () => undefined,
+});
+
+interface RequestModeCells {
+  readonly active: { current: RequestModePublication | null };
+  readonly successorOf: { current: RequestModePublication | null };
+  readonly replay: { current: RequestModeReplay | null };
+  readonly retired: WeakSet<RequestModePublication>;
+  readonly claimedPublications: WeakSet<RequestModePublication>;
+  readonly claimedActions: WeakSet<object>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+}
+
+const claimedRequestModeReactEvents = new WeakSet<object>();
+const claimedRequestModeNativeEvents = new WeakSet<Event>();
+
+class RequestModeElementOwner<ElementType extends Element> implements RequestModeElementOwnerView {
+  private current: ElementType | null = null;
+  private last: ElementType | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: RequestModeElementOwnerView,
+      element: ElementType | null,
+      previous: ElementType | null,
+      last: ElementType | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+  readonly capture = (element: ElementType | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+class RequestModePresentationCache {
+  private current: {
+    readonly authority: RequestModeAuthority;
+    readonly presentation: RequestModePresentation;
+  } | null = null;
+
+  resolve(authority: RequestModeAuthority, create: () => RequestModePresentation) {
+    if (!this.current || !requestModeAuthoritiesMatch(this.current.authority, authority)) {
+      this.current = Object.freeze({ authority, presentation: create() });
+    }
+    return this.current.presentation;
+  }
+}
+
+function createRequestModeCells(): RequestModeCells {
+  return {
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    retired: new WeakSet(),
+    claimedPublications: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+  };
+}
+
+function requestModeDescriptorMatches(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureRequestModeGetter<Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): RequestModeCapturedGetter<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (target: object) => apply(getter, target, []) as Value,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          requestModeDescriptorMatches(getOwnPropertyDescriptor(owner!, property), expected),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureRequestModeMethod<Args extends readonly unknown[], Result>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): RequestModeCapturedMethod<Args, Result> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (typeof descriptor.value !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        invoke: (target: object, ...args: Args) => apply(method, target, args) as Result,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          requestModeDescriptorMatches(getOwnPropertyDescriptor(owner!, property), expected),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureRequestModeTrustedGetter(
+  ownerWindow: Window & typeof globalThis,
+): RequestModeTrustedGetter | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("request-mode-trust-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (!descriptor || descriptor.configurable !== false || typeof descriptor.get !== "function") {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    requestModeDescriptorMatches(getOwnPropertyDescriptor(event, "isTrusted"), expected);
+  return Object.freeze({
+    read: (event: object) => apply(descriptor.get!, event, []) as boolean,
+    matches,
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureRequestModeKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): RequestModeKeyboardAuthority | null {
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const NodeConstructor = ownerWindow.Node;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const eventType = captureRequestModeGetter<string>(ownerWindow, eventPrototype, "type");
+  const eventTarget = captureRequestModeGetter<EventTarget | null>(ownerWindow, eventPrototype, "target");
+  const eventPhase = captureRequestModeGetter<number>(ownerWindow, eventPrototype, "eventPhase");
+  const eventBubbles = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "bubbles");
+  const eventCancelable = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "cancelable");
+  const eventDefaultPrevented = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "defaultPrevented");
+  const eventCancelBubble = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "cancelBubble");
+  const eventPath = captureRequestModeMethod<readonly [], EventTarget[]>(ownerWindow, eventPrototype, "composedPath");
+  const eventPreventDefault = captureRequestModeMethod<readonly [], void>(ownerWindow, eventPrototype, "preventDefault");
+  const eventView = captureRequestModeGetter<Window | null>(ownerWindow, uiEventPrototype, "view");
+  const key = captureRequestModeGetter<string>(ownerWindow, keyboardPrototype, "key");
+  const repeat = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "repeat");
+  const composing = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "isComposing");
+  const altKey = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "altKey");
+  const ctrlKey = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "ctrlKey");
+  const metaKey = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "metaKey");
+  const shiftKey = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "shiftKey");
+  const activeElement = captureRequestModeGetter<Element | null>(ownerWindow, documentPrototype, "activeElement");
+  const focus = captureRequestModeMethod<readonly [FocusOptions?], void>(ownerWindow, htmlElementPrototype, "focus");
+  const trusted = captureRequestModeTrustedGetter(ownerWindow);
+  const intrinsics = [
+    eventType,
+    eventTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventView,
+    key,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    focus,
+    trusted,
+  ];
+  if (intrinsics.some((intrinsic) => !intrinsic) || ownerDocument.defaultView !== ownerWindow) {
+    return null;
+  }
+  const exactIntrinsics = intrinsics as readonly (
+    | RequestModeCapturedGetter<unknown>
+    | RequestModeCapturedMethod<readonly unknown[], unknown>
+    | RequestModeTrustedGetter
+  )[];
+  const isCurrent = () =>
+    ownerDocument.defaultView === ownerWindow &&
+    ownerWindow.Event === EventConstructor &&
+    ownerWindow.UIEvent === UIEventConstructor &&
+    ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+    ownerWindow.Node === NodeConstructor &&
+    EventConstructor.prototype === eventPrototype &&
+    UIEventConstructor.prototype === uiEventPrototype &&
+    KeyboardEventConstructor.prototype === keyboardPrototype &&
+    ownerWindow.Document.prototype === documentPrototype &&
+    ownerWindow.HTMLElement.prototype === htmlElementPrototype &&
+    exactIntrinsics.every((intrinsic) => intrinsic.isCurrent());
+  if (!isCurrent()) return null;
+  return Object.freeze({
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Node: NodeConstructor,
+    eventType: eventType!,
+    eventTarget: eventTarget!,
+    eventPhase: eventPhase!,
+    eventBubbles: eventBubbles!,
+    eventCancelable: eventCancelable!,
+    eventDefaultPrevented: eventDefaultPrevented!,
+    eventCancelBubble: eventCancelBubble!,
+    eventPath: eventPath!,
+    eventPreventDefault: eventPreventDefault!,
+    eventView: eventView!,
+    key: key!,
+    repeat: repeat!,
+    composing: composing!,
+    altKey: altKey!,
+    ctrlKey: ctrlKey!,
+    metaKey: metaKey!,
+    shiftKey: shiftKey!,
+    activeElement: activeElement!,
+    focus: focus!,
+    trusted: trusted!,
+    isCurrent,
+  });
+}
+
+function requestModeAttributes(node: Node): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotRequestModeDom(node: Node): RequestModeDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: requestModeAttributes(node),
+    children: Object.freeze([...node.childNodes].map(snapshotRequestModeDom)),
+  });
+}
+
+function requestModeDomMatches(snapshot: RequestModeDomSnapshot): boolean {
+  const attributes = requestModeAttributes(snapshot.node);
+  if (
+    snapshot.node.nodeValue !== snapshot.nodeValue ||
+    (attributes === null) !== (snapshot.attributes === null)
+  ) {
+    return false;
+  }
+  if (
+    attributes &&
+    snapshot.attributes &&
+    (attributes.length !== snapshot.attributes.length ||
+      attributes.some(([name, value], index) => {
+        const expected = snapshot.attributes?.[index];
+        return !expected || expected[0] !== name || expected[1] !== value;
+      }))
+  ) {
+    return false;
+  }
+  return (
+    snapshot.node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        snapshot.node.childNodes.item(index) === child.node && requestModeDomMatches(child),
+    )
+  );
+}
+
+function captureRequestModePlacement(root: HTMLDivElement): RequestModePlacement | null {
+  const ownerDocument = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const chain: RequestModeNodePlacement[] = [];
+  let node: Node = root;
+  while (node !== ownerDocument) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    chain.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+        exactSiblings: node === root,
+      }),
+    );
+    node = parent;
+  }
+  return Object.freeze({ document: ownerDocument, chain: Object.freeze(chain) });
+}
+
+function requestModePlacementMatches(root: HTMLDivElement, placement: RequestModePlacement) {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.chain.length > 0 &&
+    placement.chain[0]?.node === root &&
+    placement.chain.every(
+      ({ node, parent, previousSibling, nextSibling, exactSiblings }) =>
+        node.parentNode === parent &&
+        (!exactSiblings ||
+          (node.previousSibling === previousSibling && node.nextSibling === nextSibling)),
+    )
+  );
+}
+
+function createRequestModeDomGuard(
+  root: HTMLDivElement,
+  placement: RequestModePlacement,
+): RequestModeDomGuard | null {
+  const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList") return false;
+      return placement.chain.some(({ node, parent, exactSiblings }) => {
+        if (record.target !== parent) return false;
+        const changedNodes = [...record.addedNodes, ...record.removedNodes];
+        if (changedNodes.some((candidate) => candidate === node || candidate.contains?.(node))) {
+          return true;
+        }
+        return exactSiblings && (record.previousSibling === node || record.nextSibling === node);
+      });
+    });
+  };
+  const observer = new MutationObserverConstructor(recordChanges);
+  observer.observe(placement.document, {
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    isClean: () => {
+      recordChanges(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      recordChanges(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function requestModeAgentName(candidate: MentionCandidate, viewerLogin: string | null) {
+  return candidate.agent
+    ? agentDisplayName(
+        {
+          name: candidate.name,
+          ownerLogin: candidate.agent.ownerLogin,
+          ownerName: candidate.agent.ownerName,
+        },
+        viewerLogin,
+      )
+    : candidate.name;
+}
+
+function requestModeRowsMatch(
+  previous: readonly RequestModeRowAuthority[],
+  current: readonly RequestModeRowAuthority[],
+) {
+  return (
+    previous.length === current.length &&
+    previous.every((row, index) => {
+      const candidate = current[index];
+      return Boolean(
+        candidate &&
+          row.index === candidate.index &&
+          row.id === candidate.id &&
+          row.label === candidate.label &&
+          row.checked === candidate.checked &&
+          row.disabled === candidate.disabled &&
+          row.tabIndex === candidate.tabIndex,
+      );
+    })
+  );
+}
+
+function requestModeAuthoritiesMatch(
+  previous: RequestModeAuthority,
+  current: RequestModeAuthority,
+  includeRevision = true,
+) {
+  return (
+    previous.mount === current.mount &&
+    (!includeRevision || previous.revision === current.revision) &&
+    previous.request === current.request &&
+    previous.canEdit === current.canEdit &&
+    previous.defaultMode === current.defaultMode &&
+    previous.value === current.value &&
+    previous.candidates === current.candidates &&
+    previous.agents.length === current.agents.length &&
+    previous.agents.every((agent, index) => agent === current.agents[index]) &&
+    previous.agentIdentities.length === current.agentIdentities.length &&
+    previous.agentIdentities.every(
+      (identity, index) => identity === current.agentIdentities[index],
+    ) &&
+    previous.viewerLogin === current.viewerLogin &&
+    previous.mode === current.mode &&
+    previous.effectiveMode === current.effectiveMode &&
+    previous.rowLabel === current.rowLabel &&
+    previous.busy === current.busy &&
+    previous.visitIsCurrent === current.visitIsCurrent &&
+    previous.submissionIsIdle === current.submissionIsIdle &&
+    previous.setMode === current.setMode &&
+    previous.requestSuccessor === current.requestSuccessor &&
+    requestModeRowsMatch(previous.rows, current.rows)
+  );
+}
+
+function requestModeFactsAreCurrent(authority: RequestModeAuthority) {
+  const currentAgents = mentionedAgents(authority.value, authority.candidates);
+  const expectedLabel =
+    currentAgents.length === 1
+      ? `How should ${requestModeAgentName(currentAgents[0]!, authority.viewerLogin)} answer?`
+      : "How should the agents answer?";
+  return (
+    authority.visitIsCurrent() &&
+    authority.submissionIsIdle() &&
+    !authority.busy &&
+    authority.request.canEdit === authority.canEdit &&
+    authority.request.defaultMode === authority.defaultMode &&
+    currentAgents.length > 0 &&
+    currentAgents.length === authority.agents.length &&
+    currentAgents.every(
+      (agent, index) =>
+        agent === authority.agents[index] && agent.login === authority.agentIdentities[index],
+    ) &&
+    authority.effectiveMode === (authority.canEdit ? authority.mode : "comment") &&
+    authority.rowLabel === expectedLabel &&
+    authority.rows.length === REQUEST_MODES.length &&
+    authority.rows.every((row, index) => {
+      const expected = REQUEST_MODES[index];
+      const disabled = expected?.id !== "comment" && !authority.canEdit;
+      return Boolean(
+        expected &&
+          row.index === index &&
+          row.id === expected.id &&
+          row.label === expected.label &&
+          row.checked === (row.id === authority.effectiveMode) &&
+          row.disabled === disabled &&
+          row.tabIndex === (row.checked ? 0 : -1),
+      );
+    })
+  );
+}
+
+function currentRequestModeElements(
+  authority: RequestModeAuthority,
+  rootOwner: RequestModeElementOwner<HTMLDivElement>,
+  rowPresentations: readonly (RequestModeRowPresentation & {
+    readonly buttonOwner: RequestModeElementOwner<HTMLButtonElement>;
+  })[],
+) {
+  const root = rootOwner.element();
+  const ownerWindow = root?.ownerDocument.defaultView;
+  const buttons = rowPresentations.map((presentation) => presentation.buttonOwner.element());
+  if (!root || !ownerWindow || buttons.some((button) => !button)) return null;
+  const exactButtons = buttons as HTMLButtonElement[];
+  if (
+    !root.isConnected ||
+    root.tagName !== "DIV" ||
+    root.className !== "composer-modes" ||
+    root.getAttribute("role") !== "radiogroup" ||
+    root.getAttribute("aria-label") !== authority.rowLabel ||
+    root.childNodes.length !== authority.rows.length ||
+    root.children.length !== authority.rows.length
+  ) {
+    return null;
+  }
+  for (const [index, button] of exactButtons.entries()) {
+    const row = authority.rows[index];
+    if (
+      !row ||
+      rowPresentations[index]?.authority !== row ||
+      !button.isConnected ||
+      button.ownerDocument !== root.ownerDocument ||
+      button.parentElement !== root ||
+      root.childNodes.item(index) !== button ||
+      root.children.item(index) !== button ||
+      button.tagName !== "BUTTON" ||
+      button.type !== "button" ||
+      button.disabled ||
+      button.matches(":disabled") ||
+      button.getAttribute("role") !== "radio" ||
+      button.getAttribute("aria-checked") !== String(row.checked) ||
+      button.getAttribute("aria-disabled") !== (row.disabled ? "true" : null) ||
+      button.tabIndex !== row.tabIndex ||
+      button.className !== "composer-mode" ||
+      button.dataset.testid !== `composer-mode-${row.id}` ||
+      button.textContent !== row.label
+    ) {
+      return null;
+    }
+  }
+  return Object.freeze({ root, buttons: Object.freeze(exactButtons) });
+}
+
+function requestModeDestination(
+  key: RequestModeNavigationKey,
+  current: number,
+  count: number,
+): number | null {
+  if (current < 0 || current >= count || count < 2) return null;
+  if (key === "ArrowRight" || key === "ArrowDown") return (current + 1) % count;
+  if (key === "ArrowLeft" || key === "ArrowUp") return (current - 1 + count) % count;
+  if (key === "Home") return current === 0 ? null : 0;
+  return current === count - 1 ? null : count - 1;
+}
+
+function exactRequestModeKey(
+  event: KeyboardEvent<HTMLButtonElement>,
+  publication: RequestModePublication,
+  source: HTMLButtonElement,
+): RequestModeKeyboardFacts | null {
+  if (!event || typeof event !== "object" || !publication.keyboard.isCurrent()) return null;
+  const keyboard = publication.keyboard;
+  const nativeEvent = event.nativeEvent;
+  const reactEvent = event as KeyboardEvent<HTMLButtonElement> & {
+    _reactName?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+    persist?: unknown;
+  };
+  if (
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    if (
+      key !== "ArrowRight" &&
+      key !== "ArrowDown" &&
+      key !== "ArrowLeft" &&
+      key !== "ArrowUp" &&
+      key !== "Home" &&
+      key !== "End"
+    ) {
+      return null;
+    }
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const trusted = keyboard.trusted.read(nativeEvent);
+    const repeat = keyboard.repeat.read(nativeEvent);
+    const composing = keyboard.composing.read(nativeEvent);
+    const altKey = keyboard.altKey.read(nativeEvent);
+    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
+    const metaKey = keyboard.metaKey.read(nativeEvent);
+    const shiftKey = keyboard.shiftKey.read(nativeEvent);
+    const nativeView = keyboard.eventView.read(nativeEvent);
+    return (
+      keyboard.eventType.read(nativeEvent) === "keydown" &&
+      keyboard.eventPhase.read(nativeEvent) !== keyboard.Event.NONE &&
+      keyboard.eventBubbles.read(nativeEvent) &&
+      keyboard.eventCancelable.read(nativeEvent) &&
+      !keyboard.eventDefaultPrevented.read(nativeEvent) &&
+      !keyboard.eventCancelBubble.read(nativeEvent) &&
+      (nativeView === null || nativeView === publication.ownerWindow) &&
+      trusted &&
+      !repeat &&
+      !composing &&
+      !altKey &&
+      !ctrlKey &&
+      !metaKey &&
+      !shiftKey &&
+      event.type === "keydown" &&
+      event.currentTarget === source &&
+      event.target === target &&
+      event.nativeEvent === nativeEvent &&
+      event.key === key &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === keyboard.eventBubbles.read(nativeEvent) &&
+      event.cancelable === keyboard.eventCancelable.read(nativeEvent) &&
+      event.defaultPrevented === keyboard.eventDefaultPrevented.read(nativeEvent) &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, nativeView) &&
+      target === source &&
+      target instanceof keyboard.Node &&
+      target.ownerDocument === publication.ownerDocument &&
+      path[0] === source &&
+      path.filter((entry) => entry === source).length === 1 &&
+      path.includes(publication.root) &&
+      keyboard.activeElement.read(publication.ownerDocument) === source &&
+      reactEvent._reactName === "onKeyDown" &&
+      typeof reactEvent.isDefaultPrevented === "function" &&
+      reactEvent.isDefaultPrevented() === keyboard.eventDefaultPrevented.read(nativeEvent) &&
+      typeof reactEvent.isPropagationStopped === "function" &&
+      reactEvent.isPropagationStopped() === keyboard.eventCancelBubble.read(nativeEvent) &&
+      typeof reactEvent.persist === "function"
+    )
+      ? Object.freeze({ event: nativeEvent, key })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function createRequestModeRuntime(
+  authority: RequestModeAuthority,
+  cells: RequestModeCells,
+  root: HTMLDivElement,
+  buttons: readonly HTMLButtonElement[],
+  owners: readonly RequestModeElementOwnerView[],
+  keyboard: RequestModeKeyboardAuthority,
+): RequestModeRuntime {
+  type Retirement = "element" | "layout" | "other";
+  const placement = captureRequestModePlacement(root);
+  if (!placement) throw new Error("Cannot publish request modes without committed placement");
+  const dom = snapshotRequestModeDom(root);
+  let retired = false;
+  let retirement: Retirement | null = null;
+  let established = false;
+  let invalidReplay = false;
+  let replayRefs: RequestModeRefReplay[] = [];
+  let domGuard: RequestModeDomGuard | null = null;
+  const publishedDomMatches = () =>
+    Boolean(
+      domGuard &&
+        domGuard.isClean() &&
+        root === dom.node &&
+        root.isConnected &&
+        requestModePlacementMatches(root, placement) &&
+        requestModeDomMatches(dom),
+    );
+  const retire = (reason: Retirement) => {
+    if (retired) return false;
+    retired = true;
+    retirement = reason;
+    cells.retired.add(publication);
+    if (cells.active.current === publication) {
+      cells.active.current = null;
+      cells.successorOf.current = publication;
+    }
+    queueMicrotask(() => {
+      if (cells.replay.current?.source !== publication) domGuard?.release();
+    });
+    return true;
+  };
+  const publication: RequestModePublication = Object.freeze({
+    identity: Symbol("request-mode-publication"),
+    authority,
+    root,
+    buttons,
+    ownerDocument: root.ownerDocument,
+    ownerWindow: root.ownerDocument.defaultView!,
+    dom,
+    placement,
+    keyboard,
+    retire: () => retire("other"),
+    isRetired: () => retired,
+    publishedDomMatches,
+  });
+  const refsHaveNoReplay = () =>
+    !invalidReplay &&
+    replayRefs.every(
+      (entry) =>
+        !entry.detached && !entry.reattached && entry.owner.element() === entry.element,
+    );
+  const refsHaveExactReplay = () =>
+    !invalidReplay &&
+    replayRefs.length > 0 &&
+    replayRefs.every(
+      (entry) =>
+        entry.detached && entry.reattached && entry.owner.element() === entry.element,
+    );
+  const refsHaveRecoveredReplay = () => {
+    let replayed = false;
+    const recovered = replayRefs.every((entry) => {
+      if (!entry.detached) {
+        return !entry.reattached && entry.owner.element() === entry.element;
+      }
+      replayed = true;
+      return entry.reattached && entry.owner.element() === entry.element;
+    });
+    return !invalidReplay && replayed && recovered;
+  };
+  return Object.freeze({
+    publication,
+    publish: () => {
+      established = true;
+      replayRefs = owners.map((owner) => {
+        const element = owner.element();
+        if (!element) throw new Error("Cannot publish request modes without every committed ref");
+        return { owner, element, detached: false, reattached: false };
+      });
+      domGuard = createRequestModeDomGuard(root, placement);
+      if (!domGuard || cells.retired.has(publication)) {
+        domGuard?.release();
+        return false;
+      }
+      const previous = cells.active.current;
+      previous?.retire();
+      cells.active.current = publication;
+      cells.successorOf.current = null;
+      cells.replay.current = null;
+      return true;
+    },
+    retireForElement: () => {
+      retire("element");
+    },
+    retireForLayout: () => {
+      retire("layout");
+    },
+    noteRef: (
+      owner: RequestModeElementOwnerView,
+      element: Element | null,
+      previous: Element | null,
+    ) => {
+      if (!established) return;
+      const proof = replayRefs.find((entry) => entry.owner === owner);
+      if (!proof) {
+        invalidReplay = true;
+        return;
+      }
+      if (element === null && previous === proof.element) {
+        proof.detached = true;
+        proof.reattached = false;
+      } else if (element === proof.element && previous === null && proof.detached) {
+        proof.reattached = true;
+      } else if (element !== previous) {
+        invalidReplay = true;
+      }
+      if (!retired && replayRefs.every((entry) => entry.owner.element() === entry.element)) {
+        for (const entry of replayRefs) {
+          entry.detached = false;
+          entry.reattached = false;
+        }
+        invalidReplay = false;
+      }
+    },
+    isRetired: () => retired,
+    publishedDomMatches,
+    isExactElementReplay: () =>
+      retired &&
+      retirement === "element" &&
+      established &&
+      refsHaveRecoveredReplay() &&
+      publishedDomMatches(),
+    isExactLayoutReplay: () =>
+      retired &&
+      retirement === "layout" &&
+      established &&
+      (refsHaveNoReplay() || refsHaveExactReplay()) &&
+      publishedDomMatches(),
+    replay: () =>
+      domGuard
+        ? Object.freeze({
+            source: publication,
+            dom,
+            placement,
+            historyIsClean: domGuard.isClean,
+            release: domGuard.release,
+          })
+        : null,
+  });
+}
+
+function requestModeReplayAllowsPublication(
+  cells: RequestModeCells,
+  authority: RequestModeAuthority,
+  root: HTMLDivElement,
+) {
+  const replay = cells.replay.current;
+  if (!replay) return true;
+  const sameAuthority = requestModeAuthoritiesMatch(
+    replay.source.authority,
+    authority,
+    false,
+  );
+  const exactReplay =
+    sameAuthority &&
+    cells.successorOf.current === replay.source &&
+    cells.retired.has(replay.source) &&
+    !cells.claimedPublications.has(replay.source) &&
+    replay.historyIsClean() &&
+    root === replay.dom.node &&
+    requestModePlacementMatches(root, replay.placement) &&
+    requestModeDomMatches(replay.dom);
+  cells.replay.current = null;
+  if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
+  replay.release();
+  return !sameAuthority || exactReplay;
+}
+
+function createRequestModePresentation(
+  authority: RequestModeAuthority,
+  cells: RequestModeCells,
+): RequestModePresentation {
+  let currentRuntime: RequestModeRuntime | null = null;
+  let lastRuntime: RequestModeRuntime | null = null;
+  let successorRequested = false;
+  const acceptsSuccessorOf = (publication: RequestModePublication) =>
+    cells.active.current === null &&
+    cells.successorOf.current === publication &&
+    cells.retired.has(publication) &&
+    !cells.claimedPublications.has(publication);
+  const onElementChange = (
+    owner: RequestModeElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (element === null || (element !== null && last !== null && element !== last)) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (runtime?.isExactElementReplay() && acceptsSuccessorOf(runtime.publication)) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const rootOwner = new RequestModeElementOwner<HTMLDivElement>(onElementChange);
+  const rowPresentations = authority.rows.map((row) => {
+    const buttonOwner = new RequestModeElementOwner<HTMLButtonElement>(onElementChange);
+    const action = Object.freeze({
+      identity: Symbol(`request-mode-${row.id}-keyboard-action`),
+    });
+    const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+      const publication = cells.active.current;
+      const source = buttonOwner.element();
+      if (
+        !publication ||
+        publication.isRetired() ||
+        publication.authority !== authority ||
+        !requestModeAuthoritiesMatch(publication.authority, authority) ||
+        authority.rows[row.index] !== row ||
+        publication.buttons[row.index] !== source ||
+        !source ||
+        !requestModeFactsAreCurrent(authority) ||
+        !publication.publishedDomMatches()
+      ) {
+        return;
+      }
+      const exactEvent = exactRequestModeKey(event, publication, source);
+      const destinationIndex = exactEvent
+        ? requestModeDestination(exactEvent.key, row.index, authority.rows.length)
+        : null;
+      const destinationRow =
+        destinationIndex === null ? null : authority.rows[destinationIndex];
+      const destinationPresentation =
+        destinationIndex === null ? null : rowPresentations[destinationIndex];
+      const destination = destinationPresentation?.buttonOwner.element();
+      if (
+        !exactEvent ||
+        destinationIndex === null ||
+        !destinationRow ||
+        !destinationPresentation ||
+        destinationPresentation.authority !== destinationRow ||
+        !destination ||
+        destination.ownerDocument !== publication.ownerDocument ||
+        destination.parentElement !== publication.root ||
+        publication.root.children.item(destinationIndex) !== destination ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(exactEvent.event) ||
+        claimedRequestModeReactEvents.has(event) ||
+        claimedRequestModeNativeEvents.has(exactEvent.event) ||
+        cells.active.current !== publication
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(action);
+      cells.claimedReactEvents.add(event);
+      cells.claimedNativeEvents.add(exactEvent.event);
+      claimedRequestModeReactEvents.add(event);
+      claimedRequestModeNativeEvents.add(exactEvent.event);
+      publication.keyboard.eventPreventDefault.invoke(exactEvent.event);
+      if (!publication.keyboard.eventDefaultPrevented.read(exactEvent.event)) return;
+      publication.keyboard.focus.invoke(destination, { preventScroll: true });
+      if (publication.keyboard.activeElement.read(publication.ownerDocument) !== destination) {
+        authority.requestSuccessor();
+        return;
+      }
+      if (destinationRow.disabled) authority.requestSuccessor();
+      else {
+        authority.setMode(destinationRow.id);
+        if (destinationRow.id === authority.effectiveMode) authority.requestSuccessor();
+      }
+    };
+    return Object.freeze({
+      authority: row,
+      captureButton: buttonOwner.capture,
+      buttonOwner,
+      onKeyDown,
+    });
+  });
+  const expectedOwners = () =>
+    Object.freeze([
+      rootOwner,
+      ...rowPresentations.map((presentation) => presentation.buttonOwner),
+    ]);
+  const requestReplaySuccessor = (runtime: RequestModeRuntime) => {
+    const replay = runtime.replay();
+    if (
+      successorRequested ||
+      !replay ||
+      !acceptsSuccessorOf(runtime.publication) ||
+      !requestModeFactsAreCurrent(authority) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    cells.replay.current = replay;
+    successorRequested = true;
+    authority.requestSuccessor();
+  };
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay()) &&
+        acceptsSuccessorOf(lastRuntime.publication)
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!requestModeFactsAreCurrent(authority)) return undefined;
+    const elements = currentRequestModeElements(authority, rootOwner, rowPresentations);
+    const ownerWindow = elements?.root.ownerDocument.defaultView;
+    const keyboard =
+      elements && ownerWindow
+        ? captureRequestModeKeyboardAuthority(elements.root.ownerDocument, ownerWindow)
+        : null;
+    if (
+      !elements ||
+      !ownerWindow ||
+      !keyboard ||
+      !requestModeReplayAllowsPublication(cells, authority, elements.root)
+    ) {
+      return undefined;
+    }
+    const runtime = createRequestModeRuntime(
+      authority,
+      cells,
+      elements.root,
+      elements.buttons,
+      expectedOwners(),
+      keyboard,
+    );
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+  return Object.freeze({
+    captureRoot: rootOwner.capture,
+    rows: Object.freeze(rowPresentations),
+    establish,
+  });
+}
+
 function cancelComposerFocusOperation(owner: ComposerFocusOperation) {
   const frame = owner.frame;
   owner.frame = null;
@@ -2712,9 +3907,24 @@ function Composer<Result>({
   const [trigger, setTrigger] = useState<{ start: number; query: string } | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [mode, setMode] = useState<AgentRequestMode>(request?.defaultMode ?? "suggest");
+  const [requestModeMount] = useState(() => Symbol("request mode composer"));
+  const [requestModeCells] = useState(createRequestModeCells);
+  const [requestModePresentationCache] = useState(() => new RequestModePresentationCache());
+  const [requestModeRevision, setRequestModeRevision] = useState(0);
+  const requestRequestModeSuccessor = useCallback(() => {
+    setRequestModeRevision((revision) => revision + 1);
+  }, []);
   const ref = useRef<HTMLTextAreaElement>(null);
   const activeVisit = useRef<ComposerVisit | null>(null);
   const activeSubmission = useRef<ComposerSubmissionOwner | null>(null);
+  const requestModeVisitIsCurrent = useCallback(() => {
+    const visit = activeVisit.current;
+    return !!visit && !visit.retired;
+  }, []);
+  const requestModeSubmissionIsIdle = useCallback(
+    () => activeSubmission.current === null,
+    [],
+  );
   const operationSequence = useRef(0);
   const deferredOperationSequence = useRef(0);
   const caretActionSequence = useRef(0);
@@ -2923,6 +4133,57 @@ function Composer<Result>({
   /** An agent as this user sees it: their own by its plain name, anyone else's as "Drew's Copilot CLI". */
   const nameOf = (c: MentionCandidate) => (c.agent ? agentDisplayName({ name: c.name, ownerLogin: c.agent.ownerLogin, ownerName: c.agent.ownerName }, viewerLogin) : c.name);
   const rowLabel = agents.length === 1 ? `How should ${nameOf(agents[0])} answer?` : "How should the agents answer?";
+  // The publication stores these predicates for committed event delivery; it never invokes them during render.
+  const requestModeAuthority = request && showRow
+    ? // eslint-disable-next-line react-hooks/refs
+      Object.freeze({
+        mount: requestModeMount,
+        revision: requestModeRevision,
+        request,
+        canEdit: request.canEdit,
+        defaultMode: request.defaultMode,
+        value,
+        candidates,
+        agents: Object.freeze([...agents]),
+        agentIdentities: Object.freeze(agents.map((agent) => agent.login)),
+        viewerLogin,
+        mode,
+        effectiveMode,
+        rowLabel,
+        busy,
+        rows: Object.freeze(
+          REQUEST_MODES.map((requestMode, index) => {
+            const checked = requestMode.id === effectiveMode;
+            return Object.freeze({
+              index,
+              id: requestMode.id,
+              label: requestMode.label,
+              checked,
+              disabled: modeDisabled(requestMode.id),
+              tabIndex: checked ? 0 as const : -1 as const,
+            });
+          }),
+        ),
+        visitIsCurrent: requestModeVisitIsCurrent,
+        submissionIsIdle: requestModeSubmissionIsIdle,
+        setMode,
+        requestSuccessor: requestRequestModeSuccessor,
+      } satisfies RequestModeAuthority)
+    : null;
+  const {
+    captureRoot: captureRequestModeRoot,
+    rows: requestModeRows,
+    establish: establishRequestModes,
+  } = requestModeAuthority
+    ? requestModePresentationCache.resolve(
+        requestModeAuthority,
+        () => createRequestModePresentation(requestModeAuthority, requestModeCells),
+      )
+    : EMPTY_REQUEST_MODE_PRESENTATION;
+  useLayoutEffect(
+    () => establishRequestModes(),
+    [establishRequestModes],
+  );
   // The request goes to the first agent mentioned (part A's `resolveAddressee`); when its owner has not opened it to
   // collaborators the composer says so and will not send, instead of letting the server answer 403 (#1296).
   const addressee = useMemo(() => {
@@ -2958,25 +4219,6 @@ function Composer<Result>({
     setValue(next);
     setTrigger(null);
     scheduleFocusSelection(el, [pos, pos]);
-  };
-
-  /** Arrow keys move through the modes; a disabled mode takes focus (so its tooltip can say why) without being chosen. */
-  const onModeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (activeSubmission.current) {
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
-    const key = event.key === "ArrowUp" ? "ArrowLeft" : event.key === "ArrowDown" ? "ArrowRight" : event.key;
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = rovingIndex(key, current, items.length, { orientation: "horizontal", wrap: true });
-    if (next < 0) return;
-    event.preventDefault();
-    items[next]?.focus();
-    const id = REQUEST_MODES[next]?.id;
-    if (id && !modeDisabled(id)) setMode(id);
   };
 
   const pick = (c: MentionCandidate) => {
@@ -3202,33 +4444,39 @@ function Composer<Result>({
       {/* Mentioning an agent turns the comment into a request: this row chooses how it answers. Controls only — no
           hint text under the box (Burke); the question is the group's accessible name. It appears and goes with the
           mention and never takes focus: typing carries on in the box. */}
-      {showRow && (
+      {showRow && requestModeRows.length > 0 && (
         <div className="composer-agent-row" data-testid="composer-agent-row">
-          <div className="composer-modes" role="radiogroup" aria-label={rowLabel} onKeyDown={onModeKeyDown}>
-            {REQUEST_MODES.map((m) => {
-              const disabled = modeDisabled(m.id);
-              const checked = effectiveMode === m.id;
+          <div
+            ref={captureRequestModeRoot}
+            className="composer-modes"
+            role="radiogroup"
+            aria-label={rowLabel}
+          >
+            {requestModeRows.map((rowPresentation) => {
+              const m = rowPresentation.authority;
               const radio = (
                 <button
+                  ref={rowPresentation.captureButton}
                   key={m.id}
                   type="button"
                   role="radio"
-                  aria-checked={checked}
-                  aria-disabled={busy || disabled || undefined}
+                  aria-checked={m.checked}
+                  aria-disabled={busy || m.disabled || undefined}
                   disabled={busy}
-                  tabIndex={checked ? 0 : -1}
+                  tabIndex={m.tabIndex}
                   className="composer-mode"
                   // Choosing a mode with the pointer must not pull focus out of the textarea (Enter still posts).
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => {
-                    if (!disabled && !activeSubmission.current) setMode(m.id);
+                    if (!m.disabled && !activeSubmission.current) setMode(m.id);
                   }}
+                  onKeyDown={rowPresentation.onKeyDown}
                   data-testid={`composer-mode-${m.id}`}
                 >
                   {m.label}
                 </button>
               );
-              return disabled ? (
+              return m.disabled ? (
                 <Tip key={m.id} label="Needs edit access" side="top">
                   {radio}
                 </Tip>
