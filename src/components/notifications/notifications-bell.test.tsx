@@ -2371,6 +2371,489 @@ describe("notification row keyboard browsing", () => {
   });
 });
 
+describe("notification bell directional disclosure", () => {
+  const state = {
+    ...EMPTY,
+    items: [ITEM, ITEM_TWO, ITEM_THREE],
+    unreadCount: 3,
+    loaded: true,
+  };
+
+  function trustedKey(
+    element: HTMLElement,
+    key: string,
+    init: KeyboardEventInit = {},
+  ) {
+    const view = element.ownerDocument.defaultView;
+    if (!view) throw new Error("The keyboard target has no owner window");
+    const event = new view.KeyboardEvent("keydown", {
+      key,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    markJsdomEventTrusted(event);
+    fireEvent(element, event);
+    return event;
+  }
+
+  function expectNoDisclosureWork(onOpen: ReturnType<typeof vi.fn>) {
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+  }
+
+  it.each([
+    ["ArrowDown", 0],
+    ["ArrowUp", 2],
+  ] as const)(
+    "opens with trusted %s and focuses the exact ordered row once without other work",
+    (key, destinationIndex) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const onOpen = vi.fn();
+      createStrictBellRoot(state, { onOpen }, () => undefined);
+      const trigger = screen.getByTestId("notifications-bell");
+      const scroll = {
+        documentTop: document.documentElement.scrollTop,
+        documentLeft: document.documentElement.scrollLeft,
+        bodyTop: document.body.scrollTop,
+        bodyLeft: document.body.scrollLeft,
+        windowX: window.scrollX,
+        windowY: window.scrollY,
+      };
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const event = trustedKey(trigger, key);
+
+      const rows = screen.getAllByTestId("notification-item");
+      expect(event.defaultPrevented).toBe(true);
+      expect(screen.getAllByTestId("notifications-popover")).toHaveLength(1);
+      expect(rows[destinationIndex]).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(1);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(rows[destinationIndex]);
+      expect({
+        documentTop: document.documentElement.scrollTop,
+        documentLeft: document.documentElement.scrollLeft,
+        bodyTop: document.body.scrollTop,
+        bodyLeft: document.body.scrollLeft,
+        windowX: window.scrollX,
+        windowY: window.scrollY,
+      }).toEqual(scroll);
+      expectNoDisclosureWork(onOpen);
+    },
+  );
+
+  it("opens an empty disclosure without moving focus and keeps Escape closing", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    createStrictBellRoot(
+      { ...EMPTY, loaded: true },
+      { onOpen },
+      () => undefined,
+    );
+    const trigger = screen.getByTestId("notifications-bell");
+    trigger.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = trustedKey(trigger, "ArrowDown");
+    await act(() => Promise.resolve());
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    expect(screen.queryAllByTestId("notification-item")).toHaveLength(0);
+    expect(trigger).toHaveFocus();
+    expect(
+      preventDefault.mock.contexts.filter((context) => context === event),
+    ).toHaveLength(1);
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(trigger).toHaveFocus();
+  });
+
+  it("retains row navigation, Escape return focus, and click toggling", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    createStrictBellRoot(state, { onOpen }, () => undefined);
+    const trigger = screen.getByTestId("notifications-bell");
+    trigger.focus();
+    focus.mockClear();
+    trustedKey(trigger, "ArrowDown");
+    const rows = screen.getAllByTestId("notification-item");
+    focus.mockClear();
+
+    const browse = trustedKey(rows[0]!, "ArrowDown");
+    expect(browse.defaultPrevented).toBe(true);
+    expect(rows[1]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expectNoDisclosureWork(onOpen);
+
+    fireEvent.keyDown(rows[1]!, { key: "Escape" });
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    expect(screen.getByTestId("notifications-popover")).toBeVisible();
+    fireEvent.click(trigger);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    for (const key of ["Enter", " "] as const) {
+      const toggleKey = trustedKey(trigger, key);
+      expect(toggleKey.defaultPrevented).toBe(false);
+      fireEvent.click(trigger);
+      expect(screen.getByTestId("notifications-popover")).toBeVisible();
+      fireEvent.click(trigger);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    }
+    expectNoDisclosureWork(onOpen);
+  });
+
+  it("rejects altered, canceled, stopped, untrusted, and unfocused keys before recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    createStrictBellRoot(state, { onOpen }, () => undefined);
+    const trigger = screen.getByTestId("notifications-bell");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const rejected: KeyboardEvent[] = [];
+    for (const init of [
+      { ctrlKey: true },
+      { shiftKey: true },
+      { altKey: true },
+      { metaKey: true },
+      { repeat: true },
+      { isComposing: true },
+      { bubbles: false },
+      { cancelable: false },
+    ]) {
+      trigger.focus();
+      const event = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      markJsdomEventTrusted(event);
+      rejected.push(event);
+    }
+    rejected.push(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    const prevented = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    markJsdomEventTrusted(prevented);
+    Event.prototype.preventDefault.call(prevented);
+    rejected.push(prevented);
+    const stopped = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    markJsdomEventTrusted(stopped);
+    stopped.stopPropagation();
+    rejected.push(stopped);
+
+    preventDefault.mockClear();
+    focus.mockClear();
+    for (const event of rejected) {
+      trigger.focus();
+      focus.mockClear();
+      fireEvent(trigger, event);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+    }
+    outside.focus();
+    focus.mockClear();
+    const unfocused = trustedKey(trigger, "ArrowDown");
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    trigger.focus();
+    focus.mockClear();
+    const accepted = trustedKey(trigger, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[2]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    outside.remove();
+  });
+
+  it("rejects crossed Strict replay handlers and admits one fresh pair", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    const replay = { trigger: null as CapturedControl | null };
+    createStrictBellRoot(state, { onOpen }, () => {
+      replay.trigger ??= captureControl(
+        screen.getByTestId("notifications-bell"),
+      );
+    });
+    const stale = replay.trigger;
+    if (!stale?.keyDown) {
+      throw new Error("Strict Mode did not publish its replay trigger key");
+    }
+    const current = captureControl(screen.getByTestId("notifications-bell"));
+    if (!current.keyDown) {
+      throw new Error("The current trigger key was not published");
+    }
+    expect(current.element).toBe(stale.element);
+    expect(current.keyDown).not.toBe(stale.keyDown);
+    current.element.focus();
+    focus.mockClear();
+
+    dispatchKeyWithHandlers(
+      current,
+      [stale.keyDown, current.keyDown],
+      { key: "ArrowDown" },
+    );
+
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    const accepted = trustedKey(current.element, "ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[0]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("rejects fabricated, foreign, reentrant, and replayed pairs before fresh recovery", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    createStrictBellRoot(state, { onOpen }, () => undefined);
+    const control = captureControl(
+      screen.getByTestId("notifications-bell"),
+    );
+    if (!control.keyDown) {
+      throw new Error("The current trigger key was not published");
+    }
+    const fabricatedNative = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    control.keyDown({
+      nativeEvent: fabricatedNative,
+      type: "keydown",
+      currentTarget: control.element,
+      target: control.element,
+      key: "ArrowDown",
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    control.element.focus();
+    focus.mockClear();
+    fireEvent(control.element, foreign);
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    iframe.remove();
+
+    dispatchKeyWithHandlers(
+      control,
+      [control.keyDown, control.keyDown],
+      { key: "ArrowDown" },
+    );
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+
+    const accepted = trustedKey(control.element, "ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[0]).toHaveFocus();
+    fireEvent.click(control.element);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    focus.mockClear();
+
+    fireEvent(control.element, accepted);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    control.element.focus();
+    focus.mockClear();
+    const recovered = trustedKey(control.element, "ArrowUp");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[2]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it.each([
+    "detach and restore",
+    "reorder and restore",
+    "replace and restore",
+    "attribute and restore",
+  ] as const)(
+    "retires trigger DOM after %s before a distinct successor recovers",
+    (change) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const onOpen = vi.fn();
+      const root = createStrictBellRoot(
+        state,
+        { onOpen },
+        () => undefined,
+      );
+      const stale = captureControl(screen.getByTestId("notifications-bell"));
+      const trigger = stale.element;
+      const parent = trigger.parentNode;
+      if (!parent) throw new Error("The trigger has no parent");
+
+      if (change === "detach and restore") {
+        const next = trigger.nextSibling;
+        trigger.remove();
+        parent.insertBefore(trigger, next);
+      } else if (change === "reorder and restore") {
+        const marker = document.createElement("span");
+        parent.insertBefore(marker, trigger);
+        parent.append(trigger);
+        parent.insertBefore(trigger, marker.nextSibling);
+        marker.remove();
+      } else if (change === "replace and restore") {
+        const replacement = trigger.cloneNode(true);
+        parent.replaceChild(replacement, trigger);
+        parent.replaceChild(trigger, replacement);
+      } else {
+        trigger.dataset.unread = "changed";
+        trigger.dataset.unread = String(state.unreadCount);
+      }
+      trigger.focus();
+      focus.mockClear();
+
+      const rejected = trustedKey(trigger, "ArrowDown");
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoDisclosureWork(onOpen);
+
+      renderStrictBellRoot(root, state, { onOpen });
+      const current = captureControl(
+        screen.getByTestId("notifications-bell"),
+      );
+      expect(current.keyDown).not.toBe(stale.keyDown);
+      current.element.focus();
+      focus.mockClear();
+      const accepted = trustedKey(current.element, "ArrowDown");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(screen.getAllByTestId("notification-item")[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    },
+  );
+
+  it("retires restored row and load drift until a fresh render", () => {
+    const first = { ...ITEM };
+    const items = [first, { ...ITEM_TWO }];
+    const mutable = {
+      ...EMPTY,
+      items,
+      unreadCount: 2,
+      loaded: true,
+    };
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onOpen = vi.fn();
+    const root = createStrictBellRoot(
+      mutable,
+      { onOpen },
+      () => undefined,
+    );
+    const stale = captureControl(screen.getByTestId("notifications-bell"));
+    stale.element.focus();
+    focus.mockClear();
+    first.documentTitle = "Drifted";
+    mutable.loading = true;
+
+    expect(trustedKey(stale.element, "ArrowDown").defaultPrevented).toBe(
+      false,
+    );
+    first.documentTitle = ITEM.documentTitle;
+    mutable.loading = false;
+    expect(trustedKey(stale.element, "ArrowDown").defaultPrevented).toBe(
+      false,
+    );
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    renderStrictBellRoot(root, mutable, { onOpen });
+    const current = screen.getByTestId("notifications-bell");
+    current.focus();
+    focus.mockClear();
+    expect(trustedKey(current, "ArrowUp").defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[1]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("removes trigger key listeners on cleanup and keeps a fresh mount usable", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const add = vi.spyOn(EventTarget.prototype, "addEventListener");
+    const remove = vi.spyOn(EventTarget.prototype, "removeEventListener");
+    const onOpen = vi.fn();
+    const root = createStrictBellRoot(
+      state,
+      { onOpen },
+      () => undefined,
+    );
+    const stale = captureControl(screen.getByTestId("notifications-bell"));
+    const keyAdds = add.mock.calls.filter(
+      ([type], index) =>
+        type === "keydown" &&
+        add.mock.contexts[index] === stale.element,
+    ).length;
+    expect(keyAdds).toBeGreaterThanOrEqual(2);
+
+    renderStrictBellRoot(root, state, { onOpen, present: false });
+    const keyRemovals = remove.mock.calls.filter(
+      ([type], index) =>
+        type === "keydown" &&
+        remove.mock.contexts[index] === stale.element,
+    ).length;
+    expect(keyRemovals).toBeGreaterThanOrEqual(1);
+    focus.mockClear();
+    expect(trustedKey(stale.element, "ArrowDown").defaultPrevented).toBe(
+      false,
+    );
+    expect(focus).not.toHaveBeenCalled();
+    expectNoDisclosureWork(onOpen);
+
+    renderStrictBellRoot(root, state, { onOpen, present: true });
+    const current = screen.getByTestId("notifications-bell");
+    current.focus();
+    focus.mockClear();
+    expect(trustedKey(current, "ArrowDown").defaultPrevented).toBe(true);
+    expect(screen.getAllByTestId("notification-item")[0]).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+});
+
 describe("notification bell Strict Mode replay", () => {
   it("accepts an exact replay click after its synthetic constructor is production-mangled", () => {
     const state = { ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true };
