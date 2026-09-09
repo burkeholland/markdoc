@@ -24,6 +24,8 @@ interface DocumentVisit {
 
 interface DisclosureVisit {
   readonly document: DocumentVisit;
+  readonly initialFocus: Format;
+  readonly focus: ((this: HTMLElement, options?: FocusOptions) => void) | null;
 }
 
 interface DownloadState {
@@ -51,6 +53,7 @@ interface LinkPublication {
 interface DownloadPublication {
   readonly authority: PresentationAuthority;
   readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
   readonly root: HTMLDivElement;
   readonly primary: HTMLAnchorElement;
   readonly toggle: HTMLButtonElement;
@@ -59,6 +62,7 @@ interface DownloadPublication {
   readonly rootTargets: readonly Node[];
   readonly toggleTargets: readonly Node[];
   readonly linkTargets: Readonly<Record<Format, readonly Node[]>>;
+  readonly keyboard: DownloadKeyboardIntrinsics;
   readonly retire: () => boolean;
   readonly isRetired: () => boolean;
 }
@@ -126,7 +130,79 @@ interface PublicationCells {
   readonly replay: CurrentCell<DownloadReplay | null>;
   readonly focused: WeakSet<DisclosureVisit>;
   readonly claimedEvents: WeakSet<Event>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedKeyboardPublications: WeakSet<DownloadPublication>;
 }
+
+interface DownloadTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface DownloadKeyboardIntrinsics {
+  readonly keyboardPrototype: object;
+  readonly objectPrototype: object;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: DownloadTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: KeyboardEvent) => string;
+    code: (this: KeyboardEvent) => string;
+    location: (this: KeyboardEvent) => number;
+    altKey: (this: KeyboardEvent) => boolean;
+    ctrlKey: (this: KeyboardEvent) => boolean;
+    metaKey: (this: KeyboardEvent) => boolean;
+    shiftKey: (this: KeyboardEvent) => boolean;
+    repeat: (this: KeyboardEvent) => boolean;
+    isComposing: (this: KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+}
+
+interface DownloadKeyboardSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+type DownloadToggleReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
+  readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
+};
 
 interface DownloadDomSnapshot {
   readonly node: Node;
@@ -191,6 +267,7 @@ const ROWS: { format: Format; label: string; Icon: typeof Download }[] = [
 ];
 const FORMATS = ROWS.map(({ format }) => format);
 const LIST_ID = "reader-download-list";
+const PREVENT_SCROLL = Object.freeze({ preventScroll: true });
 
 function exportHref(docId: string, format: Format) {
   return `/api/documents/${docId}/export?format=${format}&download=1`;
@@ -269,6 +346,354 @@ function descendantsOf(element: HTMLElement): readonly Node[] {
   };
   collect(element);
   return Object.freeze(nodes);
+}
+
+function downloadGetter<This extends object, Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = ownerWindow.Object.getOwnPropertyDescriptor(
+    prototype,
+    property,
+  )?.get;
+  return typeof getter === "function"
+    ? (getter as (this: This) => Value)
+    : null;
+}
+
+function downloadDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
+function captureDownloadTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): DownloadTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("download-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    downloadDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureDownloadKeyboardIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): DownloadKeyboardIntrinsics | null {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiEventPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const trusted = captureDownloadTrustedAuthority(ownerWindow);
+  const type = downloadGetter<Event, string>(
+    ownerWindow,
+    eventPrototype,
+    "type",
+  );
+  const target = downloadGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "target",
+  );
+  const currentTarget = downloadGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = downloadGetter<Event, number>(
+    ownerWindow,
+    eventPrototype,
+    "eventPhase",
+  );
+  const bubbles = downloadGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "bubbles",
+  );
+  const cancelable = downloadGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelable",
+  );
+  const defaultPrevented = downloadGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = downloadGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelBubble",
+  );
+  const key = downloadGetter<KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "key",
+  );
+  const code = downloadGetter<KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "code",
+  );
+  const location = downloadGetter<KeyboardEvent, number>(
+    ownerWindow,
+    keyboardPrototype,
+    "location",
+  );
+  const altKey = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "altKey",
+  );
+  const ctrlKey = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "ctrlKey",
+  );
+  const metaKey = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "metaKey",
+  );
+  const shiftKey = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "shiftKey",
+  );
+  const repeat = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "repeat",
+  );
+  const isComposing = downloadGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "isComposing",
+  );
+  const view = downloadGetter<UIEvent, Window | null>(
+    ownerWindow,
+    uiEventPrototype,
+    "view",
+  );
+  const activeElement = downloadGetter<Document, Element | null>(
+    ownerWindow,
+    documentPrototype,
+    "activeElement",
+  );
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const focus = htmlElementPrototype.focus;
+  const apply = ownerWindow.Reflect.apply;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof focus !== "function" ||
+    typeof apply !== "function" ||
+    typeof getPrototypeOf !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    keyboardPrototype,
+    objectPrototype: ownerWindow.Object.prototype,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    apply,
+    getPrototypeOf,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+  });
+}
+
+function readDownloadKeyboardEvent(
+  event: Event,
+  intrinsics: DownloadKeyboardIntrinsics,
+): DownloadKeyboardSnapshot | null {
+  try {
+    if (
+      !intrinsics.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.trusted.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: intrinsics.apply(intrinsics.event.type, event, []),
+      target: intrinsics.apply(intrinsics.event.target, event, []),
+      currentTarget: intrinsics.apply(
+        intrinsics.event.currentTarget,
+        event,
+        [],
+      ),
+      eventPhase: intrinsics.apply(
+        intrinsics.event.eventPhase,
+        event,
+        [],
+      ),
+      bubbles: intrinsics.apply(intrinsics.event.bubbles, event, []),
+      cancelable: intrinsics.apply(
+        intrinsics.event.cancelable,
+        event,
+        [],
+      ),
+      defaultPrevented: intrinsics.apply(
+        intrinsics.event.defaultPrevented,
+        event,
+        [],
+      ),
+      cancelBubble: intrinsics.apply(
+        intrinsics.event.cancelBubble,
+        event,
+        [],
+      ),
+      path: Object.freeze(
+        intrinsics.apply(intrinsics.event.composedPath, event, []),
+      ),
+      key: intrinsics.apply(intrinsics.keyboard.key, event, []),
+      code: intrinsics.apply(intrinsics.keyboard.code, event, []),
+      location: intrinsics.apply(
+        intrinsics.keyboard.location,
+        event,
+        [],
+      ),
+      altKey: intrinsics.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: intrinsics.apply(intrinsics.keyboard.ctrlKey, event, []),
+      metaKey: intrinsics.apply(intrinsics.keyboard.metaKey, event, []),
+      shiftKey: intrinsics.apply(
+        intrinsics.keyboard.shiftKey,
+        event,
+        [],
+      ),
+      repeat: intrinsics.apply(intrinsics.keyboard.repeat, event, []),
+      isComposing: intrinsics.apply(
+        intrinsics.keyboard.isComposing,
+        event,
+        [],
+      ),
+      isTrusted: intrinsics.trusted.read(event),
+      view: intrinsics.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function downloadKeyboardPathMatches(
+  path: readonly EventTarget[],
+  toggle: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = toggle;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    (terminal === ownerWindow ||
+      (typeof terminal === "object" &&
+        terminal !== null &&
+        "document" in terminal &&
+        terminal.document === ownerDocument))
+  );
 }
 
 function isNodeFromDocument(
@@ -366,6 +791,12 @@ function createDownloadPublication({
       (!authority.state ||
         (authority.state.document === authority.document &&
           authority.state.disclosure === authority.disclosure)) &&
+      (!authority.disclosure ||
+        (Object.isFrozen(authority.disclosure) &&
+          authority.disclosure.document === authority.document &&
+          FORMATS.includes(authority.disclosure.initialFocus) &&
+          (authority.disclosure.focus === null ||
+            typeof authority.disclosure.focus === "function"))) &&
       focusFactsMatch
     );
   };
@@ -564,6 +995,23 @@ function createDownloadPublication({
     cells.claimedEvents.add(event);
     return true;
   };
+  const claimToggleKey = (
+    publication: DownloadPublication,
+    event: object,
+    nativeEvent: Event,
+  ) => {
+    if (
+      cells.claimedKeyboardPublications.has(publication) ||
+      cells.claimedReactEvents.has(event) ||
+      cells.claimedEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    cells.claimedKeyboardPublications.add(publication);
+    cells.claimedReactEvents.add(event);
+    cells.claimedEvents.add(nativeEvent);
+    return true;
+  };
 
   const nativeMouseEvent = <T extends HTMLElement>(
     publication: DownloadPublication,
@@ -733,46 +1181,150 @@ function createDownloadPublication({
       runtime,
       authority.open
         ? null
-        : Object.freeze({ document: authority.document }),
+        : Object.freeze({
+            document: authority.document,
+            initialFocus: "md",
+            focus: null,
+          }),
       false,
     );
   };
   const onToggleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!event || typeof event !== "object") return;
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const toggle = event.currentTarget;
+    const nativeEvent = event.nativeEvent;
+    const snapshot =
+      publication && nativeEvent
+        ? readDownloadKeyboardEvent(nativeEvent, publication.keyboard)
+        : null;
+    const destination =
+      snapshot?.key === "ArrowDown"
+        ? links.md
+        : snapshot?.key === "ArrowUp"
+          ? links.pdf
+          : null;
+    const destinationElement = destination
+      ? publication?.linkElements[destination.format]
+      : null;
+    const proof = event as DownloadToggleReactEvent;
+    const intrinsics = publication?.keyboard;
+    const reactPrototype =
+      intrinsics && event
+        ? intrinsics.getPrototypeOf(event)
+        : null;
     if (
-      event.key !== "ArrowDown" ||
       !runtime ||
       !publication ||
+      !snapshot ||
+      !destination ||
+      !destinationElement ||
+      !intrinsics ||
+      !ownsToggle(publication, toggle) ||
+      !reactPrototype ||
+      reactPrototype === intrinsics.objectPrototype ||
+      event.type !== snapshot.type ||
+      event.type !== "keydown" ||
+      event.nativeEvent !== nativeEvent ||
+      event.currentTarget !== toggle ||
+      event.target !== toggle ||
+      event.eventPhase !== snapshot.eventPhase ||
+      event.bubbles !== snapshot.bubbles ||
+      event.cancelable !== snapshot.cancelable ||
+      event.defaultPrevented ||
+      event.isTrusted !== snapshot.isTrusted ||
+      event.key !== snapshot.key ||
+      event.code !== snapshot.code ||
+      event.location !== snapshot.location ||
+      event.altKey !== snapshot.altKey ||
+      event.ctrlKey !== snapshot.ctrlKey ||
+      event.metaKey !== snapshot.metaKey ||
+      event.shiftKey !== snapshot.shiftKey ||
+      event.repeat !== snapshot.repeat ||
+      event.view !== snapshot.view ||
+      proof._reactName !== "onKeyDown" ||
+      typeof event.isDefaultPrevented !== "function" ||
+      event.isDefaultPrevented() ||
+      typeof event.isPropagationStopped !== "function" ||
+      event.isPropagationStopped() ||
+      typeof proof.isPersistent !== "function" ||
+      !proof.isPersistent() ||
+      typeof event.persist !== "function" ||
+      typeof event.preventDefault !== "function" ||
+      typeof event.stopPropagation !== "function" ||
+      snapshot.target !== toggle ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== intrinsics.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== publication.ownerWindow) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !downloadKeyboardPathMatches(
+        snapshot.path,
+        toggle,
+        publication.ownerDocument,
+        publication.ownerWindow,
+      ) ||
+      intrinsics.apply(
+        intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== toggle ||
+      (authority.open &&
+        !ownsLink(publication, destination, destinationElement)) ||
+      !claimToggleKey(publication, event, nativeEvent) ||
       !ownsToggle(publication, toggle)
     ) {
       return;
     }
-    const nativeEvent = nativeKeyboardEvent(
-      publication,
-      event,
-      toggle,
-      publication.toggleTargets,
+    intrinsics.apply(
+      intrinsics.event.preventDefault,
+      nativeEvent,
+      [],
     );
-    if (!nativeEvent || !claimEvent(nativeEvent)) return;
-    if (authority.open) {
-      event.preventDefault();
-      const first = links.md;
-      const firstElement = publication.linkElements.md;
-      if (ownsLink(publication, first, firstElement)) firstElement.focus();
-      return;
-    }
     if (
-      !transition(
-        runtime,
-        Object.freeze({ document: authority.document }),
-        false,
-      )
+      !intrinsics.apply(
+        intrinsics.event.defaultPrevented,
+        nativeEvent,
+        [],
+      ) ||
+      intrinsics.apply(
+        intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== toggle ||
+      !ownsToggle(publication, toggle)
     ) {
       return;
     }
-    event.preventDefault();
+    if (authority.open) {
+      if (!ownsLink(publication, destination, destinationElement)) return;
+      intrinsics.apply(intrinsics.focus, destinationElement, [
+        PREVENT_SCROLL,
+      ]);
+      if (publication.retire()) requestSuccessor();
+      return;
+    }
+    transition(
+      runtime,
+      Object.freeze({
+        document: authority.document,
+        initialFocus: destination.format,
+        focus: intrinsics.focus,
+      }),
+      false,
+    );
   };
   const onListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const runtime = currentRuntime;
@@ -802,16 +1354,16 @@ function createDownloadPublication({
     const format = FORMATS[next]!;
     const destination = links[format];
     const element = publication.linkElements[format];
-    const nativeEvent = nativeKeyboardEvent(
+    const exactNativeEvent = nativeKeyboardEvent(
       publication,
       event,
       event.currentTarget,
       publication.rootTargets,
     );
     if (
-      !nativeEvent ||
+      !exactNativeEvent ||
       !ownsLink(publication, destination, element) ||
-      !claimEvent(nativeEvent)
+      !claimEvent(exactNativeEvent)
     ) {
       return;
     }
@@ -883,12 +1435,18 @@ function createDownloadPublication({
       FORMATS.map((format) => [format, linkOwners.get(format)?.element()]),
     ) as Record<Format, HTMLAnchorElement | null>;
     const placement = root ? captureDownloadPlacement(root) : null;
+    const ownerWindow = root?.ownerDocument.defaultView;
+    const keyboard = ownerWindow
+      ? captureDownloadKeyboardIntrinsics(ownerWindow)
+      : null;
     if (
       !root ||
       !primary ||
       !toggle ||
       !list ||
       !placement ||
+      !ownerWindow ||
+      !keyboard ||
       FORMATS.some((format) => !linkElements[format])
     ) {
       return null;
@@ -917,6 +1475,7 @@ function createDownloadPublication({
     const publication: DownloadPublication = Object.freeze({
       authority,
       ownerDocument: root.ownerDocument,
+      ownerWindow,
       root,
       primary,
       toggle,
@@ -925,6 +1484,7 @@ function createDownloadPublication({
       rootTargets: descendantsOf(root),
       toggleTargets: descendantsOf(toggle),
       linkTargets: Object.freeze(linkTargets),
+      keyboard,
       retire: () => retire("other"),
       isRetired: () => retired,
     });
@@ -1140,14 +1700,41 @@ function createDownloadPublication({
         ) {
           return authority.focusPublished;
         }
-        const first = links.md;
-        const firstElement = publication.linkElements.md;
-        if (!ownsLink(publication, first, firstElement)) return false;
+        const destination = links[disclosure.initialFocus];
+        const destinationElement =
+          publication.linkElements[disclosure.initialFocus];
+        if (
+          !ownsLink(
+            publication,
+            destination,
+            destinationElement,
+          )
+        ) {
+          return false;
+        }
         cells.focused.add(disclosure);
         focusClaimed = true;
-        if (!ownsLink(publication, first, firstElement)) return false;
-        firstElement.focus();
-        return ownsLink(publication, first, firstElement);
+        if (
+          !ownsLink(
+            publication,
+            destination,
+            destinationElement,
+          )
+        ) {
+          return false;
+        }
+        if (disclosure.focus) {
+          keyboard.apply(disclosure.focus, destinationElement, [
+            PREVENT_SCROLL,
+          ]);
+        } else {
+          destinationElement.focus();
+        }
+        return ownsLink(
+          publication,
+          destination,
+          destinationElement,
+        );
       },
       installPointer: () => {
         if (
@@ -1311,6 +1898,8 @@ export function DownloadMenu({ docId }: { docId: string }) {
     replay: new CurrentCell<DownloadReplay | null>(null),
     focused: new WeakSet<DisclosureVisit>(),
     claimedEvents: new WeakSet<Event>(),
+    claimedReactEvents: new WeakSet<object>(),
+    claimedKeyboardPublications: new WeakSet<DownloadPublication>(),
   }));
   const [, setPublicationRevision] = useState(0);
   const requestPublicationSuccessor = useCallback(() => {

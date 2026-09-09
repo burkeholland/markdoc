@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { StrictMode, useLayoutEffect, type ReactNode } from "react";
+import {
+  StrictMode,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -156,6 +161,103 @@ function keyEvent<E extends HTMLElement>(
     shiftKey: false,
     preventDefault: vi.fn(),
   };
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function toggleKeyEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const KeyboardEventConstructor =
+    element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) {
+    throw new Error("The toggle has no owner-realm KeyboardEvent");
+  }
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchToggleKey(
+  element: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+): KeyboardEvent {
+  const event =
+    typeof keyOrEvent === "string"
+      ? toggleKeyEvent(element, keyOrEvent, init)
+      : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchToggleKeyWithHandler(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  onKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void,
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to the toggle");
+  }
+  const properties = element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) {
+      properties[propsKey] = props;
+    }
+  }
 }
 
 function blurEvent(
@@ -340,6 +442,7 @@ describe("DownloadMenu presentation", () => {
   });
 
   it("opens by ArrowDown and gives Tab and unsupported toggle keys native behavior", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     render(<DownloadMenu docId={DOC_ID} />);
     const { toggle, list, links } = menuElements();
@@ -350,10 +453,17 @@ describe("DownloadMenu presentation", () => {
     expect(tab).toBe(true);
     expect(list).not.toBeVisible();
 
-    expect(fireEvent.keyDown(toggle, { key: "ArrowDown" })).toBe(false);
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const arrow = dispatchToggleKey(toggle, "ArrowDown");
+    expect(arrow.defaultPrevented).toBe(true);
     expect(list).toBeVisible();
     expect(links.md).toHaveFocus();
-    expect(focus).toHaveBeenCalledTimes(1);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
   });
 
   it("moves through the exact ordered links with wrapping and leaves modifier and unsupported keys native", () => {
@@ -445,9 +555,313 @@ describe("DownloadMenu presentation", () => {
   });
 });
 
+describe("DownloadMenu trusted toggle directions", () => {
+  it.each([
+    ["closed", "ArrowDown", "md"],
+    ["closed", "ArrowUp", "pdf"],
+    ["open", "ArrowDown", "md"],
+    ["open", "ArrowUp", "pdf"],
+  ] as const)(
+    "moves from a %s disclosure with %s to the exact %s link once",
+    (state, key, format) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      directRoots.add(root);
+      act(() => {
+        root.render(
+          <StrictMode>
+            <DownloadMenu docId={DOC_ID} />
+          </StrictMode>,
+        );
+      });
+      let { toggle, list, links } = menuElements();
+      expect(FORMATS.map((item) => links[item].textContent?.trim())).toEqual([
+        "Markdown",
+        "HTML",
+        "PDF",
+      ]);
+      if (state === "open") {
+        fireEvent.click(toggle);
+        ({ toggle, list, links } = menuElements());
+        expect(list).toBeVisible();
+        expect(links.md).toHaveFocus();
+      }
+      const originalList = list;
+      const activations = Object.fromEntries(
+        FORMATS.map((item) => {
+          const listener = vi.fn();
+          links[item].addEventListener("click", listener);
+          return [item, listener];
+        }),
+      ) as Record<Format, ReturnType<typeof vi.fn>>;
+      toggle.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const scroll = { x: window.scrollX, y: window.scrollY };
+
+      const event = dispatchToggleKey(toggle, key);
+
+      ({ toggle, list, links } = menuElements());
+      expect(event.isTrusted).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(list).toBe(originalList);
+      expect(list).toBeVisible();
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(links[format]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(focus.mock.contexts[0]).toBe(links[format]);
+      expect(Object.values(activations).every((listener) => listener.mock.calls.length === 0)).toBe(true);
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+    },
+  );
+
+  it("rejects altered key facts, prior cancellation, and missing focus before a fresh trusted recovery", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <DownloadMenu docId={DOC_ID} />
+        </StrictMode>,
+      );
+    });
+    const { toggle, list, links } = menuElements();
+    const rejected = [
+      toggleKeyEvent(toggle, "PageDown"),
+      toggleKeyEvent(toggle, "ArrowDown", { ctrlKey: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { altKey: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { metaKey: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { shiftKey: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { repeat: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { isComposing: true }),
+      toggleKeyEvent(toggle, "ArrowDown", { bubbles: false }),
+      toggleKeyEvent(toggle, "ArrowDown", { cancelable: false }),
+      toggleKeyEvent(toggle, "ArrowDown", {}, false),
+    ];
+    for (const event of rejected) {
+      toggle.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      dispatchToggleKey(toggle, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(list).not.toBeVisible();
+    }
+
+    const prevented = toggleKeyEvent(toggle, "ArrowDown");
+    Reflect.apply(nativePreventDefault, prevented, []);
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchToggleKey(toggle, prevented);
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const stopped = toggleKeyEvent(toggle, "ArrowDown");
+    stopped.stopPropagation();
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchToggleKey(toggle, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const outside = connectedElement("button");
+    outside.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const unfocused = dispatchToggleKey(toggle, "ArrowDown");
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(list).not.toBeVisible();
+
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchToggleKey(toggle, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(links.pdf).toHaveFocus();
+  });
+
+  it("rejects fabricated, crossed, forged, foreign, replayed, and reentrant pairs before successor recovery", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <DownloadMenu docId={DOC_ID} />
+        </StrictMode>,
+      );
+    });
+    let { toggle, list, links } = menuElements();
+    const handler = reactHandler<ToggleKey>(toggle, "onKeyDown");
+    const foreign = connectedElement("button");
+    const fabricatedPreventDefault = vi.fn();
+    handler({
+      key: "ArrowDown",
+      currentTarget: toggle,
+      target: toggle,
+      preventDefault: fabricatedPreventDefault,
+    } as unknown as Parameters<ToggleKey>[0]);
+    expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignView = iframe.contentWindow;
+    const foreignEvent = iframe.contentDocument?.createEvent("KeyboardEvent");
+    if (!foreignEvent) {
+      throw new Error("The iframe has no KeyboardEvent");
+    }
+    foreignEvent.initKeyboardEvent(
+      "keydown",
+      true,
+      true,
+      foreignView,
+      "ArrowDown",
+    );
+    handler({
+      key: "ArrowDown",
+      currentTarget: toggle,
+      target: toggle,
+      nativeEvent: foreignEvent,
+      preventDefault: fabricatedPreventDefault,
+    } as unknown as Parameters<ToggleKey>[0]);
+
+    for (const property of [
+      "currentTarget",
+      "target",
+      "isTrusted",
+      "isDefaultPrevented",
+    ] as const) {
+      toggle.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = toggleKeyEvent(toggle, "ArrowDown");
+      dispatchToggleKeyWithHandler(toggle, event, (reactEvent) => {
+        handler(
+          new Proxy(reactEvent, {
+            get(target, current, receiver) {
+              if (current !== property) {
+                return Reflect.get(target, current, receiver);
+              }
+              if (property === "isDefaultPrevented") {
+                return () => true;
+              }
+              if (property === "isTrusted") return false;
+              return foreign;
+            },
+          }),
+        );
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(list).not.toBeVisible();
+    }
+
+    const forged = toggleKeyEvent(toggle, "ArrowDown");
+    Object.defineProperty(forged, "key", {
+      configurable: true,
+      value: "ArrowUp",
+    });
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchToggleKey(toggle, forged);
+    expect(forged.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = toggleKeyEvent(toggle, "ArrowUp");
+    let activeReactEvent:
+      | ReactKeyboardEvent<HTMLButtonElement>
+      | null = null;
+    preventDefault.mockImplementation(function (this: Event) {
+      if (activeReactEvent) handler(activeReactEvent);
+      Reflect.apply(nativePreventDefault, this, []);
+    });
+    dispatchToggleKeyWithHandler(toggle, accepted, (event) => {
+      activeReactEvent = event;
+      handler(event);
+      handler(event);
+      activeReactEvent = null;
+    });
+    ({ toggle, list, links } = menuElements());
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(list).toBeVisible();
+    expect(links.pdf).toHaveFocus();
+
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchToggleKey(toggle, accepted);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(toggle).toHaveFocus();
+
+    const currentToggle = menuElements().toggle;
+    currentToggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const successor = dispatchToggleKey(currentToggle, "ArrowDown");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(menuElements().links.md).toHaveFocus();
+    iframe.remove();
+  });
+});
+
 describe("DownloadMenu Strict Mode replay", () => {
   it("keeps all interaction families exact through direct-root ref and layout replay", () => {
     const pointers = trackPointerListeners();
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
     document.body.append(host);
@@ -575,20 +989,22 @@ describe("DownloadMenu Strict Mode replay", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(pointers.active.size).toBe(0);
 
+    current.toggle.focus();
     focus.mockClear();
-    const openKey = keyEvent(current.toggle, current.toggle, "ArrowDown");
-    openKey.preventDefault.mockImplementation(() => {
-      current.toggleKey(openKey);
-    });
-    act(() => {
-      current.toggleKey(openKey);
-      current.toggleKey(openKey);
+    preventDefault.mockClear();
+    const openKey = toggleKeyEvent(current.toggle, "ArrowDown");
+    dispatchToggleKeyWithHandler(current.toggle, openKey, (event) => {
+      current.toggleKey(event);
+      current.toggleKey(event);
     });
     current = capture();
-    expect(openKey.preventDefault).toHaveBeenCalledOnce();
+    expect(openKey.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
     expect(current.list).toBeVisible();
     expect(current.links.md).toHaveFocus();
-    expect(focus).toHaveBeenCalledExactlyOnceWith();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
 
     focus.mockClear();
     const moveKey = keyEvent(current.list, current.links.md, "ArrowDown");
@@ -776,6 +1192,10 @@ describe("DownloadMenu exact event sources", () => {
   it.each(["wrong-before-current", "current-before-wrong"] as const)(
     "accepts an exact toggle ArrowDown once without consuming wrong sources (%s)",
     (order) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
       render(<DownloadMenu docId={DOC_ID} />);
       const { toggle, list } = menuElements();
       const foreign = connectedElement("button");
@@ -783,24 +1203,27 @@ describe("DownloadMenu exact event sources", () => {
       const replacement = toggle.cloneNode(true) as HTMLButtonElement;
       document.body.append(replacement);
       const handler = reactHandler<ToggleKey>(toggle, "onKeyDown");
-      const event = keyEvent(
-        order === "wrong-before-current" ? foreign : toggle,
-        toggle,
-        "ArrowDown",
-      );
-
-      act(() => {
-        handler(keyEvent(detached, detached, "ArrowDown"));
-        handler(keyEvent(replacement, replacement, "ArrowDown"));
-        handler(event);
-        event.currentTarget = order === "wrong-before-current" ? toggle : foreign;
-        handler(event);
-        event.currentTarget = toggle;
-        handler(event);
+      handler(keyEvent(detached, detached, "ArrowDown"));
+      handler(keyEvent(replacement, replacement, "ArrowDown"));
+      toggle.focus();
+      preventDefault.mockClear();
+      const event = toggleKeyEvent(toggle, "ArrowDown");
+      dispatchToggleKeyWithHandler(toggle, event, (reactEvent) => {
+        const wrong = new Proxy(reactEvent, {
+          get(target, property, receiver) {
+            if (property === "currentTarget") return foreign;
+            return Reflect.get(target, property, receiver);
+          },
+        });
+        if (order === "wrong-before-current") handler(wrong);
+        handler(reactEvent);
+        if (order === "current-before-wrong") handler(wrong);
+        handler(reactEvent);
       });
 
       expect(list).toBeVisible();
-      expect(event.preventDefault).toHaveBeenCalledTimes(1);
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
     },
   );
 
@@ -938,8 +1361,12 @@ describe("DownloadMenu permanent retirement", () => {
     "disabled ancestor and restore",
   ] as const)("does not revive after %s", (change) => {
     const pointers = trackPointerListeners();
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    render(
+    const view = render(
       <fieldset data-testid="download-boundary">
         <DownloadMenu docId={DOC_ID} />
       </fieldset>,
@@ -997,7 +1424,17 @@ describe("DownloadMenu permanent retirement", () => {
       fieldset.disabled = false;
     }
 
+    current.toggle.focus();
     focus.mockClear();
+    preventDefault.mockClear();
+    const staleKey = dispatchToggleKey(
+      current.toggle,
+      "ArrowUp",
+    );
+    expect(staleKey.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
     const outside = connectedElement("button");
     act(() => {
       staleLink(clickEvent(current.links.md));
@@ -1006,6 +1443,26 @@ describe("DownloadMenu permanent retirement", () => {
     expect(current.list).toBeVisible();
     expect(focus).not.toHaveBeenCalled();
     expect(pointers.active.size).toBe(0);
+
+    view.rerender(
+      <fieldset data-testid="download-boundary">
+        <DownloadMenu key="fresh" docId={DOC_ID} />
+      </fieldset>,
+    );
+    const recovered = menuElements();
+    recovered.toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const recoveredKey = dispatchToggleKey(
+      recovered.toggle,
+      "ArrowUp",
+    );
+    expect(recoveredKey.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(menuElements().links.pdf).toHaveFocus();
   });
 
   it("rejects a restored mutation between Strict Mode replay and successor publication", () => {
@@ -1307,6 +1764,10 @@ describe("DownloadMenu publication replacement", () => {
 
   it("retires removal before the parent layout boundary and cannot be revived by stale refs or listeners", () => {
     const pointers = trackPointerListeners();
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const boundaryListeners: number[] = [];
     const view = render(
@@ -1320,6 +1781,10 @@ describe("DownloadMenu publication replacement", () => {
     const previous = menuElements();
     const staleRootRef = reactRef(previous.root);
     const staleToggle = reactHandler<ToggleClick>(previous.toggle, "onClick");
+    const staleToggleKey = reactHandler<ToggleKey>(
+      previous.toggle,
+      "onKeyDown",
+    );
     const staleLink = reactHandler<LinkClick>(previous.links.pdf, "onClick");
     const stalePointer = pointers.captured.at(-1);
 
@@ -1336,11 +1801,20 @@ describe("DownloadMenu publication replacement", () => {
       staleRootRef(previous.root);
       staleRootRef(null);
       staleToggle(clickEvent(previous.toggle));
+      staleToggleKey(
+        keyEvent(previous.toggle, previous.toggle, "ArrowUp"),
+      );
       staleLink(clickEvent(previous.links.pdf));
       invokePointer(stalePointer, connectedElement("button"));
     });
+    const staleNativeKey = dispatchToggleKey(
+      previous.toggle,
+      "ArrowUp",
+    );
     expect(boundaryListeners).toEqual([0]);
     expect(pointers.active.size).toBe(0);
+    expect(staleNativeKey.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
 
     view.rerender(
