@@ -20,12 +20,16 @@ const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => P
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
 const takePendingNotice = vi.fn<() => PendingNotice | null>();
+const signOutSafely = vi.fn<() => Promise<boolean>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/components/dashboard/notifications-strip", () => ({ NotificationsStrip: () => null }));
 vi.mock("@/components/ui/theme-toggle", () => ({ ThemeToggle: () => null }));
 vi.mock("@/lib/notice", () => ({ takePendingNotice: () => takePendingNotice() }));
+vi.mock("@/lib/sign-out", () => ({
+  signOutSafely: () => signOutSafely(),
+}));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -950,6 +954,59 @@ function searchResultKeyEvent(
   return event;
 }
 
+function accountTrigger(host: ParentNode = document): HTMLButtonElement {
+  const trigger = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="Account"]',
+  );
+  if (!trigger) throw new Error("The Account trigger was not rendered");
+  return trigger;
+}
+
+function accountMenuItem(name: "Agents & API tokens" | "Sign out") {
+  const item = screen.getByRole("menuitem", { name });
+  if (!(item instanceof HTMLDivElement)) {
+    throw new Error(`The ${name} Account item was not a div`);
+  }
+  return item;
+}
+
+function accountKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = trigger.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    location: 0,
+    ...init,
+  });
+  if (trusted) markSearchResultEventTrusted(event, ownerWindow);
+  return event;
+}
+
+async function dispatchAccountKey(
+  trigger: HTMLButtonElement,
+  keyOrEvent: "ArrowDown" | "ArrowUp" | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event =
+    typeof keyOrEvent === "string"
+      ? accountKeyEvent(trigger, keyOrEvent, init)
+      : keyOrEvent;
+  await act(async () => {
+    trigger.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
 type KeydownCallback = (event: KeyboardEvent) => void;
 
 function eventCapture(options?: boolean | AddEventListenerOptions | EventListenerOptions): boolean {
@@ -997,6 +1054,8 @@ beforeEach(() => {
   unstarDocument.mockResolvedValue({ starred: false });
   takePendingNotice.mockReset();
   takePendingNotice.mockReturnValue(null);
+  signOutSafely.mockReset();
+  signOutSafely.mockResolvedValue(true);
   router.push.mockReset();
   router.replace.mockReset();
   router.refresh.mockReset();
@@ -1010,6 +1069,492 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("dashboard Account menu directional publication", () => {
+  it.each([
+    ["ArrowDown", "Agents & API tokens"],
+    ["ArrowUp", "Sign out"],
+  ] as const)(
+    "opens with %s and focuses only %s through direct-root Strict Mode replay",
+    async (key, destinationName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const scrollIntoView = vi.spyOn(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = await dispatchAccountKey(trigger, key);
+        const destination = accountMenuItem(destinationName);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(destination).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter((receiver) => receiver === event),
+        ).toHaveLength(1);
+        const destinationFocuses = focus.mock.calls.filter(
+          (_, index) => focus.mock.contexts[index] === destination,
+        );
+        expect(destinationFocuses).toEqual([[{ preventScroll: true }]]);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(searchDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retains pointer, Enter, Space, activation, Escape, and outside dismissal", async () => {
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside Account menu";
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    const closeWithEscape = async () => {
+      const item = accountMenuItem("Agents & API tokens");
+      item.focus();
+      fireEvent.keyDown(item, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(accountTrigger(host)).toHaveFocus();
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: " ", code: "Space" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      fireEvent.click(accountMenuItem("Agents & API tokens"));
+      expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      fireEvent.click(accountMenuItem("Sign out"));
+      expect(signOutSafely).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+      });
+      fireEvent.pointerDown(outside, { button: 0, ctrlKey: false });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects modified, repeated, composing, canceled, untrusted, wrong-code, wrong-target, and wrong-focus keys", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const rejected: KeyboardEvent[] = [
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { ctrlKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { metaKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { altKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { shiftKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { repeat: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          isComposing: true,
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          code: "ArrowUp",
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {}, false),
+      ];
+      for (const event of rejected) {
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+      }
+
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      const canceled = accountKeyEvent(trigger, "ArrowDown");
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      await dispatchAccountKey(trigger, canceled);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      const avatar = trigger.firstElementChild;
+      if (!(avatar instanceof HTMLElement)) {
+        throw new Error("The Account avatar was not rendered");
+      }
+      const wrongTarget = accountKeyEvent(trigger, "ArrowDown");
+      await act(async () => {
+        avatar.dispatchEvent(wrongTarget);
+        await Promise.resolve();
+      });
+      expect(wrongTarget.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, mismatched React/native, replayed, and cleanup delivery before a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const fabricatedNative = accountKeyEvent(trigger, "ArrowDown");
+      captureReactHandler(trigger, "onKeyDown")({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: fabricatedNative,
+        currentTarget: trigger,
+        target: trigger,
+        key: "ArrowDown",
+        code: "ArrowDown",
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      await act(async () => {
+        trigger.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const restore = interceptReactHandler(
+        trigger,
+        "onKeyDown",
+        (original, event) => {
+          const genuine = event as Record<string, unknown>;
+          original({
+            _reactName: genuine._reactName,
+            type: genuine.type,
+            nativeEvent: genuine.nativeEvent,
+            currentTarget: genuine.currentTarget,
+            target: genuine.target,
+            eventPhase: genuine.eventPhase,
+            bubbles: genuine.bubbles,
+            cancelable: genuine.cancelable,
+            defaultPrevented: genuine.defaultPrevented,
+            isTrusted: genuine.isTrusted,
+            key: genuine.key,
+            code: genuine.code,
+            location: genuine.location,
+            ctrlKey: genuine.ctrlKey,
+            metaKey: genuine.metaKey,
+            altKey: genuine.altKey,
+            shiftKey: genuine.shiftKey,
+            repeat: genuine.repeat,
+            view: genuine.view,
+            isDefaultPrevented: genuine.isDefaultPrevented,
+            isPropagationStopped: genuine.isPropagationStopped,
+          });
+        },
+      );
+      const mismatched = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, mismatched);
+      } finally {
+        restore();
+      }
+      expect(mismatched.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = accountKeyEvent(trigger, "ArrowDown");
+      await dispatchAccountKey(trigger, accepted);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      fireEvent.keyDown(accountMenuItem("Agents & API tokens"), {
+        key: "Escape",
+        code: "Escape",
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      focus.mockClear();
+      preventDefault.mockClear();
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      await dispatchAccountKey(trigger, accepted);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      await act(async () => root.unmount());
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it("retains descriptor, DOM, callback, and ref history while a complete clean successor recovers", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const originalClass = trigger.className;
+      trigger.className = `${originalClass} changed`;
+      trigger.className = originalClass;
+      const restoredDom = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(restoredDom.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) {
+        throw new Error("KeyboardEvent.key has no getter");
+      }
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...keyDescriptor,
+        get() {
+          return keyDescriptor.get!.call(this);
+        },
+      });
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const replacedDescriptor = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, replacedDescriptor);
+      } finally {
+        Object.defineProperty(
+          KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+      }
+      expect(replacedDescriptor.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const originalPush = router.push;
+      router.push = vi.fn();
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      let staleCallback: KeyboardEvent | null = null;
+      try {
+        staleCallback = await dispatchAccountKey(trigger, "ArrowDown");
+      } finally {
+        router.push = originalPush;
+      }
+      if (!staleCallback) throw new Error("The stale callback key was not dispatched");
+      expect(staleCallback.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const retiredHandler = captureReactHandler(trigger, "onKeyDown");
+      const triggerRef = captureReactRef(trigger);
+      act(() => triggerRef(null));
+      retiredHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => triggerRef(trigger));
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("TemplateGrid publication ownership", () => {
