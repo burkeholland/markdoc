@@ -2156,7 +2156,6 @@ function readPanelToolbarReactKeyProof(
   const composing = ownValue("isComposing");
   const eventPhase = ownValue("eventPhase");
   if (
-    ownValue("_reactName") !== "onKeyDown" ||
     ownValue("type") !== "keydown" ||
     ownValue("nativeEvent") !== native.event ||
     ownValue("target") !== native.target ||
@@ -2222,7 +2221,6 @@ function panelToolbarReactProofIsCurrent(
     return PANEL_TOOLBAR_MISSING;
   };
   return (
-    ownValue("_reactName") === "onKeyDown" &&
     ownValue("type") === "keydown" &&
     ownValue("nativeEvent") === native.event &&
     ownValue("target") === native.target &&

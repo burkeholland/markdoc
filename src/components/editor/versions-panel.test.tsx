@@ -3876,6 +3876,76 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
     }
   });
 
+  it.each(["present", "absent", "mutated"] as const)(
+    "ignores %s private React names while retaining public wrapper authority",
+    async (privateName) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      let observed = false;
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-private-react-name-${privateName}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        interceptEvent(source, "onKeyDown", (original, event) => {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            event,
+            "_reactName",
+          );
+          expect(descriptor?.value).toBe("onKeyDown");
+          if (privateName === "absent") {
+            expect(Reflect.deleteProperty(event, "_reactName")).toBe(true);
+            expect(
+              Object.getOwnPropertyDescriptor(event, "_reactName"),
+            ).toBeUndefined();
+          } else if (privateName === "mutated") {
+            expect(Reflect.set(event, "_reactName", "private-lookalike")).toBe(
+              true,
+            );
+            expect(
+              Object.getOwnPropertyDescriptor(event, "_reactName")?.value,
+            ).toBe("private-lookalike");
+          }
+          observed = true;
+          original(event);
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const requests = versions.mock.calls.length;
+
+        const accepted = await dispatchVersionsToolbarKey(
+          source,
+          "ArrowDown",
+          {},
+          false,
+        );
+
+        expect(observed).toBe(true);
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it("rejects crossed row deliveries and recovers with a clean event", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
