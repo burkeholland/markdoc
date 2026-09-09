@@ -11053,7 +11053,6 @@ function createPublishMenuPresentation({
       }),
     });
     let keyboardListenerAttached = false;
-    let publication: PublishMenuPublication;
     const keyboardListener: PublishMenuKeyboardListener = function (event) {
       coordinator.stageNative(publication, keyboardListenerRegistration, this, event);
     };
@@ -11080,7 +11079,7 @@ function createPublishMenuPresentation({
       );
       keyboardListenerAttached = false;
     };
-    publication = Object.freeze({
+    const publication: PublishMenuPublication = Object.freeze({
       identity,
       render,
       document: publicationDocument,
@@ -11368,7 +11367,16 @@ function PublishMenu({ props }: { props: HeaderProps }) {
   const {
     captureTrigger,
     captureContent,
-    captureActions,
+    captureActions: {
+      publish: capturePublish,
+      pull: capturePull,
+      sync: captureSync,
+      open: captureOpen,
+      change: captureChange,
+      connect: captureConnect,
+      download: captureDownload,
+      share: captureShare,
+    },
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -11416,24 +11424,24 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
               {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
             </MenuLabel>
-            <MenuItem ref={captureActions.publish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
               {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
             </MenuItem>
-            <MenuItem ref={captureActions.pull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
               Pull latest from GitHub
             </MenuItem>
-            <MenuItem ref={captureActions.sync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
               Sync…
             </MenuItem>
             {doc.githubUrl && (
-              <MenuItem ref={captureActions.open} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
                 Open on GitHub
               </MenuItem>
             )}
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem ref={captureActions.change} icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={props.onPublish}>
                   Change connection…
                 </MenuItem>
               </>
@@ -11443,7 +11451,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             <>
             <MenuLabel>Publish to GitHub</MenuLabel>
             <MenuItem
-              ref={captureActions.connect}
+              ref={captureConnect}
               icon={<GitHubIcon size={15} />}
               onSelect={props.onPublish}
               disabled={!props.isOwner || !githubConfigured}
@@ -11453,10 +11461,10 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
             </MenuItem>
             <MenuSeparator />
-            <MenuItem ref={captureActions.download} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
               Download Markdown
             </MenuItem>
-            <MenuItem ref={captureActions.share} icon={<Share2 size={15} />} onSelect={props.onShare}>
+            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={props.onShare}>
               Share link…
             </MenuItem>
             </>
