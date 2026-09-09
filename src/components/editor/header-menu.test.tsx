@@ -1452,6 +1452,27 @@ describe("editor header More menu authority", () => {
 });
 
 describe("editor header Publish options directional focus", () => {
+  it("publishes a complete successor after the Strict callback-ref replay", async () => {
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props));
+    const button = publishTrigger();
+    const ref = fiberFor(button).ref;
+    if (typeof ref !== "function") throw new Error("Publish trigger callback ref was not attached");
+
+    act(() => {
+      ref(null);
+      ref(button);
+    });
+    await act(async () => Promise.resolve());
+    button.focus();
+
+    const event = publishArrow("ArrowDown");
+
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+  });
+
   it.each([
     ["ArrowDown", "Gist or repository…"],
     ["ArrowUp", "Share link…"],

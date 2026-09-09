@@ -5897,11 +5897,7 @@ function createModeSwitcherPresentation({
   };
   const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const publication = currentPublication();
-    const candidate = publication ?? runtimeState.last?.publication ?? null;
-    if (!publication) {
-      if (candidate) suppressPublishMenuRadixArrowDown(candidate, event);
-      return;
-    }
+    if (!publication) return;
     const arrow = coordinator.claimReactArrow(publication, event);
     if (!arrow) {
       suppressModeSwitcherRadixArrowDown(publication, event);
@@ -9264,6 +9260,7 @@ class PublishMenuPublicationCoordinator {
   #openIntent: PublishMenuOpenIntent | null = null;
   #readyOpen: PublishMenuReadyOpen | null = null;
   #successorRequested = new WeakSet<PublishMenuPublication>();
+  #unpublishedChangeRequested = false;
 
   constructor(private readonly requestSuccessor: () => void) {}
 
@@ -9283,6 +9280,7 @@ class PublishMenuPublicationCoordinator {
     const previous = this.#active ?? this.#successorOf;
     this.#active = publication;
     this.#successorOf = null;
+    this.#unpublishedChangeRequested = false;
     const intent = this.#openIntent;
     if (intent) {
       const target = publishMenuOpenSuccessorTarget(intent, publication);
@@ -9314,7 +9312,13 @@ class PublishMenuPublicationCoordinator {
     previous: HTMLElement | null,
   ) {
     const publication = this.#active;
-    if (!publication) return;
+    if (!publication) {
+      if (!this.#unpublishedChangeRequested) {
+        this.#unpublishedChangeRequested = true;
+        this.requestSuccessor();
+      }
+      return;
+    }
     const exactBeforeChange = publication.isExact();
     publication.recordElementChange(owner, element, previous);
     if (
