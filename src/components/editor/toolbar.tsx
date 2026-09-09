@@ -198,7 +198,6 @@ interface ToolbarDescriptorEvidence {
 
 interface ToolbarKeyboardIntrinsics {
   readonly ownerWindow: Window & typeof globalThis;
-  readonly windowPrototype: object;
   readonly keyboardPrototype: object;
   readonly objectPrototype: object;
   readonly capturingPhase: number;
@@ -217,6 +216,10 @@ interface ToolbarKeyboardIntrinsics {
     defaultPrevented: (this: Event) => boolean;
     cancelBubble: (this: Event) => boolean;
     composedPath: (this: Event) => EventTarget[];
+  }>;
+  readonly eventTarget: Readonly<{
+    addEventListener: typeof EventTarget.prototype.addEventListener;
+    removeEventListener: typeof EventTarget.prototype.removeEventListener;
   }>;
   readonly keyboard: Readonly<{
     key: (this: globalThis.KeyboardEvent) => string;
@@ -272,7 +275,30 @@ interface HeadingKeyPublication {
   readonly source: ToolbarPublication;
   readonly reactEvent: KeyboardEvent<HTMLButtonElement>;
   readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly nativePublication: HeadingKeyNativePublication;
   readonly snapshot: ToolbarKeyboardSnapshot;
+  readonly cancellation: ToolbarReactCancellation;
+}
+
+interface HeadingKeyListenerRegistration {
+  readonly source: ToolbarPublication;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly listener: (this: EventTarget, event: Event) => void;
+  readonly isCurrent: () => boolean;
+  readonly release: () => void;
+}
+
+interface HeadingKeyNativePublication {
+  readonly registration: HeadingKeyListenerRegistration;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly snapshot: ToolbarKeyboardSnapshot;
+}
+
+interface ToolbarReactCancellation {
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
 }
 
 interface HeadingCloseVisit {
@@ -411,12 +437,14 @@ function captureToolbarKeyboardIntrinsics(
   const eventConstructor = ownerWindow.Event;
   const uiEventConstructor = ownerWindow.UIEvent;
   const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const eventTargetConstructor = ownerWindow.EventTarget;
   const documentConstructor = ownerWindow.Document;
   const htmlElementConstructor = ownerWindow.HTMLElement;
   const objectPrototype = objectConstructor.prototype;
   const windowPrototype = windowConstructor.prototype;
   const eventPrototype = eventConstructor.prototype;
   const keyboardPrototype = keyboardConstructor.prototype;
+  const eventTargetPrototype = eventTargetConstructor.prototype;
   const uiEventPrototype = uiEventConstructor.prototype;
   const documentPrototype = documentConstructor.prototype;
   const htmlElementPrototype = htmlElementConstructor.prototype;
@@ -582,6 +610,22 @@ function captureToolbarKeyboardIntrinsics(
     "composedPath",
     evidence,
   );
+  const addEventListener = toolbarMethod<
+    typeof EventTarget.prototype.addEventListener
+  >(
+    getOwnPropertyDescriptor,
+    eventTargetPrototype,
+    "addEventListener",
+    evidence,
+  );
+  const removeEventListener = toolbarMethod<
+    typeof EventTarget.prototype.removeEventListener
+  >(
+    getOwnPropertyDescriptor,
+    eventTargetPrototype,
+    "removeEventListener",
+    evidence,
+  );
   const focus = toolbarMethod<typeof HTMLElement.prototype.focus>(
     getOwnPropertyDescriptor,
     htmlElementPrototype,
@@ -610,6 +654,8 @@ function captureToolbarKeyboardIntrinsics(
     !view ||
     !activeElement ||
     typeof composedPath !== "function" ||
+    typeof addEventListener !== "function" ||
+    typeof removeEventListener !== "function" ||
     typeof focus !== "function" ||
     typeof apply !== "function" ||
     typeof getPrototypeOf !== "function" ||
@@ -625,6 +671,7 @@ function captureToolbarKeyboardIntrinsics(
     ownerWindow.Event === eventConstructor &&
     ownerWindow.UIEvent === uiEventConstructor &&
     ownerWindow.KeyboardEvent === keyboardConstructor &&
+    ownerWindow.EventTarget === eventTargetConstructor &&
     ownerWindow.Document === documentConstructor &&
     ownerWindow.HTMLElement === htmlElementConstructor &&
     ownerWindow.Object.prototype === objectPrototype &&
@@ -632,6 +679,7 @@ function captureToolbarKeyboardIntrinsics(
     eventConstructor.prototype === eventPrototype &&
     uiEventConstructor.prototype === uiEventPrototype &&
     keyboardConstructor.prototype === keyboardPrototype &&
+    eventTargetConstructor.prototype === eventTargetPrototype &&
     documentConstructor.prototype === documentPrototype &&
     htmlElementConstructor.prototype === htmlElementPrototype &&
     ownerWindow.Object.getOwnPropertyDescriptor ===
@@ -697,7 +745,6 @@ function captureToolbarKeyboardIntrinsics(
   if (!isCurrent()) return null;
   return Object.freeze({
     ownerWindow,
-    windowPrototype,
     keyboardPrototype,
     objectPrototype,
     capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
@@ -716,6 +763,10 @@ function captureToolbarKeyboardIntrinsics(
       defaultPrevented,
       cancelBubble,
       composedPath,
+    }),
+    eventTarget: Object.freeze({
+      addEventListener,
+      removeEventListener,
     }),
     keyboard: Object.freeze({
       key,
@@ -787,7 +838,7 @@ function toolbarKeyboardPathMatches(
   path: readonly EventTarget[],
   trigger: HTMLButtonElement,
   ownerDocument: Document,
-  intrinsics: ToolbarKeyboardIntrinsics,
+  terminalReceiver: EventTarget,
 ): boolean {
   const expected: EventTarget[] = [];
   let current: Node | null = trigger;
@@ -796,22 +847,11 @@ function toolbarKeyboardPathMatches(
     if (current === ownerDocument) break;
     current = current.parentNode;
   }
-  const terminal = path.at(-1);
-  const terminalMatches =
-    terminal === intrinsics.ownerWindow ||
-    Boolean(
-      terminal &&
-        intrinsics.apply(
-          intrinsics.isPrototypeOf,
-          intrinsics.windowPrototype,
-          [terminal],
-        ),
-    );
   return (
     expected.at(-1) === ownerDocument &&
     path.length === expected.length + 1 &&
     expected.every((entry, index) => path[index] === entry) &&
-    terminalMatches
+    path.at(-1) === terminalReceiver
   );
 }
 
@@ -859,7 +899,6 @@ function headingReactEventMatches(
       event.bubbles === snapshot.bubbles &&
       event.cancelable === snapshot.cancelable &&
       event.defaultPrevented === snapshot.defaultPrevented &&
-      event.isDefaultPrevented() === snapshot.defaultPrevented &&
       event.isTrusted === snapshot.isTrusted &&
       event.key === snapshot.key &&
       event.code === snapshot.code &&
@@ -874,6 +913,51 @@ function headingReactEventMatches(
   } catch {
     return false;
   }
+}
+
+function readToolbarReactCancellation(
+  event: KeyboardEvent<HTMLButtonElement>,
+  keyboard: ToolbarKeyboardIntrinsics,
+): ToolbarReactCancellation | null {
+  try {
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      !keyboard.methodMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) ||
+      !keyboard.methodMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) ||
+      keyboard.apply(isDefaultPrevented, event, []) !== false ||
+      keyboard.apply(isPropagationStopped, event, []) !== false
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      isDefaultPrevented,
+      isPropagationStopped,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function toolbarReactCancellationMatches(
+  event: KeyboardEvent<HTMLButtonElement>,
+  captured: ToolbarReactCancellation,
+  keyboard: ToolbarKeyboardIntrinsics,
+): boolean {
+  const current = readToolbarReactCancellation(event, keyboard);
+  return Boolean(
+    current &&
+      current.isDefaultPrevented === captured.isDefaultPrevented &&
+      current.isPropagationStopped === captured.isPropagationStopped,
+  );
 }
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -1103,9 +1187,14 @@ function createToolbarPublication({
   let headingOpenChanged = false;
   let blockedRadixOpen: object | null = null;
   let headingKeyPublication: HeadingKeyPublication | null = null;
+  let headingKeyNativePublication: HeadingKeyNativePublication | null = null;
+  let headingKeyListenerRegistration: HeadingKeyListenerRegistration | null =
+    null;
   let keyboard: ToolbarKeyboardIntrinsics | null = null;
   let establishmentDeferred = false;
   const claimed = new Set<symbol>();
+  const claimedHeadingKeyNativePublications =
+    new WeakSet<HeadingKeyNativePublication>();
   const headingKeyAction = Symbol("heading-key");
   const identity = new PublicationIdentity();
   const owners: ElementOwnerView[] = [];
@@ -1346,6 +1435,7 @@ function createToolbarPublication({
     captureEvent: object,
     event: object,
     nativeEvent: Event,
+    nativePublication: HeadingKeyNativePublication,
   ) => {
     const publication = identity.current;
     if (
@@ -1355,7 +1445,8 @@ function createToolbarPublication({
       claimed.has(headingKeyAction) ||
       claimedReactEvents.has(captureEvent) ||
       claimedReactEvents.has(event) ||
-      claimedEvents.has(nativeEvent)
+      claimedEvents.has(nativeEvent) ||
+      claimedHeadingKeyNativePublications.has(nativePublication)
     ) {
       return false;
     }
@@ -1364,6 +1455,7 @@ function createToolbarPublication({
     claimedReactEvents.add(captureEvent);
     claimedReactEvents.add(event);
     claimedEvents.add(nativeEvent);
+    claimedHeadingKeyNativePublications.add(nativePublication);
     consumed = true;
     return true;
   };
@@ -1816,6 +1908,117 @@ function createToolbarPublication({
     });
     requestSuccessor();
   };
+  const installHeadingKeyListener = (
+    ownedRoot: HTMLDivElement,
+    currentKeyboard: ToolbarKeyboardIntrinsics,
+  ) => {
+    if (headingKeyListenerRegistration) return false;
+    const ownerDocument = ownedRoot.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow || currentKeyboard.ownerWindow !== ownerWindow) return false;
+    let installed = false;
+    let released = false;
+    let registration: HeadingKeyListenerRegistration;
+    const listener = function (this: EventTarget, event: Event) {
+      if (!registration.isCurrent()) return;
+      headingKeyNativePublication = null;
+      const snapshot = readToolbarKeyboardEvent(event, currentKeyboard);
+      if (
+        !snapshot ||
+        snapshot.type !== "keydown" ||
+        snapshot.currentTarget !== this ||
+        snapshot.eventPhase !== currentKeyboard.capturingPhase ||
+        snapshot.path.at(-2) !== ownerDocument ||
+        snapshot.path.at(-1) !== this ||
+        !registration.isCurrent()
+      ) {
+        return;
+      }
+      headingKeyNativePublication = Object.freeze({
+        registration,
+        nativeEvent: event as globalThis.KeyboardEvent,
+        receiver: this,
+        snapshot,
+      });
+    };
+    const release = () => {
+      if (released) return;
+      released = true;
+      const wasInstalled = installed;
+      installed = false;
+      if (headingKeyListenerRegistration === registration) {
+        headingKeyListenerRegistration = null;
+      }
+      if (
+        headingKeyNativePublication?.registration === registration
+      ) {
+        headingKeyNativePublication = null;
+      }
+      if (wasInstalled) {
+        currentKeyboard.apply(
+          currentKeyboard.eventTarget.removeEventListener,
+          ownerWindow,
+          ["keydown", listener, true],
+        );
+      }
+    };
+    registration = Object.freeze({
+      source: publication,
+      ownerDocument,
+      ownerWindow,
+      listener,
+      isCurrent: () =>
+        installed &&
+        !released &&
+        headingKeyListenerRegistration === registration &&
+        identity.current === publication &&
+        active.current === publication &&
+        root.element()?.ownerDocument === ownerDocument &&
+        currentKeyboard.isCurrent(),
+      release,
+    });
+    headingKeyListenerRegistration = registration;
+    currentKeyboard.apply(
+      currentKeyboard.eventTarget.addEventListener,
+      ownerWindow,
+      ["keydown", listener, true],
+    );
+    installed = true;
+    const current = registration.isCurrent();
+    if (!current) registration.release();
+    return current;
+  };
+  const headingKeyNativePublicationMatches = (
+    nativePublication: HeadingKeyNativePublication,
+    nativeEvent: globalThis.KeyboardEvent,
+    snapshot: ToolbarKeyboardSnapshot,
+    trigger: HTMLButtonElement,
+  ) => {
+    const registration = headingKeyListenerRegistration;
+    return Boolean(
+      keyboard &&
+        registration &&
+        nativePublication.registration === registration &&
+        nativePublication.nativeEvent === nativeEvent &&
+        nativePublication.receiver ===
+          nativePublication.snapshot.currentTarget &&
+        nativePublication.snapshot.path.at(-2) ===
+          registration.ownerDocument &&
+        nativePublication.snapshot.path.at(-1) ===
+          nativePublication.receiver &&
+        registration.source === identity.current &&
+        registration.ownerDocument === trigger.ownerDocument &&
+        registration.ownerWindow === keyboard.ownerWindow &&
+        registration.isCurrent() &&
+        toolbarKeyboardFactsMatch(nativePublication.snapshot, snapshot) &&
+        toolbarKeyboardPathMatches(
+          snapshot.path,
+          trigger,
+          registration.ownerDocument,
+          nativePublication.receiver,
+        ),
+    );
+  };
   const establish = () => {
     if (established) {
       if (exactReplayReady()) requestReplaySuccessor();
@@ -1866,6 +2069,10 @@ function createToolbarPublication({
     if (previous && previous !== publication) previous.retire();
     active.current = publication;
     if (!syncTabStops()) {
+      active.current = null;
+      return undefined;
+    }
+    if (!installHeadingKeyListener(ownedRoot, keyboard)) {
       active.current = null;
       return undefined;
     }
@@ -1926,6 +2133,7 @@ function createToolbarPublication({
     if (domObserver) recordMutations(domObserver.takeRecords());
     retired = true;
     headingKeyPublication = null;
+    headingKeyListenerRegistration?.release();
     const wasActive = active.current === publication;
     if (wasActive) {
       active.current = null;
@@ -2092,17 +2300,30 @@ function createToolbarPublication({
     const source = identity.current;
     const trigger = buttons.heading.element();
     const nativeEvent = event.nativeEvent;
+    const nativePublication = headingKeyNativePublication;
     const snapshot =
       keyboard && nativeEvent
         ? readToolbarKeyboardEvent(nativeEvent, keyboard)
+        : null;
+    const cancellation =
+      keyboard && event
+        ? readToolbarReactCancellation(event, keyboard)
         : null;
     if (
       !source ||
       !keyboard ||
       !snapshot ||
+      !cancellation ||
+      !nativePublication ||
       !trigger ||
       active.current !== source ||
       !ownsControl(buttons.heading) ||
+      !headingKeyNativePublicationMatches(
+        nativePublication,
+        nativeEvent,
+        snapshot,
+        trigger,
+      ) ||
       !headingReactEventMatches(event, nativeEvent, snapshot, trigger) ||
       snapshot.target !== trigger ||
       snapshot.currentTarget === null ||
@@ -2126,13 +2347,14 @@ function createToolbarPublication({
         snapshot.path,
         trigger,
         trigger.ownerDocument,
-        keyboard,
+        nativePublication.receiver,
       ) ||
       keyboard.apply(
         keyboard.activeElement,
         trigger.ownerDocument,
         [],
       ) !== trigger ||
+      !toolbarReactCancellationMatches(event, cancellation, keyboard) ||
       !keyboard.isCurrent()
     ) {
       if (keyboard && !keyboard.isCurrent()) retire("other");
@@ -2142,7 +2364,9 @@ function createToolbarPublication({
       source,
       reactEvent: event,
       nativeEvent,
+      nativePublication,
       snapshot,
+      cancellation,
     });
   };
   const onHeadingKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -2158,9 +2382,14 @@ function createToolbarPublication({
     }
     const trigger = buttons.heading.element();
     const nativeEvent = event.nativeEvent;
+    const nativePublication = captured?.nativePublication ?? null;
     const snapshot =
       keyboard && nativeEvent
         ? readToolbarKeyboardEvent(nativeEvent, keyboard)
+        : null;
+    const cancellation =
+      keyboard && event
+        ? readToolbarReactCancellation(event, keyboard)
         : null;
     const destination =
       snapshot?.key === "ArrowDown"
@@ -2177,12 +2406,21 @@ function createToolbarPublication({
     if (
       !keyboard ||
       !snapshot ||
+      !cancellation ||
       !destination ||
       !trigger ||
       !captured ||
+      !nativePublication ||
+      headingKeyNativePublication !== nativePublication ||
       captured.source !== identity.current ||
       captured.reactEvent === event ||
       captured.nativeEvent !== nativeEvent ||
+      !headingKeyNativePublicationMatches(
+        nativePublication,
+        nativeEvent,
+        snapshot,
+        trigger,
+      ) ||
       !toolbarKeyboardFactsMatch(captured.snapshot, snapshot) ||
       active.current !== identity.current ||
       !ownsControl(buttons.heading) ||
@@ -2211,7 +2449,7 @@ function createToolbarPublication({
         snapshot.path,
         trigger,
         trigger.ownerDocument,
-        keyboard,
+        nativePublication.receiver,
       ) ||
       keyboard.apply(
         keyboard.activeElement,
@@ -2219,12 +2457,30 @@ function createToolbarPublication({
         [],
       ) !== trigger ||
       typeof preventDefault !== "function" ||
+      !toolbarReactCancellationMatches(
+        captured.reactEvent,
+        captured.cancellation,
+        keyboard,
+      ) ||
+      !toolbarReactCancellationMatches(event, cancellation, keyboard) ||
+      cancellation.isDefaultPrevented !==
+        captured.cancellation.isDefaultPrevented ||
+      cancellation.isPropagationStopped !==
+        captured.cancellation.isPropagationStopped ||
       !keyboard.isCurrent() ||
-      !claimHeadingKey(captured.reactEvent, event, nativeEvent) ||
+      !claimHeadingKey(
+        captured.reactEvent,
+        event,
+        nativeEvent,
+        nativePublication,
+      ) ||
       !ownsControl(buttons.heading)
     ) {
       if (keyboard && !keyboard.isCurrent()) retire("other");
       return;
+    }
+    if (headingKeyNativePublication === nativePublication) {
+      headingKeyNativePublication = null;
     }
     keyboard.apply(preventDefault, event, []);
     if (!keyboard.isCurrent()) {

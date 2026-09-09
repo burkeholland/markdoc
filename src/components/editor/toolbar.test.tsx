@@ -715,6 +715,60 @@ function markJsdomEventTrusted(event: Event) {
   if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
 }
 
+function replaceJsdomPathTerminal(event: Event, terminal: EventTarget) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray(
+        (candidate as { _path?: unknown })._path,
+      );
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's keyboard path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The jsdom keyboard path terminal did not update");
+  }
+}
+
+function jsdomWindowListeners(
+  ownerWindow: Window & typeof globalThis,
+  type: string,
+) {
+  const implementation = Object.getOwnPropertySymbols(ownerWindow)
+    .map(
+      (symbol) =>
+        (ownerWindow as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find((candidate): candidate is {
+      _eventListeners: Record<
+        string,
+        Array<{ callback: { objectReference?: unknown } }>
+      >;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return "_eventListeners" in candidate;
+    });
+  return (implementation?._eventListeners[type] ?? [])
+    .map(({ callback }) => callback.objectReference)
+    .filter((listener): listener is EventListener =>
+      typeof listener === "function",
+    );
+}
+
 function headingKeyEvent(
   trigger: HTMLButtonElement,
   key: string,
@@ -842,7 +896,7 @@ afterEach(() => {
 });
 
 describe("Toolbar Text style trusted arrows", () => {
-  it("waits for Radix's deferred portal before focusing the requested item", () => {
+  it("uses the exact jsdom WindowProxy receiver while waiting for Radix's deferred portal", () => {
     menuMockState.deferPortal = true;
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const f = fixture();
@@ -852,9 +906,13 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
     let pathTerminal: EventTarget | undefined;
-    trigger.ownerDocument.addEventListener(
+    let listenerReceiver: EventTarget | undefined;
+    let listenerCurrentTarget: EventTarget | null | undefined;
+    trigger.ownerDocument.defaultView?.addEventListener(
       "keydown",
-      (event) => {
+      function (event) {
+        listenerReceiver = this;
+        listenerCurrentTarget = event.currentTarget;
         pathTerminal = event.composedPath().at(-1);
       },
       { capture: true, once: true },
@@ -862,17 +920,66 @@ describe("Toolbar Text style trusted arrows", () => {
 
     const event = dispatchHeadingKey(trigger, "ArrowUp");
 
-    expect(pathTerminal).not.toBe(trigger.ownerDocument.defaultView);
     if (!pathTerminal) throw new Error("Keyboard path had no window terminal");
-    expect(
-      trigger.ownerDocument.defaultView?.Window.prototype.isPrototypeOf(
-        pathTerminal,
-      ),
-    ).toBe(true);
+    expect(listenerReceiver).toBe(pathTerminal);
+    expect(listenerCurrentTarget).toBe(pathTerminal);
     expect(event.defaultPrevented).toBe(true);
     expect(textStyle()).toHaveAttribute("aria-expanded", "true");
     expect(headingItem("Heading 6")).toHaveFocus();
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it("rejects a Window-prototype terminal with the exact document and constructors before clean recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    const trigger = textStyle();
+    const ownerWindow = trigger.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Text style has no owner window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: trigger.ownerDocument },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    let stagedReceiver: EventTarget | undefined;
+    ownerWindow.addEventListener(
+      "keydown",
+      function (event) {
+        stagedReceiver = this;
+        replaceJsdomPathTerminal(event, structural);
+      },
+      { capture: true, once: true },
+    );
+    trigger.focus();
+    focus.mockClear();
+
+    const rejected = dispatchHeadingKey(trigger, "ArrowDown");
+
+    expect(stagedReceiver).not.toBe(structural);
+    expect(rejected.composedPath()).toEqual([]);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(actionCalls(f.actions)).toBe(0);
+
+    preventDefault.mockClear();
+    const recovered = dispatchHeadingKey(trigger, "ArrowUp");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
     expect(actionCalls(f.actions)).toBe(0);
   });
 
@@ -911,6 +1018,60 @@ describe("Toolbar Text style trusted arrows", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     expect(headingItem("Heading 6")).toHaveFocus();
+  });
+
+  it("releases a stale listener generation and recovers with one distinct successor", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    const before = new Set(jsdomWindowListeners(window, "keydown"));
+    const view = strictRenderToolbar(f.props);
+    let trigger = textStyle();
+    const staleHandlers = headingKeyHandlers(trigger);
+    const firstGeneration = jsdomWindowListeners(window, "keydown").filter(
+      (listener) => !before.has(listener),
+    );
+    expect(firstGeneration).toHaveLength(1);
+    const staleListener = firstGeneration[0];
+    if (!staleListener) throw new Error("Text style had no native listener");
+
+    view.update(f.props, 1);
+    trigger = textStyle();
+    const successor = jsdomWindowListeners(window, "keydown").filter(
+      (listener) => !before.has(listener),
+    );
+    expect(successor).toHaveLength(1);
+    expect(successor[0]).not.toBe(staleListener);
+    expect(successor).not.toContain(staleListener);
+
+    let staleReceiver: EventTarget | undefined;
+    let staleTerminal: EventTarget | undefined;
+    window.addEventListener(
+      "keydown",
+      function (event) {
+        staleReceiver = this;
+        staleTerminal = event.composedPath().at(-1);
+        Reflect.apply(staleListener, this, [event]);
+      },
+      { capture: true, once: true },
+    );
+    trigger.focus();
+    focus.mockClear();
+    const rejected = headingKeyEvent(trigger, "ArrowDown");
+    dispatchHeadingKeyWithHandlers(trigger, rejected, {
+      capture: staleHandlers.capture,
+      bubble: staleHandlers.action,
+    });
+    expect(staleReceiver).toBe(staleTerminal);
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(actionCalls(f.actions)).toBe(0);
+
+    const recovered = dispatchHeadingKey(trigger, "ArrowDown");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Paragraph")).toHaveFocus();
+    expect(actionCalls(f.actions)).toBe(0);
   });
 
   it("retains open authority when Radix installs its focus guards", () => {
@@ -977,6 +1138,150 @@ describe("Toolbar Text style trusted arrows", () => {
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     expect(actionCalls(f.actions)).toBe(0);
   });
+
+  it("accepts exact phase wrappers only when both cancellation methods retain identity and report false", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const f = fixture();
+    strictRenderToolbar(f.props);
+    const trigger = textStyle();
+    const handlers = headingKeyHandlers(trigger);
+    const event = headingKeyEvent(trigger, "ArrowUp");
+    const methods: Array<
+      readonly [() => boolean, () => boolean]
+    > = [];
+    trigger.focus();
+    focus.mockClear();
+
+    dispatchHeadingKeyWithHandlers(trigger, event, {
+      capture: (reactEvent) => {
+        methods.push([
+          reactEvent.isDefaultPrevented,
+          reactEvent.isPropagationStopped,
+        ]);
+        expect(reactEvent.isDefaultPrevented()).toBe(false);
+        expect(reactEvent.isPropagationStopped()).toBe(false);
+        handlers.capture(reactEvent);
+      },
+      bubble: (reactEvent) => {
+        methods.push([
+          reactEvent.isDefaultPrevented,
+          reactEvent.isPropagationStopped,
+        ]);
+        expect(reactEvent.isDefaultPrevented()).toBe(false);
+        expect(reactEvent.isPropagationStopped()).toBe(false);
+        handlers.action(reactEvent);
+      },
+    });
+
+    expect(methods).toHaveLength(2);
+    expect(methods[1]).toEqual(methods[0]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(headingItem("Heading 6")).toHaveFocus();
+    expect(actionCalls(f.actions)).toBe(0);
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented", "true"],
+    ["bubble", "isDefaultPrevented", "true"],
+    ["capture", "isPropagationStopped", "true"],
+    ["bubble", "isPropagationStopped", "true"],
+    ["capture", "isDefaultPrevented", "proxy"],
+    ["bubble", "isPropagationStopped", "replacement"],
+    ["capture", "isPropagationStopped", "replacement/restoration"],
+    ["bubble", "isDefaultPrevented", "throwing"],
+    ["capture", "isDefaultPrevented", "non-boolean"],
+  ] as const)(
+    "rejects a %s %s method with %s behavior before clean recovery",
+    (phase, method, behavior) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const f = fixture();
+      strictRenderToolbar(f.props);
+      const trigger = textStyle();
+      const handlers = headingKeyHandlers(trigger);
+      const event = headingKeyEvent(trigger, "ArrowDown");
+      trigger.focus();
+      focus.mockClear();
+
+      const invoke = (
+        reactEvent: Parameters<HeadingKeyHandler>[0],
+        handler: HeadingKeyHandler,
+      ) => {
+        const original = reactEvent[method];
+        if (behavior === "proxy") {
+          const proxiedMethod = new Proxy(original, {
+            apply(target, thisArg, argumentsList) {
+              return Reflect.apply(target, thisArg, argumentsList);
+            },
+          });
+          handler(
+            new Proxy(reactEvent, {
+              get(target, property, receiver) {
+                return property === method
+                  ? proxiedMethod
+                  : Reflect.get(target, property, receiver);
+              },
+            }),
+          );
+          return;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(
+          reactEvent,
+          method,
+        );
+        if (!descriptor) {
+          throw new Error(`React wrapper had no ${method} descriptor`);
+        }
+        const value =
+          behavior === "true"
+            ? () => true
+            : behavior === "throwing"
+              ? () => {
+                  throw new Error("altered cancellation method");
+                }
+              : behavior === "non-boolean"
+                ? () => undefined
+                : () => false;
+        Object.defineProperty(reactEvent, method, {
+          ...descriptor,
+          value,
+        });
+        if (behavior === "replacement/restoration") {
+          handler(reactEvent);
+          Object.defineProperty(reactEvent, method, descriptor);
+          return;
+        }
+        handler(reactEvent);
+      };
+
+      dispatchHeadingKeyWithHandlers(trigger, event, {
+        capture: (reactEvent) => {
+          if (phase === "capture") invoke(reactEvent, handlers.capture);
+          else handlers.capture(reactEvent);
+        },
+        bubble: (reactEvent) => {
+          if (phase === "bubble") invoke(reactEvent, handlers.action);
+          else handlers.action(reactEvent);
+        },
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(actionCalls(f.actions)).toBe(0);
+
+      const recovered = dispatchHeadingKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(headingItem("Heading 6")).toHaveFocus();
+      expect(actionCalls(f.actions)).toBe(0);
+    },
+  );
 
   it.each([
     "KeyboardEvent key getter",
@@ -1307,6 +1612,7 @@ describe("Toolbar Text style trusted arrows", () => {
       "nativeEvent",
       "isTrusted",
       "isDefaultPrevented",
+      "isPropagationStopped",
     ] as const) {
       trigger.focus();
       focus.mockClear();
@@ -1322,7 +1628,12 @@ describe("Toolbar Text style trusted arrows", () => {
                 return Reflect.get(target, current, receiver);
               }
               if (property === "nativeEvent") return crossedNative;
-              if (property === "isDefaultPrevented") return () => true;
+              if (
+                property === "isDefaultPrevented" ||
+                property === "isPropagationStopped"
+              ) {
+                return () => true;
+              }
               if (property === "isTrusted") return false;
               return foreign;
             },
