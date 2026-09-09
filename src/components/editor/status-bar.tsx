@@ -3658,7 +3658,7 @@ function statusBarIssuesFocusPublications(
   const ownerWindow = generation.ownerDocument.defaultView;
   if (!ownerWindow || !(content instanceof ownerWindow.HTMLElement))
     return null;
-  const publications: StatusBarControlPublication<HTMLButtonElement>[] = [];
+  const publications: StatusBarControlPublication[] = [];
   for (const row of generation.authority.issueRows) {
     const slot = `issue:${row.index}`;
     const publication = generation.controls.get(slot);
