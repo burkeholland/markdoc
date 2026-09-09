@@ -1669,30 +1669,15 @@ describe("dashboard Account menu directional publication", () => {
         trigger,
         "onKeyDown",
         (original, event) => {
-          const genuine = event as Record<string, unknown>;
-          original({
-            _reactName: genuine._reactName,
-            type: genuine.type,
-            nativeEvent: genuine.nativeEvent,
-            currentTarget: genuine.currentTarget,
-            target: genuine.target,
-            eventPhase: genuine.eventPhase,
-            bubbles: genuine.bubbles,
-            cancelable: genuine.cancelable,
-            defaultPrevented: genuine.defaultPrevented,
-            isTrusted: genuine.isTrusted,
-            key: genuine.key,
-            code: genuine.code,
-            location: genuine.location,
-            ctrlKey: genuine.ctrlKey,
-            metaKey: genuine.metaKey,
-            altKey: genuine.altKey,
-            shiftKey: genuine.shiftKey,
-            repeat: genuine.repeat,
-            view: genuine.view,
-            isDefaultPrevented: genuine.isDefaultPrevented,
-            isPropagationStopped: genuine.isPropagationStopped,
-          });
+          if (!event || typeof event !== "object") {
+            throw new Error("The React keyboard event was not an object");
+          }
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              Object.getOwnPropertyDescriptors(event),
+            ),
+          );
         },
       );
       const mismatched = accountKeyEvent(trigger, "ArrowDown");

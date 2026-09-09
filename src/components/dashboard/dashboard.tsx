@@ -8760,6 +8760,14 @@ interface AccountKeyboardAuthority {
     listener: (event: Event) => void,
     options?: boolean | EventListenerOptions,
   ) => void;
+  readonly addWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
+  readonly removeWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
   readonly isCurrent: () => boolean;
 }
 
@@ -8956,6 +8964,14 @@ function captureAccountKeyboardAuthority(
     ],
     void
   >(view, view.EventTarget.prototype, "removeEventListener");
+  const addWindowEventListener = captureSearchOwnerGetter<
+    Window["addEventListener"]
+  >(view, view, "addEventListener");
+  const removeWindowEventListener = captureSearchOwnerGetter<
+    Window["removeEventListener"]
+  >(view, view, "removeEventListener");
+  const addWindowListener = addWindowEventListener?.read(view);
+  const removeWindowListener = removeWindowEventListener?.read(view);
   if (
     !base ||
     !code ||
@@ -8964,7 +8980,11 @@ function captureAccountKeyboardAuthority(
     !detail ||
     !isPrototypeOf ||
     !addEventListener ||
-    !removeEventListener
+    !removeEventListener ||
+    !addWindowEventListener ||
+    !removeWindowEventListener ||
+    typeof addWindowListener !== "function" ||
+    typeof removeWindowListener !== "function"
   ) {
     return null;
   }
@@ -8976,6 +8996,8 @@ function captureAccountKeyboardAuthority(
     isPrototypeOf,
     addEventListener,
     removeEventListener,
+    addWindowEventListener,
+    removeWindowEventListener,
   ];
   return Object.freeze({
     base,
@@ -8989,6 +9011,10 @@ function captureAccountKeyboardAuthority(
       addEventListener.call(target, [type, listener, options]),
     removeEventListener: (target, type, listener, options) =>
       removeEventListener.call(target, [type, listener, options]),
+    addWindowEventListener: (type, listener) =>
+      TRUSTED_REFLECT_APPLY(addWindowListener, view, [type, listener]),
+    removeWindowEventListener: (type, listener) =>
+      TRUSTED_REFLECT_APPLY(removeWindowListener, view, [type, listener]),
     isCurrent: () =>
       base.isCurrent() &&
       authorities.every((authority) => authority.isCurrent()),
@@ -9015,14 +9041,30 @@ function accountRenderIsExact(render: AccountRenderPublication) {
   );
 }
 
-function accountPathMatches(
+function captureAccountPath(
   expected: readonly EventTarget[],
   actual: readonly EventTarget[],
   ownerWindow: Window,
+): readonly EventTarget[] | null {
+  const actualWindow = actual.at(-1);
+  if (
+    expected.at(-1) !== ownerWindow ||
+    !(actualWindow instanceof ownerWindow.Window) ||
+    expected.length !== actual.length ||
+    !expected
+      .slice(0, -1)
+      .every((entry, index) => actual[index] === entry)
+  ) {
+    return null;
+  }
+  return Object.freeze([...actual]);
+}
+
+function accountPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
 ) {
   return (
-    expected.at(-1) === ownerWindow &&
-    actual.at(-1) === ownerWindow &&
     expected.length === actual.length &&
     expected.every((entry, index) => actual[index] === entry)
   );
@@ -9317,6 +9359,7 @@ function createAccountPublication(
     let keyboardHistoryIsClean = true;
     let routeProof: AccountRouteProof | null = null;
     let nativeProof: AccountNativeKeyProof | null = null;
+    let nativeListening = false;
     let terminalListening = false;
     const reactCaptureCandidates = new WeakMap<Event, object>();
 
@@ -9375,11 +9418,7 @@ function createAccountPublication(
     const removeTerminalListener = () => {
       if (!terminalListening) return;
       terminalListening = false;
-      keyboard.removeEventListener(
-        ownerWindow,
-        "keydown",
-        onWindowTerminal,
-      );
+      keyboard.removeWindowEventListener("keydown", onWindowTerminal);
     };
     const clearProof = () => {
       removeTerminalListener();
@@ -9387,6 +9426,11 @@ function createAccountPublication(
       nativeProof = null;
     };
     const releaseNativeListeners = () => {
+      if (!nativeListening) {
+        removeTerminalListener();
+        return;
+      }
+      nativeListening = false;
       keyboard.removeEventListener(
         trigger,
         "keydown",
@@ -9437,6 +9481,11 @@ function createAccountPublication(
           if (retire("other")) requestSuccessor();
           return null;
         }
+        const path = captureAccountPath(
+          triggerPath,
+          keyboard.base.composedPath(event),
+          ownerWindow,
+        );
         if (
           !publicationOwnsCurrentDom() ||
           !keyboard.isKeyboardEvent(event) ||
@@ -9447,11 +9496,7 @@ function createAccountPublication(
               ownerWindow.Event.CAPTURING_PHASE) ||
           keyboard.base.target(event) !== trigger ||
           !keyboard.base.bubbles(event) ||
-          !accountPathMatches(
-            triggerPath,
-            keyboard.base.composedPath(event),
-            ownerWindow,
-          )
+          !path
         ) {
           return null;
         }
@@ -9461,7 +9506,7 @@ function createAccountPublication(
           key,
           direction:
             key === "ArrowDown" ? "first" : key === "ArrowUp" ? "last" : null,
-          path: triggerPath,
+          path,
         });
       } catch {
         return null;
@@ -9473,6 +9518,7 @@ function createAccountPublication(
       phase: number,
       requireTrusted: boolean,
       expectedView?: Window | null,
+      expectedCurrentTarget: EventTarget | null = trigger,
     ) => {
       const reactPrototype = TRUSTED_OBJECT_GET_PROTOTYPE_OF(event);
       const isDefaultPrevented = searchControlOwnValue(
@@ -9487,11 +9533,11 @@ function createAccountPublication(
         return (
           reactPrototype !== null &&
           reactPrototype !== ownerWindow.Object.prototype &&
-          searchControlOwnValue(event, "_reactName") === "onKeyDown" &&
           searchControlOwnValue(event, "type") === "keydown" &&
           searchControlOwnValue(event, "nativeEvent") === proof.event &&
           searchControlOwnValue(event, "target") === trigger &&
-          searchControlOwnValue(event, "currentTarget") === trigger &&
+          searchControlOwnValue(event, "currentTarget") ===
+            expectedCurrentTarget &&
           searchControlOwnValue(event, "eventPhase") === phase &&
           searchControlOwnValue(event, "bubbles") === true &&
           searchControlOwnValue(event, "cancelable") === true &&
@@ -9574,6 +9620,7 @@ function createAccountPublication(
             ownerWindow.Event.CAPTURING_PHASE,
             true,
             eventView,
+            null,
           )
         ) {
           return null;
@@ -9650,7 +9697,6 @@ function createAccountPublication(
           accountPathMatches(
             proof.path,
             keyboard.base.composedPath(proof.event),
-            ownerWindow,
           )
         );
       } catch {
@@ -9729,10 +9775,18 @@ function createAccountPublication(
       }
       try {
         if (
-          keyboard.base.currentTarget(event) !== ownerWindow ||
+          keyboard.base.currentTarget(event) !== proof.path.at(-1) ||
           keyboard.base.phase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
           keyboard.base.defaultPrevented(event) ||
           keyboard.base.cancelBubble(event) ||
+          searchControlOwnValue(
+            proof.reactCaptureEvent,
+            "currentTarget",
+          ) !== null ||
+          searchControlOwnValue(
+            proof.reactBubbleEvent,
+            "currentTarget",
+          ) !== null ||
           keyboard.base.activeElement.read(ownerDocument) !== trigger ||
           render.state.open ||
           !nativeStillMatches(proof) ||
@@ -9793,7 +9847,7 @@ function createAccountPublication(
       nativeProof = exactNativeEvent(proof);
       if (nativeProof) {
         terminalListening = true;
-        keyboard.addEventListener(ownerWindow, "keydown", onWindowTerminal);
+        keyboard.addWindowEventListener("keydown", onWindowTerminal);
       }
       queueMicrotask(() => {
         if (routeProof !== proof) return;
@@ -9832,7 +9886,9 @@ function createAccountPublication(
       const nativeEvent = searchControlOwnValue(event, "nativeEvent");
       if (
         nativeEvent instanceof ownerWindow.Event &&
-        searchControlOwnValue(event, "currentTarget") === trigger
+        searchControlOwnValue(event, "currentTarget") === trigger &&
+        searchControlOwnValue(event, "eventPhase") ===
+          ownerWindow.Event.CAPTURING_PHASE
       ) {
         reactCaptureCandidates.set(nativeEvent, event);
       }
@@ -9929,6 +9985,7 @@ function createAccountPublication(
         cells.active = publication;
         cells.successorOf = null;
         if (!render.open) {
+          nativeListening = true;
           keyboard.addEventListener(
             trigger,
             "keydown",
