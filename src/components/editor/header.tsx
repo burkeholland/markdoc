@@ -9032,6 +9032,7 @@ interface PublishMenuTrustedAuthority {
 interface PublishMenuKeyboardAuthority {
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
+  readonly customEventPrototype: object;
   readonly keyboardPrototype: object;
   readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
@@ -9181,6 +9182,14 @@ interface PublishMenuOpenIntent {
 interface PublishMenuReadyOpen extends PublishMenuOpenIntent {
   readonly publication: PublishMenuPublication;
   readonly target: HTMLDivElement;
+}
+
+interface PublishMenuAutoFocusProof {
+  readonly event: Event;
+  readonly publication: PublishMenuPublication;
+  readonly content: HTMLDivElement;
+  readonly path: readonly EventTarget[];
+  readonly terminal: EventTarget;
 }
 
 interface PublishMenuPublication {
@@ -9537,25 +9546,15 @@ class PublishMenuPublicationCoordinator {
   consumeOpen(publication: PublishMenuPublication, event: Event) {
     const ready = this.#readyOpen;
     const authority = ready?.authority;
-    const content = publication.dom.content;
-    const ownerWindow = publication.document.defaultView;
+    const autoFocusProof = authority
+      ? readPublishMenuAutoFocusEvent(publication, event, authority)
+      : null;
     if (
       !ready
       || ready.publication !== publication
       || !authority
-      || !content
-      || !ownerWindow
       || this.#active !== publication
-      || !(event instanceof ownerWindow.CustomEvent)
-      || event.type !== "focusScope.autoFocusOnMount"
-      || event.target !== content
-      || event.currentTarget !== content
-      || event.eventPhase !== ownerWindow.Event.AT_TARGET
-      || !event.cancelable
-      || event.defaultPrevented
-      || event.composedPath()[0] !== content
-      || !event.composedPath().includes(publication.document)
-      || event.composedPath().at(-1) !== ready.listenerProof.terminal
+      || !autoFocusProof
       || publishMenuActiveElement(authority) !== publication.dom.trigger
       || !publishMenuNativeListenerProofMatches(
         ready.listenerProof,
@@ -9571,6 +9570,7 @@ class PublishMenuPublicationCoordinator {
     this.#claimedNativeEvents.add(event);
     const result = Object.freeze({
       authority,
+      autoFocusProof,
       target: ready.target,
       source: ready.source,
       listenerProof: ready.listenerProof,
@@ -9703,6 +9703,7 @@ function capturePublishMenuKeyboardAuthority(
   const apply = ownerWindow.Reflect.apply;
   const set = ownerWindow.Reflect.set;
   const eventPrototype = ownerWindow.Event.prototype;
+  const customEventPrototype = ownerWindow.CustomEvent.prototype;
   const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
   const uiPrototype = ownerWindow.UIEvent.prototype;
   const documentPrototype = ownerWindow.Document.prototype;
@@ -9755,6 +9756,7 @@ function capturePublishMenuKeyboardAuthority(
   if (
     !trusted
     || values.some((capture) => capture === null)
+    || getPrototypeOf(customEventPrototype) !== eventPrototype
     || getPrototypeOf(keyboardPrototype) !== uiPrototype
     || getPrototypeOf(uiPrototype) !== eventPrototype
     || getPrototypeOf(eventPrototype) !== ownerWindow.Object.prototype
@@ -9772,11 +9774,13 @@ function capturePublishMenuKeyboardAuthority(
       && ownerWindow.Reflect.apply === apply
       && ownerWindow.Reflect.set === set
       && ownerWindow.Event.prototype === eventPrototype
+      && ownerWindow.CustomEvent.prototype === customEventPrototype
       && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
       && ownerWindow.UIEvent.prototype === uiPrototype
       && ownerWindow.Document.prototype === documentPrototype
       && ownerWindow.HTMLElement.prototype === htmlElementPrototype
       && ownerWindow.EventTarget.prototype === eventTargetPrototype
+      && getPrototypeOf(customEventPrototype) === eventPrototype
       && getPrototypeOf(keyboardPrototype) === uiPrototype
       && getPrototypeOf(uiPrototype) === eventPrototype
       && getPrototypeOf(eventPrototype) === ownerWindow.Object.prototype
@@ -9788,6 +9792,7 @@ function capturePublishMenuKeyboardAuthority(
   return Object.freeze({
     ownerDocument,
     ownerWindow,
+    customEventPrototype,
     keyboardPrototype,
     getOwnPropertyDescriptor,
     getPrototypeOf,
@@ -9900,6 +9905,126 @@ function publishMenuTriggerPathMatches(
     && expected.every((entry, index) => path[index] === entry)
     && path.at(-1) === terminal
   );
+}
+
+function publishMenuContentPathMatches(
+  path: readonly EventTarget[],
+  content: HTMLDivElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  for (let current: Node | null = content; current; current = current.parentNode) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+  }
+  return (
+    expected.at(-1) === ownerDocument
+    && path.length === expected.length + 1
+    && expected.every((entry, index) => path[index] === entry)
+    && path.at(-1) === terminal
+    && !expected.includes(terminal)
+  );
+}
+
+function publishMenuAutoFocusEventMatches(
+  proof: PublishMenuAutoFocusProof,
+  publication: PublishMenuPublication,
+  event: Event,
+  authority: PublishMenuKeyboardAuthority,
+  defaultPrevented: boolean,
+) {
+  const content = publication.dom.content;
+  const ownerWindow = publication.document.defaultView;
+  if (
+    !content
+    || !ownerWindow
+    || authority.ownerDocument !== publication.document
+    || authority.ownerWindow !== ownerWindow
+    || !authority.historyIsClean()
+    || !(event instanceof ownerWindow.CustomEvent)
+    || authority.getPrototypeOf(event) !== authority.customEventPrototype
+    || !Object.isFrozen(proof)
+    || proof.event !== event
+    || proof.publication !== publication
+    || proof.content !== content
+  ) {
+    return false;
+  }
+  try {
+    const path = publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    );
+    return (
+      publishMenuNativeValue<string>(authority.event.type, event, authority)
+        === "focusScope.autoFocusOnMount"
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+        authority,
+      ) === content
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.currentTarget,
+        event,
+        authority,
+      ) === content
+      && publishMenuNativeValue<number>(authority.event.eventPhase, event, authority)
+        === ownerWindow.Event.AT_TARGET
+      && !publishMenuNativeValue<boolean>(authority.event.bubbles, event, authority)
+      && publishMenuNativeValue<boolean>(authority.event.cancelable, event, authority)
+      && publishMenuNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        event,
+        authority,
+      ) === defaultPrevented
+      && !publishMenuNativeValue<boolean>(authority.event.cancelBubble, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.event.composed, event, authority)
+      && path.length === proof.path.length
+      && path.every((entry, index) => entry === proof.path[index])
+      && publishMenuContentPathMatches(
+        path,
+        content,
+        publication.document,
+        proof.terminal,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readPublishMenuAutoFocusEvent(
+  publication: PublishMenuPublication,
+  event: Event,
+  authority: PublishMenuKeyboardAuthority,
+): PublishMenuAutoFocusProof | null {
+  const content = publication.dom.content;
+  if (!content) return null;
+  try {
+    const path = Object.freeze([...publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    )]);
+    const terminal = path.at(-1);
+    if (!terminal) return null;
+    const proof: PublishMenuAutoFocusProof = Object.freeze({
+      event,
+      publication,
+      content,
+      path,
+      terminal,
+    });
+    return publishMenuAutoFocusEventMatches(proof, publication, event, authority, false)
+      ? proof
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function publishMenuArrowIsCurrent(
@@ -11098,12 +11223,21 @@ function createPublishMenuPresentation({
     if (!publication) return;
     const ready = coordinator.consumeOpen(publication, event);
     if (!ready) return;
-    if (!publishMenuNativeListenerProofMatches(
-      ready.listenerProof,
-      ready.source,
-      ready.nativeEvent,
-      false,
-    )) {
+    if (
+      !publishMenuAutoFocusEventMatches(
+        ready.autoFocusProof,
+        publication,
+        event,
+        ready.authority,
+        false,
+      )
+      || !publishMenuNativeListenerProofMatches(
+        ready.listenerProof,
+        ready.source,
+        ready.nativeEvent,
+        false,
+      )
+    ) {
       return;
     }
     publishMenuNativeCall<void>(
@@ -11113,10 +11247,12 @@ function createPublishMenuPresentation({
       ready.authority,
     );
     if (
-      !publishMenuNativeValue<boolean>(
-        ready.authority.event.defaultPrevented,
+      !publishMenuAutoFocusEventMatches(
+        ready.autoFocusProof,
+        publication,
         event,
         ready.authority,
+        true,
       )
       || !publishMenuNativeListenerProofMatches(
         ready.listenerProof,

@@ -1656,6 +1656,8 @@ describe("editor header Publish options directional focus", () => {
   ] as const)("opens an unlinked owner menu with %s at %s", async (key, destination) => {
     const props = headerProps(createSession(), createActions());
     const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const dispatchEvent = vi.spyOn(window.EventTarget.prototype, "dispatchEvent");
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
     await renderStrict(header(props));
     publishTrigger().focus();
     focus.mockClear();
@@ -1665,7 +1667,23 @@ describe("editor header Publish options directional focus", () => {
     expect(event.defaultPrevented).toBe(true);
     await waitFor(() =>
       expect(screen.getByRole("menuitem", { name: destination })).toHaveFocus());
-    expect(focus).toHaveBeenCalledOnce();
+    const content = screen.getByRole("menu");
+    const autoFocusDeliveries = dispatchEvent.mock.calls.flatMap(
+      (args, index) =>
+        args[0] instanceof window.CustomEvent
+        && args[0].type === "focusScope.autoFocusOnMount"
+        && dispatchEvent.mock.contexts[index] === content
+          ? [args[0]]
+          : [],
+    );
+    expect(autoFocusDeliveries).toHaveLength(1);
+    expect(autoFocusDeliveries[0]!.target).toBe(content);
+    expect(autoFocusDeliveries[0]!.defaultPrevented).toBe(true);
+    expect(
+      preventDefault.mock.contexts.filter((context) => context === autoFocusDeliveries[0]),
+    ).toHaveLength(1);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(screen.getByRole("menuitem", { name: destination }));
     expect(props.onPublish).not.toHaveBeenCalled();
     expect(props.onDownload).not.toHaveBeenCalled();
     expect(props.onShare).not.toHaveBeenCalled();
