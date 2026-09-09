@@ -1231,7 +1231,9 @@ describe("dashboard Account menu directional publication", () => {
         );
       });
       const trigger = accountTrigger(host);
-      const foreignWindow = iframe.contentWindow;
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
       if (!foreignWindow) throw new Error("The iframe has no content window");
       const event = accountViewedKeyEvent(trigger, "ArrowDown", foreignWindow);
       if (event) {

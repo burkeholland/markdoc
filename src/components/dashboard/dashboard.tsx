@@ -2478,10 +2478,8 @@ interface SearchControlPublicationCells {
   readonly claimedActions: WeakSet<SearchControlActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
-  readonly claimedAutoFocusEvents: WeakSet<Event>;
   readonly attemptedReactEvents: WeakSet<object>;
   readonly attemptedNativeEvents: WeakSet<Event>;
-  readonly attemptedAutoFocusEvents: WeakSet<Event>;
 }
 
 interface SearchNativeEventProof {
@@ -8863,8 +8861,10 @@ interface AccountPublicationCells {
   readonly claimedDirections: WeakSet<AccountDirectionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedAutoFocusEvents: WeakSet<Event>;
   readonly attemptedReactEvents: WeakSet<object>;
   readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly attemptedAutoFocusEvents: WeakSet<Event>;
 }
 
 interface AccountPublicationSet {
@@ -9011,13 +9011,29 @@ function captureAccountKeyboardAuthority(
     detail: (event: Event) => detail.read(event),
     isKeyboardEvent: (event: object) =>
       isPrototypeOf.call(view.KeyboardEvent.prototype, [event]),
-    addEventListener: (target, type, listener, options) =>
+    addEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ) =>
       addEventListener.call(target, [type, listener, options]),
-    removeEventListener: (target, type, listener, options) =>
+    removeEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ) =>
       removeEventListener.call(target, [type, listener, options]),
-    addWindowEventListener: (type, listener) =>
+    addWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
       TRUSTED_REFLECT_APPLY(addWindowListener, view, [type, listener]),
-    removeWindowEventListener: (type, listener) =>
+    removeWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
       TRUSTED_REFLECT_APPLY(removeWindowListener, view, [type, listener]),
     isCurrent: () =>
       base.isCurrent() &&
@@ -9048,7 +9064,7 @@ function accountRenderIsExact(render: AccountRenderPublication) {
 function captureAccountPath(
   expected: readonly EventTarget[],
   actual: readonly EventTarget[],
-  ownerWindow: Window,
+  ownerWindow: Window & typeof globalThis,
 ): readonly EventTarget[] | null {
   const actualWindow = actual.at(-1);
   if (
@@ -9188,7 +9204,9 @@ function createAccountDomGuard(
   if (!MutationObserverConstructor) return null;
   let changed = false;
   const roots = [trigger, content].filter(
-    (element): element is HTMLElement => element !== null,
+    (
+      element,
+    ): element is HTMLButtonElement | HTMLDivElement => element !== null,
   );
   const placements = contentPlacement
     ? [...triggerPlacement, ...contentPlacement]
@@ -10038,7 +10056,11 @@ function createAccountPublication(
       retireForLayout: () => {
         retire("layout");
       },
-      noteRef: (owner, element, previous) => {
+      noteRef: (
+        owner: AccountElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
         if (!established) return;
         const proof = refs.find((entry) => entry.owner === owner);
         if (!proof) return;
@@ -11237,6 +11259,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     accountCells,
     requestAccountSuccessor,
   );
+  const accountOpenAutoFocusProps = {
+    onOpenAutoFocus: openAccountAutoFocus,
+  };
   useLayoutEffect(
     () => establishAccount(),
     [establishAccount],
@@ -11313,7 +11338,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 ref={captureAccountContent}
                 align="end"
                 className="w-56"
-                onOpenAutoFocus={openAccountAutoFocus}
+                {...accountOpenAutoFocusProps}
               >
                 <div className="px-2.5 py-2">
                   <div className="truncate text-sm font-medium text-ink">{user.name}</div>
