@@ -5897,7 +5897,11 @@ function createModeSwitcherPresentation({
   };
   const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const publication = currentPublication();
-    if (!publication) return;
+    const candidate = publication ?? runtimeState.last?.publication ?? null;
+    if (!publication) {
+      if (candidate) suppressModeSwitcherRadixArrowDown(candidate, event);
+      return;
+    }
     const arrow = coordinator.claimReactArrow(publication, event);
     if (!arrow) {
       suppressModeSwitcherRadixArrowDown(publication, event);
@@ -9180,6 +9184,7 @@ interface PublishMenuPublication {
 interface PublishMenuPublicationRuntime {
   readonly publication: PublishMenuPublication;
   readonly retireForLayout: () => void;
+  readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
 }
 
@@ -9260,7 +9265,6 @@ class PublishMenuPublicationCoordinator {
   #openIntent: PublishMenuOpenIntent | null = null;
   #readyOpen: PublishMenuReadyOpen | null = null;
   #successorRequested = new WeakSet<PublishMenuPublication>();
-  #unpublishedChangeRequested = false;
 
   constructor(private readonly requestSuccessor: () => void) {}
 
@@ -9280,7 +9284,6 @@ class PublishMenuPublicationCoordinator {
     const previous = this.#active ?? this.#successorOf;
     this.#active = publication;
     this.#successorOf = null;
-    this.#unpublishedChangeRequested = false;
     const intent = this.#openIntent;
     if (intent) {
       const target = publishMenuOpenSuccessorTarget(intent, publication);
@@ -9311,20 +9314,13 @@ class PublishMenuPublicationCoordinator {
     element: HTMLElement | null,
     previous: HTMLElement | null,
   ) {
-    const publication = this.#active;
-    if (!publication) {
-      if (!this.#unpublishedChangeRequested) {
-        this.#unpublishedChangeRequested = true;
-        this.requestSuccessor();
-      }
-      return;
-    }
-    const exactBeforeChange = publication.isExact();
+    const publication = this.#active ?? this.#successorOf;
+    if (!publication) return;
     publication.recordElementChange(owner, element, previous);
     if (
       !this.#successorRequested.has(publication)
       && this.acceptsSuccessorOf(publication)
-      && (exactBeforeChange || publication.isExactElementReplay())
+      && publication.isExactElementReplay()
     ) {
       this.#successorRequested.add(publication);
       this.requestSuccessor();
@@ -10821,6 +10817,7 @@ function createPublishMenuPresentation({
     const runtime: PublishMenuPublicationRuntime = Object.freeze({
       publication,
       retireForLayout: () => retire(mutationSeen ? "mutation" : "layout"),
+      isExactElementReplay,
       isExactLayoutReplay: () => (
         retired
         && retirement === "layout"
@@ -10880,7 +10877,11 @@ function createPublishMenuPresentation({
   };
   const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const publication = currentPublication();
-    if (!publication) return;
+    const candidate = publication ?? runtimeState.last?.publication ?? null;
+    if (!publication) {
+      if (candidate) suppressPublishMenuRadixArrowDown(candidate, event);
+      return;
+    }
     const claim = coordinator.claim(publication, event);
     if (!claim) {
       suppressPublishMenuRadixArrowDown(publication, event);
@@ -10933,7 +10934,11 @@ function createPublishMenuPresentation({
   };
   function establish() {
     if (
-      (runtimeState.last && !runtimeState.last.isExactLayoutReplay())
+      (
+        runtimeState.last
+        && !runtimeState.last.isExactLayoutReplay()
+        && !runtimeState.last.isExactElementReplay()
+      )
       || !publishMenuFactsAreCurrent(render)
     ) {
       return undefined;

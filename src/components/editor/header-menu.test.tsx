@@ -1458,11 +1458,30 @@ describe("editor header Publish options directional focus", () => {
     const button = publishTrigger();
     const ref = fiberFor(button).ref;
     if (typeof ref !== "function") throw new Error("Publish trigger callback ref was not attached");
+    const listenerAdds = () => {
+      const addEventListener = vi.mocked(EventTarget.prototype.addEventListener);
+      return addEventListener.mock.calls.filter(
+        (call, index) =>
+          addEventListener.mock.contexts[index] === button
+          && call[0] === "keydown"
+          && call[2] === true,
+      ).length;
+    };
+    const initialListenerAdds = listenerAdds();
 
     act(() => {
       ref(null);
+    });
+    expect(listenerAdds()).toBe(initialListenerAdds);
+    button.focus();
+    const partial = publishArrow("ArrowDown");
+    expect(partial.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+    act(() => {
       ref(button);
     });
+    await waitFor(() => expect(listenerAdds()).toBe(initialListenerAdds + 1));
     await act(async () => Promise.resolve());
     button.focus();
 
