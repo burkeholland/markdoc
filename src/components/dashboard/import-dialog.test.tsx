@@ -1,7 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { StrictMode, useEffect, useLayoutEffect, useState, type ReactNode, type RefCallback } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { createRoot } from "react-dom/client";
 import type { FailedImport, ImportedDocument, ImportBatch } from "@/lib/import-upload";
 
@@ -153,6 +161,116 @@ function captureResultRowRetry(index = 0): CapturedResultControl<HTMLButtonEleme
   const element = screen.getAllByTestId("import-row-retry")[index] as HTMLButtonElement | undefined;
   if (!element) throw new Error(`Row Retry control ${index} was not rendered`);
   return { element, onClick: reactProp<ResultClick<HTMLButtonElement>>(element, "onClick") };
+}
+
+type ResultKeyDown = (
+  event: ReactKeyboardEvent<HTMLElement>,
+) => void;
+
+interface CapturedResultNavigationControl {
+  readonly element: HTMLElement;
+  readonly onKeyDown: ResultKeyDown;
+}
+
+function captureResultNavigationControls(
+  container: ParentNode = document,
+): CapturedResultNavigationControl[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      '[data-testid="import-open"], [data-testid="import-row-retry"], [data-testid="import-retry"]',
+    ),
+  ).map((element) => ({
+    element,
+    onKeyDown: reactProp<ResultKeyDown>(element, "onKeyDown"),
+  }));
+}
+
+function markResultKeyTrusted(event: KeyboardEvent) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function dispatchResultKey(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+  focus = true,
+) {
+  if (focus) source.focus();
+  const ownerWindow = source.ownerDocument.defaultView;
+  if (!ownerWindow) {
+    throw new Error("The import result action has no owner window");
+  }
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: key,
+    key,
+    ...init,
+  });
+  if (trusted) markResultKeyTrusted(event);
+  let allowed = true;
+  act(() => {
+    allowed = source.dispatchEvent(event);
+  });
+  return { allowed, event };
+}
+
+function interceptResultKeyDown(
+  element: HTMLElement,
+  invoke: (
+    original: ResultKeyDown,
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void,
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"));
+  if (!propsKey) {
+    throw new Error(`React props were not attached to ${element.tagName}`);
+  }
+  const record = element as unknown as Record<
+    string,
+    Record<string, unknown> | undefined
+  >;
+  const props = record[propsKey];
+  const original = props?.onKeyDown;
+  if (!props || typeof original !== "function") {
+    throw new Error(`onKeyDown was not attached to ${element.tagName}`);
+  }
+  record[propsKey] = {
+    ...props,
+    onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) =>
+      invoke(original as ResultKeyDown, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
 }
 
 interface CapturedResultControlView {
@@ -494,6 +612,973 @@ afterEach(() => {
   cleanup();
   process.off("unhandledRejection", recordUnhandledRejection);
   vi.restoreAllMocks();
+});
+
+describe("ImportDialog result action keyboard navigation", () => {
+  const navigationItems = (
+    retry: () => void,
+    retryAll: () => void,
+  ): ImportItem[] => [
+    {
+      name: "opened.md",
+      status: "done",
+      id: "opened",
+      warnings: [],
+    },
+    {
+      name: "failed.md",
+      status: "error",
+      error: "Failed",
+      retry,
+      retryAll,
+      warnings: [],
+    },
+    {
+      name: "finished.md",
+      status: "done",
+      id: "finished",
+      warnings: [],
+    },
+  ];
+
+  it.each([
+    ["ArrowDown", 0, 1],
+    ["ArrowUp", 2, 1],
+    ["Home", 2, 0],
+    ["End", 0, 3],
+  ] as const)(
+    "moves one exact direct-root Strict Mode action with %s from %i to %i",
+    (key, sourceIndex, destinationIndex) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const retry = vi.fn();
+      const retryAll = vi.fn();
+      const onOpenChange = vi.fn();
+      const beforeScroll = [window.scrollX, window.scrollY];
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={onOpenChange}
+                items={navigationItems(retry, retryAll)}
+                ignored={["skip.pdf"]}
+                footer={<button type="button">Done</button>}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        expect(controls.map(({ element }) => element.textContent?.trim())).toEqual([
+          "Open",
+          "Retry failed.md",
+          "Open",
+          "Retry failed",
+        ]);
+        const source = controls[sourceIndex]!.element;
+        const destination = controls[destinationIndex]!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const result = dispatchResultKey(source, key, {}, true, false);
+
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(focus.mock.instances[0]).toBe(destination);
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+        expect(destination).toHaveFocus();
+        expect(onOpenChange).not.toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
+        expect(retryAll).not.toHaveBeenCalled();
+        expect([window.scrollX, window.scrollY]).toEqual(beforeScroll);
+        expect(
+          controls.map(({ element }) => element.tabIndex),
+        ).toEqual([0, 0, 0, 0]);
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["ArrowDown", 3],
+    ["ArrowUp", 0],
+    ["Home", 0],
+    ["End", 3],
+  ] as const)(
+    "leaves the %s boundary at action %i unclaimed and inert",
+    (key, sourceIndex) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const retry = vi.fn();
+      const retryAll = vi.fn();
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(retry, retryAll)}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        const source = controls[sourceIndex]!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const result = dispatchResultKey(source, key, {}, true, false);
+
+        expect(result.allowed).toBe(true);
+        expect(result.event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(retry).not.toHaveBeenCalled();
+        expect(retryAll).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("skips every disabled Retry in committed DOM order and preserves later activation", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    const onOpenChange = vi.fn();
+    const items: ImportItem[] = [
+      {
+        name: "first.md",
+        status: "done",
+        id: "first",
+        warnings: [],
+      },
+      {
+        name: "failed.md",
+        status: "error",
+        retry,
+        retryAll,
+        warnings: [],
+      },
+      {
+        name: "pending.md",
+        status: "uploading",
+        warnings: [],
+      },
+      {
+        name: "last.md",
+        status: "done",
+        id: "last",
+        warnings: [],
+      },
+    ];
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={onOpenChange}
+              items={items}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      expect(controls.map(({ element }) => element.textContent?.trim())).toEqual([
+        "Open",
+        "Retry failed.md",
+        "Open",
+        "Retry failed",
+      ]);
+      expect(controls[1]!.element).toBeDisabled();
+      expect(controls[3]!.element).toBeDisabled();
+      controls[0]!.element.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+
+      const result = dispatchResultKey(
+        controls[0]!.element,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[2]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      invokeResultControl(captureResultOpen(1));
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it.each([
+    ["untrusted", {}, false],
+    ["Control-modified", { ctrlKey: true }, true],
+    ["Alt-modified", { altKey: true }, true],
+    ["Meta-modified", { metaKey: true }, true],
+    ["Shift-modified", { shiftKey: true }, true],
+    ["repeated", { repeat: true }, true],
+    ["composing", { isComposing: true }, true],
+  ] as const)(
+    "rejects %s input without poisoning a distinct clean successor",
+    (_name, init, trusted) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const retry = vi.fn();
+      const retryAll = vi.fn();
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(retry, retryAll)}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        const source = controls[0]!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const rejected = dispatchResultKey(
+          source,
+          "ArrowDown",
+          init,
+          trusted,
+          false,
+        );
+
+        expect(rejected.allowed).toBe(true);
+        expect(rejected.event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(retry).not.toHaveBeenCalled();
+        expect(retryAll).not.toHaveBeenCalled();
+
+        const accepted = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(accepted.allowed).toBe(false);
+        expect(controls[1]!.element).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("leaves a lone enabled action and native activation behavior unchanged", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onOpenChange = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={onOpenChange}
+              items={[
+                {
+                  name: "only.md",
+                  status: "done",
+                  id: "only",
+                  warnings: [],
+                },
+              ]}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const [only] = captureResultNavigationControls();
+      if (!only) throw new Error("The lone Open action was not rendered");
+      only.element.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+
+      for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
+        const result = dispatchResultKey(
+          only.element,
+          key,
+          {},
+          true,
+          false,
+        );
+        expect(result.allowed).toBe(true);
+        expect(result.event.defaultPrevented).toBe(false);
+      }
+      const enter = dispatchResultKey(
+        only.element,
+        "Enter",
+        {},
+        true,
+        false,
+      );
+      expect(enter.allowed).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      invokeResultControl(captureResultOpen());
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("leaves Space and the focused row Retry activation unchanged after navigation", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    const onOpenChange = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={onOpenChange}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const moved = dispatchResultKey(
+        controls[0]!.element,
+        "ArrowDown",
+      );
+      expect(moved.allowed).toBe(false);
+      expect(controls[1]!.element).toHaveFocus();
+
+      const space = dispatchResultKey(
+        controls[1]!.element,
+        " ",
+        {},
+        true,
+        false,
+      );
+      expect(space.allowed).toBe(true);
+      expect(space.event.defaultPrevented).toBe(false);
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      invokeResultControl(captureResultRowRetry());
+      expect(retry).toHaveBeenCalledOnce();
+      expect(retryAll).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects canceled, wrong-focus, fabricated, and foreign-realm delivery before clean recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+              footer={
+                <button type="button" data-testid="navigation-sentinel">
+                  Sentinel
+                </button>
+              }
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const source = controls[0]!.element;
+      const sentinel = screen.getByTestId("navigation-sentinel");
+      const cancel = (event: KeyboardEvent) => event.preventDefault();
+      source.addEventListener("keydown", cancel, {
+        capture: true,
+        once: true,
+      });
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const canceled = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(canceled.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      preventDefault.mockClear();
+
+      sentinel.focus();
+      focus.mockClear();
+      const unfocused = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(unfocused.allowed).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(sentinel).toHaveFocus();
+
+      controls[0]!.onKeyDown({
+        type: "keydown",
+        key: "ArrowDown",
+        currentTarget: source,
+        target: source,
+        nativeEvent: new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "ArrowDown",
+          key: "ArrowDown",
+        }),
+      } as unknown as ReactKeyboardEvent<HTMLElement>);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(sentinel).toHaveFocus();
+
+      const iframe = document.createElement("iframe");
+      document.body.append(iframe);
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("The foreign realm was not created");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "ArrowDown",
+        key: "ArrowDown",
+      });
+      markResultKeyTrusted(foreign);
+      source.focus();
+      focus.mockClear();
+      let foreignAllowed = false;
+      act(() => {
+        foreignAllowed = source.dispatchEvent(foreign);
+      });
+      expect(foreignAllowed).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      iframe.remove();
+
+      const recovered = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(recovered.allowed).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("rejects altered React delivery and a replayed native event while permitting distinct successors", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const source = controls[0]!.element;
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const restore = interceptResultKeyDown(
+        source,
+        (original, event) => {
+          original(
+            new Proxy(event, {
+              get(target, property, receiver) {
+                if (property === "key") return "ArrowUp";
+                return Reflect.get(target, property, receiver);
+              },
+            }),
+          );
+        },
+      );
+      try {
+        const altered = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(altered.allowed).toBe(true);
+      } finally {
+        restore();
+      }
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      const accepted = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(accepted.allowed).toBe(false);
+      expect(controls[1]!.element).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      let replayAllowed = true;
+      act(() => {
+        replayAllowed = source.dispatchEvent(accepted.event);
+      });
+      expect(replayAllowed).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      const successor = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(successor.allowed).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("rejects reentrant input during prevention and accepts the next clean action", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    let source: HTMLElement | null = null;
+    let nestedEvent: KeyboardEvent | null = null;
+    let nestedAllowed = false;
+    const preventDefault = vi
+      .spyOn(Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        if (source && nestedEvent) {
+          const event = nestedEvent;
+          nestedEvent = null;
+          nestedAllowed = source.dispatchEvent(event);
+        }
+        nativePreventDefault.call(this);
+      });
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      source = controls[0]!.element;
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      nestedEvent = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "ArrowDown",
+        key: "ArrowDown",
+      });
+      markResultKeyTrusted(nestedEvent);
+
+      const result = dispatchResultKey(
+        source,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(nestedAllowed).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+
+      preventDefault.mockClear();
+      focus.mockClear();
+      const successor = dispatchResultKey(
+        controls[1]!.element,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(successor.allowed).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[2]!.element).toHaveFocus();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it.each([
+    "attribute restore",
+    "detach and restore",
+    "order restore",
+  ] as const)(
+    "retires %s history before focus work and publishes a clean recovery",
+    (change) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const retry = vi.fn();
+      const retryAll = vi.fn();
+      const items = navigationItems(retry, retryAll);
+      const renderDialog = () => (
+        <StrictMode>
+          <ImportDialog
+            open
+            onOpenChange={vi.fn()}
+            items={items}
+            ignored={[]}
+          />
+        </StrictMode>
+      );
+      try {
+        act(() => root.render(renderDialog()));
+        const stale = captureResultNavigationControls();
+        const source = stale[0]!.element;
+        const row = source.parentElement;
+        const list = row?.parentElement;
+        if (!row || !list) throw new Error("The Open action had no result row");
+        if (change === "attribute restore") {
+          const className = source.className;
+          source.className = `${className} changed`;
+          source.className = className;
+        } else if (change === "detach and restore") {
+          const next = source.nextSibling;
+          source.remove();
+          row.insertBefore(source, next);
+        } else {
+          const nextRow = row.nextSibling;
+          list.append(row);
+          list.insertBefore(row, nextRow);
+        }
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const rejected = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(rejected.allowed).toBe(true);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+
+        act(() => root.render(renderDialog()));
+        const current = captureResultNavigationControls();
+        current[0]!.element.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const recovered = dispatchResultKey(
+          current[0]!.element,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(recovered.allowed).toBe(false);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(current[1]!.element).toHaveFocus();
+        expect(retry).not.toHaveBeenCalled();
+        expect(retryAll).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("rejects stale facts and crossed handlers, then retires all work at cleanup", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const staleRetry = vi.fn();
+    const retryAll = vi.fn();
+    const staleItems = navigationItems(staleRetry, retryAll);
+    let rootUnmounted = false;
+    try {
+      act(() => {
+        root.render(
+          <ImportDialog
+            open
+            onOpenChange={vi.fn()}
+            items={staleItems}
+            ignored={[]}
+          />,
+        );
+      });
+      const stale = captureResultNavigationControls();
+      const staleHandler = stale[0]!.onKeyDown;
+      staleItems[0]!.id = "changed";
+      stale[0]!.element.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      expect(
+        dispatchResultKey(
+          stale[0]!.element,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        ).allowed,
+      ).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      staleItems[0]!.id = "opened";
+      const currentRetry = vi.fn();
+      act(() => {
+        root.render(
+          <ImportDialog
+            open
+            onOpenChange={vi.fn()}
+            items={navigationItems(currentRetry, retryAll)}
+            ignored={[]}
+          />,
+        );
+      });
+      const current = captureResultNavigationControls();
+      const restore = interceptResultKeyDown(
+        current[0]!.element,
+        (currentHandler, event) => {
+          staleHandler(event);
+          currentHandler(event);
+        },
+      );
+      current[0]!.element.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        expect(
+          dispatchResultKey(
+            current[0]!.element,
+            "ArrowDown",
+            {},
+            true,
+            false,
+          ).allowed,
+        ).toBe(true);
+      } finally {
+        restore();
+      }
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = dispatchResultKey(
+        current[0]!.element,
+        "ArrowDown",
+        {},
+        true,
+        false,
+      );
+      expect(recovered.allowed).toBe(false);
+      expect(current[1]!.element).toHaveFocus();
+      expect(staleRetry).not.toHaveBeenCalled();
+      expect(currentRetry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+
+      const removedRoot = screen.getByTestId("import-dialog");
+      const removedHandler = current[1]!.onKeyDown;
+      act(() => root.unmount());
+      rootUnmounted = true;
+      document.body.append(removedRoot);
+      const sentinel = document.createElement("button");
+      document.body.append(sentinel);
+      sentinel.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      removedHandler({
+        type: "keydown",
+        key: "ArrowDown",
+        currentTarget: current[1]!.element,
+        target: current[1]!.element,
+        nativeEvent: new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "ArrowDown",
+          key: "ArrowDown",
+        }),
+      } as unknown as ReactKeyboardEvent<HTMLElement>);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(sentinel).toHaveFocus();
+      expect(staleRetry).not.toHaveBeenCalled();
+      expect(currentRetry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+      sentinel.remove();
+      removedRoot.remove();
+    } finally {
+      if (!rootUnmounted) act(() => root.unmount());
+      host.remove();
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
 });
 
 describe("ImportDialog result publications", () => {
