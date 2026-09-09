@@ -109,7 +109,11 @@ const unhandledRejections: unknown[] = [];
 const recordUnhandledRejection = (reason: unknown) => {
   unhandledRejections.push(reason);
 };
-const directSecretViews: Array<{ host: HTMLDivElement; root: Root }> = [];
+const directSecretViews: Array<{
+  host: HTMLDivElement;
+  root: Root;
+  frame?: HTMLIFrameElement;
+}> = [];
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -125,6 +129,7 @@ afterEach(async () => {
   for (const view of directSecretViews.splice(0)) {
     await act(async () => view.root.unmount());
     view.host.remove();
+    view.frame?.remove();
   }
   await Promise.resolve();
   process.off("unhandledRejection", recordUnhandledRejection);
@@ -137,6 +142,27 @@ function renderDirectSecret(node: ReactNode) {
   const host = document.createElement("div");
   document.body.append(host);
   const view = { host, root: createRoot(host) };
+  directSecretViews.push(view);
+  act(() => view.root.render(node));
+  return view;
+}
+
+function renderDirectKeyboard<Setup>(
+  node: ReactNode,
+  setup: (ownerWindow: Window & typeof globalThis) => Setup,
+) {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) {
+    frame.remove();
+    throw new Error("The token keyboard frame has no current realm");
+  }
+  const host = ownerDocument.createElement("div");
+  ownerDocument.body.append(host);
+  const configured = setup(ownerWindow);
+  const view = { host, root: createRoot(host), frame, setup: configured };
   directSecretViews.push(view);
   act(() => view.root.render(node));
   return view;
@@ -266,6 +292,226 @@ function renameEscape(
   });
   return event;
 }
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is { isTrusted: boolean } =>
+      typeof candidate === "object"
+      && candidate !== null
+      && "isTrusted" in candidate
+      && candidate.isTrusted === false);
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function createTokenEscape(
+  target: HTMLElement,
+  init: KeyboardEventInit & { type?: string } = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The token create control has no owner window");
+  const { type = "keydown", ...eventInit } = init;
+  const event = new ownerWindow.KeyboardEvent(type, {
+    key: "Escape",
+    code: "Escape",
+    bubbles: true,
+    cancelable: true,
+    view: ownerWindow,
+    ...eventInit,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchTokenEscape(
+  target: HTMLElement,
+  init: KeyboardEventInit & { type?: string } = {},
+  trusted = true,
+) {
+  const event = createTokenEscape(target, init, trusted);
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchCreateWithHandler(
+  form: HTMLFormElement,
+  target: HTMLElement,
+  handler: (event: ReactKeyboardEvent<HTMLFormElement>) => void,
+) {
+  const propsKey = Object.keys(form).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the create form");
+  const properties = form as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  if (!props) throw new Error("The create form has no React props");
+  properties[propsKey] = { ...props, onKeyDown: handler };
+  try {
+    return dispatchTokenEscape(target);
+  } finally {
+    properties[propsKey] = props;
+  }
+}
+
+async function settleCreatePublication() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+async function showStrictCreate(options: {
+  tokens?: (typeof token)[];
+  documents?: DocumentSummary[];
+  setup?: (ownerWindow: Window & typeof globalThis) => CreateKeyboardSetup;
+} = {}) {
+  const tokens = options.tokens ?? [];
+  const documents = options.documents ?? [];
+  fetchMock.mockImplementation((url) => Promise.resolve(
+    String(url).startsWith("/api/documents")
+      ? response({ documents })
+      : response({ tokens }),
+  ));
+  const view = renderDirectKeyboard(
+    <StrictMode>
+      <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+    </StrictMode>,
+    options.setup ?? ((ownerWindow) => ({
+      preventDefault: vi.spyOn(ownerWindow.Event.prototype, "preventDefault"),
+      focus: vi.spyOn(ownerWindow.HTMLElement.prototype, "focus"),
+    })),
+  );
+  const panel = within(view.host);
+  await panel.findByText(tokens.length === 0 ? "No tokens yet." : tokens[0]!.name);
+  await settleCreatePublication();
+  fireEvent.click(panel.getByTestId("token-add"));
+  await settleCreatePublication();
+  return { ...view, panel };
+}
+
+type DocumentSummary = {
+  id: string;
+  title: string;
+};
+
+type CreateKeyboardSetup = {
+  preventDefault: ReturnType<typeof vi.spyOn>;
+  focus: ReturnType<typeof vi.spyOn>;
+};
+
+type CreateAuthorityMutation = (
+  ownerWindow: Window & typeof globalThis,
+) => () => void;
+
+function replaceRealmProperty(
+  target: object,
+  key: PropertyKey,
+  replacement: (descriptor: PropertyDescriptor) => PropertyDescriptor,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  if (!descriptor) throw new Error(`The create authority has no ${String(key)} descriptor`);
+  Object.defineProperty(target, key, replacement(descriptor));
+  return () => Object.defineProperty(target, key, descriptor);
+}
+
+const createAuthorityMutations = [
+  ["constructor", (ownerWindow) => replaceRealmProperty(
+    ownerWindow,
+    "KeyboardEvent",
+    (descriptor) => ({
+      ...descriptor,
+      value: class extends ownerWindow.KeyboardEvent {},
+    }),
+  )],
+  ["prototype link", (ownerWindow) => {
+    const prototype = ownerWindow.KeyboardEvent.prototype;
+    const original = Object.getPrototypeOf(prototype);
+    Object.setPrototypeOf(prototype, ownerWindow.Event.prototype);
+    return () => Object.setPrototypeOf(prototype, original);
+  }],
+  ["getter descriptor", (ownerWindow) => replaceRealmProperty(
+    ownerWindow.KeyboardEvent.prototype,
+    "key",
+    (descriptor) => ({
+      ...descriptor,
+      get: function (this: KeyboardEvent) {
+        return descriptor.get?.call(this);
+      },
+    }),
+  )],
+  ["method descriptor", (ownerWindow) => {
+    const original = ownerWindow.Event.prototype.preventDefault;
+    return replaceRealmProperty(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+      (descriptor) => ({
+        ...descriptor,
+        value: function (this: Event) {
+          return original.call(this);
+        },
+      }),
+    );
+  }],
+  ["Object.getOwnPropertyDescriptor", (ownerWindow) => {
+    const original = ownerWindow.Object.getOwnPropertyDescriptor;
+    return replaceRealmProperty(
+      ownerWindow.Object,
+      "getOwnPropertyDescriptor",
+      (descriptor) => ({
+        ...descriptor,
+        value: (target: object, key: PropertyKey) => original(target, key),
+      }),
+    );
+  }],
+  ["Object.getPrototypeOf", (ownerWindow) => {
+    const original = ownerWindow.Object.getPrototypeOf;
+    return replaceRealmProperty(
+      ownerWindow.Object,
+      "getPrototypeOf",
+      (descriptor) => ({
+        ...descriptor,
+        value: (target: object) => original(target),
+      }),
+    );
+  }],
+  ["Object.prototype.isPrototypeOf", (ownerWindow) => {
+    const original = ownerWindow.Object.prototype.isPrototypeOf;
+    return replaceRealmProperty(
+      ownerWindow.Object.prototype,
+      "isPrototypeOf",
+      (descriptor) => ({
+        ...descriptor,
+        value: function (this: object, target: object) {
+          return original.call(this, target);
+        },
+      }),
+    );
+  }],
+  ["Reflect.apply", (ownerWindow) => {
+    const original = ownerWindow.Reflect.apply;
+    return replaceRealmProperty(
+      ownerWindow.Reflect,
+      "apply",
+      (descriptor) => ({
+        ...descriptor,
+        value: original.bind(ownerWindow.Reflect),
+      }),
+    );
+  }],
+] satisfies readonly (readonly [string, CreateAuthorityMutation])[];
 
 describe("Settings → Agents: account-session authority", () => {
   it.each(["success", "failure"] as const)(
@@ -849,6 +1095,435 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(screen.queryByLabelText("Token name")).toBeNull();
     expect(callsFor("PATCH")).toHaveLength(0);
     expect(callsFor("POST")).toHaveLength(0);
+  });
+});
+
+describe("Settings → Agents: create token Escape authority", () => {
+  it.each([
+    ["Name input", "token-name"],
+    ["scope radio", "token-scope-comment"],
+    ["restriction checkbox", "token-restrict"],
+    ["expiration select", "token-expiration"],
+    ["form background", "token-create-form"],
+    ["document chooser descendant", "token-document-doc-one"],
+  ] as const)(
+    "cancels once from the current %s, prevents once, and focuses Create token without scrolling",
+    async (_label, targetId) => {
+      const view = await showStrictCreate({
+        documents: [{ id: "doc-one", title: "One" }],
+      });
+      if (targetId === "token-document-doc-one") {
+        fireEvent.click(view.panel.getByTestId("token-restrict"));
+        await view.panel.findByTestId(targetId);
+        await settleCreatePublication();
+      }
+      const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+      const target = view.panel.getByTestId(targetId) as HTMLElement;
+      const createToken = view.panel.getByTestId("token-add") as HTMLButtonElement;
+      target.focus();
+      expect(target.ownerDocument.activeElement).toBe(target);
+      const pageX = view.frame.contentWindow!.scrollX;
+      const pageY = view.frame.contentWindow!.scrollY;
+      const formLeft = form.scrollLeft;
+      const formTop = form.scrollTop;
+      const callsBefore = fetchMock.mock.calls.length;
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const escape = createTokenEscape(target);
+
+      act(() => {
+        target.dispatchEvent(escape);
+        target.dispatchEvent(escape);
+      });
+
+      expect(escape.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.preventDefault.mock.contexts).toEqual([escape]);
+      expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+      expect(createToken).toHaveTextContent("Create token");
+      expect(createToken).toHaveFocus();
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus.mock.contexts).toEqual([createToken]);
+      expect(view.setup.focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+      expect(view.frame.contentWindow!.scrollX).toBe(pageX);
+      expect(view.frame.contentWindow!.scrollY).toBe(pageY);
+      expect(form.scrollLeft).toBe(formLeft);
+      expect(form.scrollTop).toBe(formTop);
+    },
+  );
+
+  it("preserves every draft field and the create error exactly like Cancel creation", async () => {
+    const view = await showStrictCreate({
+      documents: [
+        { id: "doc-one", title: "One" },
+        { id: "doc-two", title: "Two" },
+      ],
+    });
+    fetchMock.mockImplementation((url, init) => {
+      if (url === "/api/tokens" && init?.method === "POST") {
+        return Promise.resolve(response({ error: "Draft rejected" }, 422));
+      }
+      if (String(url).startsWith("/api/documents")) {
+        return Promise.resolve(response({
+          documents: [
+            { id: "doc-one", title: "One" },
+            { id: "doc-two", title: "Two" },
+          ],
+        }));
+      }
+      return Promise.resolve(response({ tokens: [] }));
+    });
+    fireEvent.change(view.panel.getByTestId("token-name"), {
+      target: { value: "Preserved draft" },
+    });
+    fireEvent.click(view.panel.getByTestId("token-scope-full"));
+    fireEvent.click(view.panel.getByTestId("token-restrict"));
+    const documentChoice = await view.panel.findByTestId("token-document-doc-two");
+    fireEvent.click(documentChoice);
+    fireEvent.change(view.panel.getByTestId("token-expiration"), {
+      target: { value: "365" },
+    });
+    fireEvent.click(view.panel.getByTestId("token-create"));
+    expect(await view.panel.findByRole("alert")).toHaveTextContent("Draft rejected");
+    await settleCreatePublication();
+    const expiration = view.panel.getByTestId("token-expiration") as HTMLSelectElement;
+    expiration.focus();
+    view.setup.preventDefault.mockClear();
+    const callsBefore = fetchMock.mock.calls.length;
+
+    dispatchTokenEscape(expiration);
+
+    expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+    expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+    expect(view.panel.getByRole("alert")).toHaveTextContent("Draft rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+    fireEvent.click(view.panel.getByTestId("token-add"));
+    expect(view.panel.getByTestId("token-name")).toHaveValue("Preserved draft");
+    expect(view.panel.getByTestId("token-scope-full")).toBeChecked();
+    expect(view.panel.getByTestId("token-restrict")).toBeChecked();
+    expect(await view.panel.findByTestId("token-document-doc-two")).toBeChecked();
+    expect(view.panel.getByTestId("token-expiration")).toHaveValue("365");
+    expect(view.panel.getByRole("alert")).toHaveTextContent("Draft rejected");
+    expect(callsFor("POST")).toHaveLength(1);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("leaves untrusted, modified, repeated, composing, prevented, stopped, and native control keys inert", async () => {
+    const view = await showStrictCreate();
+    const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    for (const [label, init] of [
+      ["Alt", { altKey: true }],
+      ["Control", { ctrlKey: true }],
+      ["Meta", { metaKey: true }],
+      ["Shift", { shiftKey: true }],
+      ["repeat", { repeat: true }],
+      ["composition", { isComposing: true }],
+      ["non-bubbling", { bubbles: false }],
+      ["non-cancelable", { cancelable: false }],
+      ["Tab", { key: "Tab", code: "Tab" }],
+      ["Arrow", { key: "ArrowDown", code: "ArrowDown" }],
+      ["Space", { key: " ", code: "Space" }],
+      ["Enter", { key: "Enter", code: "Enter" }],
+    ] satisfies readonly (readonly [string, KeyboardEventInit])[]) {
+      const calls = view.setup.preventDefault.mock.calls.length;
+      const event = dispatchTokenEscape(name, init);
+      expect(event.defaultPrevented, label).toBe(false);
+      expect(view.setup.preventDefault.mock.calls.length, label).toBe(calls);
+      expect(view.panel.getByTestId("token-create-form"), label).toBe(form);
+    }
+    const untrusted = dispatchTokenEscape(name, {}, false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    const prevented = createTokenEscape(name);
+    prevented.preventDefault();
+    view.setup.preventDefault.mockClear();
+    act(() => name.dispatchEvent(prevented));
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+    const stopped = createTokenEscape(name);
+    name.addEventListener("keydown", (event) => event.stopPropagation(), { once: true });
+    act(() => name.dispatchEvent(stopped));
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+    fireEvent.change(name, { target: { value: "Native controls remain active" } });
+    fireEvent.click(view.panel.getByTestId("token-scope-read"));
+    fireEvent.click(view.panel.getByTestId("token-restrict"));
+    fireEvent.change(view.panel.getByTestId("token-expiration"), {
+      target: { value: "30" },
+    });
+    expect(name).toHaveValue("Native controls remain active");
+    expect(view.panel.getByTestId("token-scope-read")).toBeChecked();
+    expect(view.panel.getByTestId("token-restrict")).toBeChecked();
+    expect(view.panel.getByTestId("token-expiration")).toHaveValue("30");
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("rejects a structurally matching wrapper that reached only the bubble action boundary", async () => {
+    const view = await showStrictCreate();
+    const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    const propsKey = Object.keys(form).find((key) => key.startsWith("__reactProps$"));
+    if (!propsKey) throw new Error("React props were not attached to the create form");
+    const properties = form as unknown as Record<string, Record<string, unknown>>;
+    const props = properties[propsKey];
+    if (!props) throw new Error("The create form has no React props");
+    const bubble = props.onKeyDown;
+    if (typeof bubble !== "function") throw new Error("The create form has no bubble handler");
+    const fabricatedPrevent = vi.fn();
+    properties[propsKey] = {
+      ...props,
+      onKeyDownCapture: undefined,
+      onKeyDown: undefined,
+    };
+    name.addEventListener("keydown", (nativeEvent) => {
+      bubble({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        key: "Escape",
+        code: "Escape",
+        target: name,
+        currentTarget: form,
+        nativeEvent,
+        eventPhase: nativeEvent.eventPhase,
+        bubbles: nativeEvent.bubbles,
+        cancelable: nativeEvent.cancelable,
+        defaultPrevented: nativeEvent.defaultPrevented,
+        isTrusted: nativeEvent.isTrusted,
+        repeat: false,
+        isComposing: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        view: name.ownerDocument.defaultView,
+        preventDefault: fabricatedPrevent,
+        stopPropagation: vi.fn(),
+        isDefaultPrevented: () => false,
+        isPropagationStopped: () => false,
+        persist: vi.fn(),
+        isPersistent: () => true,
+      } as unknown as ReactKeyboardEvent<HTMLFormElement>);
+    }, { once: true });
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    let fabricated!: KeyboardEvent;
+    try {
+      fabricated = dispatchTokenEscape(name);
+    } finally {
+      properties[propsKey] = props;
+    }
+
+    expect(fabricated.defaultPrevented).toBe(false);
+    expect(fabricatedPrevent).not.toHaveBeenCalled();
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+    const accepted = dispatchTokenEscape(name);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+    expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it.each(createAuthorityMutations)(
+    "permanently rejects a restored %s until a clean keyed successor",
+    async (_label, mutate) => {
+      const view = await showStrictCreate();
+      const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+      const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+      const ownerWindow = name.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The create form has no owner window");
+      name.focus();
+      const duringMutation = createTokenEscape(name);
+      const restore = mutate(ownerWindow);
+      view.setup.preventDefault.mockClear();
+      try {
+        act(() => name.dispatchEvent(duringMutation));
+      } finally {
+        restore();
+      }
+      expect(duringMutation.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+      const restored = dispatchTokenEscape(name);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+      act(() => view.root.render(
+        <StrictMode>
+          <TokensPanel key={`authority-${_label}`} origin="https://markdoc.test" userLogin="alice" />
+        </StrictMode>,
+      ));
+      await view.panel.findByText("No tokens yet.");
+      await settleCreatePublication();
+      fireEvent.click(view.panel.getByTestId("token-add"));
+      await settleCreatePublication();
+      const currentName = view.panel.getByTestId("token-name") as HTMLInputElement;
+      currentName.focus();
+      const accepted = dispatchTokenEscape(currentName);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+      expect(callsFor("POST")).toHaveLength(0);
+      expect(callsFor("PATCH")).toHaveLength(0);
+    },
+  );
+
+  it("is inert outside the form and while create or a blocking token operation is pending", async () => {
+    const view = await showStrictCreate({ tokens: [token] });
+    let form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    let name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    const outside = view.panel.getByRole("button", { name: `Rename ${token.name}` });
+    outside.focus();
+    view.setup.preventDefault.mockClear();
+    const outsideEscape = dispatchTokenEscape(outside);
+    expect(outsideEscape.defaultPrevented).toBe(false);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+    const revokeRequest = deferred();
+    fetchMock.mockImplementation((url, init) =>
+      String(url).endsWith(`/${token.id}`) && init?.method === "DELETE"
+        ? revokeRequest.later
+        : Promise.resolve(response({ tokens: [token] })));
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    fireEvent.click(view.panel.getByRole("button", { name: `Revoke ${token.name}` }));
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    const requestsAtRevoke = fetchMock.mock.calls.length;
+    const pendingRevokeEscape = dispatchTokenEscape(name);
+    expect(pendingRevokeEscape.defaultPrevented).toBe(false);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+    expect(fetchMock).toHaveBeenCalledTimes(requestsAtRevoke);
+    await act(async () => {
+      revokeRequest.settle(response({ error: "Revoke unavailable" }, 503));
+    });
+    await settleCreatePublication();
+
+    const createRequest = deferred();
+    fetchMock.mockImplementation((url, init) =>
+      url === "/api/tokens" && init?.method === "POST"
+        ? createRequest.later
+        : Promise.resolve(response({ tokens: [token] })));
+    form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    fireEvent.click(view.panel.getByTestId("token-create"));
+    form.focus();
+    view.setup.preventDefault.mockClear();
+    const requestsAtCreate = fetchMock.mock.calls.length;
+    const pendingCreateEscape = dispatchTokenEscape(form);
+    expect(pendingCreateEscape.defaultPrevented).toBe(false);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+    expect(fetchMock).toHaveBeenCalledTimes(requestsAtCreate);
+    await act(async () => {
+      createRequest.settle(response({ token: createdSecret }, 201));
+    });
+  });
+
+  it.each([
+    "restored form attribute",
+    "restored control placement",
+    "replaced and restored control",
+    "restored form placement",
+  ] as const)("rejects %s history and admits a clean keyed successor", async (mutation) => {
+    const view = await showStrictCreate();
+    const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    if (mutation === "restored form attribute") {
+      form.setAttribute("data-transient", "true");
+      form.removeAttribute("data-transient");
+    } else if (mutation === "restored control placement") {
+      const parent = name.parentNode!;
+      const next = name.nextSibling;
+      name.remove();
+      parent.insertBefore(name, next);
+    } else if (mutation === "replaced and restored control") {
+      const replacement = name.cloneNode(true);
+      name.replaceWith(replacement);
+      replacement.parentNode!.replaceChild(name, replacement);
+    } else {
+      const parent = form.parentNode!;
+      const next = form.nextSibling;
+      form.remove();
+      parent.insertBefore(form, next);
+    }
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    const restored = dispatchTokenEscape(name);
+    expect(restored.defaultPrevented).toBe(false);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+    act(() => view.root.render(
+      <StrictMode>
+        <TokensPanel key={`successor-${mutation}`} origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+    ));
+    await view.panel.findByText("No tokens yet.");
+    await settleCreatePublication();
+    fireEvent.click(view.panel.getByTestId("token-add"));
+    await settleCreatePublication();
+    const currentName = view.panel.getByTestId("token-name") as HTMLInputElement;
+    currentName.focus();
+    dispatchTokenEscape(currentName);
+    expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+    expect(view.panel.queryByTestId("token-create-form")).toBeNull();
+  });
+
+  it("rejects stale handlers, partial ref replay, and cleanup without poisoning a current successor", async () => {
+    const view = await showStrictCreate();
+    const form = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const name = view.panel.getByTestId("token-name") as HTMLInputElement;
+    const staleHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLFormElement>) => void
+    >(form, "onKeyDown");
+    fireEvent.change(name, { target: { value: "Current draft" } });
+    await settleCreatePublication();
+    name.focus();
+    view.setup.preventDefault.mockClear();
+    dispatchCreateWithHandler(form, name, staleHandler);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.panel.getByTestId("token-create-form")).toBe(form);
+
+    const currentForm = view.panel.getByTestId("token-create-form") as HTMLFormElement;
+    const currentName = view.panel.getByTestId("token-name") as HTMLInputElement;
+    const formRef = reactProp<(element: HTMLFormElement | null) => void>(
+      currentForm,
+      "ref",
+    );
+    act(() => {
+      formRef(null);
+      formRef(currentForm);
+    });
+    await settleCreatePublication();
+    currentName.focus();
+    const replayed = dispatchTokenEscape(currentName);
+    expect(replayed.defaultPrevented).toBe(false);
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+
+    const callsAtCleanup = fetchMock.mock.calls.length;
+    act(() => view.root.unmount());
+    const staleNative = createTokenEscape(currentName);
+    act(() => staleHandler({
+      type: "keydown",
+      key: "Escape",
+      code: "Escape",
+      target: currentName,
+      currentTarget: currentForm,
+      nativeEvent: staleNative,
+    } as unknown as ReactKeyboardEvent<HTMLFormElement>));
+    expect(staleNative.defaultPrevented).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(callsAtCleanup);
+    expect(view.host).toBeEmptyDOMElement();
   });
 });
 
