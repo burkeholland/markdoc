@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { RefreshCw, X } from "lucide-react";
@@ -118,6 +119,7 @@ type RefreshControlPublication = Readonly<{
   refreshTargets: readonly Node[];
   dismissTargets: readonly Node[];
   reloadAuthority: ReloadAuthority;
+  keyboard: RefreshControlKeyboardIntrinsics;
   retire: () => boolean;
   isRetired: () => boolean;
 }>;
@@ -136,7 +138,104 @@ type RefreshControlCells = {
   claimedActions: WeakSet<RefreshAction>;
   claimedReactEvents: WeakSet<object>;
   claimedNativeEvents: WeakSet<Event>;
+  claimedMovements: WeakSet<RefreshControlMovement>;
+  claimedMovementActions: WeakSet<RefreshControlMovementAction>;
+  activeMovements: WeakMap<
+    RefreshControlPublication,
+    RefreshControlMovement
+  >;
+  claimedDestinations: WeakMap<
+    HTMLButtonElement,
+    RefreshControlMovement
+  >;
 };
+
+type RefreshControlMovementAction = {
+  claimed: boolean;
+  destinationClaimed: boolean;
+};
+
+type RefreshControlMovement = Readonly<{
+  identity: symbol;
+  publication: RefreshControlPublication;
+  source: HTMLButtonElement;
+  destination: HTMLButtonElement;
+  key: string;
+  action: RefreshControlMovementAction;
+}>;
+
+interface RefreshControlTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface RefreshControlKeyboardIntrinsics {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboardPrototype: object;
+  readonly objectPrototype: object;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: RefreshControlTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: KeyboardEvent) => string;
+    code: (this: KeyboardEvent) => string;
+    location: (this: KeyboardEvent) => number;
+    altKey: (this: KeyboardEvent) => boolean;
+    ctrlKey: (this: KeyboardEvent) => boolean;
+    metaKey: (this: KeyboardEvent) => boolean;
+    shiftKey: (this: KeyboardEvent) => boolean;
+    repeat: (this: KeyboardEvent) => boolean;
+    isComposing: (this: KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface RefreshControlKeyboardSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+type RefreshControlReactKeyboardEvent =
+  ReactKeyboardEvent<HTMLButtonElement> & {
+    readonly _reactName?: unknown;
+    readonly isPersistent?: unknown;
+  };
 
 type RefreshControlDomSnapshot = Readonly<{
   node: Node;
@@ -312,6 +411,8 @@ type RefreshControlPublicationSet = Readonly<{
   establish: () => void | (() => void);
   onRefresh: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onDismiss: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onRefreshKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  onDismissKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }>;
 
 function snapshotAttributes(node: Node): readonly (readonly [string, string])[] | null {
@@ -425,6 +526,465 @@ function descendantsOf(element: HTMLElement): readonly Node[] {
   };
   collect(element);
   return Object.freeze(descendants);
+}
+
+const REFRESH_CONTROL_PREVENT_SCROLL = Object.freeze({
+  preventScroll: true,
+});
+
+function refreshControlGetter<This extends object, Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = ownerWindow.Object.getOwnPropertyDescriptor(
+    prototype,
+    property,
+  )?.get;
+  return typeof getter === "function"
+    ? (getter as (this: This) => Value)
+    : null;
+}
+
+function refreshControlDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
+function captureRefreshControlTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): RefreshControlTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent(
+      "reader-update-keyboard-intrinsic",
+    );
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    refreshControlDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureRefreshControlKeyboardIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): RefreshControlKeyboardIntrinsics | null {
+  const objectConstructor = ownerWindow.Object;
+  const reflect = ownerWindow.Reflect;
+  const eventConstructor = ownerWindow.Event;
+  const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const uiEventConstructor = ownerWindow.UIEvent;
+  const documentConstructor = ownerWindow.Document;
+  const htmlElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = eventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const trusted = captureRefreshControlTrustedAuthority(ownerWindow);
+  const type = refreshControlGetter<Event, string>(
+    ownerWindow,
+    eventPrototype,
+    "type",
+  );
+  const target = refreshControlGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "target",
+  );
+  const currentTarget = refreshControlGetter<Event, EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = refreshControlGetter<Event, number>(
+    ownerWindow,
+    eventPrototype,
+    "eventPhase",
+  );
+  const bubbles = refreshControlGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "bubbles",
+  );
+  const cancelable = refreshControlGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelable",
+  );
+  const defaultPrevented = refreshControlGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = refreshControlGetter<Event, boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelBubble",
+  );
+  const key = refreshControlGetter<KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "key",
+  );
+  const code = refreshControlGetter<KeyboardEvent, string>(
+    ownerWindow,
+    keyboardPrototype,
+    "code",
+  );
+  const location = refreshControlGetter<KeyboardEvent, number>(
+    ownerWindow,
+    keyboardPrototype,
+    "location",
+  );
+  const altKey = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "altKey",
+  );
+  const ctrlKey = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "ctrlKey",
+  );
+  const metaKey = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "metaKey",
+  );
+  const shiftKey = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "shiftKey",
+  );
+  const repeat = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "repeat",
+  );
+  const isComposing = refreshControlGetter<KeyboardEvent, boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "isComposing",
+  );
+  const view = refreshControlGetter<UIEvent, Window | null>(
+    ownerWindow,
+    uiEventPrototype,
+    "view",
+  );
+  const activeElement = refreshControlGetter<Document, Element | null>(
+    ownerWindow,
+    documentPrototype,
+    "activeElement",
+  );
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const focus = htmlElementPrototype.focus;
+  const apply = reflect.apply;
+  const getPrototypeOf = objectConstructor.getPrototypeOf;
+  const isPrototypeOf = objectConstructor.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof focus !== "function" ||
+    typeof apply !== "function" ||
+    typeof getPrototypeOf !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  const intrinsics: RefreshControlKeyboardIntrinsics = {
+    ownerWindow,
+    keyboardPrototype,
+    objectPrototype: objectConstructor.prototype,
+    bubblingPhase: eventConstructor.BUBBLING_PHASE,
+    apply,
+    getPrototypeOf,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+    isCurrent: () =>
+      ownerWindow.Object === objectConstructor &&
+      ownerWindow.Reflect === reflect &&
+      ownerWindow.Event === eventConstructor &&
+      ownerWindow.KeyboardEvent === keyboardConstructor &&
+      ownerWindow.UIEvent === uiEventConstructor &&
+      ownerWindow.Document === documentConstructor &&
+      ownerWindow.HTMLElement === htmlElementConstructor &&
+      eventConstructor.prototype === eventPrototype &&
+      keyboardConstructor.prototype === keyboardPrototype &&
+      uiEventConstructor.prototype === uiEventPrototype &&
+      documentConstructor.prototype === documentPrototype &&
+      htmlElementConstructor.prototype === htmlElementPrototype &&
+      eventPrototype.composedPath === composedPath &&
+      eventPrototype.preventDefault === preventDefault &&
+      htmlElementPrototype.focus === focus &&
+      ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+      ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
+      ownerWindow.Reflect.apply === apply &&
+      trusted.isCurrent(),
+  };
+  return Object.freeze(intrinsics);
+}
+
+function readRefreshControlKeyboardEvent(
+  event: Event,
+  intrinsics: RefreshControlKeyboardIntrinsics,
+): RefreshControlKeyboardSnapshot | null {
+  try {
+    if (
+      !intrinsics.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: intrinsics.apply(intrinsics.event.type, event, []),
+      target: intrinsics.apply(intrinsics.event.target, event, []),
+      currentTarget: intrinsics.apply(
+        intrinsics.event.currentTarget,
+        event,
+        [],
+      ),
+      eventPhase: intrinsics.apply(
+        intrinsics.event.eventPhase,
+        event,
+        [],
+      ),
+      bubbles: intrinsics.apply(intrinsics.event.bubbles, event, []),
+      cancelable: intrinsics.apply(
+        intrinsics.event.cancelable,
+        event,
+        [],
+      ),
+      defaultPrevented: intrinsics.apply(
+        intrinsics.event.defaultPrevented,
+        event,
+        [],
+      ),
+      cancelBubble: intrinsics.apply(
+        intrinsics.event.cancelBubble,
+        event,
+        [],
+      ),
+      path: Object.freeze(
+        intrinsics.apply(intrinsics.event.composedPath, event, []),
+      ),
+      key: intrinsics.apply(intrinsics.keyboard.key, event, []),
+      code: intrinsics.apply(intrinsics.keyboard.code, event, []),
+      location: intrinsics.apply(
+        intrinsics.keyboard.location,
+        event,
+        [],
+      ),
+      altKey: intrinsics.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: intrinsics.apply(
+        intrinsics.keyboard.ctrlKey,
+        event,
+        [],
+      ),
+      metaKey: intrinsics.apply(
+        intrinsics.keyboard.metaKey,
+        event,
+        [],
+      ),
+      shiftKey: intrinsics.apply(
+        intrinsics.keyboard.shiftKey,
+        event,
+        [],
+      ),
+      repeat: intrinsics.apply(
+        intrinsics.keyboard.repeat,
+        event,
+        [],
+      ),
+      isComposing: intrinsics.apply(
+        intrinsics.keyboard.isComposing,
+        event,
+        [],
+      ),
+      isTrusted: intrinsics.trusted.read(event),
+      view: intrinsics.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function refreshControlKeyboardFactsMatch(
+  left: RefreshControlKeyboardSnapshot,
+  right: RefreshControlKeyboardSnapshot,
+): boolean {
+  return (
+    left.type === right.type &&
+    left.target === right.target &&
+    left.currentTarget === right.currentTarget &&
+    left.eventPhase === right.eventPhase &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.defaultPrevented === right.defaultPrevented &&
+    left.cancelBubble === right.cancelBubble &&
+    left.key === right.key &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.altKey === right.altKey &&
+    left.ctrlKey === right.ctrlKey &&
+    left.metaKey === right.metaKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.isComposing === right.isComposing &&
+    left.isTrusted === right.isTrusted &&
+    left.view === right.view &&
+    left.path.length === right.path.length &&
+    left.path.every((entry, index) => right.path[index] === entry)
+  );
+}
+
+function refreshControlKeyboardPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    (terminal === ownerWindow ||
+      (typeof terminal === "object" &&
+        terminal !== null &&
+        "document" in terminal &&
+        terminal.document === ownerDocument))
+  );
+}
+
+function refreshControlDestination(
+  key: string,
+  sourceIndex: number,
+): number {
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    return sourceIndex < 1 ? sourceIndex + 1 : -1;
+  }
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return sourceIndex > 0 ? sourceIndex - 1 : -1;
+  }
+  if (key === "Home") return sourceIndex === 0 ? -1 : 0;
+  if (key === "End") return sourceIndex === 1 ? -1 : 1;
+  return -1;
+}
+
+function refreshControlIsVisible(
+  pill: HTMLDivElement,
+  ownerDocument: Document,
+): boolean {
+  if (ownerDocument.visibilityState !== "visible") return false;
+  for (
+    let element: HTMLElement | null = pill;
+    element;
+    element = element.parentElement
+  ) {
+    if (
+      element.hidden ||
+      element.getAttribute("aria-hidden")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function createFailureCheckAttempt(
@@ -781,6 +1341,7 @@ function createRefreshControlPublication(
     refreshButton: HTMLButtonElement,
     dismissButton: HTMLButtonElement,
     reloadAuthority: ReloadAuthority,
+    keyboard: RefreshControlKeyboardIntrinsics,
   ): RefreshControlRuntime => {
     type Retirement = "element" | "layout" | "invalid" | "other";
     let retired = false;
@@ -834,6 +1395,7 @@ function createRefreshControlPublication(
       refreshTargets: descendantsOf(refreshButton),
       dismissTargets: descendantsOf(dismissButton),
       reloadAuthority,
+      keyboard,
       retire: () => retire("other"),
       isRetired: () => retired,
     });
@@ -992,12 +1554,17 @@ function createRefreshControlPublication(
     const dismissButton = dismissButtonOwner.element();
     const placement = pill ? captureControlPlacement(pill) : null;
     const reloadAuthority = captureReloadAuthority(render.ownerDocument);
+    const ownerWindow = render.ownerDocument.defaultView;
+    const keyboard = ownerWindow
+      ? captureRefreshControlKeyboardIntrinsics(ownerWindow)
+      : null;
     if (
       !pill ||
       !refreshButton ||
       !dismissButton ||
       !placement ||
-      !reloadAuthority
+      !reloadAuthority ||
+      !keyboard
     ) {
       return undefined;
     }
@@ -1029,6 +1596,7 @@ function createRefreshControlPublication(
       refreshButton,
       dismissButton,
       reloadAuthority,
+      keyboard,
     );
     const previous = cells.active.current;
     if (previous && previous !== runtime.publication) previous.retire();
@@ -1083,6 +1651,7 @@ function createRefreshControlPublication(
       nativeEvent.defaultPrevented ||
       cells.claimedReactEvents.has(event) ||
       cells.claimedNativeEvents.has(nativeEvent) ||
+      cells.activeMovements.has(publication) ||
       cells.claimedRefreshes.has(render.refresh) ||
       cells.claimedPublications.has(publication) ||
       cells.claimedActions.has(publication.action) ||
@@ -1127,6 +1696,224 @@ function createRefreshControlPublication(
     }
   };
 
+  const navigate = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    kind: "refresh" | "dismiss",
+  ) => {
+    if (!event || typeof event !== "object") return;
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const source =
+      kind === "refresh"
+        ? publication?.refreshButton
+        : publication?.dismissButton;
+    const nativeEvent = event.nativeEvent;
+    const keyboard = publication?.keyboard;
+    const snapshot =
+      keyboard && nativeEvent
+        ? readRefreshControlKeyboardEvent(nativeEvent, keyboard)
+        : null;
+    const controls = publication
+      ? ([publication.refreshButton, publication.dismissButton] as const)
+      : null;
+    const sourceIndex = controls && source ? controls.indexOf(source) : -1;
+    const destinationIndex =
+      snapshot && sourceIndex >= 0
+        ? refreshControlDestination(snapshot.key, sourceIndex)
+        : -1;
+    const destination =
+      controls && destinationIndex >= 0
+        ? controls[destinationIndex]
+        : undefined;
+    const proof = event as RefreshControlReactKeyboardEvent;
+    let reactPrototype: object | null = null;
+    try {
+      reactPrototype =
+        keyboard && typeof event === "object"
+          ? keyboard.getPrototypeOf(event)
+          : null;
+    } catch {
+      return;
+    }
+    if (
+      !runtime ||
+      !publication ||
+      !source ||
+      !snapshot ||
+      !controls ||
+      !destination ||
+      !keyboard ||
+      sourceIndex < 0 ||
+      destinationIndex < 0 ||
+      destination === source ||
+      !reactPrototype ||
+      reactPrototype === keyboard.objectPrototype ||
+      publication.ownerDocument.defaultView !== keyboard.ownerWindow ||
+      keyboard.ownerWindow.document !== publication.ownerDocument ||
+      event.type !== snapshot.type ||
+      event.type !== "keydown" ||
+      event.nativeEvent !== nativeEvent ||
+      event.currentTarget !== source ||
+      event.target !== source ||
+      event.eventPhase !== snapshot.eventPhase ||
+      event.bubbles !== snapshot.bubbles ||
+      event.cancelable !== snapshot.cancelable ||
+      event.defaultPrevented ||
+      event.isTrusted !== snapshot.isTrusted ||
+      event.key !== snapshot.key ||
+      event.code !== snapshot.code ||
+      event.location !== snapshot.location ||
+      event.altKey !== snapshot.altKey ||
+      event.ctrlKey !== snapshot.ctrlKey ||
+      event.metaKey !== snapshot.metaKey ||
+      event.shiftKey !== snapshot.shiftKey ||
+      event.repeat !== snapshot.repeat ||
+      !Object.is(event.view, snapshot.view) ||
+      proof._reactName !== "onKeyDown" ||
+      typeof event.isDefaultPrevented !== "function" ||
+      event.isDefaultPrevented() ||
+      typeof event.isPropagationStopped !== "function" ||
+      event.isPropagationStopped() ||
+      typeof proof.isPersistent !== "function" ||
+      !proof.isPersistent() ||
+      typeof event.persist !== "function" ||
+      typeof event.preventDefault !== "function" ||
+      typeof event.stopPropagation !== "function" ||
+      snapshot.type !== "keydown" ||
+      snapshot.target !== source ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== keyboard.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== keyboard.ownerWindow) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !refreshControlKeyboardPathMatches(
+        snapshot.path,
+        source,
+        publication.ownerDocument,
+        keyboard.ownerWindow,
+      ) ||
+      keyboard.apply(
+        keyboard.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source ||
+      !refreshControlIsVisible(
+        publication.pill,
+        publication.ownerDocument,
+      ) ||
+      !isEffectivelyEnabled(source) ||
+      !isEffectivelyEnabled(destination) ||
+      cells.claimedReactEvents.has(event) ||
+      cells.claimedNativeEvents.has(nativeEvent) ||
+      cells.activeMovements.has(publication) ||
+      cells.claimedDestinations.has(destination) ||
+      !publicationIsCurrent(runtime)
+    ) {
+      return;
+    }
+
+    const action: RefreshControlMovementAction = {
+      claimed: false,
+      destinationClaimed: false,
+    };
+    const movement = Object.freeze<RefreshControlMovement>({
+      identity: Symbol("reader-update-control-movement"),
+      publication,
+      source,
+      destination,
+      key: snapshot.key,
+      action,
+    });
+    cells.activeMovements.set(publication, movement);
+    cells.claimedMovements.add(movement);
+    cells.claimedMovementActions.add(action);
+    cells.claimedReactEvents.add(event);
+    cells.claimedNativeEvents.add(nativeEvent);
+    cells.claimedDestinations.set(destination, movement);
+    action.claimed = true;
+    action.destinationClaimed = true;
+
+    try {
+      const currentSnapshot = readRefreshControlKeyboardEvent(
+        nativeEvent,
+        keyboard,
+      );
+      if (
+        !currentSnapshot ||
+        !refreshControlKeyboardFactsMatch(snapshot, currentSnapshot) ||
+        cells.activeMovements.get(publication) !== movement ||
+        !cells.claimedMovements.has(movement) ||
+        !cells.claimedMovementActions.has(action) ||
+        cells.claimedDestinations.get(destination) !== movement ||
+        !action.claimed ||
+        !action.destinationClaimed ||
+        movement.publication !== publication ||
+        movement.source !== source ||
+        movement.destination !== destination ||
+        movement.key !== snapshot.key ||
+        keyboard.apply(
+          keyboard.activeElement,
+          publication.ownerDocument,
+          [],
+        ) !== source ||
+        !refreshControlIsVisible(
+          publication.pill,
+          publication.ownerDocument,
+        ) ||
+        !publicationIsCurrent(runtime)
+      ) {
+        return;
+      }
+      keyboard.apply(
+        keyboard.event.preventDefault,
+        nativeEvent,
+        [],
+      );
+      if (
+        !keyboard.apply(
+          keyboard.event.defaultPrevented,
+          nativeEvent,
+          [],
+        ) ||
+        cells.activeMovements.get(publication) !== movement ||
+        cells.claimedDestinations.get(destination) !== movement ||
+        keyboard.apply(
+          keyboard.activeElement,
+          publication.ownerDocument,
+          [],
+        ) !== source ||
+        !refreshControlIsVisible(
+          publication.pill,
+          publication.ownerDocument,
+        ) ||
+        !publicationIsCurrent(runtime)
+      ) {
+        return;
+      }
+      keyboard.apply(keyboard.focus, destination, [
+        REFRESH_CONTROL_PREVENT_SCROLL,
+      ]);
+    } finally {
+      if (cells.activeMovements.get(publication) === movement) {
+        cells.activeMovements.delete(publication);
+      }
+      if (cells.claimedDestinations.get(destination) === movement) {
+        cells.claimedDestinations.delete(destination);
+      }
+    }
+  };
+
   return Object.freeze({
     capturePill: pillOwner.capture,
     captureRefreshButton: refreshButtonOwner.capture,
@@ -1134,6 +1921,8 @@ function createRefreshControlPublication(
     establish,
     onRefresh: (event) => claim(event, "refresh"),
     onDismiss: (event) => claim(event, "dismiss"),
+    onRefreshKeyDown: (event) => navigate(event, "refresh"),
+    onDismissKeyDown: (event) => navigate(event, "dismiss"),
   });
 }
 
@@ -1793,6 +2582,8 @@ function RefreshControl({
     captureDismissButton,
     onRefresh,
     onDismiss,
+    onRefreshKeyDown,
+    onDismissKeyDown,
   } = publication;
   return (
     <div
@@ -1806,6 +2597,7 @@ function RefreshControl({
         type="button"
         className={BUTTON_CLASS_NAME}
         onClick={onRefresh}
+        onKeyDown={onRefreshKeyDown}
       >
         <span className={UPDATED_CLASS_NAME}>Updated</span>
         <span aria-hidden className={SEPARATOR_CLASS_NAME}>
@@ -1820,6 +2612,7 @@ function RefreshControl({
         className={DISMISS_BUTTON_CLASS_NAME}
         aria-label={DISMISS_LABEL}
         onClick={onDismiss}
+        onKeyDown={onDismissKeyDown}
       >
         <X size={14} />
       </button>
@@ -1878,6 +2671,16 @@ export function UpdatePill({
     claimedActions: new WeakSet<RefreshAction>(),
     claimedReactEvents: new WeakSet<object>(),
     claimedNativeEvents: new WeakSet<Event>(),
+    claimedMovements: new WeakSet<RefreshControlMovement>(),
+    claimedMovementActions: new WeakSet<RefreshControlMovementAction>(),
+    activeMovements: new WeakMap<
+      RefreshControlPublication,
+      RefreshControlMovement
+    >(),
+    claimedDestinations: new WeakMap<
+      HTMLButtonElement,
+      RefreshControlMovement
+    >(),
   }));
   const [failureControlCells] = useState<FailureControlCells>(() => ({
     active: { current: null },
