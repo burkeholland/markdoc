@@ -9032,6 +9032,7 @@ interface PublishMenuTrustedAuthority {
 interface PublishMenuKeyboardAuthority {
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
+  readonly windowPrototype: object;
   readonly keyboardPrototype: object;
   readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
@@ -9636,6 +9637,8 @@ function capturePublishMenuKeyboardAuthority(
   const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
   const apply = ownerWindow.Reflect.apply;
   const set = ownerWindow.Reflect.set;
+  const windowConstructor = ownerWindow.Window;
+  const windowPrototype = windowConstructor.prototype;
   const eventPrototype = ownerWindow.Event.prototype;
   const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
   const uiPrototype = ownerWindow.UIEvent.prototype;
@@ -9705,6 +9708,8 @@ function capturePublishMenuKeyboardAuthority(
       && ownerWindow.Object.getPrototypeOf === getPrototypeOf
       && ownerWindow.Reflect.apply === apply
       && ownerWindow.Reflect.set === set
+      && ownerWindow.Window === windowConstructor
+      && ownerWindow.Window.prototype === windowPrototype
       && ownerWindow.Event.prototype === eventPrototype
       && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
       && ownerWindow.UIEvent.prototype === uiPrototype
@@ -9722,6 +9727,7 @@ function capturePublishMenuKeyboardAuthority(
   return Object.freeze({
     ownerDocument,
     ownerWindow,
+    windowPrototype,
     keyboardPrototype,
     getOwnPropertyDescriptor,
     getPrototypeOf,
@@ -9793,19 +9799,39 @@ function publishMenuActiveElement(authority: PublishMenuKeyboardAuthority) {
 function publishMenuTriggerPathMatches(
   path: readonly EventTarget[],
   trigger: HTMLButtonElement,
-  ownerDocument: Document,
-  ownerWindow: Window & typeof globalThis,
+  authority: PublishMenuKeyboardAuthority,
 ) {
+  const { ownerDocument, ownerWindow } = authority;
   const expected: EventTarget[] = [];
   for (let current: Node | null = trigger; current; current = current.parentNode) {
     expected.push(current);
     if (current === ownerDocument) break;
   }
+  const terminal = path.at(-1);
+  let exactWindowTarget = terminal === ownerWindow;
+  if (!exactWindowTarget && terminal && typeof terminal === "object") {
+    try {
+      const terminalWindow = terminal as Window & typeof globalThis;
+      exactWindowTarget = Boolean(
+        authority.getPrototypeOf(terminal) === authority.windowPrototype
+        && terminalWindow.window === terminalWindow
+        && terminalWindow.self === terminalWindow
+        && terminalWindow.document === ownerDocument
+        && terminalWindow.Window === ownerWindow.Window
+        && terminalWindow.Object === ownerWindow.Object
+        && terminalWindow.Event === ownerWindow.Event
+        && terminalWindow.KeyboardEvent === ownerWindow.KeyboardEvent
+        && ownerDocument.defaultView === ownerWindow
+      );
+    } catch {
+      exactWindowTarget = false;
+    }
+  }
   return (
     expected.at(-1) === ownerDocument
     && path.length === expected.length + 1
     && expected.every((entry, index) => path[index] === entry)
-    && path.at(-1) === ownerWindow
+    && exactWindowTarget
   );
 }
 
@@ -9895,8 +9921,7 @@ function readPublishMenuNativeEvent(
       || !publishMenuTriggerPathMatches(
         path,
         publication.dom.trigger,
-        publication.document,
-        authority.ownerWindow,
+        authority,
       )
       || !publishMenuArrowIsCurrent(publication, action)
     ) {

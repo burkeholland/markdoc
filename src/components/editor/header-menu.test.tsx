@@ -1454,7 +1454,24 @@ describe("editor header More menu authority", () => {
 describe("editor header Publish options directional focus", () => {
   it("publishes a complete successor after the Strict callback-ref replay", async () => {
     const props = headerProps(createSession(), createActions());
-    await renderStrict(header(props));
+    const composedPath = vi.spyOn(window.Event.prototype, "composedPath");
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    let reactPair: null | {
+      readonly nativeEvent: globalThis.KeyboardEvent;
+      readonly view: unknown;
+    } = null;
+    await renderStrict(
+      <div
+        onKeyDown={(current) => {
+          reactPair = {
+            nativeEvent: current.nativeEvent,
+            view: current.view,
+          };
+        }}
+      >
+        {header(props)}
+      </div>,
+    );
     const button = publishTrigger();
     const ref = fiberFor(button).ref;
     if (typeof ref !== "function") throw new Error("Publish trigger callback ref was not attached");
@@ -1483,10 +1500,69 @@ describe("editor header Publish options directional focus", () => {
     });
     await waitFor(() => expect(listenerAdds()).toBe(initialListenerAdds + 1));
     await act(async () => Promise.resolve());
+    const observe = vi.spyOn(window.MutationObserver.prototype, "observe");
+    composedPath.mockClear();
+    preventDefault.mockClear();
+    let nativeDelivery: null | {
+      readonly currentTarget: EventTarget | null;
+      readonly eventPhase: number;
+      readonly path: readonly EventTarget[];
+      readonly view: Window | null;
+    } = null;
+    button.addEventListener("keydown", (current) => {
+      const keyboard = current as globalThis.KeyboardEvent;
+      nativeDelivery = {
+        currentTarget: current.currentTarget,
+        eventPhase: current.eventPhase,
+        path: current.composedPath(),
+        view: keyboard.view,
+      };
+    }, { capture: true, once: true });
     button.focus();
 
     const event = publishArrow("ArrowDown");
+    const pathCalls = () =>
+      composedPath.mock.contexts.filter((context) => context === event).length;
+    const preventionCalls = () =>
+      preventDefault.mock.contexts.filter((context) => context === event).length;
 
+    const expectedPath: EventTarget[] = [];
+    const ownerWindow = button.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+    for (let current: Node | null = button; current; current = current.parentNode) {
+      expectedPath.push(current);
+      if (current === button.ownerDocument) break;
+    }
+    expect(nativeDelivery).not.toBeNull();
+    expect(ownerWindow).toBe(window);
+    expect(nativeDelivery!.currentTarget).toBe(button);
+    expect(nativeDelivery!.eventPhase).toBe(window.Event.AT_TARGET);
+    expect(nativeDelivery!.path).toHaveLength(expectedPath.length + 1);
+    expect(
+      nativeDelivery!.path.slice(0, -1)
+        .findIndex((entry, index) => entry !== expectedPath[index]),
+    ).toBe(-1);
+    const pathTerminal = nativeDelivery!.path.at(-1);
+    const terminalWindow = pathTerminal as Window & typeof globalThis;
+    expect(pathTerminal).not.toBe(ownerWindow);
+    expect(pathTerminal).toBeInstanceOf(ownerWindow.Window);
+    expect(Object.getPrototypeOf(pathTerminal)).toBe(ownerWindow.Window.prototype);
+    expect(terminalWindow.document).toBe(button.ownerDocument);
+    expect(terminalWindow.window).toBe(pathTerminal);
+    expect(terminalWindow.self).toBe(pathTerminal);
+    expect(terminalWindow.Window).toBe(ownerWindow.Window);
+    expect(terminalWindow.Object).toBe(ownerWindow.Object);
+    expect(terminalWindow.Event).toBe(ownerWindow.Event);
+    expect(terminalWindow.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+    expect(nativeDelivery!.view).toBe(event.view);
+    expect(Object.getPrototypeOf(event)).toBe(window.KeyboardEvent.prototype);
+    expect(event.isTrusted).toBe(true);
+    expect(reactPair).not.toBeNull();
+    expect(reactPair!.nativeEvent).toBe(event);
+    expect(reactPair!.view).toBe(event.view);
+    expect(pathCalls()).toBe(4);
+    expect(observe).toHaveBeenCalled();
+    expect(preventionCalls()).toBe(1);
     expect(event.defaultPrevented).toBe(true);
     await waitFor(() =>
       expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
