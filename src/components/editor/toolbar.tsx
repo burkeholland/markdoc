@@ -218,10 +218,8 @@ interface ToolbarKeyboardIntrinsics {
     cancelBubble: (this: Event) => boolean;
     composedPath: (this: Event) => EventTarget[];
   }>;
-  readonly eventTarget: Readonly<{
-    addEventListener: typeof EventTarget.prototype.addEventListener;
-    removeEventListener: typeof EventTarget.prototype.removeEventListener;
-  }>;
+  readonly addEventListener: typeof EventTarget.prototype.addEventListener;
+  readonly removeEventListener: typeof EventTarget.prototype.removeEventListener;
   readonly keyboard: Readonly<{
     key: (this: globalThis.KeyboardEvent) => string;
     code: (this: globalThis.KeyboardEvent) => string;
@@ -439,14 +437,12 @@ function captureToolbarKeyboardIntrinsics(
   const eventConstructor = ownerWindow.Event;
   const uiEventConstructor = ownerWindow.UIEvent;
   const keyboardConstructor = ownerWindow.KeyboardEvent;
-  const eventTargetConstructor = ownerWindow.EventTarget;
   const documentConstructor = ownerWindow.Document;
   const htmlElementConstructor = ownerWindow.HTMLElement;
   const objectPrototype = objectConstructor.prototype;
   const windowPrototype = windowConstructor.prototype;
   const eventPrototype = eventConstructor.prototype;
   const keyboardPrototype = keyboardConstructor.prototype;
-  const eventTargetPrototype = eventTargetConstructor.prototype;
   const uiEventPrototype = uiEventConstructor.prototype;
   const documentPrototype = documentConstructor.prototype;
   const htmlElementPrototype = htmlElementConstructor.prototype;
@@ -492,7 +488,7 @@ function captureToolbarKeyboardIntrinsics(
     apply,
     evidence,
   );
-  const listenerTarget = ownerWindow.window;
+  const listenerTarget = ownerWindow;
   const type = toolbarGetter<Event, string>(
     getOwnPropertyDescriptor,
     eventPrototype,
@@ -613,22 +609,8 @@ function captureToolbarKeyboardIntrinsics(
     "composedPath",
     evidence,
   );
-  const addEventListener = toolbarMethod<
-    typeof EventTarget.prototype.addEventListener
-  >(
-    getOwnPropertyDescriptor,
-    eventTargetPrototype,
-    "addEventListener",
-    evidence,
-  );
-  const removeEventListener = toolbarMethod<
-    typeof EventTarget.prototype.removeEventListener
-  >(
-    getOwnPropertyDescriptor,
-    eventTargetPrototype,
-    "removeEventListener",
-    evidence,
-  );
+  const addEventListener = ownerWindow.addEventListener;
+  const removeEventListener = ownerWindow.removeEventListener;
   const focus = toolbarMethod<typeof HTMLElement.prototype.focus>(
     getOwnPropertyDescriptor,
     htmlElementPrototype,
@@ -674,7 +656,6 @@ function captureToolbarKeyboardIntrinsics(
     ownerWindow.Event === eventConstructor &&
     ownerWindow.UIEvent === uiEventConstructor &&
     ownerWindow.KeyboardEvent === keyboardConstructor &&
-    ownerWindow.EventTarget === eventTargetConstructor &&
     ownerWindow.Document === documentConstructor &&
     ownerWindow.HTMLElement === htmlElementConstructor &&
     ownerWindow.Object.prototype === objectPrototype &&
@@ -682,14 +663,15 @@ function captureToolbarKeyboardIntrinsics(
     eventConstructor.prototype === eventPrototype &&
     uiEventConstructor.prototype === uiEventPrototype &&
     keyboardConstructor.prototype === keyboardPrototype &&
-    eventTargetConstructor.prototype === eventTargetPrototype &&
     documentConstructor.prototype === documentPrototype &&
     htmlElementConstructor.prototype === htmlElementPrototype &&
     ownerWindow.Object.getOwnPropertyDescriptor ===
       getOwnPropertyDescriptor &&
     ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
     ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
-    ownerWindow.Reflect.apply === apply;
+    ownerWindow.Reflect.apply === apply &&
+    ownerWindow.addEventListener === addEventListener &&
+    ownerWindow.removeEventListener === removeEventListener;
   const isCurrent = () => {
     if (!historyIsClean) return false;
     try {
@@ -768,10 +750,8 @@ function captureToolbarKeyboardIntrinsics(
       cancelBubble,
       composedPath,
     }),
-    eventTarget: Object.freeze({
-      addEventListener,
-      removeEventListener,
-    }),
+    addEventListener,
+    removeEventListener,
     keyboard: Object.freeze({
       key,
       code,
@@ -1961,7 +1941,7 @@ function createToolbarPublication({
       }
       if (wasInstalled) {
         currentKeyboard.apply(
-          currentKeyboard.eventTarget.removeEventListener,
+          currentKeyboard.removeEventListener,
           listenerTarget,
           ["keydown", listener, true],
         );
@@ -1985,7 +1965,7 @@ function createToolbarPublication({
     });
     headingKeyListenerRegistration = registration;
     currentKeyboard.apply(
-      currentKeyboard.eventTarget.addEventListener,
+      currentKeyboard.addEventListener,
       listenerTarget,
       ["keydown", listener, true],
     );

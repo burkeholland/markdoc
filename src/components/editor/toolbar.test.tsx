@@ -744,31 +744,6 @@ function replaceJsdomPathTerminal(event: Event, terminal: EventTarget) {
   }
 }
 
-function jsdomWindowListeners(
-  ownerWindow: Window & typeof globalThis,
-  type: string,
-) {
-  const implementation = Object.getOwnPropertySymbols(ownerWindow)
-    .map(
-      (symbol) =>
-        (ownerWindow as unknown as Record<symbol, unknown>)[symbol],
-    )
-    .find((candidate): candidate is {
-      _eventListeners: Record<
-        string,
-        Array<{ callback: { objectReference?: unknown } }>
-      >;
-    } => {
-      if (!candidate || typeof candidate !== "object") return false;
-      return "_eventListeners" in candidate;
-    });
-  return (implementation?._eventListeners[type] ?? [])
-    .map(({ callback }) => callback.objectReference)
-    .filter((listener): listener is EventListener =>
-      typeof listener === "function",
-    );
-}
-
 function headingKeyEvent(
   trigger: HTMLButtonElement,
   key: string,
@@ -953,6 +928,7 @@ describe("Toolbar Text style trusted arrows", () => {
       self: { value: structural },
     });
     let stagedReceiver: EventTarget | undefined;
+    const handlers = headingKeyHandlers(trigger);
     ownerWindow.addEventListener(
       "keydown",
       function (event) {
@@ -964,7 +940,11 @@ describe("Toolbar Text style trusted arrows", () => {
     trigger.focus();
     focus.mockClear();
 
-    const rejected = dispatchHeadingKey(trigger, "ArrowDown");
+    const rejected = headingKeyEvent(trigger, "ArrowDown");
+    dispatchHeadingKeyWithHandlers(trigger, rejected, {
+      capture: handlers.capture,
+      bubble: handlers.action,
+    });
 
     expect(stagedReceiver).not.toBe(structural);
     expect(rejected.composedPath()).toEqual([]);
@@ -1023,29 +1003,44 @@ describe("Toolbar Text style trusted arrows", () => {
   it("releases a stale listener generation and recovers with one distinct successor", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const f = fixture();
-    const before = new Set(jsdomWindowListeners(window, "keydown"));
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Toolbar document had no owner window");
+    const addEventListener = vi.spyOn(ownerWindow, "addEventListener");
+    const removeEventListener = vi.spyOn(ownerWindow, "removeEventListener");
+    const headingListeners = () =>
+      addEventListener.mock.calls
+        .filter(([type, , options]) => type === "keydown" && options === true)
+        .map(([, listener]) => listener)
+        .filter(
+          (listener): listener is EventListener =>
+            typeof listener === "function",
+        );
     const view = strictRenderToolbar(f.props);
     let trigger = textStyle();
     const staleHandlers = headingKeyHandlers(trigger);
-    const firstGeneration = jsdomWindowListeners(window, "keydown").filter(
-      (listener) => !before.has(listener),
-    );
-    expect(firstGeneration).toHaveLength(1);
-    const staleListener = firstGeneration[0];
+    const firstGeneration = headingListeners();
+    const staleListener = firstGeneration.at(-1);
     if (!staleListener) throw new Error("Text style had no native listener");
 
     view.update(f.props, 1);
     trigger = textStyle();
-    const successor = jsdomWindowListeners(window, "keydown").filter(
-      (listener) => !before.has(listener),
-    );
-    expect(successor).toHaveLength(1);
-    expect(successor[0]).not.toBe(staleListener);
-    expect(successor).not.toContain(staleListener);
+    const successorListener = headingListeners().at(-1);
+    if (!successorListener) {
+      throw new Error("Text style had no successor native listener");
+    }
+    expect(successorListener).not.toBe(staleListener);
+    expect(
+      removeEventListener.mock.calls.filter(
+        ([type, listener, options]) =>
+          type === "keydown" &&
+          listener === staleListener &&
+          options === true,
+      ),
+    ).toHaveLength(1);
 
     let staleReceiver: EventTarget | undefined;
     let staleTerminal: EventTarget | undefined;
-    window.addEventListener(
+    ownerWindow.addEventListener(
       "keydown",
       function (event) {
         staleReceiver = this;
