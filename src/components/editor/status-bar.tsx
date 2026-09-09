@@ -126,7 +126,7 @@ interface StatusBarNativeEventPublication {
   type: string;
   target: EventTarget | null;
   currentTarget: EventTarget | null;
-  ownerWindowCapture: Window | null;
+  ownerWindowCapture: (Window & typeof globalThis) | null;
   intrinsicCurrentTarget: EventTarget | null | undefined;
   intrinsicView: Window | null | undefined;
   path: readonly EventTarget[];
@@ -2503,7 +2503,7 @@ function armStatsMutationFromNative(
 function recordNativeEvent(
   generation: StatusBarGeneration,
   event: Event,
-  ownerWindowCapture: Window | null = null,
+  ownerWindowCapture: (Window & typeof globalThis) | null = null,
 ) {
   if (generation.nativeEvents.has(event)) return;
   const retainDirectionalObservation = Boolean(
@@ -2814,7 +2814,7 @@ function activateGeneration(
   });
   if (ownerWindow) {
     const listener = function (
-      this: Window,
+      this: Window & typeof globalThis,
       event: KeyboardEvent,
     ) {
       recordNativeEvent(generation, event, this);
