@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
@@ -235,6 +236,7 @@ interface KeepAgentPanelElements {
 }
 
 type PanelElementRole = keyof KeepAgentPanelElements;
+type PanelNavRole = "tokensLink" | "connectLink";
 
 const PANEL_ELEMENT_ROLES: readonly PanelElementRole[] = [
   "panel",
@@ -256,6 +258,10 @@ const PANEL_ELEMENT_ROLES: readonly PanelElementRole[] = [
   "clients",
   "docsLink",
 ];
+const PANEL_NAV_ROLES: readonly PanelNavRole[] = Object.freeze([
+  "tokensLink",
+  "connectLink",
+]);
 
 function emptyPanelElements(): KeepAgentPanelElements {
   return {
@@ -339,9 +345,15 @@ interface KeepAgentPanelPublication {
   readonly topLevelChildren: readonly Element[];
   readonly placement: readonly KeepAgentPanelPlacement[];
   readonly dom: KeepAgentPanelDomSnapshot;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly navIntrinsics: KeepAgentPanelNavIntrinsics;
+  readonly navActions: Readonly<Record<PanelNavRole, KeepAgentPanelNavAction>>;
+  readonly navWindowListener: KeepAgentPanelNavWindowListener;
   readonly back: KeepAgentPanelAction | null;
   readonly retry: KeepAgentPanelAction | null;
   readonly copy: KeepAgentPanelAction;
+  pendingNavRoutes: WeakMap<KeyboardEvent, KeepAgentPanelNavRoute>;
   retired: boolean;
   mutated: boolean;
   observer: MutationObserver | null;
@@ -364,6 +376,176 @@ interface KeepAgentPanelReplay {
   readonly rebound: Map<PanelElementRole, KeepAgentPanelBinding>;
   layoutRetired: boolean;
   invalid: boolean;
+}
+
+interface KeepAgentPanelNavTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface KeepAgentPanelNavIntrinsics {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboardPrototype: object;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: KeepAgentPanelNavTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: KeyboardEvent) => string;
+    code: (this: KeyboardEvent) => string;
+    location: (this: KeyboardEvent) => number;
+    altKey: (this: KeyboardEvent) => boolean;
+    ctrlKey: (this: KeyboardEvent) => boolean;
+    metaKey: (this: KeyboardEvent) => boolean;
+    shiftKey: (this: KeyboardEvent) => boolean;
+    repeat: (this: KeyboardEvent) => boolean;
+    isComposing: (this: KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface KeepAgentPanelNavNativeSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+interface KeepAgentPanelNavReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly isTrusted: boolean;
+  readonly nativeEvent: KeyboardEvent;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly preventDefault: () => void;
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface KeepAgentPanelNavAction {
+  readonly identity: symbol;
+  readonly generation: KeepAgentPanelGeneration;
+  readonly render: KeepAgentPanelRender;
+  readonly sourceRole: PanelNavRole;
+  readonly sourceIndex: number;
+  readonly source: HTMLAnchorElement;
+  readonly ownerDocument: Document;
+  readonly order: readonly PanelNavRole[];
+}
+
+interface KeepAgentPanelNavWindowListener {
+  readonly identity: symbol;
+  readonly target: Window & typeof globalThis;
+  readonly add: Window["addEventListener"];
+  readonly remove: Window["removeEventListener"];
+  readonly callback: EventListener;
+  active: boolean;
+}
+
+interface KeepAgentPanelNavWindowProof {
+  readonly identity: symbol;
+  readonly listener: KeepAgentPanelNavWindowListener;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly pathTerminal: EventTarget;
+}
+
+interface KeepAgentPanelNavRoute {
+  readonly identity: symbol;
+  readonly publication: KeepAgentPanelPublication;
+  readonly generation: KeepAgentPanelGeneration;
+  readonly action: KeepAgentPanelNavAction;
+  readonly sourceRole: PanelNavRole;
+  readonly source: HTMLAnchorElement;
+  readonly destinationRole: PanelNavRole;
+  readonly destination: HTMLAnchorElement;
+  readonly nativeEvent: KeyboardEvent;
+  readonly windowSnapshot: KeepAgentPanelNavNativeSnapshot;
+  readonly windowProof: KeepAgentPanelNavWindowProof;
+  captureSnapshot: KeepAgentPanelNavReactSnapshot | null;
+  captureNativeSnapshot: KeepAgentPanelNavNativeSnapshot | null;
+  invalid: boolean;
+}
+
+interface KeepAgentPanelNavClaim {
+  readonly identity: symbol;
+  readonly publication: KeepAgentPanelPublication;
+  readonly generation: KeepAgentPanelGeneration;
+  readonly draft: KeepAgentPanelDraft;
+  readonly nav: HTMLElement;
+  readonly action: KeepAgentPanelNavAction;
+  readonly route: KeepAgentPanelNavRoute;
+  readonly sourceRole: PanelNavRole;
+  readonly source: HTMLAnchorElement;
+  readonly destinationRole: PanelNavRole;
+  readonly destination: HTMLAnchorElement;
+  readonly pendingNavRoutes: WeakMap<KeyboardEvent, KeepAgentPanelNavRoute>;
+  readonly capture: KeepAgentPanelNavReactSnapshot;
+  readonly bubble: KeepAgentPanelNavReactSnapshot;
+  readonly nativeEvent: KeyboardEvent;
+  readonly windowProof: KeepAgentPanelNavWindowProof;
+  readonly preventDefault: () => void;
+  readonly isPropagationStopped: () => boolean;
+  readonly focus: KeepAgentPanelNavIntrinsics["focus"];
+}
+
+interface KeepAgentPanelNavPreventedProof {
+  readonly isDefaultPrevented: () => boolean;
+  readonly defaultPrevented: true;
+  readonly propagationStopped: false;
+}
+
+interface KeepAgentPanelNavAuthentication {
+  readonly route: KeepAgentPanelNavRoute;
+  phase: "predicates" | "effect" | "post-predicates" | "final";
+  reentered: boolean;
 }
 
 function descendantsOf(element: HTMLElement): readonly Node[] {
@@ -527,6 +709,514 @@ function nativePathMatches(
     terminal.document === ownerDocument;
 }
 
+function panelNavGetter<This extends object, Value>(
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = Object.getOwnPropertyDescriptor(prototype, property)?.get;
+  return typeof getter === "function" ? getter as (this: This) => Value : null;
+}
+
+function panelNavDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+    current.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.get === expected.get &&
+    current.set === expected.set &&
+    current.value === expected.value &&
+    current.writable === expected.writable
+  );
+}
+
+function capturePanelNavTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): KeepAgentPanelNavTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("keep-agent-panel-nav-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    panelNavDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function capturePanelNavIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): KeepAgentPanelNavIntrinsics | null {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiEventPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const trusted = capturePanelNavTrustedAuthority(ownerWindow);
+  const type = panelNavGetter<Event, string>(eventPrototype, "type");
+  const target = panelNavGetter<Event, EventTarget | null>(eventPrototype, "target");
+  const currentTarget = panelNavGetter<Event, EventTarget | null>(eventPrototype, "currentTarget");
+  const eventPhase = panelNavGetter<Event, number>(eventPrototype, "eventPhase");
+  const bubbles = panelNavGetter<Event, boolean>(eventPrototype, "bubbles");
+  const cancelable = panelNavGetter<Event, boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = panelNavGetter<Event, boolean>(eventPrototype, "defaultPrevented");
+  const cancelBubble = panelNavGetter<Event, boolean>(eventPrototype, "cancelBubble");
+  const key = panelNavGetter<KeyboardEvent, string>(keyboardPrototype, "key");
+  const code = panelNavGetter<KeyboardEvent, string>(keyboardPrototype, "code");
+  const location = panelNavGetter<KeyboardEvent, number>(keyboardPrototype, "location");
+  const altKey = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "shiftKey");
+  const repeat = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "repeat");
+  const isComposing = panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "isComposing");
+  const view = panelNavGetter<UIEvent, Window | null>(uiEventPrototype, "view");
+  const activeElement = panelNavGetter<Document, Element | null>(documentPrototype, "activeElement");
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const focus = htmlElementPrototype.focus;
+  const apply = ownerWindow.Reflect.apply;
+  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof focus !== "function" ||
+    typeof apply !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  const isCurrent = () => {
+    try {
+      return ownerWindow.Event.prototype === eventPrototype &&
+        ownerWindow.KeyboardEvent.prototype === keyboardPrototype &&
+        ownerWindow.UIEvent.prototype === uiEventPrototype &&
+        ownerWindow.Document.prototype === documentPrototype &&
+        ownerWindow.HTMLElement.prototype === htmlElementPrototype &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf &&
+        panelNavGetter<Event, string>(eventPrototype, "type") === type &&
+        panelNavGetter<Event, EventTarget | null>(eventPrototype, "target") === target &&
+        panelNavGetter<Event, EventTarget | null>(eventPrototype, "currentTarget") === currentTarget &&
+        panelNavGetter<Event, number>(eventPrototype, "eventPhase") === eventPhase &&
+        panelNavGetter<Event, boolean>(eventPrototype, "bubbles") === bubbles &&
+        panelNavGetter<Event, boolean>(eventPrototype, "cancelable") === cancelable &&
+        panelNavGetter<Event, boolean>(eventPrototype, "defaultPrevented") === defaultPrevented &&
+        panelNavGetter<Event, boolean>(eventPrototype, "cancelBubble") === cancelBubble &&
+        panelNavGetter<KeyboardEvent, string>(keyboardPrototype, "key") === key &&
+        panelNavGetter<KeyboardEvent, string>(keyboardPrototype, "code") === code &&
+        panelNavGetter<KeyboardEvent, number>(keyboardPrototype, "location") === location &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "altKey") === altKey &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "ctrlKey") === ctrlKey &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "metaKey") === metaKey &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "shiftKey") === shiftKey &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "repeat") === repeat &&
+        panelNavGetter<KeyboardEvent, boolean>(keyboardPrototype, "isComposing") === isComposing &&
+        panelNavGetter<UIEvent, Window | null>(uiEventPrototype, "view") === view &&
+        panelNavGetter<Document, Element | null>(documentPrototype, "activeElement") === activeElement &&
+        eventPrototype.composedPath === composedPath &&
+        eventPrototype.preventDefault === preventDefault &&
+        htmlElementPrototype.focus === focus &&
+        trusted.isCurrent();
+    } catch {
+      return false;
+    }
+  };
+  return Object.freeze({
+    ownerWindow,
+    keyboardPrototype,
+    capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    apply,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+    isCurrent,
+  });
+}
+
+function readPanelNavNativeEvent(
+  event: Event,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+): KeepAgentPanelNavNativeSnapshot | null {
+  try {
+    if (
+      !intrinsics.isCurrent() ||
+      !intrinsics.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: intrinsics.apply(intrinsics.event.type, event, []),
+      target: intrinsics.apply(intrinsics.event.target, event, []),
+      currentTarget: intrinsics.apply(intrinsics.event.currentTarget, event, []),
+      eventPhase: intrinsics.apply(intrinsics.event.eventPhase, event, []),
+      bubbles: intrinsics.apply(intrinsics.event.bubbles, event, []),
+      cancelable: intrinsics.apply(intrinsics.event.cancelable, event, []),
+      defaultPrevented: intrinsics.apply(intrinsics.event.defaultPrevented, event, []),
+      cancelBubble: intrinsics.apply(intrinsics.event.cancelBubble, event, []),
+      path: Object.freeze(intrinsics.apply(intrinsics.event.composedPath, event, [])),
+      key: intrinsics.apply(intrinsics.keyboard.key, event, []),
+      code: intrinsics.apply(intrinsics.keyboard.code, event, []),
+      location: intrinsics.apply(intrinsics.keyboard.location, event, []),
+      altKey: intrinsics.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: intrinsics.apply(intrinsics.keyboard.ctrlKey, event, []),
+      metaKey: intrinsics.apply(intrinsics.keyboard.metaKey, event, []),
+      shiftKey: intrinsics.apply(intrinsics.keyboard.shiftKey, event, []),
+      repeat: intrinsics.apply(intrinsics.keyboard.repeat, event, []),
+      isComposing: intrinsics.apply(intrinsics.keyboard.isComposing, event, []),
+      isTrusted: intrinsics.trusted.read(event),
+      view: intrinsics.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function panelNavPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLAnchorElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  return expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal;
+}
+
+function panelNavNativeSnapshotsMatch(
+  first: KeepAgentPanelNavNativeSnapshot,
+  second: KeepAgentPanelNavNativeSnapshot,
+  includeDispatchState: boolean,
+): boolean {
+  return first.type === second.type &&
+    first.target === second.target &&
+    (!includeDispatchState || first.currentTarget === second.currentTarget) &&
+    (!includeDispatchState || first.eventPhase === second.eventPhase) &&
+    first.bubbles === second.bubbles &&
+    first.cancelable === second.cancelable &&
+    first.defaultPrevented === second.defaultPrevented &&
+    first.cancelBubble === second.cancelBubble &&
+    first.path.length === second.path.length &&
+    first.path.every((entry, index) => second.path[index] === entry) &&
+    first.key === second.key &&
+    first.code === second.code &&
+    first.location === second.location &&
+    first.altKey === second.altKey &&
+    first.ctrlKey === second.ctrlKey &&
+    first.metaKey === second.metaKey &&
+    first.shiftKey === second.shiftKey &&
+    first.repeat === second.repeat &&
+    first.isComposing === second.isComposing &&
+    first.isTrusted === second.isTrusted &&
+    Object.is(first.view, second.view);
+}
+
+function panelNavNativeSnapshotIsPrevented(
+  before: KeepAgentPanelNavNativeSnapshot,
+  after: KeepAgentPanelNavNativeSnapshot,
+): boolean {
+  return before.type === after.type &&
+    before.target === after.target &&
+    before.currentTarget === after.currentTarget &&
+    before.eventPhase === after.eventPhase &&
+    before.bubbles === after.bubbles &&
+    before.cancelable === after.cancelable &&
+    !before.defaultPrevented &&
+    after.defaultPrevented &&
+    before.cancelBubble === after.cancelBubble &&
+    before.path.length === after.path.length &&
+    before.path.every((entry, index) => after.path[index] === entry) &&
+    before.key === after.key &&
+    before.code === after.code &&
+    before.location === after.location &&
+    before.altKey === after.altKey &&
+    before.ctrlKey === after.ctrlKey &&
+    before.metaKey === after.metaKey &&
+    before.shiftKey === after.shiftKey &&
+    before.repeat === after.repeat &&
+    before.isComposing === after.isComposing &&
+    before.isTrusted === after.isTrusted &&
+    Object.is(before.view, after.view);
+}
+
+function readPanelNavReactEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: KeyboardEvent,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+): KeepAgentPanelNavReactSnapshot | null {
+  try {
+    const snapshot: KeepAgentPanelNavReactSnapshot = Object.freeze({
+      event,
+      type: event.type,
+      target: event.target,
+      currentTarget: event.currentTarget,
+      eventPhase: event.eventPhase,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      isTrusted: event.isTrusted,
+      nativeEvent: event.nativeEvent,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      repeat: event.repeat,
+      view: event.view,
+      preventDefault: event.preventDefault,
+      isDefaultPrevented: event.isDefaultPrevented,
+      isPropagationStopped: event.isPropagationStopped,
+    });
+    return snapshot.nativeEvent === nativeEvent &&
+      panelNavReactSnapshotMatches(snapshot, intrinsics)
+        ? snapshot
+        : null;
+  } catch {
+    return null;
+  }
+}
+
+function panelNavReactSnapshotMatches(
+  snapshot: KeepAgentPanelNavReactSnapshot,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+  releasedCurrentTarget = false,
+): boolean {
+  const { event } = snapshot;
+  try {
+    if (
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      )
+    ) {
+      return false;
+    }
+    const defaultPrevented = intrinsics.apply(
+      snapshot.isDefaultPrevented,
+      event,
+      [],
+    );
+    if (
+      defaultPrevented !== false ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      )
+    ) {
+      return false;
+    }
+    const propagationStopped = intrinsics.apply(
+      snapshot.isPropagationStopped,
+      event,
+      [],
+    );
+    return propagationStopped === false &&
+      panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      );
+  } catch {
+    return false;
+  }
+}
+
+function panelNavReactSnapshotIsStable(
+  snapshot: KeepAgentPanelNavReactSnapshot,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+  releasedCurrentTarget = false,
+  defaultPrevented = snapshot.defaultPrevented,
+  isDefaultPrevented = snapshot.isDefaultPrevented,
+): boolean {
+  const { event } = snapshot;
+  try {
+    return intrinsics.isCurrent() &&
+      event.type === snapshot.type &&
+      event.target === snapshot.target &&
+      (
+        event.currentTarget === snapshot.currentTarget ||
+        (releasedCurrentTarget && event.currentTarget === null)
+      ) &&
+      event.eventPhase === snapshot.eventPhase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      event.nativeEvent === snapshot.nativeEvent &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.altKey === snapshot.altKey &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      Object.is(event.view, snapshot.view) &&
+      event.preventDefault === snapshot.preventDefault &&
+      event.isDefaultPrevented === isDefaultPrevented &&
+      event.isPropagationStopped === snapshot.isPropagationStopped &&
+      typeof snapshot.preventDefault === "function" &&
+      typeof isDefaultPrevented === "function" &&
+      typeof snapshot.isPropagationStopped === "function";
+  } catch {
+    return false;
+  }
+}
+
+function readPanelNavReactPreventedProof(
+  snapshot: KeepAgentPanelNavReactSnapshot,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+): KeepAgentPanelNavPreventedProof | null {
+  const { event } = snapshot;
+  try {
+    const isDefaultPrevented = event.isDefaultPrevented;
+    if (
+      typeof isDefaultPrevented !== "function" ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        false,
+        true,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    const defaultPrevented = intrinsics.apply(
+      isDefaultPrevented,
+      event,
+      [],
+    );
+    if (
+      defaultPrevented !== true ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        false,
+        true,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    const propagationStopped = intrinsics.apply(
+      snapshot.isPropagationStopped,
+      event,
+      [],
+    );
+    return propagationStopped === false
+      ? Object.freeze({
+          isDefaultPrevented,
+          defaultPrevented: true,
+          propagationStopped: false,
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function panelNavDestination(key: string, sourceIndex: number): number {
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    const next = sourceIndex + 1;
+    return next < PANEL_NAV_ROLES.length ? next : -1;
+  }
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return sourceIndex > 0 ? sourceIndex - 1 : -1;
+  }
+  if (key === "Home") return 0;
+  if (key === "End") return PANEL_NAV_ROLES.length - 1;
+  return -1;
+}
+
 class KeepAgentPanelCoordinator {
   readonly #mount: symbol;
   #current: KeepAgentPanelPublication | null = null;
@@ -536,8 +1226,11 @@ class KeepAgentPanelCoordinator {
   #publishedGenerations = new WeakSet<KeepAgentPanelGeneration>();
   #replayedGenerations = new WeakSet<KeepAgentPanelGeneration>();
   #claimedActions = new WeakSet<KeepAgentPanelAction>();
+  #claimedNavPublications = new WeakSet<KeepAgentPanelPublication>();
   #claimedReactEvents = new WeakSet<object>();
   #claimedNativeEvents = new WeakSet<Event>();
+  #navAuthentication: KeepAgentPanelNavAuthentication | null = null;
+  #navEffect: KeepAgentPanelNavClaim | null = null;
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -1070,6 +1763,7 @@ class KeepAgentPanelCoordinator {
       this.#claimedActions.has(publication.copy) ||
       Boolean(publication.back && this.#claimedActions.has(publication.back)) ||
       Boolean(publication.retry && this.#claimedActions.has(publication.retry)) ||
+      this.#claimedNavPublications.has(publication) ||
       !this.#publicationIsCurrent(publication)
     ) {
       return null;
@@ -1181,6 +1875,7 @@ class KeepAgentPanelCoordinator {
       target,
       replay.publication.dom,
       replay.publication.placement,
+      replay.publication.navIntrinsics,
     );
     this.#replay = null;
     this.#disconnect(replay.publication);
@@ -1206,6 +1901,7 @@ class KeepAgentPanelCoordinator {
     target: RefObject<HTMLPreElement | null>,
     expectedDom?: KeepAgentPanelDomSnapshot,
     expectedPlacement?: readonly KeepAgentPanelPlacement[],
+    expectedNavIntrinsics?: KeepAgentPanelNavIntrinsics,
   ): KeepAgentPanelPublication | null {
     const { generation, render } = draft;
     const { elements } = generation;
@@ -1261,7 +1957,56 @@ class KeepAgentPanelCoordinator {
       Object.freeze({ kind, element, targets: descendantsOf(element) });
     const dom = expectedDom ?? snapshotPanelDom(panel, setup);
     const placement = expectedPlacement ?? connectedPlacement(panel);
-    if (!placement) return null;
+    const ownerDocument = panel.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const navIntrinsics = expectedNavIntrinsics ??
+      (ownerWindow ? capturePanelNavIntrinsics(ownerWindow) : null);
+    if (
+      !placement ||
+      !ownerWindow ||
+      !navIntrinsics ||
+      navIntrinsics.ownerWindow !== ownerWindow ||
+      !navIntrinsics.isCurrent()
+    ) {
+      return null;
+    }
+    const add = ownerWindow.addEventListener;
+    const remove = ownerWindow.removeEventListener;
+    if (typeof add !== "function" || typeof remove !== "function") return null;
+    const navActions = Object.freeze({
+      tokensLink: Object.freeze({
+        identity: Symbol("keep-agent-panel-tokens-nav-action"),
+        generation,
+        render,
+        sourceRole: "tokensLink",
+        sourceIndex: 0,
+        source: tokensLink,
+        ownerDocument,
+        order: PANEL_NAV_ROLES,
+      } satisfies KeepAgentPanelNavAction),
+      connectLink: Object.freeze({
+        identity: Symbol("keep-agent-panel-connect-nav-action"),
+        generation,
+        render,
+        sourceRole: "connectLink",
+        sourceIndex: 1,
+        source: connectLink,
+        ownerDocument,
+        order: PANEL_NAV_ROLES,
+      } satisfies KeepAgentPanelNavAction),
+    });
+    const recordWindowEvent = this.#recordNavWindowEvent.bind(this);
+    const navWindowCallback: EventListener = function (this: EventTarget, event: Event) {
+      recordWindowEvent(publication, navWindowListener, this, event);
+    };
+    const navWindowListener: KeepAgentPanelNavWindowListener = {
+      identity: Symbol("keep-agent-panel-nav-window-listener"),
+      target: ownerWindow,
+      add,
+      remove,
+      callback: navWindowCallback,
+      active: false,
+    };
     const publication: KeepAgentPanelPublication = {
       identity: Symbol("keep-agent-panel-publication"),
       render,
@@ -1277,9 +2022,15 @@ class KeepAgentPanelCoordinator {
       topLevelChildren: Object.freeze(Array.from(panel.children)),
       placement,
       dom,
+      ownerDocument,
+      ownerWindow,
+      navIntrinsics,
+      navActions,
+      navWindowListener,
       back: back ? action("back", back) : null,
       retry: retry ? action("retry", retry) : null,
       copy: action("copy", copy),
+      pendingNavRoutes: new WeakMap(),
       retired: false,
       mutated: false,
       observer: null,
@@ -1299,46 +2050,68 @@ class KeepAgentPanelCoordinator {
     ) {
       return false;
     }
-    publication.draft.committed = true;
-    this.#current = publication;
-    const Observer = publication.elements.panel?.ownerDocument.defaultView?.MutationObserver;
-    if (Observer) {
-      const observer = new Observer((records) => {
-        if (this.#hasRelevantMutation(publication, records)) {
-          this.#markMutated(publication);
-        }
-      });
-      const { panel, promptWrapper } = publication.elements;
-      observer.observe(panel!, { attributes: true, childList: true });
-      observer.observe(promptWrapper!, {
+    const Observer = publication.ownerWindow.MutationObserver;
+    if (!Observer || !publication.navIntrinsics.isCurrent()) return false;
+    const observer = new Observer((records) => {
+      if (this.#hasRelevantMutation(publication, records)) {
+      this.#markMutated(publication);
+      }
+    });
+    const { panel, nav, promptWrapper } = publication.elements;
+    observer.observe(panel!, { attributes: true, childList: true });
+    observer.observe(nav!, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    observer.observe(promptWrapper!, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    for (const action of [publication.back, publication.retry, publication.copy]) {
+      if (action) {
+      observer.observe(action.element, {
         attributes: true,
         characterData: true,
         childList: true,
         subtree: true,
       });
-      for (const action of [publication.back, publication.retry, publication.copy]) {
-        if (action) {
-          observer.observe(action.element, {
-            attributes: true,
-            characterData: true,
-            childList: true,
-            subtree: true,
-          });
-        }
       }
-      const observedParents = new Set<Node>();
-      for (const { parent } of publication.placement) {
-        if (parent && !observedParents.has(parent)) {
-          observedParents.add(parent);
-          observer.observe(parent, { childList: true });
-        }
-      }
-      publication.observer = observer;
     }
+    const observedParents = new Set<Node>();
+    for (const { parent } of publication.placement) {
+      if (parent && !observedParents.has(parent)) {
+      observedParents.add(parent);
+      observer.observe(parent, { childList: true });
+      }
+    }
+    publication.observer = observer;
+    if (
+      publication.ownerWindow.addEventListener !==
+        publication.navWindowListener.add ||
+      publication.ownerWindow.removeEventListener !==
+        publication.navWindowListener.remove
+    ) {
+      observer.disconnect();
+      publication.observer = null;
+      return false;
+    }
+    publication.navIntrinsics.apply(
+      publication.navWindowListener.add,
+      publication.navWindowListener.target,
+      ["keydown", publication.navWindowListener.callback, true],
+    );
+    publication.navWindowListener.active = true;
+    publication.draft.committed = true;
+    this.#current = publication;
     return true;
   }
 
   #retirePublication(publication: KeepAgentPanelPublication, preserveObserver: boolean) {
+    publication.pendingNavRoutes = new WeakMap();
     if (!publication.retired) {
       publication.retired = true;
       publication.draft.retired = true;
@@ -1365,6 +2138,16 @@ class KeepAgentPanelCoordinator {
   }
 
   #disconnect(publication: KeepAgentPanelPublication) {
+    publication.pendingNavRoutes = new WeakMap();
+    const listener = publication.navWindowListener;
+    if (listener.active) {
+      listener.active = false;
+      publication.navIntrinsics.apply(listener.remove, listener.target, [
+        "keydown",
+        listener.callback,
+        true,
+      ]);
+    }
     publication.observer?.disconnect();
     publication.observer = null;
   }
@@ -1406,10 +2189,664 @@ class KeepAgentPanelCoordinator {
       !publication.retired &&
       !publication.draft.retired &&
       publication.generation.authority === publication.draft &&
+      publication.ownerDocument === publication.elements.panel?.ownerDocument &&
+      publication.ownerWindow === publication.ownerDocument.defaultView &&
+      publication.navIntrinsics.ownerWindow === publication.ownerWindow &&
+      publication.navIntrinsics.isCurrent() &&
+      this.#navWindowListenerIsCurrent(publication) &&
+      Object.isFrozen(publication.navActions) &&
+      PANEL_NAV_ROLES.every((role) =>
+        publication.navActions[role].source === publication.elements[role]) &&
       this.#mutationFree(publication) &&
       this.#renderIsCurrent(publication.render) &&
       this.#hierarchyIsCurrent(publication)
     );
+  }
+
+  navigate(
+    generation: KeepAgentPanelGeneration,
+    sourceRole: PanelNavRole,
+    event: ReactKeyboardEvent<HTMLAnchorElement>,
+  ) {
+    const publication = this.#current;
+    const action = publication?.navActions[sourceRole];
+    const source = action?.source;
+    const nativeEvent = event?.nativeEvent;
+    const pendingNavRoutes = publication?.pendingNavRoutes;
+    const route = nativeEvent
+      ? pendingNavRoutes?.get(nativeEvent)
+      : undefined;
+    const activeAuthentication = this.#navAuthentication;
+    if (activeAuthentication) {
+      if (
+        nativeEvent === activeAuthentication.route.nativeEvent &&
+        (
+          activeAuthentication.phase === "predicates" ||
+          activeAuthentication.phase === "post-predicates"
+        )
+      ) {
+        activeAuthentication.reentered = true;
+      }
+      return;
+    }
+    if (!route) return;
+    const authentication: KeepAgentPanelNavAuthentication = {
+      route,
+      phase: "predicates",
+      reentered: false,
+    };
+    this.#navAuthentication = authentication;
+    try {
+      const capture = route.captureSnapshot;
+      const captureNativeSnapshot = route.captureNativeSnapshot;
+      const snapshot = publication && nativeEvent
+        ? readPanelNavNativeEvent(nativeEvent, publication.navIntrinsics)
+        : null;
+      const bubble = publication &&
+        nativeEvent instanceof publication.ownerWindow.KeyboardEvent
+          ? readPanelNavReactEvent(
+              event as ReactKeyboardEvent<HTMLElement>,
+              nativeEvent,
+              publication.navIntrinsics,
+            )
+          : null;
+      if (
+      !publication ||
+      !pendingNavRoutes ||
+      !action ||
+      !source ||
+      !snapshot ||
+      !bubble ||
+      route.invalid ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      route.action !== action ||
+      route.sourceRole !== sourceRole ||
+      route.source !== source ||
+      route.destinationRole === sourceRole ||
+      route.destination !== publication.elements[route.destinationRole] ||
+      route.nativeEvent !== nativeEvent ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
+      !capture ||
+      !captureNativeSnapshot ||
+      capture.event === bubble.event ||
+      publication.generation !== generation ||
+      publication.draft !== generation.authority ||
+      publication.retired ||
+      publication.draft.retired ||
+      !publication.draft.committed ||
+      !publication.render.active ||
+      action.generation !== generation ||
+      action.render !== publication.render ||
+      action.sourceRole !== sourceRole ||
+      action.sourceIndex !== PANEL_NAV_ROLES.indexOf(sourceRole) ||
+      action.source !== source ||
+      action.ownerDocument !== publication.ownerDocument ||
+      action.order !== PANEL_NAV_ROLES ||
+      !Object.isFrozen(action) ||
+      bubble.type !== "keydown" ||
+      bubble.currentTarget !== source ||
+      bubble.target !== source ||
+      bubble.eventPhase !== publication.navIntrinsics.bubblingPhase ||
+      bubble.bubbles !== snapshot.bubbles ||
+      bubble.cancelable !== snapshot.cancelable ||
+      bubble.defaultPrevented ||
+      bubble.isTrusted !== snapshot.isTrusted ||
+      bubble.key !== snapshot.key ||
+      bubble.code !== snapshot.code ||
+      bubble.location !== snapshot.location ||
+      bubble.altKey !== snapshot.altKey ||
+      bubble.ctrlKey !== snapshot.ctrlKey ||
+      bubble.metaKey !== snapshot.metaKey ||
+      bubble.shiftKey !== snapshot.shiftKey ||
+      bubble.repeat !== snapshot.repeat ||
+      !Object.is(bubble.view, snapshot.view) ||
+      snapshot.type !== "keydown" ||
+      snapshot.target !== source ||
+      snapshot.currentTarget === null ||
+      snapshot.eventPhase !== publication.navIntrinsics.bubblingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== publication.ownerWindow &&
+        snapshot.view !== route.windowProof.receiver) ||
+      !snapshot.path.includes(snapshot.currentTarget) ||
+      !panelNavNativeSnapshotsMatch(route.windowSnapshot, snapshot, false) ||
+      !panelNavNativeSnapshotsMatch(
+        captureNativeSnapshot,
+        snapshot,
+        false,
+      ) ||
+      captureNativeSnapshot.currentTarget !== snapshot.currentTarget ||
+      captureNativeSnapshot.eventPhase !==
+        publication.navIntrinsics.capturingPhase ||
+      !this.#navWindowProofIsCurrent(publication, route) ||
+      !panelNavReactSnapshotMatches(
+        capture,
+        publication.navIntrinsics,
+        true,
+      ) ||
+      !panelNavReactSnapshotMatches(bubble, publication.navIntrinsics) ||
+      publication.navIntrinsics.apply(
+        publication.navIntrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source ||
+      this.#navEffect ||
+      this.#claimedReactEvents.has(capture.event) ||
+      this.#claimedReactEvents.has(event) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      !this.#navActionIsCurrent(publication, action) ||
+      !this.#publicationIsCurrent(publication)
+      ) {
+        return;
+      }
+
+      const stableSnapshot = readPanelNavNativeEvent(
+        nativeEvent,
+        publication.navIntrinsics,
+      );
+      if (
+      !stableSnapshot ||
+      !panelNavNativeSnapshotsMatch(snapshot, stableSnapshot, true) ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
+      route.invalid ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      route.action !== action ||
+      route.sourceRole !== sourceRole ||
+      route.source !== source ||
+      route.destinationRole === sourceRole ||
+      route.destination !== publication.elements[route.destinationRole] ||
+      route.nativeEvent !== nativeEvent ||
+      route.captureSnapshot !== capture ||
+      route.captureNativeSnapshot !== captureNativeSnapshot ||
+      publication.generation !== generation ||
+      publication.draft !== generation.authority ||
+      publication.retired ||
+      publication.draft.retired ||
+      !publication.draft.committed ||
+      !publication.render.active ||
+      action.generation !== generation ||
+      action.render !== publication.render ||
+      action.sourceRole !== sourceRole ||
+      action.sourceIndex !== PANEL_NAV_ROLES.indexOf(sourceRole) ||
+      action.source !== source ||
+      action.ownerDocument !== publication.ownerDocument ||
+      action.order !== PANEL_NAV_ROLES ||
+      !Object.isFrozen(action) ||
+      !panelNavReactSnapshotIsStable(
+        capture,
+        publication.navIntrinsics,
+        true,
+      ) ||
+      !panelNavReactSnapshotIsStable(
+        bubble,
+        publication.navIntrinsics,
+      ) ||
+      !this.#navWindowProofIsCurrent(publication, route) ||
+      !this.#navActionIsCurrent(publication, action) ||
+      !this.#publicationIsCurrent(publication) ||
+      publication.navIntrinsics.apply(
+        publication.navIntrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source ||
+      this.#navEffect ||
+      this.#claimedReactEvents.has(capture.event) ||
+      this.#claimedReactEvents.has(event) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      authentication.reentered
+      ) {
+        return;
+      }
+      if (!pendingNavRoutes.delete(nativeEvent)) return;
+      const claim: KeepAgentPanelNavClaim = Object.freeze({
+      identity: Symbol("keep-agent-panel-nav-claim"),
+      publication,
+      generation,
+      draft: publication.draft,
+      nav: publication.elements.nav!,
+      action,
+      route,
+      sourceRole,
+      source,
+      destinationRole: route.destinationRole,
+      destination: route.destination,
+      pendingNavRoutes,
+      capture,
+      bubble,
+      nativeEvent,
+      windowProof: route.windowProof,
+      preventDefault: bubble.preventDefault,
+      isPropagationStopped: bubble.isPropagationStopped,
+      focus: publication.navIntrinsics.focus,
+      });
+      this.#navEffect = claim;
+      this.#claimedNavPublications.add(publication);
+      this.#claimedReactEvents.add(claim.capture.event);
+      this.#claimedReactEvents.add(claim.bubble.event);
+      this.#claimedNativeEvents.add(claim.nativeEvent);
+      authentication.phase = "effect";
+      try {
+      const immediateSnapshot = readPanelNavNativeEvent(
+        claim.nativeEvent,
+        claim.publication.navIntrinsics,
+      );
+      if (
+        this.#navEffect !== claim ||
+        !immediateSnapshot ||
+        !panelNavNativeSnapshotsMatch(snapshot, immediateSnapshot, true) ||
+        claim.publication.generation !== claim.generation ||
+        claim.publication.draft !== claim.draft ||
+        claim.generation.authority !== claim.draft ||
+        !claim.draft.committed ||
+        claim.nav !== claim.publication.elements.nav ||
+        claim.route.action !== claim.action ||
+        claim.route.sourceRole !== claim.sourceRole ||
+        claim.route.source !== claim.source ||
+        claim.route.destinationRole !== claim.destinationRole ||
+        claim.route.destination !== claim.destination ||
+        claim.action.source !== claim.source ||
+        claim.publication.elements[claim.destinationRole] !==
+          claim.destination ||
+        !claim.publication.render.active ||
+        !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
+        !panelNavReactSnapshotIsStable(
+          claim.capture,
+          claim.publication.navIntrinsics,
+          true,
+        ) ||
+        !panelNavReactSnapshotIsStable(
+          claim.bubble,
+          claim.publication.navIntrinsics,
+        ) ||
+        claim.bubble.preventDefault !== claim.preventDefault ||
+        claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
+        !this.#navActionIsCurrent(claim.publication, claim.action) ||
+        !this.#publicationIsCurrent(claim.publication) ||
+        claim.publication.navIntrinsics.apply(
+          claim.publication.navIntrinsics.activeElement,
+          claim.publication.ownerDocument,
+          [],
+        ) !== claim.source
+      ) {
+        return;
+      }
+
+      try {
+        claim.publication.navIntrinsics.apply(
+          claim.preventDefault,
+          claim.bubble.event,
+          [],
+        );
+      } catch {
+        return;
+      }
+      const preventedSnapshot = readPanelNavNativeEvent(
+        claim.nativeEvent,
+        claim.publication.navIntrinsics,
+      );
+      if (
+        this.#navEffect !== claim ||
+        !preventedSnapshot ||
+        !panelNavNativeSnapshotIsPrevented(
+          immediateSnapshot,
+          preventedSnapshot,
+        ) ||
+        claim.publication.pendingNavRoutes !== claim.pendingNavRoutes ||
+        claim.pendingNavRoutes.has(claim.nativeEvent) ||
+        claim.bubble.preventDefault !== claim.preventDefault ||
+        claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
+        !panelNavReactSnapshotIsStable(
+         claim.capture,
+         claim.publication.navIntrinsics,
+         true,
+        ) ||
+        !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
+        !this.#navActionIsCurrent(claim.publication, claim.action) ||
+        !this.#publicationIsCurrent(claim.publication) ||
+        claim.publication.navIntrinsics.apply(
+          claim.publication.navIntrinsics.activeElement,
+          claim.publication.ownerDocument,
+          [],
+        ) !== claim.source
+      ) {
+        return;
+      }
+      authentication.phase = "post-predicates";
+      const preventedProof = readPanelNavReactPreventedProof(
+        claim.bubble,
+        claim.publication.navIntrinsics,
+      );
+      authentication.phase = "final";
+      const finalSnapshot = readPanelNavNativeEvent(
+        claim.nativeEvent,
+        claim.publication.navIntrinsics,
+      );
+      if (
+        this.#navEffect !== claim ||
+        !preventedProof ||
+        !finalSnapshot ||
+        !panelNavNativeSnapshotIsPrevented(
+          immediateSnapshot,
+          finalSnapshot,
+        ) ||
+        !panelNavNativeSnapshotsMatch(
+          preventedSnapshot,
+          finalSnapshot,
+          true,
+        ) ||
+        claim.publication.generation !== claim.generation ||
+        claim.publication.draft !== claim.draft ||
+        claim.generation.authority !== claim.draft ||
+        claim.publication.retired ||
+        claim.draft.retired ||
+        !claim.draft.committed ||
+        claim.nav !== claim.publication.elements.nav ||
+        claim.route.publication !== claim.publication ||
+        claim.route.generation !== claim.generation ||
+        claim.route.action !== claim.action ||
+        claim.route.sourceRole !== claim.sourceRole ||
+        claim.route.source !== claim.source ||
+        claim.route.destinationRole !== claim.destinationRole ||
+        claim.route.destination !== claim.destination ||
+        claim.route.nativeEvent !== claim.nativeEvent ||
+        claim.route.windowProof !== claim.windowProof ||
+        claim.action.source !== claim.source ||
+        claim.publication.elements[claim.sourceRole] !== claim.source ||
+        claim.publication.elements[claim.destinationRole] !==
+          claim.destination ||
+        claim.publication.pendingNavRoutes !== claim.pendingNavRoutes ||
+        claim.pendingNavRoutes.has(claim.nativeEvent) ||
+        !claim.publication.render.active ||
+        !panelNavReactSnapshotIsStable(
+          claim.capture,
+          claim.publication.navIntrinsics,
+          true,
+        ) ||
+        !panelNavReactSnapshotIsStable(
+          claim.bubble,
+          claim.publication.navIntrinsics,
+          false,
+          true,
+          preventedProof.isDefaultPrevented,
+        ) ||
+        claim.bubble.preventDefault !== claim.preventDefault ||
+        claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
+        preventedProof.defaultPrevented !== true ||
+        preventedProof.propagationStopped !== false ||
+        claim.focus !== claim.publication.navIntrinsics.focus ||
+        !this.#claimedNavPublications.has(claim.publication) ||
+        !this.#claimedReactEvents.has(claim.capture.event) ||
+        !this.#claimedReactEvents.has(claim.bubble.event) ||
+        !this.#claimedNativeEvents.has(claim.nativeEvent) ||
+        authentication.reentered ||
+        !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
+        !this.#navActionIsCurrent(claim.publication, claim.action) ||
+        !this.#publicationIsCurrent(claim.publication) ||
+        claim.publication.navIntrinsics.apply(
+          claim.publication.navIntrinsics.activeElement,
+          claim.publication.ownerDocument,
+          [],
+        ) !== claim.source
+      ) {
+        return;
+      }
+      claim.publication.navIntrinsics.apply(claim.focus, claim.destination, [
+        { preventScroll: true },
+      ]);
+      } finally {
+        if (this.#navEffect === claim) this.#navEffect = null;
+      }
+    } finally {
+      if (this.#navAuthentication === authentication) {
+        this.#navAuthentication = null;
+      }
+    }
+  }
+
+  captureNavigation(
+    generation: KeepAgentPanelGeneration,
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) {
+    const publication = this.#current;
+    const nativeEvent = event?.nativeEvent;
+    const pendingNavRoutes = publication?.pendingNavRoutes;
+    const route = nativeEvent
+      ? pendingNavRoutes?.get(nativeEvent)
+      : undefined;
+    if (
+      !publication ||
+      !pendingNavRoutes ||
+      !route ||
+      route.nativeEvent !== nativeEvent ||
+      route.invalid
+    ) {
+      return;
+    }
+    const nativeSnapshot = readPanelNavNativeEvent(
+      nativeEvent,
+      publication.navIntrinsics,
+    );
+    const capture =
+      nativeEvent instanceof publication.ownerWindow.KeyboardEvent
+        ? readPanelNavReactEvent(
+            event,
+            nativeEvent,
+            publication.navIntrinsics,
+          )
+        : null;
+    if (
+      !nativeSnapshot ||
+      !capture ||
+      route.captureSnapshot ||
+      route.captureNativeSnapshot ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      publication.generation !== generation ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
+      capture.type !== "keydown" ||
+      capture.currentTarget !== publication.elements.nav ||
+      capture.target !== route.source ||
+      capture.eventPhase !== publication.navIntrinsics.capturingPhase ||
+      capture.bubbles !== nativeSnapshot.bubbles ||
+      capture.cancelable !== nativeSnapshot.cancelable ||
+      capture.defaultPrevented ||
+      capture.isTrusted !== nativeSnapshot.isTrusted ||
+      capture.key !== nativeSnapshot.key ||
+      capture.code !== nativeSnapshot.code ||
+      capture.location !== nativeSnapshot.location ||
+      capture.altKey !== nativeSnapshot.altKey ||
+      capture.ctrlKey !== nativeSnapshot.ctrlKey ||
+      capture.metaKey !== nativeSnapshot.metaKey ||
+      capture.shiftKey !== nativeSnapshot.shiftKey ||
+      capture.repeat !== nativeSnapshot.repeat ||
+      !Object.is(capture.view, nativeSnapshot.view) ||
+      nativeSnapshot.currentTarget === null ||
+      nativeSnapshot.eventPhase !== publication.navIntrinsics.capturingPhase ||
+      !nativeSnapshot.path.includes(nativeSnapshot.currentTarget) ||
+      !panelNavNativeSnapshotsMatch(
+        route.windowSnapshot,
+        nativeSnapshot,
+        false,
+      ) ||
+      !this.#navWindowProofIsCurrent(publication, route) ||
+      !this.#navActionIsCurrent(publication, route.action) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      route.invalid = true;
+      return;
+    }
+    route.captureSnapshot = capture;
+    route.captureNativeSnapshot = nativeSnapshot;
+  }
+
+  #recordNavWindowEvent(
+    publication: KeepAgentPanelPublication,
+    listener: KeepAgentPanelNavWindowListener,
+    receiver: EventTarget,
+    nativeEvent: Event,
+  ) {
+    if (this.#navAuthentication || this.#navEffect) return;
+    const pendingNavRoutes = publication.pendingNavRoutes;
+    const snapshot = readPanelNavNativeEvent(
+      nativeEvent,
+      publication.navIntrinsics,
+    );
+    if (
+      !snapshot ||
+      !(nativeEvent instanceof publication.ownerWindow.KeyboardEvent) ||
+      !listener.active ||
+      listener !== publication.navWindowListener ||
+      snapshot.type !== "keydown" ||
+      snapshot.target === null ||
+      snapshot.currentTarget !== receiver ||
+      snapshot.eventPhase !== publication.navIntrinsics.capturingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      pendingNavRoutes.has(nativeEvent) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      (snapshot.view !== null &&
+        snapshot.view !== publication.ownerWindow &&
+        snapshot.view !== receiver) ||
+      snapshot.path.at(-1) !== receiver ||
+      !publication.render.active ||
+      !this.#navWindowListenerIsCurrent(publication) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      return;
+    }
+    const sourceRole = PANEL_NAV_ROLES.find(
+      (role) => publication.elements[role] === snapshot.target,
+    );
+    const action = sourceRole
+      ? publication.navActions[sourceRole]
+      : undefined;
+    const destinationIndex = action
+      ? panelNavDestination(snapshot.key, action.sourceIndex)
+      : -1;
+    const destinationRole = destinationIndex >= 0
+      ? PANEL_NAV_ROLES[destinationIndex]
+      : undefined;
+    const destination = destinationRole
+      ? publication.elements[destinationRole]
+      : undefined;
+    if (
+      !sourceRole ||
+      !action ||
+      !destinationRole ||
+      !(destination instanceof publication.ownerWindow.HTMLAnchorElement) ||
+      destinationRole === sourceRole ||
+      !panelNavPathMatches(
+        snapshot.path,
+        action.source,
+        publication.ownerDocument,
+        receiver,
+      ) ||
+      publication.navIntrinsics.apply(
+        publication.navIntrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== action.source ||
+      !this.#navActionIsCurrent(publication, action)
+    ) {
+      return;
+    }
+    const windowProof: KeepAgentPanelNavWindowProof = Object.freeze({
+      identity: Symbol("keep-agent-panel-nav-window-proof"),
+      listener,
+      receiver,
+      currentTarget: snapshot.currentTarget,
+      pathTerminal: snapshot.path.at(-1)!,
+    });
+    if (
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.has(nativeEvent)
+    ) {
+      return;
+    }
+    pendingNavRoutes.set(nativeEvent, {
+      identity: Symbol("keep-agent-panel-nav-route"),
+      publication,
+      generation: publication.generation,
+      action,
+      sourceRole,
+      source: action.source,
+      destinationRole,
+      destination,
+      nativeEvent: nativeEvent as KeyboardEvent,
+      windowSnapshot: snapshot,
+      windowProof,
+      captureSnapshot: null,
+      captureNativeSnapshot: null,
+      invalid: false,
+    });
+  }
+
+  #navWindowListenerIsCurrent(
+    publication: KeepAgentPanelPublication,
+  ): boolean {
+    const listener = publication.navWindowListener;
+    try {
+      return listener.active &&
+        listener.target === publication.ownerWindow &&
+        publication.ownerWindow.addEventListener === listener.add &&
+        publication.ownerWindow.removeEventListener === listener.remove &&
+        publication.navIntrinsics.isCurrent();
+    } catch {
+      return false;
+    }
+  }
+
+  #navWindowProofIsCurrent(
+    publication: KeepAgentPanelPublication,
+    route: KeepAgentPanelNavRoute,
+  ): boolean {
+    const { windowProof } = route;
+    return route.publication === publication &&
+      windowProof.listener === publication.navWindowListener &&
+      windowProof.receiver === windowProof.currentTarget &&
+      windowProof.receiver === windowProof.pathTerminal &&
+      route.windowSnapshot.currentTarget === windowProof.currentTarget &&
+      route.windowSnapshot.path.at(-1) === windowProof.pathTerminal &&
+      this.#navWindowListenerIsCurrent(publication);
+  }
+
+  #navActionIsCurrent(
+    publication: KeepAgentPanelPublication,
+    action: KeepAgentPanelNavAction,
+  ): boolean {
+    return Object.isFrozen(publication.navActions) &&
+      Object.isFrozen(action) &&
+      publication.navActions[action.sourceRole] === action &&
+      action.generation === publication.generation &&
+      action.render === publication.render &&
+      action.source === publication.elements[action.sourceRole] &&
+      action.ownerDocument === publication.ownerDocument &&
+      action.order === PANEL_NAV_ROLES &&
+      action.sourceIndex === PANEL_NAV_ROLES.indexOf(action.sourceRole);
   }
 
   activate(
@@ -1598,9 +3035,31 @@ function KeepAgentHerePanelContent({
         </div>
       )}
       {render.showSetup && <AgentConnectCard origin={render.origin} onDismiss={render.dismiss} onCreateToken={render.onCreateToken} className="p-3" />}
-      <nav ref={(element) => coordinator.bindElement(draft, "nav", element)} className={NAV_CLASS} aria-label="Agent setup">
-        <a ref={(element) => coordinator.bindElement(draft, "tokensLink", element)} className={LINK_CLASS} href={render.tokensHref}>Tokens</a>
-        <a ref={(element) => coordinator.bindElement(draft, "connectLink", element)} className={CONNECT_LINK_CLASS} href={render.connectHref}>Connect an MCP client</a>
+      <nav
+        ref={(element) => coordinator.bindElement(draft, "nav", element)}
+        className={NAV_CLASS}
+        aria-label="Agent setup"
+        onKeyDownCapture={(event) =>
+          coordinator.captureNavigation(draft.generation, event)}
+      >
+        <a
+          ref={(element) => coordinator.bindElement(draft, "tokensLink", element)}
+          className={LINK_CLASS}
+          href={render.tokensHref}
+          onKeyDown={(event) =>
+            coordinator.navigate(draft.generation, "tokensLink", event)}
+        >
+          Tokens
+        </a>
+        <a
+          ref={(element) => coordinator.bindElement(draft, "connectLink", element)}
+          className={CONNECT_LINK_CLASS}
+          href={render.connectHref}
+          onKeyDown={(event) =>
+            coordinator.navigate(draft.generation, "connectLink", event)}
+        >
+          Connect an MCP client
+        </a>
       </nav>
       <p ref={(element) => coordinator.bindElement(draft, "body", element)} className={BODY_CLASS}>{PANEL_BODY}</p>
       <p ref={(element) => coordinator.bindElement(draft, "hint", element)} className={HINT_CLASS} data-testid="keep-agent-hint">
