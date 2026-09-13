@@ -162,19 +162,13 @@ async function chooseFromCommittedSuccessor(
   settledInput: HTMLInputElement,
 ) {
   const upload = screen.getByTestId("image-upload");
+  await userEvent.setup().hover(upload);
   expect(screen.getByTestId("image-file")).toBe(settledInput);
   expect(screen.getByTestId("image-upload-error")).toBeVisible();
   expect(settledInput).toBeEnabled();
   expect(settledInput).toHaveValue("");
   expect(upload).toBeEnabled();
-  await userEvent.setup().hover(upload);
-  fireEvent.click(upload);
-  const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
-  expect(currentInput).toBe(settledInput);
-  expect(currentInput).toBeEnabled();
-  expect(currentInput).toHaveValue("");
-  expect(screen.getByTestId("image-upload")).toBeEnabled();
-  fireEvent.change(currentInput, { target: { files: [file] } });
+  fireEvent.change(settledInput, { target: { files: [file] } });
 }
 
 function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
@@ -492,14 +486,22 @@ describe("ImageDialog upload lifecycle", () => {
       expect(onUpload).toHaveBeenCalledWith(failedFile);
       expect(onUpload.mock.results[0]?.value).toBe(failed.promise);
       expect(screen.getByTestId("image-file")).toBe(input);
+      expect(input).toBeDisabled();
       setInputValue(input, "failed-selection");
+      const getterFailure =
+        getter === "url"
+          ? "URL result getter failed"
+          : getter === "alt"
+            ? "Alt result getter failed"
+            : "Error message getter failed";
+      const readHostileGetter = vi.fn(() => {
+        throw new Error(getterFailure);
+      });
 
       if (getter === "error") {
         const error = new Error();
         Object.defineProperty(error, "message", {
-          get() {
-            throw new Error("Error message getter failed");
-          },
+          get: readHostileGetter,
         });
         await act(async () => {
           failed.reject(error);
@@ -512,13 +514,7 @@ describe("ImageDialog upload lifecycle", () => {
           url: "/api/assets/unread",
         } as UploadResult;
         Object.defineProperty(result, getter, {
-          get() {
-            throw new Error(
-              getter === "url"
-                ? "URL result getter failed"
-                : "Alt result getter failed",
-            );
-          },
+          get: readHostileGetter,
         });
         await act(async () => {
           failed.resolve(result);
@@ -534,6 +530,7 @@ describe("ImageDialog upload lifecycle", () => {
             ? "Alt result getter failed"
             : "Upload failed",
       );
+      expect(readHostileGetter).toHaveBeenCalledOnce();
       expect(screen.getByTestId("image-upload")).toBeEnabled();
       expect(screen.getByTestId("image-file")).toBe(input);
       expect(input).toBeEnabled();
@@ -546,13 +543,27 @@ describe("ImageDialog upload lifecycle", () => {
       expect(onUpload).toHaveBeenCalledTimes(2);
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
       expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
+      expect(input).toBeDisabled();
       await act(async () => {
-        retry.resolve({ url: "/api/assets/retry" });
+        retry.resolve({ url: "/api/assets/retry", alt: "Retry Alt" });
         await retry.promise;
       });
+      await act(async () => {
+        if (getter === "error") {
+          failed.reject(new Error("Late failure"));
+        } else {
+          failed.resolve({ url: "/api/assets/late", alt: "Late Alt" });
+        }
+        await Promise.resolve();
+      });
+      expect(readHostileGetter).toHaveBeenCalledOnce();
+      expect(onUpload).toHaveBeenCalledTimes(2);
       expect(screen.getByTestId("image-url")).toHaveValue(
         "/api/assets/retry",
       );
+      expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(input).toBeEnabled();
     },
   );
 
