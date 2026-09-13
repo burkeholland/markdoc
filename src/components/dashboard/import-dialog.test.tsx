@@ -763,6 +763,55 @@ describe("ImportDialog result action keyboard navigation", () => {
     }
   });
 
+  it("accepts legitimate distinct wrappers with different prototype identities", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const pair = dispatchResultKeyWithBoundaryProbe(
+        controls[0]!.element,
+        "ArrowDown",
+        (phase, event) => {
+          if (phase.endsWith("before")) {
+            Object.setPrototypeOf(
+              event,
+              Object.create(Object.getPrototypeOf(event)),
+            );
+          }
+        },
+      );
+
+      expect(pair.capture).not.toBe(pair.bubble);
+      expect(Object.getPrototypeOf(pair.capture)).not.toBe(
+        Object.getPrototypeOf(pair.bubble),
+      );
+      expect(pair.capture.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.bubble.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each([
     ["capture", "capture-after", "isDefaultPrevented"],
     ["bubble", "bubble-before", "isPropagationStopped"],

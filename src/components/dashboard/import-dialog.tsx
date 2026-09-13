@@ -424,7 +424,6 @@ const IMPORT_RESULT_REACT_KEYBOARD_METHOD_NAMES = Object.freeze([
 
 interface ImportResultReactKeyboardSnapshot {
   readonly event: ReactKeyboardEvent<HTMLElement>;
-  readonly prototype: object;
   readonly nativeEvent: Event;
   readonly target: EventTarget;
   readonly currentTarget: HTMLElement;
@@ -914,7 +913,6 @@ interface ImportResultKeyboardAuthority {
     property: PropertyKey,
     value: unknown,
   ) => boolean;
-  readonly prototypeOf: (value: object) => object | null | undefined;
   readonly applyMethod: (
     method: ImportResultReactKeyboardMethod,
     receiver: object,
@@ -1287,14 +1285,6 @@ function captureImportResultKeyboardAuthority(
         return false;
       }
     },
-    prototypeOf: (value: object) => {
-      if (!intrinsicsAreCurrent()) return undefined;
-      try {
-        return prototypeOf(value);
-      } catch {
-        return undefined;
-      }
-    },
     applyMethod: (
       reactMethod: ImportResultReactKeyboardMethod,
       receiver: object,
@@ -1396,9 +1386,7 @@ function captureImportResultReactKeyboardEvent(
     const persist = proof.persist;
     const preventDefault = proof.preventDefault;
     const stopPropagation = proof.stopPropagation;
-    const prototype = authority.prototypeOf(event);
     if (
-      !prototype ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
       typeof isPersistent !== "function" ||
@@ -1420,7 +1408,6 @@ function captureImportResultReactKeyboardEvent(
     });
     const snapshot: ImportResultReactKeyboardSnapshot = Object.freeze({
       event,
-      prototype,
       nativeEvent,
       target: event.target,
       currentTarget: event.currentTarget,
@@ -3049,7 +3036,6 @@ function createImportResultPublication(
       !currentDestination ||
       currentDestination !== pair.destinationControl ||
       nativeFacts.key !== pair.key ||
-      pair.capture.prototype !== bubble.prototype ||
       pair.capture.target !== bubble.target ||
       pair.capture.currentTarget !== bubble.currentTarget ||
       pair.capture.phase !== keyboard.capturingPhase ||
