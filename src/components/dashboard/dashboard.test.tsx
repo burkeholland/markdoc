@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { StrictMode, createElement, startTransition, useEffect, useLayoutEffect, useState } from "react";
+import {
+  StrictMode,
+  createElement,
+  startTransition,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { flushSync } from "react-dom";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -530,6 +539,258 @@ function directRetryButton(host: HTMLElement): HTMLButtonElement {
   const button = host.querySelector<HTMLButtonElement>('[data-testid="trash-error"] button');
   if (!button) throw new Error("Trash Retry was not rendered");
   return button;
+}
+
+type TrashNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+function createTrashKeyboardEvent(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Trash key target has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: ownerWindow,
+    ...init,
+  });
+  if (trusted) markSearchResultEventTrusted(event, ownerWindow);
+  return event;
+}
+
+function dispatchTrashKey(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = createTrashKeyboardEvent(target, key, init, trusted);
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+const first = trashedDoc("keyboard-first", "Keyboard first");
+const second = trashedDoc("keyboard-second", "Keyboard second");
+const trash = (
+  documents: DocumentSummaryDto[] = [first, second],
+  busy: string | null = null,
+  error: string | null = "Trash warning",
+  callbacks: {
+    onRetry: () => void;
+    onRestore: (document: DocumentSummaryDto) => void;
+    onPurge: (document: DocumentSummaryDto) => void;
+  } = {
+    onRetry: () => {},
+    onRestore: () => {},
+    onPurge: () => {},
+  },
+  key?: string,
+) => (
+  <StrictMode>
+    <TrashView
+      key={key}
+      documents={documents}
+      busy={busy}
+      loading={false}
+      error={error}
+      onRetry={callbacks.onRetry}
+      onRestore={callbacks.onRestore}
+      onPurge={callbacks.onPurge}
+    />
+  </StrictMode>
+);
+
+function renderTrashKeyboard<Setup>(
+  node: ReactNode,
+  setup: (ownerWindow: Window & typeof globalThis) => Setup,
+) {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) {
+    frame.remove();
+    throw new Error("The Trash keyboard frame has no owner realm");
+  }
+  const host = ownerDocument.createElement("div");
+  ownerDocument.body.append(host);
+  const configured = setup(ownerWindow);
+  const root = createRoot(host);
+  act(() => root.render(node));
+  return {
+    frame,
+    host,
+    ownerDocument,
+    ownerWindow,
+    root,
+    setup: configured,
+    dispose: () => {
+      act(() => root.unmount());
+      frame.remove();
+    },
+  };
+}
+
+function trackTrashNavigationEffects(
+  ownerWindow: Window & typeof globalThis,
+) {
+  const nativePreventDefault =
+    ownerWindow.Event.prototype.preventDefault;
+  const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+  const focusCalls: {
+    target: HTMLElement;
+    options: FocusOptions | undefined;
+  }[] = [];
+  const preventDefault = vi
+    .spyOn(ownerWindow.Event.prototype, "preventDefault")
+    .mockImplementation(function (this: Event) {
+      Reflect.apply(nativePreventDefault, this, []);
+    });
+  const focus = vi
+    .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+    .mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      focusCalls.push({ target: this, options });
+      Reflect.apply(
+        nativeFocus,
+        this,
+        options === undefined ? [] : [options],
+      );
+    });
+  const scrollTo = vi
+    .spyOn(ownerWindow, "scrollTo")
+    .mockImplementation(() => undefined);
+  const scrollBy = vi
+    .spyOn(ownerWindow, "scrollBy")
+    .mockImplementation(() => undefined);
+  return {
+    nativePreventDefault,
+    nativeFocus,
+    preventDefault,
+    focus,
+    focusCalls,
+    scrollTo,
+    scrollBy,
+  };
+}
+
+function dispatchTrashKeyWithReactPairMutation(
+  card: HTMLLIElement,
+  target: HTMLButtonElement,
+  key: TrashNavigationKey,
+  mutations: {
+    captureAfter?: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+    bubbleBefore?: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+  } = {},
+) {
+  const entry = reactPropsEntry(card);
+  const capture = entry.props.onKeyDownCapture;
+  const bubble = entry.props.onKeyDown;
+  const ownerWindow = target.ownerDocument.defaultView;
+  const nativeCurrentTargetGetter = ownerWindow
+    ? Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get
+    : null;
+  if (
+    typeof capture !== "function" ||
+    typeof bubble !== "function" ||
+    !nativeCurrentTargetGetter
+  ) {
+    throw new Error("The Trash card has no complete key delivery pair");
+  }
+  const delivery: {
+    capture: ReactKeyboardEvent<HTMLLIElement> | null;
+    bubble: ReactKeyboardEvent<HTMLLIElement> | null;
+    captureTarget: EventTarget | null;
+    bubbleTarget: EventTarget | null;
+    nativeCaptureTarget: EventTarget | null;
+    nativeBubbleTarget: EventTarget | null;
+    capturePhase: number;
+    bubblePhase: number;
+  } = {
+    capture: null,
+    bubble: null,
+    captureTarget: null,
+    bubbleTarget: null,
+    nativeCaptureTarget: null,
+    nativeBubbleTarget: null,
+    capturePhase: Event.NONE,
+    bubblePhase: Event.NONE,
+  };
+  const wrapped = {
+    ...entry.props,
+    onKeyDownCapture: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
+      delivery.capture = event;
+      delivery.captureTarget = event.currentTarget;
+      delivery.nativeCaptureTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      delivery.capturePhase = event.eventPhase;
+      capture(event);
+      mutations.captureAfter?.(event);
+    },
+    onKeyDown: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
+      delivery.bubble = event;
+      delivery.bubbleTarget = event.currentTarget;
+      delivery.nativeBubbleTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      delivery.bubblePhase = event.eventPhase;
+      mutations.bubbleBefore?.(event);
+      bubble(event);
+    },
+  };
+  entry.record[entry.key] = wrapped;
+  let nativeEvent: KeyboardEvent;
+  try {
+    nativeEvent = dispatchTrashKey(target, key);
+  } finally {
+    if (entry.record[entry.key] === wrapped) {
+      entry.record[entry.key] = entry.props;
+    }
+  }
+  if (!delivery.capture || !delivery.bubble) {
+    throw new Error("React did not deliver both Trash key phases");
+  }
+  return {
+    nativeEvent,
+    captureEvent: delivery.capture,
+    bubbleEvent: delivery.bubble,
+    captureTarget: delivery.captureTarget,
+    bubbleTarget: delivery.bubbleTarget,
+    nativeCaptureTarget: delivery.nativeCaptureTarget,
+    nativeBubbleTarget: delivery.nativeBubbleTarget,
+    capturePhase: delivery.capturePhase,
+    bubblePhase: delivery.bubblePhase,
+  };
 }
 
 function templateButton(host: HTMLElement, id: string): HTMLButtonElement {
@@ -1455,6 +1716,759 @@ describe("dashboard Account menu directional publication", () => {
     },
   );
 
+});
+
+function registerTrashKeyboardProvenanceTests() {
+  it("rejects a crossed card delivery without consuming a clean successor event", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const firstCard = directTrashCard(view.host, first.title);
+      const secondCard = directTrashCard(view.host, second.title);
+      const secondCapture =
+        reactProps(secondCard).onKeyDownCapture;
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      if (typeof secondCapture !== "function") {
+        throw new Error("The second Trash card has no capture handler");
+      }
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const crossed = dispatchTrashKeyWithReactPairMutation(
+        firstCard,
+        restore,
+        "ArrowRight",
+        {
+          captureAfter: (event) => secondCapture(event),
+        },
+      ).nativeEvent;
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(restore).toHaveFocus();
+
+      const accepted = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each(["card-detach", "action-reorder"] as const)(
+    "permanently rejects restored DOM history after %s and recovers on a keyed mount",
+    (history) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        if (history === "card-detach") {
+          const parent = card.parentNode;
+          const next = card.nextSibling;
+          if (!parent) throw new Error("The Trash card has no parent");
+          card.remove();
+          parent.insertBefore(card, next);
+        } else {
+          const parent = restore.parentNode;
+          if (!parent) {
+            throw new Error("The Trash actions have no parent");
+          }
+          parent.append(restore);
+          parent.insertBefore(restore, purge);
+        }
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+
+        const restored = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(restored.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+
+        const replay = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(replay.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+
+        act(() => {
+          view.root.render(
+            trash(
+              [first, second],
+              null,
+              "Trash warning",
+              undefined,
+              `successor-${history}`,
+            ),
+          );
+        });
+        const successorRestore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const successorPurge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        successorRestore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+
+        const accepted = dispatchTrashKey(
+          successorRestore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(successorPurge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("keeps descriptor-restored authority stale until a clean keyed generation", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const descriptor = Object.getOwnPropertyDescriptor(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+      );
+      if (!descriptor) {
+        throw new Error("Event.preventDefault has no descriptor");
+      }
+      Object.defineProperty(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+        {
+          ...descriptor,
+          value: vi.fn(),
+        },
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const changed = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(changed.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      Object.defineProperty(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+        descriptor,
+      );
+      const restored = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(restored.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      act(() => {
+        view.root.render(
+          trash(
+            [first, second],
+            null,
+            "Trash warning",
+            undefined,
+            "descriptor-successor",
+          ),
+        );
+      });
+      const successorRestore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const successorPurge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      successorRestore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        successorRestore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(successorPurge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("claims before prevention reentry and focuses only the outer destination", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      const nested: KeyboardEvent[] = [];
+      view.setup.preventDefault.mockImplementationOnce(function (
+        this: Event,
+      ) {
+        Reflect.apply(
+          view.setup.nativePreventDefault,
+          this,
+          [],
+        );
+        const nestedEvent = createTrashKeyboardEvent(
+          restore,
+          "ArrowRight",
+        );
+        nested.push(nestedEvent);
+        restore.dispatchEvent(nestedEvent);
+      });
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      view.setup.focusCalls.length = 0;
+
+      const outer = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+
+      expect(outer.defaultPrevented).toBe(true);
+      expect(nested).toHaveLength(1);
+      expect(nested[0]?.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(view.setup.focusCalls).toEqual([
+        { target: purge, options: { preventScroll: true } },
+      ]);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("releases keyboard authority on cleanup and lets a fresh Strict root recover", () => {
+    const retired = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    const restore = directTrashButton(
+      retired.host,
+      first.title,
+      "restore-button",
+    );
+    restore.focus();
+    const afterCleanup = createTrashKeyboardEvent(
+      restore,
+      "ArrowRight",
+    );
+    retired.setup.preventDefault.mockClear();
+    retired.setup.focus.mockClear();
+    retired.dispose();
+    restore.dispatchEvent(afterCleanup);
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(retired.setup.preventDefault).not.toHaveBeenCalled();
+    expect(retired.setup.focus).not.toHaveBeenCalled();
+
+    const successor = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const currentRestore = directTrashButton(
+        successor.host,
+        first.title,
+        "restore-button",
+      );
+      const currentPurge = directTrashButton(
+        successor.host,
+        first.title,
+        "purge-button",
+      );
+      currentRestore.focus();
+      successor.setup.preventDefault.mockClear();
+      successor.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        currentRestore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(successor.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(successor.setup.focus).toHaveBeenCalledTimes(1);
+      expect(currentPurge).toHaveFocus();
+    } finally {
+      successor.dispose();
+    }
+  });
+}
+
+function registerTrashKeyboardNativeAuthorityTests() {
+  it("binds an accepted key to the event-local backing Window receiver, currentTarget, and path terminal", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      (ownerWindow) => {
+        const effects = trackTrashNavigationEffects(ownerWindow);
+        const currentTargetDescriptor =
+          Object.getOwnPropertyDescriptor(
+            ownerWindow.Event.prototype,
+            "currentTarget",
+          );
+        const composedPath =
+          ownerWindow.Event.prototype.composedPath;
+        if (typeof currentTargetDescriptor?.get !== "function") {
+          throw new Error("Event.currentTarget has no getter");
+        }
+        const observations: {
+          receiver: EventTarget;
+          currentTarget: EventTarget | null;
+          terminal: EventTarget | undefined;
+        }[] = [];
+        ownerWindow.addEventListener(
+          "keydown",
+          function (this: EventTarget, event: Event) {
+            observations.push({
+              receiver: this,
+              currentTarget: Reflect.apply(
+                currentTargetDescriptor.get!,
+                event,
+                [],
+              ) as EventTarget | null,
+              terminal: (
+                Reflect.apply(
+                  composedPath,
+                  event,
+                  [],
+                ) as EventTarget[]
+              ).at(-1),
+            });
+          },
+          true,
+        );
+        const implementationSymbol =
+          Object.getOwnPropertySymbols(ownerWindow.document).find(
+            (symbol) => String(symbol) === "Symbol(impl)",
+          );
+        const backingReceiver = implementationSymbol
+          ? (
+              ownerWindow.document as unknown as Record<
+                symbol,
+                { _globalObject: EventTarget }
+              >
+            )[implementationSymbol]._globalObject
+          : ownerWindow;
+        return { ...effects, observations, backingReceiver };
+      },
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const event = dispatchTrashKey(restore, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(view.setup.observations).toHaveLength(1);
+      expect(view.setup.observations[0]).toEqual({
+        receiver: view.setup.backingReceiver,
+        currentTarget: view.setup.backingReceiver,
+        terminal: view.setup.backingReceiver,
+      });
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each(["same-prototype", "structural"] as const)(
+    "rejects a %s Window-shaped terminal and then accepts the genuine terminal",
+    (kind) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        (ownerWindow) => {
+          const effects =
+            trackTrashNavigationEffects(ownerWindow);
+          const nativePath =
+            ownerWindow.Event.prototype.composedPath;
+          const lookalike = Object.create(
+            kind === "same-prototype"
+              ? ownerWindow.Window.prototype
+              : null,
+          ) as Window & Record<string, unknown>;
+          Object.defineProperties(lookalike, {
+            document: {
+              configurable: true,
+              value: ownerWindow.document,
+            },
+            window: { configurable: true, value: lookalike },
+            self: { configurable: true, value: lookalike },
+            Event: {
+              configurable: true,
+              value: ownerWindow.Event,
+            },
+            KeyboardEvent: {
+              configurable: true,
+              value: ownerWindow.KeyboardEvent,
+            },
+            Object: {
+              configurable: true,
+              value: ownerWindow.Object,
+            },
+            Reflect: {
+              configurable: true,
+              value: ownerWindow.Reflect,
+            },
+          });
+          let spoof = true;
+          vi.spyOn(
+            ownerWindow.Event.prototype,
+            "composedPath",
+          ).mockImplementation(function (this: Event) {
+            const path = Reflect.apply(
+              nativePath,
+              this,
+              [],
+            ) as EventTarget[];
+            return spoof
+              ? [...path.slice(0, -1), lookalike]
+              : path;
+          });
+          return {
+            ...effects,
+            lookalike,
+            acceptGenuineTerminal: () => {
+              spoof = false;
+            },
+          };
+        },
+      );
+      try {
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        expect(view.setup.lookalike).not.toBe(view.ownerWindow);
+        expect(view.setup.lookalike.document).toBe(
+          view.ownerDocument,
+        );
+
+        const rejected = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+
+        view.setup.acceptGenuineTerminal();
+        const accepted = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(purge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and non-navigation keys without poisoning recovery", () => {
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const view = renderTrashKeyboard(
+      trash([first, second], null, "Trash warning", {
+        onRetry,
+        onRestore,
+        onPurge,
+      }),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      const outsider =
+        view.ownerDocument.createElement("button");
+      view.ownerDocument.body.append(outsider);
+      const rejected: KeyboardEvent[] = [];
+      const reject = (
+        key: string,
+        init: KeyboardEventInit = {},
+        trusted = true,
+      ) => {
+        restore.focus();
+        view.setup.focus.mockClear();
+        view.setup.preventDefault.mockClear();
+        const event = dispatchTrashKey(
+          restore,
+          key,
+          init,
+          trusted,
+        );
+        rejected.push(event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+      };
+      reject("ArrowRight", {}, false);
+      reject("ArrowRight", { ctrlKey: true });
+      reject("ArrowRight", { metaKey: true });
+      reject("ArrowRight", { altKey: true });
+      reject("ArrowRight", { shiftKey: true });
+      reject("ArrowRight", { repeat: true });
+      reject("ArrowRight", { isComposing: true });
+      reject("6", {
+        code: "Numpad6",
+        location:
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      reject("Tab");
+      reject("Enter");
+      reject(" ");
+
+      restore.focus();
+      const previouslyPrevented = createTrashKeyboardEvent(
+        restore,
+        "ArrowRight",
+      );
+      previouslyPrevented.preventDefault();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => restore.dispatchEvent(previouslyPrevented));
+      expect(previouslyPrevented.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      const previouslyStopped = createTrashKeyboardEvent(
+        restore,
+        "ArrowRight",
+      );
+      previouslyStopped.stopPropagation();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => restore.dispatchEvent(previouslyStopped));
+      expect(previouslyStopped.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      outsider.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const wrongFocus = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(outsider).toHaveFocus();
+
+      const foreignFrame =
+        view.ownerDocument.createElement("iframe");
+      view.ownerDocument.body.append(foreignFrame);
+      const foreignDocument = foreignFrame.contentDocument;
+      const foreignWindow = foreignDocument?.defaultView;
+      if (!foreignDocument || !foreignWindow) {
+        throw new Error("The foreign key realm is unavailable");
+      }
+      const foreignTarget =
+        foreignDocument.createElement("button");
+      foreignDocument.body.append(foreignTarget);
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+        view: foreignWindow,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => foreignTarget.dispatchEvent(foreign));
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      foreignFrame.remove();
+
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+      expect(rejected).toHaveLength(11);
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("preserves disabled, Enter, Space, Tab, and click behavior", () => {
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const callbacks = { onRetry, onRestore, onPurge };
+    const view = renderTrashKeyboard(
+      trash([first], first.id, null, callbacks),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const disabledRestore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const disabledPurge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      expect(disabledRestore).toBeDisabled();
+      expect(disabledPurge).toBeDisabled();
+      const disabledEvent = dispatchTrashKey(
+        disabledRestore,
+        "ArrowRight",
+      );
+      expect(disabledEvent.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      act(() => {
+        view.root.render(
+          trash([first], null, null, callbacks, "enabled"),
+        );
+      });
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      expect(restore.tabIndex).toBe(0);
+      expect(purge.tabIndex).toBe(0);
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      for (const key of ["Enter", " ", "Tab"]) {
+        const event = dispatchTrashKey(restore, key);
+        expect(event.defaultPrevented, key).toBe(false);
+      }
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+
+      restore.click();
+      purge.click();
+      expect(onRestore).toHaveBeenCalledExactlyOnceWith(first);
+      expect(onPurge).toHaveBeenCalledExactlyOnceWith(first);
+      expect(onRetry).not.toHaveBeenCalled();
+    } finally {
+      view.dispose();
+    }
+  });
+}
+
+describe("dashboard Account menu directional publication", () => {
   it("retains pointer, Enter, Space, activation, Escape, and outside dismissal", async () => {
     const host = document.createElement("div");
     const outside = document.createElement("button");
@@ -8974,6 +9988,437 @@ describe("TrashView publication ownership", () => {
       host.remove();
     }
   });
+});
+
+describe("TrashView per-card keyboard navigation", () => {
+  registerTrashKeyboardProvenanceTests();
+  registerTrashKeyboardNativeAuthorityTests();
+
+  it.each([
+    ["restore-button", "purge-button", "ArrowRight"],
+    ["restore-button", "purge-button", "ArrowDown"],
+    ["restore-button", "purge-button", "End"],
+    ["purge-button", "restore-button", "ArrowLeft"],
+    ["purge-button", "restore-button", "ArrowUp"],
+    ["purge-button", "restore-button", "Home"],
+  ] as const)(
+    "moves from %s to %s with %s exactly once without action or scroll work",
+    (sourceId, destinationId, key) => {
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const view = renderTrashKeyboard(
+        trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        }),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const source = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const destination = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${destinationId}"]`,
+        )!;
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+        view.setup.scrollTo.mockClear();
+        view.setup.scrollBy.mockClear();
+        const markup = view.host.innerHTML;
+        const before = {
+          x: view.ownerWindow.scrollX,
+          y: view.ownerWindow.scrollY,
+          cardTop: card.scrollTop,
+          cardLeft: card.scrollLeft,
+        };
+
+        const event = dispatchTrashKey(source, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(view.setup.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(view.setup.scrollTo).not.toHaveBeenCalled();
+        expect(view.setup.scrollBy).not.toHaveBeenCalled();
+        expect({
+          x: view.ownerWindow.scrollX,
+          y: view.ownerWindow.scrollY,
+          cardTop: card.scrollTop,
+          cardLeft: card.scrollLeft,
+        }).toEqual(before);
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(onRestore).not.toHaveBeenCalled();
+        expect(onPurge).not.toHaveBeenCalled();
+        expect(view.host.innerHTML).toBe(markup);
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["purge-button", "restore-button", "ArrowLeft", "Numpad4"],
+    ["purge-button", "restore-button", "ArrowUp", "Numpad8"],
+    ["restore-button", "purge-button", "ArrowRight", "Numpad6"],
+    ["restore-button", "purge-button", "ArrowDown", "Numpad2"],
+    ["purge-button", "restore-button", "Home", "Numpad7"],
+    ["restore-button", "purge-button", "End", "Numpad1"],
+  ] as const)(
+    "moves from %s to %s by semantic %s with physical %s",
+    (sourceId, destinationId, key, code) => {
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const view = renderTrashKeyboard(
+        trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        }),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const source = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const destination = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${destinationId}"]`,
+        )!;
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+
+        const event = dispatchTrashKey(source, key, {
+          code,
+          location:
+            view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        });
+
+        expect(event.code).toBe(code);
+        expect(event.location).toBe(
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        );
+        expect(event.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(view.setup.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(directTrashButton(
+          view.host,
+          second.title,
+          destinationId,
+        )).not.toHaveFocus();
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(onRestore).not.toHaveBeenCalled();
+        expect(onPurge).not.toHaveBeenCalled();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["restore-button", "ArrowLeft"],
+    ["restore-button", "ArrowUp"],
+    ["restore-button", "Home"],
+    ["purge-button", "ArrowRight"],
+    ["purge-button", "ArrowDown"],
+    ["purge-button", "End"],
+  ] as const)(
+    "leaves the %s %s boundary unprevented without wrapping or crossing cards",
+    (sourceId, key) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const firstCard = directTrashCard(view.host, first.title);
+        const source = firstCard.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const secondRestore = directTrashButton(
+          view.host,
+          second.title,
+          "restore-button",
+        );
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+
+        const event = dispatchTrashKey(source, key);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(secondRestore).not.toHaveFocus();
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("attests distinct card wrappers and their shared delegated native root without private fields", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const card = directTrashCard(view.host, first.title);
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      view.setup.focusCalls.length = 0;
+      const delivery = dispatchTrashKeyWithReactPairMutation(
+        card,
+        restore,
+        "ArrowRight",
+        {
+          captureAfter: (event) => {
+            const alternate = Object.create(
+              Object.getPrototypeOf(event),
+            );
+            Object.setPrototypeOf(event, alternate);
+            Reflect.deleteProperty(event, "_reactName");
+          },
+          bubbleBefore: (event) => {
+            expect(event.defaultPrevented).toBe(false);
+            expect(
+              Reflect.apply(
+                event.isDefaultPrevented,
+                event,
+                [],
+              ),
+            ).toBe(false);
+            const alternate = Object.create(
+              Object.getPrototypeOf(event),
+            );
+            Object.setPrototypeOf(event, alternate);
+            Object.defineProperty(event, "_reactName", {
+              configurable: true,
+              value: Symbol("ignored-private-field"),
+            });
+          },
+        },
+      );
+
+      expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+      expect(delivery.captureEvent.nativeEvent).toBe(
+        delivery.nativeEvent,
+      );
+      expect(delivery.bubbleEvent.nativeEvent).toBe(
+        delivery.nativeEvent,
+      );
+      expect(Object.getPrototypeOf(delivery.captureEvent)).not.toBe(
+        Object.getPrototypeOf(delivery.bubbleEvent),
+      );
+      expect(delivery.captureTarget).toBe(card);
+      expect(delivery.bubbleTarget).toBe(card);
+      expect(delivery.nativeCaptureTarget).toBe(view.host);
+      expect(delivery.nativeCaptureTarget).not.toBe(card);
+      expect(delivery.nativeBubbleTarget).toBe(
+        delivery.nativeCaptureTarget,
+      );
+      expect(delivery.capturePhase).toBe(Event.CAPTURING_PHASE);
+      expect(delivery.bubblePhase).toBe(Event.BUBBLING_PHASE);
+      expect(
+        Reflect.apply(
+          delivery.captureEvent.isDefaultPrevented,
+          delivery.captureEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(
+        Reflect.apply(
+          delivery.captureEvent.isPropagationStopped,
+          delivery.captureEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(
+        Reflect.apply(
+          delivery.bubbleEvent.isDefaultPrevented,
+          delivery.bubbleEvent,
+          [],
+        ),
+      ).toBe(true);
+      expect(
+        Reflect.apply(
+          delivery.bubbleEvent.isPropagationStopped,
+          delivery.bubbleEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(delivery.bubbleEvent.defaultPrevented).toBe(true);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("exposes public prevention to a same-root synthetic ancestor", () => {
+    const onAncestorAction = vi.fn();
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const ancestorObservations: {
+      defaultPrevented: boolean;
+      queried: boolean;
+    }[] = [];
+    const view = renderTrashKeyboard(
+      <div
+        onKeyDown={(event) => {
+          ancestorObservations.push({
+            defaultPrevented: event.defaultPrevented,
+            queried: event.isDefaultPrevented(),
+          });
+          if (!event.defaultPrevented) onAncestorAction();
+        }}
+      >
+        {trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        })}
+      </div>,
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const event = dispatchTrashKey(restore, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(ancestorObservations).toEqual([
+        { defaultPrevented: true, queried: true },
+      ]);
+      expect(onAncestorAction).not.toHaveBeenCalled();
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s-wrapper %s drift and admits a distinct clean event",
+    (phase, property) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+        const replacement = vi.fn(() => false);
+
+        const rejected = dispatchTrashKeyWithReactPairMutation(
+          card,
+          restore,
+          "ArrowRight",
+          phase === "capture"
+            ? {
+                captureAfter: (event) => {
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    value: replacement,
+                  });
+                },
+              }
+            : {
+                bubbleBefore: (event) => {
+                  const original = event[property];
+                  let reads = 0;
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    get: () => {
+                      reads += 1;
+                      return reads === 1
+                        ? original
+                        : replacement;
+                    },
+                  });
+                },
+              },
+        ).nativeEvent;
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(restore).toHaveFocus();
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+
+        const accepted = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(purge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
 });
 
 describe("dashboard filter keyboard navigation", () => {
