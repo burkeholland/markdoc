@@ -85,6 +85,84 @@ test.describe("find & replace", () => {
     await user.context.close();
   });
 
+  test("trusted F3 advances while synthetic F3 is rejected", async ({ browser }) => {
+    const user = await signIn(browser, "f3-trust");
+    const id = await createDocument(user.page, SAMPLE);
+    await openDocument(user.page, id);
+    const { page } = user;
+
+    await openFromCodePane(page);
+    const input = page.getByTestId("find-input");
+    await page.keyboard.type("cat");
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    const syntheticPrevented = await input.evaluate((element) => {
+      const observations: boolean[] = [];
+      Reflect.set(window, "__markdocF3Trust", observations);
+      element.addEventListener("keydown", (event) => {
+        const keyboardEvent = event as KeyboardEvent;
+        if (keyboardEvent.key === "F3") {
+          observations.push(keyboardEvent.isTrusted);
+        }
+      }, { capture: true });
+      const synthetic = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "F3",
+        code: "F3",
+        view: window,
+      });
+      element.dispatchEvent(synthetic);
+      return synthetic.defaultPrevented;
+    });
+    expect(syntheticPrevented).toBe(false);
+    expect(await page.evaluate(() =>
+      Reflect.get(window, "__markdocF3Trust"))).toEqual([false]);
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+
+    await input.evaluate((element) => {
+      const bar = element.closest<HTMLElement>('[data-testid="find-bar"]');
+      const propsKey = bar &&
+        Object.keys(bar).find((key) => key.startsWith("__reactProps$"));
+      const props = bar && propsKey
+        ? Reflect.get(bar, propsKey) as {
+            onKeyDown?: (event: { nativeEvent: KeyboardEvent }) => void;
+          }
+        : null;
+      if (!props?.onKeyDown) throw new Error("Find React key handler is unavailable");
+      const observation = {
+        defaultPreventedBeforeCancel: true,
+        isTrusted: false,
+      };
+      Reflect.set(window, "__markdocF3EarlyDelivery", observation);
+      element.addEventListener("keydown", (event) => {
+        if (!(event instanceof KeyboardEvent) || event.key !== "F3") return;
+        props.onKeyDown?.({ nativeEvent: event });
+        observation.defaultPreventedBeforeCancel = event.defaultPrevented;
+        observation.isTrusted = event.isTrusted;
+        event.preventDefault();
+        event.stopPropagation();
+      }, { capture: true, once: true });
+    });
+    await page.keyboard.press("F3");
+    expect(await page.evaluate(() =>
+      Reflect.get(window, "__markdocF3EarlyDelivery"))).toEqual({
+      defaultPreventedBeforeCancel: false,
+      isTrusted: true,
+    });
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+
+    await page.keyboard.press("F3");
+    await expect.poll(() => page.evaluate(() =>
+      Reflect.get(window, "__markdocF3Trust"))).toEqual([false, true, true]);
+    await expect(page.getByTestId("find-count")).toHaveText("2 of 3");
+    await expect(input).toBeFocused();
+
+    await page.keyboard.press("Shift+F3");
+    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    await expect(input).toBeFocused();
+    await user.context.close();
+  });
+
   test("Replace and Replace all rewrite the source", async ({ browser }) => {
     const user = await signIn(browser, "solo");
     const id = await createDocument(user.page, SAMPLE);
