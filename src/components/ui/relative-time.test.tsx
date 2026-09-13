@@ -22,7 +22,7 @@ function captureIntervals() {
 
   vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay, ...args) => {
     if (typeof handler !== "function") throw new TypeError("Expected an interval callback");
-    intervals.push({ callback: () => handler(...args), delay, handle: reusedHandle });
+    intervals.push({ callback: vi.fn(() => handler(...args)), delay, handle: reusedHandle });
     return reusedHandle;
   });
   vi.spyOn(globalThis, "clearInterval").mockImplementation((handle) => {
@@ -30,6 +30,27 @@ function captureIntervals() {
   });
 
   return { intervals, clears, reusedHandle };
+}
+
+function captureVisibilityListeners() {
+  const added: EventListener[] = [];
+  const removed: EventListenerOrEventListenerObject[] = [];
+  const add = document.addEventListener.bind(document);
+  const remove = document.removeEventListener.bind(document);
+
+  vi.spyOn(document, "addEventListener").mockImplementation((type, listener, options) => {
+    if (type === "visibilitychange") {
+      if (typeof listener !== "function") throw new TypeError("Expected a visibility callback");
+      added.push(listener);
+    }
+    add(type, listener, options);
+  });
+  vi.spyOn(document, "removeEventListener").mockImplementation((type, listener, options) => {
+    if (type === "visibilitychange") removed.push(listener);
+    remove(type, listener, options);
+  });
+
+  return { added, removed };
 }
 
 type StoreSubscribe = (listener: () => void) => () => void;
@@ -71,12 +92,26 @@ describe("RelativeTime", () => {
     vi.doUnmock("react");
   });
 
-  it("renders the absolute UTC date on the server, never relative text", () => {
-    const html = renderToString(<RelativeTime date={new Date(NOW - 60_000)} prefix="Edited " />);
-    expect(html).toContain('<time dateTime="2026-08-22T18:29:00.000Z"');
-    expect(html).toContain(">Edited Aug 22</time>");
-    expect(html).not.toContain("ago");
-    expect(html).not.toContain("title=");
+  it("imports and renders the absolute UTC date on the server without browser globals", async () => {
+    vi.resetModules();
+    vi.stubGlobal("document", undefined);
+    vi.stubGlobal("window", undefined);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval");
+    try {
+      const { RelativeTime: ServerRelativeTime } = await import("./relative-time");
+      const html = renderToString(
+        <ServerRelativeTime date={new Date(NOW - 60_000)} prefix="Edited " className="timestamp" />,
+      );
+      expect(html).toContain('<time dateTime="2026-08-22T18:29:00.000Z"');
+      expect(html).toContain('class="timestamp"');
+      expect(html).toContain(">Edited Aug 22</time>");
+      expect(html).not.toContain("ago");
+      expect(html).not.toContain("title=");
+      expect(html).not.toContain("data-relative");
+      expect(intervalSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("includes the year for dates outside the current year", () => {
@@ -137,6 +172,139 @@ describe("RelativeTime", () => {
 
     view.unmount();
     expect(clears).toEqual([reusedHandle]);
+  });
+
+  it("refreshes both timestamps on visibility return without ticking or duplicating shared resources", () => {
+    const { intervals, clears, reusedHandle } = captureIntervals();
+    const { added, removed } = captureVisibilityListeners();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    const visibilityEvent = new Event("visibilitychange");
+    const nowSpy = vi.spyOn(Date, "now");
+    const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+    const windowFocusSpy = vi.spyOn(window, "focus");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const xhrSpy = vi.spyOn(XMLHttpRequest.prototype, "open");
+    const date = new Date(NOW - 20_000);
+    function Group({ names }: { names: string[] }) {
+      return names.map((name) => <RelativeTime key={name} date={date} prefix={`${name} `} className="timestamp" />);
+    }
+
+    const view = render(<Group names={["A", "B"]} />);
+    const first = screen.getByText("A just now");
+    expect(screen.getByText("B just now")).toBeInTheDocument();
+    const title = first.getAttribute("title");
+    const focused = document.activeElement;
+    expect(added).toHaveLength(1);
+    expect(intervals).toHaveLength(1);
+    expect(intervals[0].delay).toBe(60_000);
+
+    vi.setSystemTime(NOW + 300_000);
+    nowSpy.mockClear();
+    act(() => document.dispatchEvent(visibilityEvent));
+    expect(nowSpy).not.toHaveBeenCalled();
+    expect(first).toHaveTextContent("A just now");
+    expect(screen.getByText("B just now")).toBeInTheDocument();
+
+    visibility.mockReturnValue("visible");
+    act(() => document.dispatchEvent(visibilityEvent));
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+    expect(first).toHaveTextContent("A 5 minutes ago");
+    expect(screen.getByText("B 5 minutes ago")).toBeInTheDocument();
+    expect(first).toHaveAttribute("title", title);
+    expect(first).toHaveAttribute("dateTime", date.toISOString());
+    expect(first).toHaveAttribute("class", "timestamp");
+    expect(first).toHaveAttribute("data-relative", "true");
+    expect(intervals[0].callback).not.toHaveBeenCalled();
+
+    vi.setSystemTime(NOW + 360_000);
+    nowSpy.mockClear();
+    act(() => document.dispatchEvent(visibilityEvent));
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+    expect(first).toHaveTextContent("A 6 minutes ago");
+    expect(screen.getByText("B 6 minutes ago")).toBeInTheDocument();
+    expect(added).toHaveLength(1);
+    expect(intervals).toHaveLength(1);
+    expect(intervals[0].callback).not.toHaveBeenCalled();
+
+    view.rerender(<Group names={["A"]} />);
+    expect(removed).toHaveLength(0);
+    expect(clears).toHaveLength(0);
+    visibility.mockReturnValue("hidden");
+    vi.setSystemTime(NOW + 420_000);
+    nowSpy.mockClear();
+    act(() => document.dispatchEvent(visibilityEvent));
+    expect(nowSpy).not.toHaveBeenCalled();
+    act(() => intervals[0].callback());
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+    expect(first).toHaveTextContent("A 7 minutes ago");
+    expect(intervals[0].callback).toHaveBeenCalledTimes(1);
+    expect(added).toHaveLength(1);
+    expect(intervals).toHaveLength(1);
+    expect(removed).toHaveLength(0);
+    expect(clears).toHaveLength(0);
+    expect(document.activeElement).toBe(focused);
+    expect(focusSpy).not.toHaveBeenCalled();
+    expect(windowFocusSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(xhrSpy).not.toHaveBeenCalled();
+    expect(view.container.querySelector("[aria-live], [role='status'], [role='alert']")).toBeNull();
+
+    view.unmount();
+    expect(removed).toEqual([added[0]]);
+    expect(clears).toEqual([reusedHandle]);
+  });
+
+  it("keeps retired visibility callbacks inert while a new generation refreshes once", async () => {
+    const { intervals, clears, reusedHandle } = captureIntervals();
+    const { added, removed } = captureVisibilityListeners();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const visibilityEvent = new Event("visibilitychange");
+    const store = await captureTickerStore();
+    const retiredListener = vi.fn();
+    const unsubscribe = store.subscribe(retiredListener);
+    const retiredVisibility = added[0];
+    unsubscribe();
+    unsubscribe();
+    expect(removed).toEqual([retiredVisibility]);
+    expect(clears).toEqual([reusedHandle]);
+
+    const nowSpy = vi.spyOn(Date, "now");
+    vi.setSystemTime(NOW + 300_000);
+    retiredVisibility(visibilityEvent);
+    document.dispatchEvent(visibilityEvent);
+    expect(nowSpy).not.toHaveBeenCalled();
+    expect(retiredListener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(NOW);
+
+    const observedSnapshots: number[] = [];
+    const liveListener = vi.fn(() => observedSnapshots.push(store.getSnapshot()));
+    const unsubscribeNext = store.subscribe(liveListener);
+    const unsubscribeOther = store.subscribe(liveListener);
+    expect(added).toHaveLength(2);
+    expect(added[1]).not.toBe(retiredVisibility);
+    expect(intervals).toHaveLength(2);
+    vi.setSystemTime(NOW + 360_000);
+    nowSpy.mockClear();
+    retiredVisibility(visibilityEvent);
+    unsubscribe();
+    expect(nowSpy).not.toHaveBeenCalled();
+    expect(liveListener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(NOW + 300_000);
+    expect(removed).toEqual([retiredVisibility]);
+
+    document.dispatchEvent(visibilityEvent);
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+    expect(liveListener).toHaveBeenCalledTimes(2);
+    expect(observedSnapshots).toEqual([NOW + 360_000, NOW + 360_000]);
+    expect(retiredListener).not.toHaveBeenCalled();
+    expect(intervals.every(({ callback }) => vi.mocked(callback).mock.calls.length === 0)).toBe(true);
+    unsubscribeNext();
+    unsubscribeNext();
+    expect(removed).toEqual([retiredVisibility]);
+    unsubscribeOther();
+    unsubscribeOther();
+    expect(removed).toEqual(added);
+    expect(clears).toEqual([reusedHandle, reusedHandle]);
   });
 
   it("tracks reused listener identities as exact, idempotent registrations", async () => {
