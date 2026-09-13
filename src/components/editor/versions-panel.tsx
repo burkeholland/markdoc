@@ -515,6 +515,11 @@ type PanelRowReactKeyProof = Omit<PanelToolbarReactKeyProof, "currentTarget"> & 
   readonly currentTarget: Element | null;
 };
 
+interface PanelRowPrevention {
+  readonly event: object;
+  readonly isDefaultPrevented: PanelToolbarReactMethod;
+}
+
 interface PanelToolbarMovement {
   readonly identity: symbol;
   readonly publication: PanelToolbarKeyboardPublication;
@@ -2237,42 +2242,51 @@ function readPanelRowReactKeyProof(
   currentTarget: Element | null,
   eventPhase: number,
   defaultPrevented = false,
+  methodsAreCurrent: () => boolean = () => true,
 ): PanelRowReactKeyProof | null {
   const wrapper = event as KeyboardEvent<Element> & {
     isComposing?: unknown;
     locale?: unknown;
   };
+  let valid = true;
+  const read = <T,>(getter: () => T): T | undefined => {
+    if (!valid) return undefined;
+    const value = getter();
+    valid = methodsAreCurrent();
+    return value;
+  };
   const current = {
-    type: wrapper.type,
-    nativeEvent: wrapper.nativeEvent,
-    target: wrapper.target,
-    currentTarget: wrapper.currentTarget,
-    eventPhase: wrapper.eventPhase,
-    bubbles: wrapper.bubbles,
-    cancelable: wrapper.cancelable,
-    defaultPrevented: wrapper.defaultPrevented,
-    isTrusted: wrapper.isTrusted,
-    view: wrapper.view as unknown,
-    key: wrapper.key,
-    code: wrapper.code,
-    location: wrapper.location,
-    locale: wrapper.locale,
-    charCode: wrapper.charCode,
-    keyCode: wrapper.keyCode,
-    which: wrapper.which,
-    detail: wrapper.detail,
-    timeStamp: wrapper.timeStamp,
-    ctrlKey: wrapper.ctrlKey,
-    metaKey: wrapper.metaKey,
-    altKey: wrapper.altKey,
-    shiftKey: wrapper.shiftKey,
-    repeat: wrapper.repeat,
-    composing: wrapper.isComposing,
-    preventDefault: wrapper.preventDefault,
-    isDefaultPrevented: wrapper.isDefaultPrevented,
-    isPropagationStopped: wrapper.isPropagationStopped,
+    type: read(() => wrapper.type),
+    nativeEvent: read(() => wrapper.nativeEvent),
+    target: read(() => wrapper.target),
+    currentTarget: read(() => wrapper.currentTarget),
+    eventPhase: read(() => wrapper.eventPhase),
+    bubbles: read(() => wrapper.bubbles),
+    cancelable: read(() => wrapper.cancelable),
+    defaultPrevented: read(() => wrapper.defaultPrevented),
+    isTrusted: read(() => wrapper.isTrusted),
+    view: read(() => wrapper.view as unknown),
+    key: read(() => wrapper.key),
+    code: read(() => wrapper.code),
+    location: read(() => wrapper.location),
+    locale: read(() => wrapper.locale),
+    charCode: read(() => wrapper.charCode),
+    keyCode: read(() => wrapper.keyCode),
+    which: read(() => wrapper.which),
+    detail: read(() => wrapper.detail),
+    timeStamp: read(() => wrapper.timeStamp),
+    ctrlKey: read(() => wrapper.ctrlKey),
+    metaKey: read(() => wrapper.metaKey),
+    altKey: read(() => wrapper.altKey),
+    shiftKey: read(() => wrapper.shiftKey),
+    repeat: read(() => wrapper.repeat),
+    composing: read(() => wrapper.isComposing),
+    preventDefault: read(() => wrapper.preventDefault),
+    isDefaultPrevented: read(() => wrapper.isDefaultPrevented),
+    isPropagationStopped: read(() => wrapper.isPropagationStopped),
   };
   if (
+    !valid ||
     event === native.event ||
     current.type !== "keydown" ||
     current.nativeEvent !== native.event ||
@@ -3975,14 +3989,53 @@ function createPanelRowKeyboardRuntime(
     !authority.eventCancelBubble.read(proof.event) &&
     authority.activeElement.read(ownerDocument) === proof.target &&
     publicationIsCurrent();
+  const retainedReactProofs = () =>
+    [reactListCapture, reactSelectCapture, reactSelectBubble, reactListBubble]
+      .filter((proof): proof is PanelRowReactKeyProof => proof !== null);
+  const methodsRemainExact = (
+    proofs: readonly PanelRowReactKeyProof[],
+    prevention: PanelRowPrevention | null,
+  ) => {
+    const matches = (proof: PanelRowReactKeyProof) => {
+      const event = proof.event as KeyboardEvent<Element>;
+      const defaultQuery = prevention?.event === proof.event
+        ? prevention.isDefaultPrevented
+        : proof.methods.isDefaultPrevented;
+      return (
+        event.preventDefault === proof.methods.preventDefault &&
+        event.isDefaultPrevented === defaultQuery &&
+        event.isPropagationStopped === proof.methods.isPropagationStopped
+      );
+    };
+    // Method accessors are public callbacks too; revisit earlier wrappers after later reads.
+    return proofs.every(matches) && [...proofs].reverse().every(matches);
+  };
   const authenticateReact = (
     proof: PanelRowReactKeyProof,
     native: PanelRowNativeKeyProof,
     currentTarget: Element | null,
-    nativePrevented = false,
-    wrapperPrevented = false,
+    prevention: PanelRowPrevention | null = null,
+    proofs: readonly PanelRowReactKeyProof[] = [...retainedReactProofs(), proof],
   ) => {
+    const wrapperPrevented = prevention?.event === proof.event;
+    const defaultQuery = wrapperPrevented
+      ? prevention.isDefaultPrevented
+      : proof.methods.isDefaultPrevented;
+    const methodsAreCurrent = () => methodsRemainExact(proofs, prevention);
+    const authorityIsCurrent = () =>
+      nativeIsCurrent(native, prevention !== null) &&
+      (prevention === null ||
+        (cells.claimedRowPublications.has(publication) &&
+          cells.claimedRowEntries.has(native.entry) &&
+          cells.claimedRowActions.has(native.action) &&
+          cells.claimedRowNativeEvents.has(native.event) &&
+          proofs.every((react) => cells.claimedRowReactEvents.has(react.event)))) &&
+      methodsAreCurrent() &&
+      nativeIsCurrent(native, prevention !== null) &&
+      methodsAreCurrent();
+    const revalidate = () => readGuarded(authorityIsCurrent)?.value === true;
     const readCurrent = () => {
+      if (!revalidate()) return null;
       const current = readGuarded(() =>
         readPanelRowReactKeyProof(
           proof.event,
@@ -3990,23 +4043,24 @@ function createPanelRowKeyboardRuntime(
           currentTarget,
           proof.eventPhase,
           wrapperPrevented,
+          methodsAreCurrent,
         ),
       )?.value;
       return current &&
         current.composing === proof.composing &&
         current.methods.preventDefault === proof.methods.preventDefault &&
         current.methods.isPropagationStopped === proof.methods.isPropagationStopped &&
-        (wrapperPrevented ||
-          current.methods.isDefaultPrevented === proof.methods.isDefaultPrevented) &&
-        nativeIsCurrent(native, nativePrevented)
+        current.methods.isDefaultPrevented === defaultQuery &&
+        revalidate()
         ? current
         : null;
     };
     const current = readCurrent();
     if (!current) return false;
     const defaultResult = readGuarded(() =>
-      authority.apply(current.methods.isDefaultPrevented, proof.event, []),
+      authority.apply(defaultQuery, proof.event, []),
     );
+    if (defaultResult?.value !== wrapperPrevented || !revalidate()) return false;
     const afterDefault = readCurrent();
     if (
       defaultResult?.value !== wrapperPrevented ||
@@ -4018,6 +4072,7 @@ function createPanelRowKeyboardRuntime(
     const propagationResult = readGuarded(() =>
       authority.apply(proof.methods.isPropagationStopped, proof.event, []),
     );
+    if (propagationResult?.value !== false || !revalidate()) return false;
     const afterPropagation = readCurrent();
     return (
       propagationResult?.value === false &&
@@ -4048,6 +4103,8 @@ function createPanelRowKeyboardRuntime(
         native,
         currentTarget,
         eventPhase,
+        false,
+        () => methodsRemainExact(retainedReactProofs(), null),
       ),
     )?.value;
     return proof && authenticateReact(proof, native, currentTarget) ? proof : null;
@@ -4173,21 +4230,30 @@ function createPanelRowKeyboardRuntime(
       !nativeStillMatches(native) ||
       !proof.reactProofs.every((react) => authenticateReact(react, native, null)) ||
       !publicationIsCurrent() ||
+      readGuarded(() => methodsRemainExact(proof.reactProofs, null))?.value !== true ||
       !claim(proof)
     ) {
       rejectObservedEvent(native);
       return;
     }
     const destination = native.destination;
-    const prevented = readGuarded(() =>
-      authority.apply(proof.reactBubble.methods.preventDefault, proof.reactBubble.event, []),
-    );
+    const prevented = readGuarded(() => {
+      const event = proof.reactBubble.event as KeyboardEvent<Element>;
+      authority.apply(proof.reactBubble.methods.preventDefault, event, []);
+      // Only this immediate return-boundary read may adopt React's replacement query.
+      const isDefaultPrevented = event.isDefaultPrevented;
+      return typeof isDefaultPrevented === "function"
+        ? Object.freeze({ event, isDefaultPrevented })
+        : null;
+    })?.value;
     const canFocus = Boolean(
       prevented &&
-      nativeIsCurrent(native, true) &&
       proof.reactProofs.every((react) =>
-        authenticateReact(react, native, null, true, react.event === proof.reactBubble.event),
-      ),
+        authenticateReact(react, native, null, prevented, proof.reactProofs),
+      ) &&
+      readGuarded(() =>
+        nativeIsCurrent(native, true) && methodsRemainExact(proof.reactProofs, prevented),
+      )?.value === true,
     );
     clearProof(native);
     runtime.retireForAction();

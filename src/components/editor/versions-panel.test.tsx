@@ -5614,6 +5614,199 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
     versions.mockReset().mockResolvedValue({ versions: rowVersions });
   });
 
+  type RowQueryScenario = {
+    name: string;
+    aliases?: boolean;
+    success?: boolean;
+    trigger?: "capture query" | "scalar" | "alias query" | "replacement getter" | "later query";
+    timing?: "before" | "after";
+    method?: (typeof VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS)[number];
+  };
+  const rowQueryScenarios: RowQueryScenario[] = [
+    { name: "capture query replacing Q1", trigger: "capture query" },
+    { name: "scalar accessor replacing Q1", trigger: "scalar" },
+    { name: "true alias replacing Q1 between visits", trigger: "alias query", aliases: true },
+    { name: "replacement getter changing a retained method", trigger: "replacement getter" },
+    { name: "exact Q1 on independent wrappers", success: true },
+    { name: "exact Q1 on true aliases", success: true, aliases: true },
+    { name: "reentrant replacement getter", trigger: "replacement getter", success: true },
+    ...(["before", "after"] as const).flatMap((timing) =>
+      VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS.map((method) => ({
+        name: `later query changing earlier ${method} ${timing} prevention`,
+        trigger: "later query" as const,
+        timing,
+        method,
+      })),
+    ),
+  ];
+
+  it.each(rowQueryScenarios)(
+    "retained row query authority: $name",
+    async (scenario) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-retained-query-${scenario.name}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        const list = source.closest("ul")!;
+        const wrappers: CapturedEvent<HTMLElement>[] = [];
+        const methods: ReturnType<typeof cloneVersionsToolbarReactKey>["methods"][] = [];
+        const retainedHandlers: ((event: CapturedEvent<HTMLElement>) => void)[] = [];
+        const replacement = vi.fn(() => true);
+        const prevention = vi.fn();
+        let terminalReady = false;
+        let changed = false;
+        let replacementRead = false;
+        let native: Event | undefined;
+        const replace = (
+          index: number,
+          method: (typeof VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS)[number],
+        ) => {
+          if (changed) return;
+          changed = true;
+          Reflect.set(wrappers[index], method, replacement);
+        };
+        const q1 = vi.fn(() => {
+          if (scenario.trigger === "alias query") replace(2, "isDefaultPrevented");
+          if (scenario.trigger === "later query" && scenario.timing === "after") {
+            replace(0, scenario.method!);
+          }
+          return true;
+        });
+        const boundaries = [
+          [list, "onKeyDownCapture"],
+          [source, "onKeyDownCapture"],
+          [source, "onKeyDown"],
+          [list, "onKeyDown"],
+        ] as const;
+        boundaries.forEach(([element, prop], index) => {
+          interceptEvent<HTMLElement>(element, prop, (original, event) => {
+            retainedHandlers[index] = original;
+            const aliasIndex = scenario.aliases && (index === 1 || index === 3)
+              ? index - 1
+              : null;
+            if (aliasIndex !== null) {
+              wrappers[index] = wrappers[aliasIndex];
+              methods[index] = methods[aliasIndex];
+              wrappers[index].currentTarget = event.currentTarget;
+            } else {
+              const isolated = cloneVersionsToolbarReactKey(event, Object.create(null), {
+                accessors: true,
+                privateState: "absent",
+              });
+              wrappers[index] = isolated.clone;
+              methods[index] = isolated.methods;
+              native = (event as unknown as ReactKeyboardEvent<HTMLElement>).nativeEvent;
+              const query = isolated.methods.isDefaultPrevented.getMockImplementation()!;
+              isolated.methods.isDefaultPrevented.mockImplementation(function (this: object) {
+                if (terminalReady) {
+                  if (scenario.trigger === "capture query" && index === 0 && native?.defaultPrevented) {
+                    replace(2, "isDefaultPrevented");
+                  }
+                  if (
+                    scenario.trigger === "later query" && index === 3 &&
+                    scenario.timing === "before" && !native?.defaultPrevented
+                  ) {
+                    replace(0, scenario.method!);
+                  }
+                }
+                return Reflect.apply(query, this, []);
+              });
+              if (index === 0 && scenario.trigger === "scalar") {
+                const key = isolated.clone.key;
+                Object.defineProperty(isolated.clone, "key", { get: () => {
+                  if (terminalReady && native?.defaultPrevented) replace(2, "isDefaultPrevented");
+                  return key;
+                } });
+              }
+              if (index === 2) {
+                const originalPrevent = isolated.methods.preventDefault.getMockImplementation()!;
+                isolated.methods.preventDefault.mockImplementation(function (this: object) {
+                  prevention();
+                  Reflect.apply(originalPrevent, this, []);
+                  if (scenario.trigger === "replacement getter") {
+                    Object.defineProperty(this, "isDefaultPrevented", {
+                      configurable: true,
+                      get: () => {
+                        if (!replacementRead) {
+                          replacementRead = true;
+                          if (scenario.success) original(isolated.clone);
+                          else replace(0, "isPropagationStopped");
+                        }
+                        return q1;
+                      },
+                    });
+                  } else {
+                    Reflect.set(this, "isDefaultPrevented", q1);
+                  }
+                });
+              }
+            }
+            original(wrappers[index]);
+            Reflect.set(wrappers[index], "currentTarget", null);
+            if (index === 3) terminalReady = true;
+          });
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const requests = versions.mock.calls.length;
+        const delivered = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        const alreadyPrevented = scenario.timing !== "before";
+        expect(new Set(wrappers).size).toBe(scenario.aliases ? 2 : 4);
+        expect(changed).toBe(!scenario.success);
+        expect(delivered.defaultPrevented).toBe(alreadyPrevented);
+        expect(prevention).toHaveBeenCalledTimes(alreadyPrevented ? 1 : 0);
+        expect(preventDefault).toHaveBeenCalledTimes(alreadyPrevented ? 1 : 0);
+        expect(replacement).not.toHaveBeenCalled();
+        if (scenario.success) {
+          expect(q1).toHaveBeenCalled();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+          expect(versionRowSelects(host)[1]).toHaveFocus();
+        } else {
+          expect(focus).not.toHaveBeenCalled();
+          expect(source).toHaveFocus();
+        }
+        expectNoVersionRowWork(onClose, onPreview, requests);
+
+        focus.mockClear();
+        preventDefault.mockClear();
+        await act(async () => {
+          wrappers.forEach((wrapper, index) => retainedHandlers[index](wrapper));
+          source.dispatchEvent(delivered);
+        });
+        expect(replacement).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+
+        source.focus();
+        focus.mockClear();
+        const successor = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(successor.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expect(replacement).not.toHaveBeenCalled();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it.each(["own accessors", "inherited accessors"] as const)(
     "accepts independent public row wrappers with %s and no private authority",
     async (storage) => {
