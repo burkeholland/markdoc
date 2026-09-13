@@ -10,8 +10,12 @@ import {
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { compile } from "tailwindcss";
 import type { CollabSession } from "@/editor/collab/session";
 import type { ActivityItemDto, ActivityPageDto } from "@/lib/api";
+import { formatDateTime, formatDayHeading } from "@/lib/utils";
 
 const activity = vi.fn();
 const unhandledRejections: unknown[] = [];
@@ -462,6 +466,230 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   expect(unhandledRejections).toEqual([]);
+});
+
+describe("ActivityPanel text wrapping", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-08T12:05:00.000Z"));
+  });
+
+  afterEach(() => {
+    // Restore timer spies before the outer cleanup switches back to real timers.
+    vi.restoreAllMocks();
+  });
+
+  function observeInspection(onClose: () => void) {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const click = vi.spyOn(HTMLElement.prototype, "click");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const counts = () => [
+      activity.mock.calls.length,
+      focus.mock.calls.length,
+      click.mock.calls.length,
+      timeout.mock.calls.length,
+      interval.mock.calls.length,
+      vi.getTimerCount(),
+    ];
+    return (inspect: () => void) => {
+      const before = counts();
+      const focused = document.activeElement;
+      const markup = activityPanel().innerHTML;
+      inspect();
+      expect(counts()).toEqual(before);
+      expect(document.activeElement).toBe(focused);
+      expect(activityPanel().innerHTML).toBe(markup);
+      expect(onClose).not.toHaveBeenCalled();
+    };
+  }
+
+  function expectWrappedRows(
+    items: ActivityItemDto[],
+    descriptions: string[],
+    timestamps: string[],
+  ) {
+    const rows = screen.getAllByTestId("activity-row");
+    expect(rows).toHaveLength(items.length);
+    expect(activityPanel()).toHaveClass("w-[340px]", "shrink-0");
+    expect(screen.queryAllByTestId("activity-agent-chip")).toHaveLength(
+      items.filter((item) => item.actorKind === "agent").length,
+    );
+
+    for (const [index, item] of items.entries()) {
+      const renderedRow = rows[index];
+      const name = within(renderedRow).getByText(item.actorName, { exact: true });
+      const description = within(renderedRow).getByText(descriptions[index], { exact: true });
+      expect(renderedRow.tagName).toBe("LI");
+      expect(renderedRow).toHaveAttribute("data-action", item.action);
+      expect(renderedRow).toHaveAttribute("data-actor-kind", item.actorKind);
+      expect(renderedRow).toHaveClass("flex", "items-start", "gap-2.5");
+      expect(name).toHaveClass("wrap-anywhere", "font-medium", "text-ink");
+      expect(description).toHaveClass("wrap-anywhere");
+      expect(name.parentElement).toBe(description.parentElement);
+      expect(name.parentElement).toHaveClass("flex", "flex-wrap");
+      expect(name.parentElement?.parentElement).toHaveClass("min-w-0", "flex-1");
+      for (const [element, text] of [[name, item.actorName], [description, descriptions[index]]] as const) {
+        expect(element.textContent).toBe(text);
+        expect(element.childElementCount).toBe(0);
+        expect(element).not.toHaveClass("break-words", "break-all", "truncate", "overflow-hidden", "whitespace-nowrap");
+      }
+      expect(renderedRow.querySelectorAll("script, img, br, wbr")).toHaveLength(0);
+
+      const avatar = renderedRow.firstElementChild;
+      const chips = within(renderedRow).queryAllByTestId("activity-agent-chip");
+      if (item.actorKind === "agent") {
+        expect(avatar).toHaveAttribute("title", `${item.actorName} (agent)`);
+        expect(avatar).toHaveClass("h-7", "w-7", "shrink-0");
+        expect(chips).toHaveLength(1);
+        expect(chips[0].textContent).toBe("agent");
+        expect(chips[0]).toBe(name.nextElementSibling);
+        expect(chips[0].nextElementSibling).toBe(description);
+      } else {
+        expect(avatar).toHaveAttribute("title", item.actorName);
+        expect(avatar).toHaveStyle({ width: "28px", height: "28px" });
+        expect(chips).toHaveLength(0);
+        expect(name.nextElementSibling).toBe(description);
+      }
+      const time = renderedRow.querySelector("time");
+      expect(time).toHaveAttribute("datetime", item.createdAt);
+      expect(time).toHaveAttribute("title", formatDateTime(item.createdAt));
+      expect(time?.textContent).toBe(timestamps[index]);
+    }
+
+    const days = [...new Set(items.map((item) => formatDayHeading(item.createdAt)))];
+    const lists = within(activityPanel()).getAllByRole("list");
+    expect(lists).toHaveLength(days.length);
+    for (const [index, day] of days.entries()) {
+      expect(lists[index].previousElementSibling?.textContent).toBe(day);
+      expect(lists[index].children).toHaveLength(
+        items.filter((item) => formatDayHeading(item.createdAt) === day).length,
+      );
+    }
+    const refresh = screen.getByRole("button", { name: "Refresh activity" });
+    const close = screen.getByRole("button", { name: "Close activity" });
+    expect(refresh).toBeEnabled();
+    expect(close).toBeEnabled();
+    expect(refresh.nextElementSibling).toBe(close);
+  }
+
+  it.each([
+    { label: "unbroken", human: "H".repeat(240), agent: "A".repeat(240), quote: "Q".repeat(240) },
+    { label: "multiword", human: "Human Editor", agent: "Review Agent", quote: "an ordinary multiword comment" },
+    { label: "literal markup", human: 'Human<em>&"\'</em>', agent: 'Agent<img>&"\'', quote: '<script>alert("quoted")</script>&<br><wbr>\'literal\'' },
+  ])("preserves full $label names and descriptions with wrapping classes", async ({ label, human, agent, quote }) => {
+    const items: ActivityItemDto[] = [
+      { ...row("human", human), action: "comment.add", detail: { quote }, createdAt: "2026-09-08T12:04:00.000Z" },
+      { ...row("agent", agent), actorKind: "agent", createdAt: "2026-09-07T12:05:00.000Z" },
+    ];
+    if (label === "unbroken") {
+      for (const text of [human, agent, quote]) {
+        expect(text.length).toBeGreaterThanOrEqual(200);
+        expect(text).not.toMatch(/\s/);
+      }
+    }
+    const onClose = vi.fn();
+    const inspect = observeInspection(onClose);
+    activity.mockResolvedValueOnce({ items, nextBefore: "older" });
+    render(<ActivityPanel session={session(`wrapping-${label}`)} onClose={onClose} />);
+    await act(async () => {});
+
+    inspect(() => {
+      expectWrappedRows(items, [`commented: \u201c${quote}\u201d`, "edited the document"], ["1 minute ago", "yesterday"]);
+      expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
+      expect(screen.getByTestId("activity-load-more")).toHaveClass("w-full");
+    });
+    expect(activity).toHaveBeenCalledExactlyOnceWith(`wrapping-${label}`, { limit: 50 });
+  });
+
+  it("keeps wrapping through append and refresh, then discards old rows and pending work on replacement", async () => {
+    const human = { ...row("human", "H".repeat(240)), createdAt: "2026-09-08T12:04:00.000Z" };
+    const quote = "Q".repeat(240);
+    const agent: ActivityItemDto = {
+      ...row("agent", "A".repeat(240)), actorKind: "agent", action: "comment.add",
+      detail: { quote }, createdAt: "2026-09-07T12:05:00.000Z",
+    };
+    const ordinary = { ...row("ordinary", "Current Human Editor"), createdAt: "2026-09-08T12:05:00.000Z" };
+    const replacement: ActivityItemDto = { ...human, id: "replacement", actorName: "R".repeat(240), action: "comment.reply", detail: { quote } };
+    const appended = deferred<ActivityPageDto>();
+    const refreshed = deferred<ActivityPageDto>();
+    const stalePage = deferred<ActivityPageDto>();
+    const currentPage = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce({ items: [human], nextBefore: "older" })
+      .mockReturnValueOnce(appended.promise)
+      .mockReturnValueOnce(refreshed.promise)
+      .mockReturnValueOnce(stalePage.promise)
+      .mockReturnValueOnce(currentPage.promise);
+    const onClose = vi.fn();
+    const inspect = observeInspection(onClose);
+    const rendered = render(<ActivityPanel session={session("wrapping-old")} onClose={onClose} />);
+    await act(async () => {});
+    inspect(() => expectWrappedRows([human], ["edited the document"], ["1 minute ago"]));
+
+    const loadMore = screen.getByRole("button", { name: "Load more" });
+    fireEvent.click(loadMore);
+    fireEvent.click(loadMore);
+    expect(activity).toHaveBeenCalledTimes(2);
+    expect(activity).toHaveBeenLastCalledWith("wrapping-old", { before: "older", limit: 50 });
+    expect(loadMore).toBeDisabled();
+    appended.resolve({ items: [agent, human], nextBefore: "oldest" });
+    await act(async () => {});
+    inspect(() => expectWrappedRows(
+      [human, agent], ["edited the document", `commented: \u201c${quote}\u201d`], ["1 minute ago", "yesterday"],
+    ));
+
+    const refresh = screen.getByRole("button", { name: "Refresh activity" });
+    fireEvent.click(refresh);
+    fireEvent.click(refresh);
+    expect(activity).toHaveBeenCalledTimes(3);
+    expect(activity).toHaveBeenLastCalledWith("wrapping-old", { limit: 50 });
+    expect(refresh).toBeDisabled();
+    refreshed.resolve({ items: [ordinary, human], nextBefore: "ignored-refresh-cursor" });
+    await act(async () => {});
+    inspect(() => expectWrappedRows(
+      [ordinary, human, agent], ["edited the document", "edited the document", `commented: \u201c${quote}\u201d`],
+      ["just now", "1 minute ago", "yesterday"],
+    ));
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(activity).toHaveBeenCalledTimes(4);
+    expect(activity).toHaveBeenLastCalledWith("wrapping-old", { before: "oldest", limit: 50 });
+    rendered.rerender(<ActivityPanel session={session("wrapping-current")} onClose={onClose} />);
+    expect(activity).toHaveBeenCalledTimes(5);
+    expect(activity).toHaveBeenLastCalledWith("wrapping-current", { limit: 50 });
+    expect(screen.queryAllByTestId("activity-row")).toHaveLength(0);
+    currentPage.resolve({ items: [replacement], nextBefore: null });
+    await act(async () => {});
+    stalePage.resolve({ items: [human, agent], nextBefore: "stale-cursor" });
+    await act(async () => {});
+    inspect(() => {
+      expectWrappedRows([replacement], [`replied: \u201c${quote}\u201d`], ["1 minute ago"]);
+      expect(screen.queryByText(human.actorName)).toBeNull();
+      expect(screen.queryByText(agent.actorName)).toBeNull();
+      expect(screen.queryByText(ordinary.actorName)).toBeNull();
+      expect(screen.queryByTestId("activity-load-more")).toBeNull();
+    });
+
+    const close = screen.getByRole("button", { name: "Close activity" });
+    fireEvent.click(close);
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(activity).toHaveBeenCalledTimes(5);
+  });
+
+  it("emits overflow-wrap anywhere and the existing flex width constraints from installed Tailwind", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["wrap-anywhere", "flex-wrap", "min-w-0", "flex-1"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.flex-wrap\s*\{\s*flex-wrap:\s*wrap;\s*\}/);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.flex-1\s*\{\s*flex:\s*1;\s*\}/);
+  });
 });
 
 describe("ActivityPanel list recovery", () => {
