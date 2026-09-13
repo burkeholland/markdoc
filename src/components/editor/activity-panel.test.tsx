@@ -463,8 +463,8 @@ afterEach(async () => {
   await Promise.resolve();
   process.off("unhandledRejection", recordUnhandledRejection);
   vi.clearAllTimers();
-  vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.useRealTimers();
   expect(unhandledRejections).toEqual([]);
 });
 
@@ -689,6 +689,293 @@ describe("ActivityPanel text wrapping", () => {
     expect(css).toMatch(/\.flex-wrap\s*\{\s*flex-wrap:\s*wrap;\s*\}/);
     expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
     expect(css).toMatch(/\.flex-1\s*\{\s*flex:\s*1;\s*\}/);
+  });
+
+  const errorMessages = [
+    { label: "unbroken", message: "E".repeat(260) },
+    { label: "ordinary", message: "Activity is temporarily unavailable. Please try again." },
+    { label: "literal HTML and whitespace", message: ' \t<em>offline</em>  <script>alert("error")</script>\n<img src="x"><br><wbr>& "reason"\t ' },
+  ];
+
+  function expectWrappedError(surface: "list" | "page", text: string) {
+    const panel = activityPanel();
+    const scroll = panel.children.item(1);
+    const content = scroll?.firstElementChild;
+    const message = within(panel).getByText(text, { exact: true, normalizer: (value) => value });
+    const errorClasses = "mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40";
+    expect(panel.className).toBe("flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2");
+    expect(panel.children).toHaveLength(2);
+    expect(scroll?.className).toBe("scrollbar-thin flex-1 overflow-y-auto p-3");
+    expect(scroll?.children).toHaveLength(1);
+    expect(content?.tagName).toBe("DIV");
+    expect(content?.getAttributeNames()).toEqual([]);
+    expect(message.tagName).toBe("DIV");
+    expect(message.textContent).toBe(text);
+    expect(message.childNodes).toHaveLength(1);
+    expect(message.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(message.childElementCount).toBe(0);
+    expect(message.getAttributeNames()).toEqual(["class"]);
+    expect(message).not.toHaveFocus();
+    expect(panel.querySelectorAll('script, img, br, wbr, [role="tooltip"]')).toHaveLength(0);
+    if (surface === "list") {
+      const alert = screen.getByRole("alert");
+      const retry = within(alert).getByRole("button", { name: "Retry" });
+      expect(message.className).toBe("wrap-anywhere");
+      expect(alert.className).toBe(errorClasses);
+      expect(alert.getAttributeNames().sort()).toEqual(["aria-atomic", "class", "role"]);
+      expect(alert).toHaveAttribute("aria-atomic", "true");
+      expect(content?.firstElementChild).toBe(alert);
+      expect([...alert.childNodes]).toEqual([message, retry]);
+      expect(retry.className).toBe("btn btn-outline btn-sm mt-2 gap-1.5");
+      expect(retry).toHaveAttribute("type", "button");
+      expect(retry).toBeEnabled();
+    } else {
+      expect(message.className).toBe(`${errorClasses} wrap-anywhere`);
+      expect(message.parentElement).toBe(content);
+      expect(content?.children.item(screen.queryByRole("alert") ? 1 : 0)).toBe(message);
+    }
+    return message;
+  }
+
+  it.each(errorMessages)("keeps the full $label list error through repeated failure and empty recovery", async ({ label, message }) => {
+    if (label === "unbroken") {
+      expect(message.length).toBeGreaterThanOrEqual(240);
+      expect(message).not.toMatch(/\s/);
+    }
+    const repeated = deferred<ActivityPageDto>();
+    const recovered = deferred<ActivityPageDto>();
+    activity
+      .mockRejectedValueOnce(new Error(message))
+      .mockReturnValueOnce(repeated.promise)
+      .mockReturnValueOnce(recovered.promise);
+    const onClose = vi.fn();
+    render(<ActivityPanel session={session(`list-error-${label}`)} onClose={onClose} />);
+    await act(async () => {});
+    const inspect = observeInspection(onClose);
+    const alert = screen.getByRole("alert");
+
+    for (const [index, request] of [repeated, recovered].entries()) {
+      inspect(() => {
+        expectWrappedError("list", message);
+        expect(within(activityPanel()).getAllByRole("button")).toHaveLength(3);
+        expect(activityPanel().querySelector(".animate-spin")).toBeNull();
+        expect(screen.queryByText("No activity yet")).toBeNull();
+        expect(screen.queryAllByTestId("activity-row")).toHaveLength(0);
+      });
+      const retry = screen.getByRole("button", { name: "Retry" });
+      fireEvent.click(retry);
+      fireEvent.click(retry);
+      expect(activity).toHaveBeenCalledTimes(index + 2);
+      expect(activity).toHaveBeenLastCalledWith(`list-error-${label}`, { limit: 50 });
+      expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Refreshing activity" })).toBeDisabled();
+      if (request === repeated) request.reject(new Error(message));
+      else request.resolve({ items: [], nextBefore: null });
+      await act(async () => {});
+    }
+    inspect(() => {
+      expect(screen.getByText("No activity yet")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(alert).not.toBeInTheDocument();
+      expect(activityPanel().querySelector(".wrap-anywhere")).toBeNull();
+      expect(within(activityPanel()).getAllByRole("button")).toHaveLength(2);
+      expect(screen.getByRole("button", { name: "Refresh activity" })).toBeEnabled();
+    });
+  });
+
+  it.each(errorMessages)("keeps the full $label page error through repeated failure and cached-row recovery", async ({ label, message }) => {
+    if (label === "unbroken") {
+      expect(message.length).toBeGreaterThanOrEqual(240);
+      expect(message).not.toMatch(/\s/);
+    }
+    const failed = deferred<ActivityPageDto>();
+    const repeated = deferred<ActivityPageDto>();
+    const recovered = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce({ items: [row("recent", "Recent editor")], nextBefore: "older-cursor" })
+      .mockReturnValueOnce(failed.promise)
+      .mockReturnValueOnce(repeated.promise)
+      .mockReturnValueOnce(recovered.promise);
+    const onClose = vi.fn();
+    render(<ActivityPanel session={session(`page-error-${label}`)} onClose={onClose} />);
+    await act(async () => {});
+    const inspect = observeInspection(onClose);
+    const recent = screen.getByTestId("activity-row");
+    let error: HTMLElement | undefined;
+
+    for (const [index, request] of [failed, repeated, recovered].entries()) {
+      const loadMore = screen.getByRole("button", { name: "Load more" });
+      fireEvent.click(loadMore);
+      fireEvent.click(loadMore);
+      expect(activity).toHaveBeenCalledTimes(index + 2);
+      expect(activity).toHaveBeenLastCalledWith(`page-error-${label}`, { before: "older-cursor", limit: 50 });
+      expect(screen.getByTestId("activity-load-more")).toBeDisabled();
+      if (request === recovered) {
+        request.resolve({ items: [row("older", "Earlier editor"), row("recent", "Duplicate editor")], nextBefore: null });
+      } else {
+        request.reject(new Error(message));
+      }
+      await act(async () => {});
+      if (request !== recovered) {
+        inspect(() => {
+          error = expectWrappedError("page", message);
+          expect(screen.queryByRole("alert")).toBeNull();
+          expect(within(activityPanel()).getAllByRole("button")).toHaveLength(3);
+          expect(screen.getByTestId("activity-row")).toBe(recent);
+          expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
+        });
+      }
+    }
+    inspect(() => {
+      expect(error).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("activity-load-more")).toBeNull();
+      expect(screen.getAllByTestId("activity-row")).toHaveLength(2);
+      expect(screen.getByText("Recent editor")).toBeInTheDocument();
+      expect(screen.getByText("Earlier editor")).toBeInTheDocument();
+      expect(screen.queryByText("Duplicate editor")).toBeNull();
+      expect(within(activityPanel()).getAllByRole("button")).toHaveLength(2);
+    });
+  });
+
+  it("retains expanded history and its cursor while wrapped list and page errors recover separately", async () => {
+    const listMessage = "L".repeat(260);
+    const pageMessage = "P".repeat(260);
+    const refreshed = deferred<ActivityPageDto>();
+    const paged = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce({ items: [row("recent", "Recent editor")], nextBefore: "older-cursor" })
+      .mockResolvedValueOnce({ items: [row("older", "Earlier editor")], nextBefore: "deep-cursor" })
+      .mockRejectedValueOnce(new Error(listMessage))
+      .mockRejectedValueOnce(new Error(pageMessage))
+      .mockReturnValueOnce(refreshed.promise)
+      .mockReturnValueOnce(paged.promise);
+    const onClose = vi.fn();
+    render(<ActivityPanel session={session("wrapped-expanded-errors")} onClose={onClose} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await act(async () => {});
+    const cachedRows = screen.getAllByTestId("activity-row");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh activity" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await act(async () => {});
+    const inspect = observeInspection(onClose);
+    inspect(() => {
+      expectWrappedError("list", listMessage);
+      expectWrappedError("page", pageMessage);
+      expect(screen.getAllByTestId("activity-row")).toEqual(cachedRows);
+      expect(within(activityPanel()).getAllByRole("button")).toHaveLength(4);
+    });
+    expect(activity).toHaveBeenCalledTimes(4);
+    expect(activity).toHaveBeenLastCalledWith("wrapped-expanded-errors", { before: "deep-cursor", limit: 50 });
+
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(activity).toHaveBeenCalledTimes(5);
+    expect(activity).toHaveBeenLastCalledWith("wrapped-expanded-errors", { limit: 50 });
+    refreshed.resolve({
+      items: [row("fresh", "Newest editor"), row("recent", "Updated recent editor")],
+      nextBefore: "ignored-refresh-cursor",
+    });
+    await act(async () => {});
+    inspect(() => {
+      expect(screen.queryByRole("alert")).toBeNull();
+      expectWrappedError("page", pageMessage);
+      expect(screen.getAllByTestId("activity-row").map((item) => item.textContent)).toEqual([
+        expect.stringContaining("Newest editor"),
+        expect.stringContaining("Updated recent editor"),
+        expect.stringContaining("Earlier editor"),
+      ]);
+    });
+    const loadMore = screen.getByRole("button", { name: "Load more" });
+    fireEvent.click(loadMore);
+    fireEvent.click(loadMore);
+    expect(activity).toHaveBeenCalledTimes(6);
+    expect(activity).toHaveBeenLastCalledWith("wrapped-expanded-errors", { before: "deep-cursor", limit: 50 });
+    paged.resolve({ items: [row("oldest", "Oldest editor"), row("older", "Duplicate earlier editor")], nextBefore: null });
+    await act(async () => {});
+    inspect(() => {
+      expect(screen.queryByText(pageMessage)).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("activity-load-more")).toBeNull();
+      expect(screen.getAllByTestId("activity-row")).toHaveLength(4);
+      expect(screen.getByText("Earlier editor")).toBeInTheDocument();
+      expect(screen.queryByText("Duplicate earlier editor")).toBeNull();
+    });
+  });
+
+  it.each(
+    (["list", "page"] as const).flatMap((surface) =>
+      (["removal", "document replacement"] as const).map((boundary) => ({ surface, boundary })),
+    ),
+  )("retires wrapped $surface errors and pending controls on $boundary", async ({ surface, boundary }) => {
+    const message = "E".repeat(260);
+    const stale = deferred<ActivityPageDto>();
+    const current = deferred<ActivityPageDto>();
+    if (surface === "page") {
+      activity.mockResolvedValueOnce({ items: [row("old", "Old editor")], nextBefore: "old-cursor" });
+    }
+    activity
+      .mockRejectedValueOnce(new Error(message))
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    const onClose = vi.fn();
+    const rendered = render(<ActivityPanel session={session("wrapped-retired")} onClose={onClose} />);
+    await act(async () => {});
+    if (surface === "page") {
+      fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+      await act(async () => {});
+    }
+    const error = expectWrappedError(surface, message);
+    const request = captureControl(screen.getByRole("button", { name: surface === "list" ? "Retry" : "Load more" }));
+    act(() => {
+      invoke(request);
+      invoke(request);
+    });
+    const pendingCount = surface === "list" ? 2 : 3;
+    expect(activity).toHaveBeenCalledTimes(pendingCount);
+    expect(activity).toHaveBeenLastCalledWith(
+      "wrapped-retired",
+      surface === "list" ? { limit: 50 } : { before: "old-cursor", limit: 50 },
+    );
+    const oldClose = captureControl(screen.getByRole("button", { name: "Close activity" }));
+    const oldRefresh = captureControl(screen.getByRole("button", { name: surface === "list" ? "Refreshing activity" : "Refresh activity" }));
+    if (boundary === "removal") rendered.unmount();
+    else rendered.rerender(<ActivityPanel session={session("wrapped-current")} onClose={onClose} />);
+    const expectedCount = pendingCount + (boundary === "document replacement" ? 1 : 0);
+    const afterBoundary = document.body.innerHTML;
+    expect(error).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("activity-row")).toHaveLength(0);
+    act(() => {
+      invoke(request);
+      invoke(oldRefresh);
+      invoke(oldClose);
+    });
+    expect(activity).toHaveBeenCalledTimes(expectedCount);
+    expect(document.body.innerHTML).toBe(afterBoundary);
+    expect(onClose).not.toHaveBeenCalled();
+    if (boundary === "document replacement") {
+      expect(activity).toHaveBeenLastCalledWith("wrapped-current", { limit: 50 });
+      current.resolve({ items: [row("current", "Current editor")], nextBefore: null });
+      await act(async () => {});
+    }
+    const beforeStale = document.body.innerHTML;
+    stale.reject(new Error(`Retired ${message}`));
+    await act(async () => {});
+    expect(document.body.innerHTML).toBe(beforeStale);
+    expect(activity).toHaveBeenCalledTimes(expectedCount);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(message)).toBeNull();
+    expect(screen.queryByText("Old editor")).toBeNull();
+    if (boundary === "removal") {
+      expect(screen.queryByTestId("activity-panel")).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } else {
+      expect(screen.getByText("Current editor")).toBeInTheDocument();
+      expect(screen.queryByTestId("activity-load-more")).toBeNull();
+    }
   });
 });
 
