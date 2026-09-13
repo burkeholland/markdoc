@@ -12,7 +12,7 @@ import {
 import { AlertTriangle, Check, CloudDownload, GitMerge, Loader2, Scale, UploadCloud } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { apiErrorText, type SyncStatusDto } from "@/lib/api";
-import { relativeTime } from "@/lib/utils";
+import { formatDateTime, relativeTime } from "@/lib/utils";
 
 type SyncActionKind = "merge" | "keep" | "take";
 type SyncControlKind = SyncActionKind | "compare";
@@ -2683,14 +2683,14 @@ export const SyncDialog = memo(function SyncDialog({
                 <div className="mt-1 font-medium text-ink" data-testid="sync-local-lines">
                   {presentation.localChanged ? `${plural(presentation.localLines)} changed` : "No changes"}
                 </div>
-                <div className="text-xs text-ink-3">since {presentation.publishedAt ? relativeTime(presentation.publishedAt) : "the last sync"}</div>
+                <div className="text-xs text-ink-3" title={presentation.publishedAt ? formatDateTime(presentation.publishedAt) : undefined}>since {presentation.publishedAt ? relativeTime(presentation.publishedAt) : "the last sync"}</div>
               </div>
               <div className="rounded-xl border border-line bg-surface-2 p-3">
                 <div className="text-xs font-medium uppercase tracking-wide text-ink-3">On GitHub</div>
                 <div className="mt-1 font-medium text-ink" data-testid="sync-remote-lines">
                   {presentation.remoteChanged ? `${plural(presentation.remoteLines)} changed` : "No changes"}
                 </div>
-                <div className="truncate text-xs text-ink-3">
+                <div className="truncate text-xs text-ink-3" title={presentation.remoteUpdatedAt ? formatDateTime(presentation.remoteUpdatedAt) : presentation.remoteSha || undefined}>
                   {presentation.remoteUpdatedAt ? `updated ${relativeTime(presentation.remoteUpdatedAt)}` : presentation.remoteSha ? `at ${presentation.remoteSha.slice(0, 7)}` : "\u00a0"}
                 </div>
               </div>

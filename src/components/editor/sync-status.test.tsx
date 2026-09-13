@@ -17,6 +17,7 @@ import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
+import { formatDateTime, relativeTime } from "@/lib/utils";
 import { pollDocumentSync } from "./use-sync-polling";
 import { PublishStatusButton } from "./header";
 import { SyncDialog, type SyncActions } from "./sync-dialog";
@@ -1249,6 +1250,206 @@ describe("remote-unreadable sync status", () => {
     expect(screen.getByTestId("sync-remote-unreadable")).toHaveTextContent("3.63 MB");
     expect(screen.getByTestId("sync-remote-unreadable")).toHaveTextContent("2 MB");
     expect(screen.getByTestId("sync-keep-mine")).toBeInTheDocument();
+    expect(screen.queryByTestId("sync-merge")).toBeNull();
+    expect(screen.queryByTestId("sync-take-remote")).toBeNull();
+    expect(screen.queryByTestId("sync-compare")).toBeNull();
+  });
+});
+
+describe("Sync dialog metadata titles", () => {
+  const publishedAt = "2026-09-12T08:15:00.000Z";
+  const updatedAt = "2026-09-13T09:30:00.000Z";
+  const sha = "4ce1359b0123456789abcdef0123456789abcdef";
+  const doc = { ...DOC, publishedAt };
+  const sync: SyncStatusDto = {
+    ...DIVERGED,
+    remote: { ...REMOTE, sha, updatedAt },
+  };
+
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-09-13T12:00:00.000Z").getTime());
+  });
+
+  function metadataRows() {
+    const local = screen.getByTestId("sync-local-lines").nextElementSibling;
+    const remote = screen.getByTestId("sync-remote-lines").nextElementSibling;
+    if (!(local instanceof HTMLDivElement) || !(remote instanceof HTMLDivElement)) {
+      throw new Error("Sync metadata must remain on the existing summary divs");
+    }
+    return { local, remote };
+  }
+
+  it.each([
+    { name: "both timestamps, with timestamp taking precedence over SHA", localTime: publishedAt, remoteTime: updatedAt, remoteSha: sha },
+    { name: "no local time and the complete 40-character SHA", localTime: null, remoteTime: null, remoteSha: sha },
+    { name: "remote timestamp without a SHA", localTime: publishedAt, remoteTime: updatedAt, remoteSha: null },
+    { name: "no metadata", localTime: null, remoteTime: null, remoteSha: null },
+    { name: "empty metadata", localTime: "", remoteTime: "", remoteSha: "" },
+  ])("preserves visible labels and exposes $name", ({ localTime, remoteTime, remoteSha }) => {
+    render(
+      <SyncDialog
+        open
+        onOpenChange={vi.fn()}
+        doc={{ ...doc, publishedAt: localTime }}
+        sync={{ ...sync, remote: { ...sync.remote, updatedAt: remoteTime, sha: remoteSha } }}
+        actions={syncActions()}
+      />,
+    );
+    const { local, remote } = metadataRows();
+
+    expect(local.textContent).toBe(`since ${localTime ? relativeTime(localTime) : "the last sync"}`);
+    expect(local.getAttribute("title")).toBe(localTime ? formatDateTime(localTime) : null);
+    expect(remote.textContent).toBe(remoteTime ? `updated ${relativeTime(remoteTime)}` : remoteSha ? `at ${remoteSha.slice(0, 7)}` : "\u00a0");
+    expect(remote.getAttribute("title")).toBe(remoteTime ? formatDateTime(remoteTime) : remoteSha || null);
+    if (remoteSha && !remoteTime) expect(remote.title).toHaveLength(40);
+    expect(local.className).toBe("text-xs text-ink-3");
+    expect(remote.className).toBe("truncate text-xs text-ink-3");
+    expect(local).not.toHaveAttribute("tabindex");
+    expect(remote).not.toHaveAttribute("tabindex");
+  });
+
+  it.each(["metadata", "document"] as const)("replaces and removes stale titles after %s replacement", (replacement) => {
+    const actions = syncActions();
+    const onOpenChange = vi.fn();
+    const view = render(<SyncDialog open onOpenChange={onOpenChange} doc={doc} sync={sync} actions={actions} />);
+    const original = metadataRows();
+    expect(original.local).toHaveAttribute("title", formatDateTime(publishedAt));
+    expect(original.remote).toHaveAttribute("title", formatDateTime(updatedAt));
+
+    const nextDoc = {
+      ...(replacement === "document" ? SECOND_DOC : doc),
+      publishedAt: "2026-09-10T06:45:00.000Z",
+    };
+    const nextTime = "2026-09-11T07:00:00.000Z";
+    const nextSync = { ...sync, remote: { ...sync.remote, updatedAt: nextTime } };
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={nextDoc} sync={nextSync} actions={actions} />);
+    const next = metadataRows();
+    expect(next.local).toBe(original.local);
+    expect(next.remote).toBe(original.remote);
+    expect(next.local).toHaveAttribute("title", formatDateTime(nextDoc.publishedAt));
+    expect(next.remote).toHaveAttribute("title", formatDateTime(nextTime));
+    expect(next.local.textContent).toBe(`since ${relativeTime(nextDoc.publishedAt)}`);
+    expect(next.remote.textContent).toBe(`updated ${relativeTime(nextTime)}`);
+    expect(screen.queryByTitle(formatDateTime(publishedAt))).toBeNull();
+    expect(screen.queryByTitle(formatDateTime(updatedAt))).toBeNull();
+
+    const noLocalTime = { ...nextDoc, publishedAt: null };
+    const shaOnly = { ...nextSync, remote: { ...nextSync.remote, updatedAt: null } };
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={noLocalTime} sync={shaOnly} actions={actions} />);
+    expect(metadataRows().local).not.toHaveAttribute("title");
+    expect(metadataRows().local.textContent).toBe("since the last sync");
+    expect(metadataRows().remote).toHaveAttribute("title", sha);
+    expect(metadataRows().remote.textContent).toBe(`at ${sha.slice(0, 7)}`);
+
+    view.rerender(<SyncDialog open onOpenChange={onOpenChange} doc={noLocalTime} sync={null} actions={actions} />);
+    expect(metadataRows().local).not.toHaveAttribute("title");
+    expect(metadataRows().remote).not.toHaveAttribute("title");
+    expect(metadataRows().remote.textContent).toBe("\u00a0");
+    expect(screen.getByTestId("sync-dialog").querySelectorAll("[title]")).toHaveLength(0);
+  });
+
+  it("keeps the summary, descriptions and controls unchanged, with inert hover and one accepted action", async () => {
+    const actions = syncActions();
+    const onOpenChange = vi.fn();
+    render(<SyncDialog open onOpenChange={onOpenChange} doc={doc} sync={sync} actions={actions} />);
+    const { local, remote } = metadataRows();
+    const summary = local.parentElement?.parentElement;
+    expect(summary?.className).toBe("grid grid-cols-2 gap-3 text-sm");
+    expect(summary?.children).toHaveLength(2);
+    expect(summary?.children[0]).toBe(local.parentElement);
+    expect(summary?.children[1]).toBe(remote.parentElement);
+    expect(summary?.querySelectorAll("div")).toHaveLength(8);
+    expect(screen.getByText("This document")).toBeInTheDocument();
+    expect(screen.getByText("On GitHub")).toBeInTheDocument();
+    expect(screen.getByTestId("sync-local-lines").textContent).toBe("2 lines changed");
+    expect(screen.getByTestId("sync-remote-lines").textContent).toBe("3 lines changed");
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Sync with GitHub");
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription("This document and o/r (main) both changed since they were last in sync.");
+    expect(screen.getByTestId("sync-merge")).toHaveAccessibleName("MergeCombine both sets of edits; conflicting lines are marked for you to resolve.");
+    expect(screen.getByTestId("sync-keep-mine")).toHaveAccessibleName("Keep mineForce-publish this document over the GitHub file.");
+    expect(screen.getByTestId("sync-take-remote")).toHaveAccessibleName("Take GitHubForce-pull; your local edits are kept in version history.");
+    expect(screen.getByTestId("sync-compare")).toHaveAccessibleName("Compare GitHub with this document");
+    const root = screen.getByTestId("sync-dialog");
+    const controls = [...root.querySelectorAll("button")];
+    expect(controls.map((control) => control.dataset.testid)).toEqual([
+      "sync-merge", "sync-keep-mine", "sync-take-remote", "sync-compare",
+    ]);
+    expect(controls.every((control) => !control.disabled && control.tabIndex === 0)).toBe(true);
+    expect(root.querySelectorAll("button, input, a[href], [tabindex]")).toHaveLength(5);
+    const keep = screen.getByTestId("sync-keep-mine");
+    keep.focus();
+    const markup = document.body.innerHTML;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      throw new Error("Unexpected request during Sync metadata hover");
+    });
+    const send = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {
+      throw new Error("Unexpected XHR during Sync metadata hover");
+    });
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animation = vi.spyOn(window, "requestAnimationFrame");
+    try {
+      for (const row of [local, remote]) {
+        fireEvent.pointerOver(row);
+        fireEvent.pointerEnter(row);
+        fireEvent.mouseOver(row);
+        fireEvent.mouseEnter(row);
+        fireEvent.mouseLeave(row);
+        fireEvent.mouseOut(row);
+        fireEvent.pointerLeave(row);
+        fireEvent.pointerOut(row);
+      }
+      expect(document.body.innerHTML).toBe(markup);
+      expect(keep).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(animation).not.toHaveBeenCalled();
+      expect(actions.merge).not.toHaveBeenCalled();
+      expect(actions.keepMine).not.toHaveBeenCalled();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+      fetch.mockRestore();
+      send.mockRestore();
+      timeout.mockRestore();
+      interval.mockRestore();
+      animation.mockRestore();
+    }
+
+    await act(async () => {
+      fireEvent.click(keep);
+      fireEvent.click(keep);
+    });
+    expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update big.md");
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(actions.compare).not.toHaveBeenCalled();
+    expect(screen.getByTestId("sync-done")).toHaveTextContent("Published your version");
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("does not add metadata to the remote-unreadable branch", () => {
+    render(
+      <SyncDialog
+        open
+        onOpenChange={vi.fn()}
+        doc={doc}
+        sync={{ ...UNREADABLE_SYNC, remote: sync.remote }}
+        actions={syncActions()}
+      />,
+    );
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription("The file in o/r (main) cannot be read until it is made smaller or replaced.");
+    expect(screen.getByTestId("sync-remote-unreadable")).toHaveTextContent("The GitHub file is 3.63 MB, but Markdoc can read files up to 2 MB.");
+    expect(screen.queryByTestId("sync-local-lines")).toBeNull();
+    expect(screen.queryByTestId("sync-remote-lines")).toBeNull();
+    expect(screen.getByTestId("sync-dialog").querySelectorAll("[title]")).toHaveLength(0);
+    expect(screen.getByTestId("sync-keep-mine")).toBeEnabled();
     expect(screen.queryByTestId("sync-merge")).toBeNull();
     expect(screen.queryByTestId("sync-take-remote")).toBeNull();
     expect(screen.queryByTestId("sync-compare")).toBeNull();
