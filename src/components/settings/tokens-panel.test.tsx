@@ -41,6 +41,11 @@ const token = {
   collaboratorsMayAsk: false,
 };
 
+type TestToken = Omit<typeof token, "expiresAt"> & {
+  expiresAt: string | null;
+  revokedAt?: string | null;
+};
+
 const createdSecret = {
   id: "created-token",
   name: "Strict agent",
@@ -366,6 +371,114 @@ function dispatchRenameNavigationKey(
     target.dispatchEvent(event);
   });
   return event;
+}
+
+async function showStrictTokenRows(rows: readonly TestToken[] = [token]) {
+  fetchMock
+    .mockResolvedValueOnce(response({ tokens: rows }))
+    .mockResolvedValueOnce(response({ tokens: rows }));
+  const view = renderDirectSecret(
+    <StrictMode>
+      <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+    </StrictMode>,
+  );
+  const renderedRows = await screen.findAllByTestId("token-row");
+  return {
+    ...view,
+    rows: renderedRows as HTMLLIElement[],
+  };
+}
+
+function dispatchTokenRowKeyboardWithReactPairMutation(
+  group: HTMLDivElement,
+  action: HTMLButtonElement,
+  mutations: {
+    captureBefore?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+    captureAfter?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+    bubbleBefore?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  } = {},
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const groupPropsKey = Object.keys(group).find((key) => key.startsWith("__reactProps$"));
+  const actionPropsKey = Object.keys(action).find((key) => key.startsWith("__reactProps$"));
+  if (!groupPropsKey || !actionPropsKey) {
+    throw new Error("React props were not attached to the token row actions");
+  }
+  const groupProperties = group as unknown as Record<string, Record<string, unknown>>;
+  const actionProperties = action as unknown as Record<string, Record<string, unknown>>;
+  const groupProps = groupProperties[groupPropsKey];
+  const actionProps = actionProperties[actionPropsKey];
+  const capture = groupProps?.onKeyDownCapture;
+  const bubble = actionProps?.onKeyDown;
+  if (
+    !groupProps
+    || !actionProps
+    || typeof capture !== "function"
+    || typeof bubble !== "function"
+  ) {
+    throw new Error("The token row has no complete keyboard delivery pair");
+  }
+  const delivery: {
+    captureEvent: ReactKeyboardEvent<HTMLDivElement> | null;
+    bubbleEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
+    captureCurrentTarget: EventTarget | null;
+    bubbleCurrentTarget: EventTarget | null;
+    capturePhase: number;
+    bubblePhase: number;
+  } = {
+    captureEvent: null,
+    bubbleEvent: null,
+    captureCurrentTarget: null,
+    bubbleCurrentTarget: null,
+    capturePhase: Event.NONE,
+    bubblePhase: Event.NONE,
+  };
+  const wrappedGroup = {
+    ...groupProps,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      delivery.captureEvent = event;
+      delivery.captureCurrentTarget = event.currentTarget;
+      delivery.capturePhase = event.eventPhase;
+      mutations.captureBefore?.(event);
+      (capture as (event: ReactKeyboardEvent<HTMLDivElement>) => void)(event);
+      mutations.captureAfter?.(event);
+    },
+  };
+  const wrappedAction = {
+    ...actionProps,
+    onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      delivery.bubbleEvent = event;
+      delivery.bubbleCurrentTarget = event.currentTarget;
+      delivery.bubblePhase = event.eventPhase;
+      mutations.bubbleBefore?.(event);
+      (bubble as (event: ReactKeyboardEvent<HTMLButtonElement>) => void)(event);
+    },
+  };
+  groupProperties[groupPropsKey] = wrappedGroup;
+  actionProperties[actionPropsKey] = wrappedAction;
+  const key = init.key ?? "ArrowRight";
+  const nativeEvent = createRenameNavigationKey(action, key, init, trusted);
+  try {
+    act(() => action.dispatchEvent(nativeEvent));
+  } finally {
+    if (groupProperties[groupPropsKey] === wrappedGroup) {
+      groupProperties[groupPropsKey] = groupProps;
+    }
+    if (actionProperties[actionPropsKey] === wrappedAction) {
+      actionProperties[actionPropsKey] = actionProps;
+    }
+  }
+  const { captureEvent, bubbleEvent } = delivery;
+  if (!captureEvent || !bubbleEvent) {
+    throw new Error("React did not deliver both token row keyboard phases");
+  }
+  return {
+    nativeEvent,
+    ...delivery,
+    captureEvent,
+    bubbleEvent,
+  };
 }
 
 function renameEscape(
@@ -1200,6 +1313,769 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(screen.queryByLabelText("Token name")).toBeNull();
     expect(callsFor("PATCH")).toHaveLength(0);
     expect(callsFor("POST")).toHaveLength(0);
+  });
+});
+
+describe("Settings → Agents: token row action navigation", () => {
+  function trackRowNavigationEffects(ownerWindow: Window & typeof globalThis) {
+    const nativePreventDefault = ownerWindow.Event.prototype.preventDefault;
+    const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+    const focusCalls: Array<{
+      target: HTMLElement;
+      options: FocusOptions | undefined;
+    }> = [];
+    const preventDefault = vi
+      .spyOn(ownerWindow.Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        Reflect.apply(nativePreventDefault, this, []);
+      });
+    const focus = vi
+      .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+      .mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+        focusCalls.push({ target: this, options });
+        Reflect.apply(
+          nativeFocus,
+          this,
+          options === undefined ? [] : [options],
+        );
+      });
+    const scrollTo = vi.spyOn(ownerWindow, "scrollTo").mockImplementation(() => undefined);
+    const scrollBy = vi.spyOn(ownerWindow, "scrollBy").mockImplementation(() => undefined);
+    return { preventDefault, focus, focusCalls, scrollTo, scrollBy };
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("moves every key in committed action order and leaves bounded edges native without work", async () => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const row = view.rows[0]!;
+    const group = within(row).getByRole("group", {
+      name: `${token.name} token actions`,
+    });
+    const controls = {
+      rename: within(group).getByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement,
+      replace: within(group).getByRole("button", { name: `Replace ${token.name}` }) as HTMLButtonElement,
+      revoke: within(group).getByRole("button", { name: `Revoke ${token.name}` }) as HTMLButtonElement,
+    };
+    expect(Array.from(group.children)).toEqual([
+      controls.rename,
+      controls.replace,
+      controls.revoke,
+    ]);
+    const moves = [
+      ["ArrowRight", "rename", "replace"],
+      ["ArrowDown", "rename", "replace"],
+      ["End", "rename", "revoke"],
+      ["ArrowLeft", "replace", "rename"],
+      ["ArrowUp", "replace", "rename"],
+      ["Home", "replace", "rename"],
+      ["ArrowRight", "replace", "revoke"],
+      ["ArrowDown", "replace", "revoke"],
+      ["End", "replace", "revoke"],
+      ["ArrowLeft", "revoke", "replace"],
+      ["ArrowUp", "revoke", "replace"],
+      ["Home", "revoke", "rename"],
+    ] as const;
+    const callsBefore = fetchMock.mock.calls.length;
+    for (const [key, sourceName, destinationName] of moves) {
+      const source = controls[sourceName];
+      const destination = controls[destinationName];
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      effects.scrollTo.mockClear();
+      effects.scrollBy.mockClear();
+
+      const event = dispatchRenameNavigationKey(source, key);
+
+      expect(event.defaultPrevented, key).toBe(true);
+      expect(effects.preventDefault, key).toHaveBeenCalledTimes(1);
+      expect(effects.preventDefault.mock.contexts, key).toEqual([event]);
+      expect(effects.focus, key).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls, key).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(destination, key).toHaveFocus();
+      expect(effects.scrollTo, key).not.toHaveBeenCalled();
+      expect(effects.scrollBy, key).not.toHaveBeenCalled();
+    }
+
+    const boundaries = [
+      [controls.rename, "ArrowLeft"],
+      [controls.rename, "ArrowUp"],
+      [controls.rename, "Home"],
+      [controls.revoke, "ArrowRight"],
+      [controls.revoke, "ArrowDown"],
+      [controls.revoke, "End"],
+    ] as const;
+    for (const [source, key] of boundaries) {
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const event = dispatchRenameNavigationKey(source, key);
+      expect(event.defaultPrevented, key).toBe(false);
+      expect(effects.preventDefault, key).not.toHaveBeenCalled();
+      expect(effects.focus, key).not.toHaveBeenCalled();
+      expect(source, key).toHaveFocus();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+  });
+
+  it("skips disabled actions and never enters a row whose actions are absent", async () => {
+    const expired = {
+      ...token,
+      expiresAt: "2020-01-01T00:00:00.000Z",
+    };
+    const revoked = {
+      ...token,
+      id: "tok-revoked",
+      name: "Revoked CLI",
+      revokedAt: "2026-09-01T00:00:00.000Z",
+    };
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows([expired, revoked]);
+    const activeRow = view.rows[0]!;
+    const group = within(activeRow).getByRole("group", {
+      name: `${expired.name} token actions`,
+    });
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${expired.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(group).getByRole("button", {
+      name: `Replace ${expired.name}`,
+    }) as HTMLButtonElement;
+    const revoke = within(group).getByRole("button", {
+      name: `Revoke ${expired.name}`,
+    }) as HTMLButtonElement;
+    expect(replace).toBeDisabled();
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+
+    const forward = dispatchRenameNavigationKey(rename, "ArrowRight");
+
+    expect(forward.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: revoke,
+      options: { preventScroll: true },
+    }]);
+    expect(revoke).toHaveFocus();
+
+    const revokedRow = view.rows[1]!;
+    expect(within(revokedRow).queryByRole("group", {
+      name: `${revoked.name} token actions`,
+    })).toBeNull();
+    expect(within(revokedRow).queryByRole("button", {
+      name: `Rename ${revoked.name}`,
+    })).toBeNull();
+    revokedRow.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    const absent = new window.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      code: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    setJsdomEventView(absent, window);
+    markJsdomEventTrusted(absent);
+    act(() => revokedRow.dispatchEvent(absent));
+    expect(absent.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+    expect(revokedRow).toHaveFocus();
+  });
+
+  it.each([
+    ["ArrowLeft", "Numpad4", "replace", "rename"],
+    ["ArrowUp", "Numpad8", "revoke", "replace"],
+    ["ArrowRight", "Numpad6", "rename", "replace"],
+    ["ArrowDown", "Numpad2", "replace", "revoke"],
+    ["Home", "Numpad7", "revoke", "rename"],
+    ["End", "Numpad1", "rename", "revoke"],
+  ] as const)(
+    "uses semantic %s while retaining unrestricted keypad %s",
+    async (key, code, sourceName, destinationName) => {
+      const effects = trackRowNavigationEffects(window);
+      const view = await showStrictTokenRows();
+      const group = within(view.rows[0]!).getByRole("group", {
+        name: `${token.name} token actions`,
+      });
+      const controls = {
+        rename: within(group).getByRole("button", { name: `Rename ${token.name}` }) as HTMLButtonElement,
+        replace: within(group).getByRole("button", { name: `Replace ${token.name}` }) as HTMLButtonElement,
+        revoke: within(group).getByRole("button", { name: `Revoke ${token.name}` }) as HTMLButtonElement,
+      };
+      const source = controls[sourceName];
+      const destination = controls[destinationName];
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const event = dispatchRenameNavigationKey(source, key, {
+        code,
+        location: window.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(destination).toHaveFocus();
+    },
+  );
+
+  it.each([1, 3])(
+    "retains the exact native pair through %i capture microtask checkpoint(s)",
+    async (checkpoints) => {
+      const effects = trackRowNavigationEffects(window);
+      const view = await showStrictTokenRows();
+      const group = within(view.rows[0]!).getByRole("group", {
+        name: `${token.name} token actions`,
+      });
+      const rename = within(group).getByRole("button", {
+        name: `Rename ${token.name}`,
+      }) as HTMLButtonElement;
+      const replace = within(group).getByRole("button", {
+        name: `Replace ${token.name}`,
+      }) as HTMLButtonElement;
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      let observed = 0;
+      rename.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+
+      try {
+        const event = dispatchRenameNavigationKey(rename, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: replace,
+          options: { preventScroll: true },
+        }]);
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not let an ineligible crossed bubble consume the rightful native pair", async () => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const group = within(view.rows[0]!).getByRole("group", {
+      name: `${token.name} token actions`,
+    });
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(group).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    const renameBubble = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(rename, "onKeyDown");
+    rename.addEventListener("keydown", (event) => {
+      if (!(event instanceof window.KeyboardEvent)) {
+        throw new Error("The crossed row action did not receive a keyboard event");
+      }
+      renameBubble(renameNavigationReactWrapper(event, replace, rename));
+    }, { capture: true, once: true });
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+
+    const event = dispatchRenameNavigationKey(rename, "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: replace,
+      options: { preventScroll: true },
+    }]);
+  });
+
+  it("authenticates distinct group-capture and action-bubble wrappers with independent methods and prototypes", async () => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const group = within(view.rows[0]!).getByRole("group", {
+      name: `${token.name} token actions`,
+    }) as HTMLDivElement;
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(group).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    const methods: Array<{
+      preventDefault: ReturnType<typeof vi.fn>;
+      isDefaultPrevented: ReturnType<typeof vi.fn>;
+      isPropagationStopped: ReturnType<typeof vi.fn>;
+    }> = [];
+    const installMethods = (
+      event: ReactKeyboardEvent<HTMLElement>,
+      prototype: object,
+      replaceDefaultQuery: boolean,
+    ) => {
+      const original = {
+        preventDefault: event.preventDefault,
+        isDefaultPrevented: event.isDefaultPrevented,
+        isPropagationStopped: event.isPropagationStopped,
+      };
+      const current = {
+        preventDefault: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+          Reflect.apply(original.preventDefault, this, []);
+          if (replaceDefaultQuery) {
+            Object.defineProperty(this, "isDefaultPrevented", {
+              configurable: true,
+              value: vi.fn(() => true),
+            });
+          }
+        }),
+        isDefaultPrevented: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+          return Reflect.apply(original.isDefaultPrevented, this, []);
+        }),
+        isPropagationStopped: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+          return Reflect.apply(original.isPropagationStopped, this, []);
+        }),
+      };
+      Object.setPrototypeOf(event, prototype);
+      Object.defineProperties(event, {
+        preventDefault: { configurable: true, writable: true, value: current.preventDefault },
+        isDefaultPrevented: { configurable: true, writable: true, value: current.isDefaultPrevented },
+        isPropagationStopped: { configurable: true, writable: true, value: current.isPropagationStopped },
+      });
+      methods.push(current);
+    };
+    const capturePrototype = Object.freeze({ phase: "capture" });
+    const bubblePrototype = Object.freeze({ phase: "bubble" });
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+
+    const delivery = dispatchTokenRowKeyboardWithReactPairMutation(
+      group,
+      rename,
+      {
+        captureBefore: (event) => installMethods(
+          event as ReactKeyboardEvent<HTMLElement>,
+          capturePrototype,
+          false,
+        ),
+        bubbleBefore: (event) => installMethods(
+          event as ReactKeyboardEvent<HTMLElement>,
+          bubblePrototype,
+          true,
+        ),
+      },
+      { key: "ArrowRight", code: "Numpad6", location: 3 },
+    );
+
+    expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+    expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
+    expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
+    expect(delivery.captureCurrentTarget).toBe(group);
+    expect(delivery.bubbleCurrentTarget).toBe(rename);
+    expect(delivery.capturePhase).toBe(Event.CAPTURING_PHASE);
+    expect(delivery.bubblePhase).toBe(Event.BUBBLING_PHASE);
+    expect(Object.getPrototypeOf(delivery.captureEvent)).toBe(capturePrototype);
+    expect(Object.getPrototypeOf(delivery.bubbleEvent)).toBe(bubblePrototype);
+    expect(methods).toHaveLength(2);
+    expect(methods[0]!.preventDefault).not.toBe(methods[1]!.preventDefault);
+    expect(methods[0]!.isDefaultPrevented).not.toBe(methods[1]!.isDefaultPrevented);
+    expect(methods[0]!.isPropagationStopped).not.toBe(methods[1]!.isPropagationStopped);
+    expect(methods[0]!.preventDefault).not.toHaveBeenCalled();
+    expect(methods[1]!.preventDefault).toHaveBeenCalledTimes(1);
+    expect(methods[1]!.preventDefault.mock.contexts).toEqual([delivery.bubbleEvent]);
+    expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: replace,
+      options: { preventScroll: true },
+    }]);
+  });
+
+  it.each(
+    (["capture", "bubble"] as const).flatMap((phase) =>
+      ([
+        "preventDefault",
+        "isDefaultPrevented",
+        "isPropagationStopped",
+      ] as const).map((method) => [phase, method] as const)),
+  )("rejects retained %s-wrapper %s drift and admits a clean successor", async (phase, method) => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const group = within(view.rows[0]!).getByRole("group", {
+      name: `${token.name} token actions`,
+    }) as HTMLDivElement;
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(group).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+    const mutate = (
+      event: ReactKeyboardEvent<HTMLDivElement> | ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const replacement = vi.fn(() =>
+        method === "preventDefault" ? undefined : false);
+      if (phase === "capture") {
+        Object.defineProperty(event, method, {
+          configurable: true,
+          value: replacement,
+        });
+        return;
+      }
+      const original = event[method];
+      let reads = 0;
+      Object.defineProperty(event, method, {
+        configurable: true,
+        get: () => {
+          reads += 1;
+          return reads === 1 ? original : replacement;
+        },
+      });
+    };
+
+    const rejected = dispatchTokenRowKeyboardWithReactPairMutation(
+      group,
+      rename,
+      phase === "capture"
+        ? { captureAfter: mutate }
+        : { bubbleBefore: mutate },
+      { key: "ArrowRight", code: "ArrowRight" },
+    ).nativeEvent;
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+    expect(rename).toHaveFocus();
+
+    const accepted = dispatchRenameNavigationKey(rename, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: replace,
+      options: { preventScroll: true },
+    }]);
+  });
+
+  it.each(["preventDefault", "isPropagationStopped"] as const)(
+    "rejects bubble %s drift caused during prevention and admits a clean successor",
+    async (method) => {
+      const effects = trackRowNavigationEffects(window);
+      const view = await showStrictTokenRows();
+      const group = within(view.rows[0]!).getByRole("group", {
+        name: `${token.name} token actions`,
+      }) as HTMLDivElement;
+      const rename = within(group).getByRole("button", {
+        name: `Rename ${token.name}`,
+      }) as HTMLButtonElement;
+      const replace = within(group).getByRole("button", {
+        name: `Replace ${token.name}`,
+      }) as HTMLButtonElement;
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const rejected = dispatchTokenRowKeyboardWithReactPairMutation(
+        group,
+        rename,
+        {
+          bubbleBefore: (event) => {
+            const preventDefault = event.preventDefault;
+            const replacement = method === "preventDefault"
+              ? vi.fn(() => undefined)
+              : vi.fn(() => false);
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              writable: true,
+              value: function (this: ReactKeyboardEvent<HTMLButtonElement>) {
+                Reflect.apply(preventDefault, this, []);
+                Object.defineProperty(this, method, {
+                  configurable: true,
+                  writable: true,
+                  value: replacement,
+                });
+              },
+            });
+          },
+        },
+        { key: "ArrowRight", code: "ArrowRight" },
+      ).nativeEvent;
+
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(rename).toHaveFocus();
+
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const accepted = dispatchRenameNavigationKey(rename, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: replace,
+        options: { preventScroll: true },
+      }]);
+    },
+  );
+
+  it("rejects modifiers, cancellation, replay, reentrancy, wrong focus, and cross-row movement", async () => {
+    const other = { ...token, id: "tok-2", name: "Second CLI" };
+    const nativePreventDefault = window.Event.prototype.preventDefault;
+    let source: HTMLButtonElement | null = null;
+    let reentrant: KeyboardEvent | null = null;
+    let entered = false;
+    const effects = trackRowNavigationEffects(window);
+    effects.preventDefault.mockImplementation(function (this: Event) {
+      Reflect.apply(nativePreventDefault, this, []);
+      if (!entered && source && reentrant) {
+        entered = true;
+        source.dispatchEvent(reentrant);
+      }
+    });
+    const view = await showStrictTokenRows([token, other]);
+    const firstGroup = within(view.rows[0]!).getByRole("group", {
+      name: `${token.name} token actions`,
+    });
+    source = within(firstGroup).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(firstGroup).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    const secondGroup = within(view.rows[1]!).getByRole("group", {
+      name: `${other.name} token actions`,
+    });
+    const secondRename = within(secondGroup).getByRole("button", {
+      name: `Rename ${other.name}`,
+    }) as HTMLButtonElement;
+    source.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+    const invalid = [
+      [{ altKey: true }, true],
+      [{ ctrlKey: true }, true],
+      [{ metaKey: true }, true],
+      [{ shiftKey: true }, true],
+      [{ repeat: true }, true],
+      [{ isComposing: true }, true],
+      [{ composed: false }, true],
+      [{}, false],
+    ] as const;
+    for (const [init, trusted] of invalid) {
+      expect(dispatchRenameNavigationKey(
+        source,
+        "ArrowRight",
+        init,
+        trusted,
+      ).defaultPrevented).toBe(false);
+    }
+    const canceled = createRenameNavigationKey(source, "ArrowRight");
+    canceled.preventDefault();
+    effects.preventDefault.mockClear();
+    act(() => source?.dispatchEvent(canceled));
+    view.rows[0]!.focus();
+    const wrongFocus = dispatchRenameNavigationKey(source, "ArrowRight");
+    secondRename.focus();
+    effects.focus.mockClear();
+    const crossRow = dispatchRenameNavigationKey(secondRename, "ArrowLeft");
+    expect(canceled.defaultPrevented).toBe(true);
+    expect(wrongFocus.defaultPrevented).toBe(false);
+    expect(crossRow.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+    expect(secondRename).toHaveFocus();
+
+    source.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+    reentrant = createRenameNavigationKey(source, "ArrowRight");
+    const accepted = createRenameNavigationKey(source, "ArrowRight");
+    act(() => source?.dispatchEvent(accepted));
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(reentrant.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: replace,
+      options: { preventScroll: true },
+    }]);
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    act(() => source?.dispatchEvent(accepted));
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+  });
+
+  it("retires restored DOM history and cleanup handlers, then admits a complete clean successor", async () => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const row = view.rows[0]!;
+    const group = within(row).getByRole("group", {
+      name: `${token.name} token actions`,
+    }) as HTMLDivElement;
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const staleCapture = reactProp<
+      (event: ReactKeyboardEvent<HTMLDivElement>) => void
+    >(group, "onKeyDownCapture");
+    const staleBubble = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(rename, "onKeyDown");
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    const staged = createRenameNavigationKey(rename, "ArrowRight");
+    rename.addEventListener("keydown", (event) => {
+      event.stopImmediatePropagation();
+    }, { capture: true, once: true });
+    act(() => rename.dispatchEvent(staged));
+    expect(staged.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+
+    group.setAttribute("data-transient", "true");
+    group.removeAttribute("data-transient");
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    const restored = dispatchRenameNavigationKey(rename, "ArrowRight");
+    expect(restored.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+
+    act(() => view.root.unmount());
+    const fabricatedNative = createRenameNavigationKey(rename, "ArrowRight");
+    const fabricatedCapture = renameNavigationReactWrapper(
+      fabricatedNative,
+      group,
+      rename,
+    );
+    const fabricatedBubble = renameNavigationReactWrapper(
+      fabricatedNative,
+      rename,
+      rename,
+    );
+    act(() => {
+      staleBubble(renameNavigationReactWrapper(staged, rename, rename));
+      staleCapture(fabricatedCapture as unknown as ReactKeyboardEvent<HTMLDivElement>);
+      staleBubble(fabricatedBubble);
+    });
+    expect(fabricatedNative.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+
+    fetchMock
+      .mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    const successor = renderDirectSecret(
+      <StrictMode>
+        <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+    );
+    const currentRow = await within(successor.host).findByTestId("token-row");
+    const currentGroup = within(currentRow).getByRole("group", {
+      name: `${token.name} token actions`,
+    });
+    const currentRename = within(currentGroup).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const currentReplace = within(currentGroup).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    currentRename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+    const accepted = dispatchRenameNavigationKey(currentRename, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: currentReplace,
+      options: { preventScroll: true },
+    }]);
+  });
+
+  it("preserves Tab, Enter, Space, click activation, and rename-form navigation", async () => {
+    const effects = trackRowNavigationEffects(window);
+    await showStrictTokenRows();
+    const rename = screen.getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    for (const [key, code] of [
+      ["Tab", "Tab"],
+      ["Enter", "Enter"],
+      [" ", "Space"],
+    ] as const) {
+      const event = dispatchRenameNavigationKey(rename, key, { code });
+      expect(event.defaultPrevented, key).toBe(false);
+    }
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+    expect(rename).toHaveFocus();
+
+    fireEvent.click(rename);
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    save.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+    const formNavigation = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(formNavigation.defaultPrevented).toBe(true);
+    expect(cancel).toHaveFocus();
+    fireEvent.click(cancel);
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(screen.getByRole("button", {
+      name: `Rename ${token.name}`,
+    })).toHaveFocus();
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
   });
 });
 
