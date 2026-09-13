@@ -4767,7 +4767,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     target: HTMLButtonElement;
     currentTarget: HTMLElement;
     phase: number;
-    view: Window | null;
+    view: ReactKeyboardEvent<HTMLElement>["view"] | null;
     methods: RowNavigationReactMethods;
   }>;
   interface RowNavigationPublication {
@@ -6232,7 +6232,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       const preventDefault = reactEvent.preventDefault;
       const isDefaultPrevented = reactEvent.isDefaultPrevented;
       const isPropagationStopped = reactEvent.isPropagationStopped;
-      const view: Window | null = event.nativeEvent.view;
+      const view: ReactKeyboardEvent<HTMLElement>["view"] | null = event.view;
       if (
         typeof preventDefault !== "function"
         || typeof isDefaultPrevented !== "function"
@@ -6259,10 +6259,9 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         || event.altKey !== native.altKey
         || event.metaKey !== native.metaKey
         || event.shiftKey !== native.shiftKey
-        || event.view !== view
         || (view !== null
-          && view !== authority.keyboard.ownerWindow
-          && view !== native.terminal.receiver)
+          && !Object.is(event.view, authority.keyboard.ownerWindow)
+          && !Object.is(event.view, native.terminal.receiver))
         || event.detail !== native.detail
       ) {
         return null;
@@ -6296,7 +6295,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         isDefaultPrevented?: unknown;
         isPropagationStopped?: unknown;
       };
-      const view: Window | null = event.nativeEvent.view;
+      const view: ReactKeyboardEvent<HTMLElement>["view"] | null = event.view;
       return event.nativeEvent === snapshot.nativeEvent
         && event.nativeEvent === native.event
         && event.type === native.type
@@ -6317,11 +6316,11 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         && event.altKey === native.altKey
         && event.metaKey === native.metaKey
         && event.shiftKey === native.shiftKey
-        && event.view === view
-        && view === snapshot.view
+        && Object.is(event.view, snapshot.view)
+        && Object.is(view, snapshot.view)
         && (view === null
-          || view === authority.keyboard.ownerWindow
-          || view === native.terminal.receiver)
+          || Object.is(event.view, authority.keyboard.ownerWindow)
+          || Object.is(event.view, native.terminal.receiver))
         && event.detail === native.detail
         && event.preventDefault === snapshot.methods.preventDefault
         && event.isDefaultPrevented === snapshot.methods.isDefaultPrevented
