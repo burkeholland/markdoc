@@ -12,7 +12,7 @@ import {
 import { Check, Link2 } from "lucide-react";
 import { useCopy } from "@/lib/hooks";
 
-const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C to copy";
+const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C (Command+C on Mac) to copy";
 
 interface CopySource {
   readonly mount: symbol;

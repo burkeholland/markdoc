@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  StrictMode,
   useEffect,
   useLayoutEffect,
   type ChangeEvent,
@@ -9,8 +10,10 @@ import {
   type ReactNode,
   type RefCallback,
 } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const primitiveCapture = vi.hoisted(() => ({ latest: new Map<string, unknown>() }));
@@ -1107,6 +1110,879 @@ describe("ImageDialog editor-action visits", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+type TableKeyHandler = (event: KeyboardEvent<HTMLDivElement>) => void;
+type TablePublicEvent = Parameters<TableKeyHandler>[0];
+
+function tableGridControls() {
+  const grid = screen.getByTestId("table-grid") as HTMLDivElement;
+  const cells = [...grid.querySelectorAll<HTMLButtonElement>("button")];
+  return {
+    grid, cells,
+    capture: reactProp<TableKeyHandler>(grid, "onKeyDownCapture"),
+    bubble: reactProp<TableKeyHandler>(grid, "onKeyDown"),
+    gridRef: reactProp<RefCallback<HTMLDivElement>>(grid, "ref"),
+    cellRefs: cells.map((cell) => reactProp<RefCallback<HTMLButtonElement>>(cell, "ref")),
+  };
+}
+
+type TableGridControls = ReturnType<typeof tableGridControls>;
+
+function tableNativeKey(target: HTMLElement, init: KeyboardEventInit = {}, trusted = true) {
+  const view = target.ownerDocument.defaultView!;
+  const event = new view.KeyboardEvent("keydown", {
+    key: "ArrowRight", code: "ArrowRight", bubbles: true, cancelable: true, ...init,
+  });
+  const slot = Object.getOwnPropertySymbols(event).find((symbol) => String(symbol) === "Symbol(impl)");
+  const implementation = slot ? (event as unknown as Record<symbol, { isTrusted: boolean; view: unknown }>)[slot] : null;
+  if (!implementation) throw new Error("The jsdom event implementation slot is unavailable");
+  implementation.view = Object.hasOwn(init, "view") ? init.view : view;
+  if (trusted) {
+    // jsdom resets trust in dispatchEvent; only the unit harness holds this internal slot.
+    Object.defineProperty(implementation, "isTrusted", { get: () => true, set: () => undefined });
+  }
+  return event;
+}
+
+function withTableGridHandlers(
+  controls: TableGridControls,
+  capture: TableKeyHandler,
+  bubble: TableKeyHandler,
+  run: () => void,
+) {
+  const key = Object.keys(controls.grid).find((key) => key.startsWith("__reactProps$"));
+  if (!key) throw new Error("The table grid has no React props");
+  const element = controls.grid as unknown as Record<string, Record<string, unknown>>;
+  const original = element[key];
+  const replacement = { ...original, onKeyDownCapture: capture, onKeyDown: bubble };
+  element[key] = replacement;
+  try {
+    act(run);
+  } finally {
+    if (element[key] === replacement) element[key] = original;
+  }
+}
+
+function deliverTableKey(
+  controls: TableGridControls,
+  event = tableNativeKey(controls.cells.find((cell) => cell.tabIndex === 0)!),
+  options: {
+    capture?: (event: TablePublicEvent, handler: TableKeyHandler) => void;
+    bubble?: (event: TablePublicEvent, handler: TableKeyHandler) => void;
+    target?: HTMLElement;
+  } = {},
+) {
+  const wrappers: TablePublicEvent[] = [];
+  const preventions: ReturnType<typeof vi.fn>[] = [];
+  const intercept = (phase: "capture" | "bubble"): TableKeyHandler => (delivery) => {
+    const original = delivery.preventDefault;
+    const prevent = vi.fn(function (this: TablePublicEvent) {
+      Reflect.apply(original, this, []);
+    });
+    delivery.preventDefault = prevent;
+    wrappers.push(delivery);
+    preventions.push(prevent);
+    if (options[phase]) options[phase](delivery, controls[phase]);
+    else controls[phase](delivery);
+  };
+  withTableGridHandlers(controls, intercept("capture"), intercept("bubble"), () => {
+    (options.target ?? controls.cells.find((cell) => cell.tabIndex === 0)!).dispatchEvent(event);
+  });
+  return { event, wrappers, preventions };
+}
+
+describe("TableDialog grid-navigation public deliveries", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function setup(row = 0, col = 0, strict = false) {
+    const nativeFocus = HTMLElement.prototype.focus;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const actions: TableActions = { onOpenChange: vi.fn(), onSubmit: vi.fn() };
+    const view = render(strict ? <StrictMode>{table(actions)}</StrictMode> : table(actions));
+    act(() => screen.getByRole("button", { name: `${row + 1} by ${col + 1}` }).focus());
+    focus.mockClear();
+    return { ...view, actions, focus, nativeFocus, controls: tableGridControls() };
+  }
+
+  function expectGrid(row: number, col: number) {
+    const { cells } = tableGridControls();
+    expect(screen.getAllByRole("gridcell")).toHaveLength(48);
+    expect(cells).toHaveLength(48);
+    expect(cells.filter((cell) => cell.tabIndex === 0)).toEqual([cells[row * 8 + col]]);
+    expect(screen.getByTestId("table-grid-label")).toHaveTextContent(`${row + 1} rows × ${col + 1} columns`);
+  }
+
+  function expectNoActions(actions: TableActions) {
+    expect(actions.onSubmit).not.toHaveBeenCalled();
+    expect(actions.onOpenChange).not.toHaveBeenCalled();
+  }
+
+  function expectRejected(
+    context: ReturnType<typeof setup>,
+    result: ReturnType<typeof deliverTableKey>,
+    row = 0,
+    col = 0,
+  ) {
+    expect(result.preventions.every((prevent) => prevent.mock.calls.length === 0)).toBe(true);
+    expect(context.focus).not.toHaveBeenCalled();
+    expectNoActions(context.actions);
+    expectGrid(row, col);
+  }
+
+  function expectAccepted(context: ReturnType<typeof setup>, result: ReturnType<typeof deliverTableKey>, row: number, col: number) {
+    expect(result.wrappers).toHaveLength(2);
+    expect(result.wrappers[0]).not.toBe(result.wrappers[1]);
+    expect(result.wrappers[0].nativeEvent).toBe(result.wrappers[1].nativeEvent);
+    expect(result.preventions[0]).not.toHaveBeenCalled();
+    expect(result.preventions[1]).toHaveBeenCalledOnce();
+    expect(result.preventions[1].mock.contexts).toEqual([result.wrappers[1]]);
+    expect(result.event.defaultPrevented).toBe(true);
+    expect(context.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    const destination = tableGridControls().cells[row * 8 + col];
+    expect(context.focus.mock.contexts).toEqual([destination]);
+    expect(destination).toHaveFocus();
+    expectGrid(row, col);
+    expectNoActions(context.actions);
+  }
+
+  it.each([
+    ["ArrowRight", 2, 3, 2, 4], ["ArrowLeft", 2, 3, 2, 2],
+    ["ArrowDown", 2, 3, 3, 3], ["ArrowUp", 2, 3, 1, 3],
+    ["Home", 2, 3, 2, 0], ["End", 2, 3, 2, 7],
+    ["ArrowLeft", 0, 0, 0, 0], ["ArrowUp", 0, 0, 0, 0],
+    ["ArrowRight", 5, 7, 5, 7], ["ArrowDown", 5, 7, 5, 7],
+    ["Home", 0, 0, 0, 0], ["End", 5, 7, 5, 7],
+  ] as const)("%s moves (%i,%i) to (%i,%i) without wrapping", (key, row, col, nextRow, nextCol) => {
+    const context = setup(row, col);
+    const event = tableNativeKey(context.controls.cells[row * 8 + col], { key, code: key });
+    expectAccepted(context, deliverTableKey(context.controls, event), nextRow, nextCol);
+  });
+
+  it.each(["ctrlKey", "metaKey"] as const)("preserves one-cell arrows and whole-grid Home/End with %s", (modifier) => {
+    const context = setup(2, 3);
+    const cases = [
+      ["ArrowRight", 2, 4], ["ArrowDown", 3, 4], ["ArrowLeft", 3, 3],
+      ["ArrowUp", 2, 3], ["Home", 0, 0], ["End", 5, 7],
+    ] as const;
+    for (const [key, row, col] of cases) {
+      context.focus.mockClear();
+      const controls = tableGridControls();
+      const source = controls.cells.find((cell) => cell.tabIndex === 0)!;
+      expectAccepted(context, deliverTableKey(controls, tableNativeKey(source, { key, code: key, [modifier]: true })), row, col);
+    }
+  });
+
+  it("pairs distinct React wrappers, consumes once, and recovers on a distinct event", () => {
+    const context = setup();
+    const result = deliverTableKey(context.controls);
+    expectAccepted(context, result, 0, 1);
+    context.focus.mockClear();
+    act(() => {
+      context.controls.capture(result.wrappers[0]);
+      context.controls.bubble(result.wrappers[1]);
+    });
+    expect(result.preventions[1]).toHaveBeenCalledOnce();
+    expect(context.focus).not.toHaveBeenCalled();
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 2);
+  });
+
+  it.each([
+    { key: "Enter", code: "Enter" }, { key: " ", code: "Space" }, { key: "Tab", code: "Tab" },
+    { key: "Escape", code: "Escape" }, { key: "a", code: "KeyA" },
+    { key: "Right", code: "ArrowRight" }, { code: "ArrowLeft" }, { code: "" },
+    { location: 1 }, { location: 3 }, { altKey: true }, { shiftKey: true },
+    { ctrlKey: true, shiftKey: true }, { metaKey: true, altKey: true },
+    { repeat: true }, { isComposing: true }, { bubbles: false }, { cancelable: false },
+  ])("leaves unsupported native input inert: %j", (init) => {
+    const context = setup();
+    const result = deliverTableKey(context.controls, tableNativeKey(context.controls.cells[0], init));
+    expectRejected(context, result);
+    expect(result.event.defaultPrevented).toBe(false);
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it("keeps native Enter, Space, click, and Tab behavior", async () => {
+    const context = setup(2, 3);
+    const user = userEvent.setup();
+    await user.tab();
+    expect(context.controls.cells[19]).not.toHaveFocus();
+    expectNoActions(context.actions);
+    act(() => context.controls.cells[19].focus());
+    for (const key of ["{Enter}", " "]) {
+      await user.keyboard(key);
+      expect(context.actions.onOpenChange).toHaveBeenLastCalledWith(false);
+      captured<() => void>("Insert table.onClosed")();
+      expect(context.actions.onSubmit).toHaveBeenLastCalledWith(3, 4);
+    }
+    fireEvent.click(context.controls.cells[19]);
+    captured<() => void>("Insert table.onClosed")();
+    expect(context.actions.onSubmit).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["untrusted", "canceled", "stopped", "wrong-target", "grid-target", "foreign-view", "foreign-event"] as const)(
+    "rejects %s native dispatch and leaves a clean successor usable", (kind) => {
+      const context = setup();
+      const { controls } = context;
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      try {
+        let event = tableNativeKey(controls.cells[0], {}, kind !== "untrusted");
+        if (kind === "canceled") event.preventDefault();
+        if (kind === "foreign-view") event = tableNativeKey(controls.cells[0], { view: frame.contentWindow });
+        if (kind === "foreign-event") event = tableNativeKey(frame.contentDocument!.body);
+        const result = deliverTableKey(controls, event, {
+          target: kind === "wrong-target" ? controls.cells[1] : kind === "grid-target" ? controls.grid : controls.cells[0],
+          capture: (delivery, handler) => {
+            if (kind === "stopped") delivery.stopPropagation();
+            handler(delivery);
+          },
+        });
+        expectRejected(context, result);
+      } finally {
+        frame.remove();
+      }
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+    },
+  );
+
+  it.each(["capture", "bubble"] as const)("rejects inconsistent %s public facts independently", (phase) => {
+    const context = setup();
+    const cases: Readonly<Record<string, unknown>> = {
+      key: "ArrowLeft", code: "Home", location: 2, repeat: true, altKey: true, shiftKey: true,
+      ctrlKey: true, metaKey: true, type: "keyup", target: context.controls.cells[1],
+      currentTarget: context.controls.cells[0], nativeEvent: new Event("keydown"),
+      eventPhase: 2, bubbles: false, cancelable: false, isTrusted: false, timeStamp: -1,
+      view: null, defaultPrevented: true, preventDefault: null,
+      isDefaultPrevented: () => true, isPropagationStopped: () => true,
+    };
+    for (const [field, value] of Object.entries(cases)) {
+      const result = deliverTableKey(tableGridControls(), undefined, {
+        [phase]: (delivery: TablePublicEvent, handler: TableKeyHandler) => {
+          Object.defineProperty(delivery, field, { configurable: true, value });
+          handler(delivery);
+        },
+      });
+      expectRejected(context, result);
+    }
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it.each(["capture", "bubble"] as const)("accepts stable own/inherited accessors and transparent %s forwarding", (phase) => {
+    const context = setup();
+    for (const kind of ["own", "inherited", "proxy", "facade"] as const) {
+      context.focus.mockClear();
+      const controls = tableGridControls();
+      const result = deliverTableKey(controls, undefined, {
+        [phase]: (delivery: TablePublicEvent, handler: TableKeyHandler) => {
+          if (kind === "proxy") return handler(new Proxy(delivery, {}));
+          if (kind === "own" || kind === "inherited") {
+            if (kind === "inherited") Object.setPrototypeOf(delivery, Object.create(Object.getPrototypeOf(delivery)));
+            for (const field of ["key", "ctrlKey", "preventDefault", "isPropagationStopped"] as const) {
+              const value = delivery[field];
+              Object.defineProperty(kind === "own" ? delivery : Object.getPrototypeOf(delivery), field, {
+                configurable: true, get: () => value,
+              });
+              if (kind === "inherited") Reflect.deleteProperty(delivery, field);
+            }
+            handler(delivery);
+          } else {
+            const facade = Object.create(null);
+            for (const field of Object.keys(delivery)) {
+              Object.defineProperty(facade, field, {
+                configurable: true,
+                get: () => Reflect.get(delivery, field),
+                set: (value) => Reflect.set(delivery, field, value),
+              });
+            }
+            for (const field of ["preventDefault", "isDefaultPrevented", "isPropagationStopped"]) {
+              if (!(field in facade)) Object.defineProperty(facade, field, {
+                configurable: true, get: () => Reflect.get(delivery, field),
+                set: (value) => Reflect.set(delivery, field, value),
+              });
+            }
+            handler(facade);
+          }
+        },
+      });
+      const col = kind === "own" ? 1 : kind === "inherited" ? 2 : kind === "proxy" ? 3 : 4;
+      expect(result.preventions[0]).not.toHaveBeenCalled();
+      expect(result.preventions[1]).toHaveBeenCalledOnce();
+      expect(context.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expectGrid(0, col);
+      expectNoActions(context.actions);
+    }
+  });
+
+  it.each(["capture", "bubble"] as const)("rejects throwing %s scalar, method, and query reads, then recovers", (phase) => {
+    const context = setup();
+    for (const field of ["nativeEvent", "key", "currentTarget", "preventDefault", "isDefaultPrevented", "isPropagationStopped"]) {
+      const result = deliverTableKey(tableGridControls(), undefined, {
+        [phase]: (delivery: TablePublicEvent, handler: TableKeyHandler) => {
+          Object.defineProperty(delivery, field, {
+            configurable: true,
+            get: () => { throw new Error("hostile accessor"); },
+            set: () => undefined,
+          });
+          handler(delivery);
+        },
+      });
+      expectRejected(context, result);
+    }
+    for (const field of ["isDefaultPrevented", "isPropagationStopped"] as const) {
+      const result = deliverTableKey(tableGridControls(), undefined, {
+        [phase]: (delivery: TablePublicEvent, handler: TableKeyHandler) => {
+          delivery[field] = () => { throw new Error("hostile query"); };
+          handler(delivery);
+        },
+      });
+      expectRejected(context, result);
+    }
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it.each(["key", "preventDefault", "isDefaultPrevented", "isPropagationStopped"] as const)(
+    "rejects observed %s replacement at a validation boundary", (field) => {
+      const context = setup();
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          const original = delivery[field];
+          let reads = 0;
+          Object.defineProperty(delivery, field, {
+            configurable: true,
+            get: () => ++reads < 2 ? original : field === "key" ? "ArrowLeft" : () => false,
+          });
+          handler(delivery);
+        },
+      });
+      expectRejected(context, result);
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+    },
+  );
+
+  it.each(["capture", "bubble"] as const)("excludes nested %s execution before reading key or nativeEvent", (phase) => {
+    const context = setup();
+    let nestedReads = 0;
+    let entered = false;
+    const nested = new Proxy({} as TablePublicEvent, { get: () => { nestedReads++; throw new Error("nested read"); } });
+    const result = deliverTableKey(context.controls, undefined, {
+      [phase]: (delivery: TablePublicEvent, handler: TableKeyHandler) => {
+        const key = delivery.key;
+        Object.defineProperty(delivery, "key", {
+          configurable: true,
+          get: () => {
+            if (!entered) {
+              entered = true;
+              context.controls.capture(nested);
+              context.controls.bubble(nested);
+            }
+            return key;
+          },
+        });
+        handler(delivery);
+      },
+    });
+    expectAccepted(context, result, 0, 1);
+    expect(entered).toBe(true);
+    expect(nestedReads).toBe(0);
+  });
+
+  it.each(["capture", "bubble", "prevention", "focus"] as const)("never double-moves during %s reentry", (where) => {
+    const context = setup();
+    let retained: TablePublicEvent | null = null;
+    const reenter = () => {
+      if (!retained) return;
+      context.controls.capture(retained);
+      context.controls.bubble(retained);
+    };
+    if (where === "focus") {
+      context.focus.mockImplementation(function (this: HTMLElement, options) {
+        reenter();
+        Reflect.apply(context.nativeFocus, this, [options]);
+      });
+    }
+    const result = deliverTableKey(context.controls, undefined, {
+      capture: (delivery, handler) => {
+        retained = delivery;
+        if (where === "capture") {
+          delivery.isPropagationStopped = () => { reenter(); return false; };
+        }
+        handler(delivery);
+      },
+      bubble: (delivery, handler) => {
+        retained = delivery;
+        if (where === "bubble") delivery.isDefaultPrevented = () => { reenter(); return false; };
+        if (where === "prevention") {
+          const prevent = delivery.preventDefault;
+          delivery.preventDefault = function () { reenter(); Reflect.apply(prevent, this, []); };
+        }
+        handler(delivery);
+      },
+    });
+    expectAccepted(context, result, 0, 1);
+  });
+
+  it.each(["source-ref", "destination-ref", "grid-ref", "remove", "reparent", "reorder", "focus", "disabled", "inert", "owner"] as const)(
+    "revokes %s drift between phases", (kind) => {
+      const context = setup();
+      let restore = () => {};
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          const { cells, grid } = context.controls;
+          if (kind.endsWith("-ref")) {
+            const ref = kind === "grid-ref" ? context.controls.gridRef : context.controls.cellRefs[kind === "source-ref" ? 0 : 1];
+            Reflect.apply(ref, null, [null]);
+          } else if (kind === "remove" || kind === "reparent") {
+            const parent = cells[1].parentElement!;
+            if (kind === "remove") cells[1].remove();
+            else document.body.append(cells[1]);
+            restore = () => parent.append(cells[1]);
+          } else if (kind === "reorder") {
+            const row = grid.children[0];
+            const first = row.children[0];
+            row.append(first);
+            restore = () => row.prepend(first);
+          } else if (kind === "focus") {
+            const other = document.createElement("button");
+            document.body.append(other);
+            other.focus();
+            context.focus.mockClear();
+            restore = () => other.remove();
+          } else if (kind === "disabled") {
+            cells[1].disabled = true;
+            restore = () => { cells[1].disabled = false; };
+          } else if (kind === "inert") {
+            grid.setAttribute("inert", "");
+            restore = () => grid.removeAttribute("inert");
+          } else {
+            const descriptor = Object.getOwnPropertyDescriptor(document, "defaultView");
+            Object.defineProperty(document, "defaultView", { configurable: true, value: null });
+            restore = () => {
+              if (descriptor) Object.defineProperty(document, "defaultView", descriptor);
+              else Reflect.deleteProperty(document, "defaultView");
+            };
+          }
+          handler(delivery);
+        },
+      });
+      try {
+        expect(result.preventions.every((prevent) => prevent.mock.calls.length === 0)).toBe(true);
+        expect(context.focus).not.toHaveBeenCalled();
+        expectNoActions(context.actions);
+        expect(screen.getByTestId("table-grid-label").textContent).toBe("1 rows × 1 columns");
+      } finally {
+        restore();
+      }
+      context.rerender(<TableDialog open {...{ onSubmit: vi.fn(), onOpenChange: vi.fn() }} />);
+      act(() => tableGridControls().cells[0].focus());
+      context.focus.mockClear();
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+    },
+  );
+
+  it("detects remove-and-restore history even when the current DOM is identical", () => {
+    const context = setup();
+    const result = deliverTableKey(context.controls, undefined, {
+      bubble: (delivery, handler) => {
+        const destination = context.controls.cells[1];
+        const parent = destination.parentElement!;
+        destination.remove();
+        parent.append(destination);
+        handler(delivery);
+      },
+    });
+    expectRejected(context, result);
+  });
+
+  it.each(["nativeEvent", "key", "default-query", "prevention"] as const)(
+    "stops after synchronous unmount from %s", (where) => {
+      const context = setup();
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          let replaced = false;
+          const replace = () => {
+            if (replaced) return;
+            replaced = true;
+            flushSync(() => context.unmount());
+          };
+          if (where === "nativeEvent" || where === "key") {
+            const value = delivery[where];
+            Object.defineProperty(delivery, where, { configurable: true, get: () => { replace(); return value; } });
+          } else if (where === "default-query") {
+            delivery.isDefaultPrevented = () => { replace(); return false; };
+          } else {
+            const prevent = delivery.preventDefault;
+            delivery.preventDefault = function () { Reflect.apply(prevent, this, []); replace(); };
+          }
+          handler(delivery);
+        },
+      });
+      expect(result.preventions[0]).not.toHaveBeenCalled();
+      expect(result.preventions[1]).toHaveBeenCalledTimes(where === "prevention" ? 1 : 0);
+      expect(context.focus).not.toHaveBeenCalled();
+      expectNoActions(context.actions);
+      expect(screen.queryByTestId("table-grid")).toBeNull();
+    },
+  );
+
+  it.each(["unmount", "visit replacement"] as const)(
+    "does not read the replacement query after prevention retires via %s", (transition) => {
+      const nativePrevention = vi.spyOn(Event.prototype, "preventDefault");
+      const context = setup();
+      const replacement: TableActions = { onOpenChange: vi.fn(), onSubmit: vi.fn() };
+      const label = screen.getByTestId("table-grid-label");
+      const retiredGetter = vi.fn();
+      const replacementQueryBody = vi.fn();
+      let retired = false;
+      let replacements = 0;
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          let query = delivery.isDefaultPrevented;
+          Object.defineProperty(delivery, "isDefaultPrevented", {
+            configurable: true,
+            get: () => {
+              if (retired) retiredGetter();
+              return query;
+            },
+            set: (next: TablePublicEvent["isDefaultPrevented"]) => {
+              replacements++;
+              query = function (this: TablePublicEvent) {
+                replacementQueryBody();
+                return Reflect.apply(next, this, []);
+              };
+            },
+          });
+          const prevent = delivery.preventDefault;
+          delivery.preventDefault = function () {
+            Reflect.apply(prevent, this, []);
+            flushSync(() => {
+              if (transition === "unmount") context.unmount();
+              else context.rerender(<TableDialog open {...replacement} />);
+            });
+            retired = true;
+          };
+          handler(delivery);
+        },
+      });
+      expect(retired).toBe(true);
+      expect(replacements).toBe(1);
+      expect(retiredGetter).not.toHaveBeenCalled();
+      expect(replacementQueryBody).not.toHaveBeenCalled();
+      expect(result.preventions[0]).not.toHaveBeenCalled();
+      expect(result.preventions[1]).toHaveBeenCalledOnce();
+      expect(result.preventions[1].mock.contexts).toEqual([result.wrappers[1]]);
+      expect(nativePrevention).toHaveBeenCalledOnce();
+      expect(nativePrevention.mock.contexts).toEqual([result.event]);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(context.focus).not.toHaveBeenCalled();
+      expect(label.textContent).toBe("1 rows × 1 columns");
+      expect(context.controls.cells.filter((cell) => cell.tabIndex === 0)).toEqual([context.controls.cells[0]]);
+      expectNoActions(context.actions);
+      expectNoActions(replacement);
+      if (transition === "unmount") {
+        expect(screen.queryByTestId("table-grid")).toBeNull();
+        render(<TableDialog open {...replacement} />);
+      }
+      expectGrid(0, 0);
+      act(() => tableGridControls().cells[0].focus());
+      context.focus.mockClear();
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+      expect(nativePrevention).toHaveBeenCalledTimes(2);
+      expectNoActions(replacement);
+      expect(retiredGetter).not.toHaveBeenCalled();
+      expect(replacementQueryBody).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["close", "visit"] as const)("rejects old handlers across %s replacement and supports reopening", (kind) => {
+    const context = setup();
+    const retained = deliverTableKey(context.controls, undefined, { bubble: () => {} });
+    const other: TableActions = { onSubmit: vi.fn(), onOpenChange: vi.fn() };
+    context.rerender(<TableDialog open={kind !== "close"} {...(kind === "visit" ? other : context.actions)} />);
+    const reads = vi.fn(() => { throw new Error("stale public read"); });
+    const stale = new Proxy(retained.wrappers[1], { get: reads });
+    act(() => {
+      context.controls.capture(stale);
+      context.controls.bubble(stale);
+    });
+    expect(reads).not.toHaveBeenCalled();
+    expect(context.focus).not.toHaveBeenCalled();
+    expectNoActions(context.actions);
+    context.rerender(<TableDialog open {...other} />);
+    act(() => tableGridControls().cells[0].focus());
+    context.focus.mockClear();
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+    expectNoActions(other);
+  });
+
+  it("rejects missing, crossed, fabricated and replayed native dispatch pairs without poisoning another key", () => {
+    const context = setup();
+    const incomplete = deliverTableKey(context.controls, undefined, { bubble: () => {} });
+    expectRejected(context, incomplete);
+    const missing = deliverTableKey(context.controls, undefined, { capture: () => {} });
+    expectRejected(context, missing);
+    const crossed = deliverTableKey(context.controls, undefined, {
+      capture: () => {},
+      bubble: (_delivery, handler) => handler(incomplete.wrappers[0]),
+    });
+    expectRejected(context, crossed);
+    act(() => {
+      context.controls.capture(keyDown("ArrowRight"));
+      context.controls.bubble(keyDown("ArrowRight"));
+      context.controls.bubble(incomplete.wrappers[1]);
+    });
+    const replayed = deliverTableKey(context.controls, incomplete.event);
+    expectRejected(context, replayed);
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it.each(["path", "path-throws", "native-key", "native-target", "native-query", "listener", "focus-method"] as const)(
+    "rejects observable %s drift before prevention", (kind) => {
+      const context = setup();
+      let restore = () => {};
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          const native = delivery.nativeEvent;
+          if (kind === "path" || kind === "path-throws") {
+            Object.defineProperty(native, "composedPath", {
+              configurable: true,
+              value: kind === "path" ? () => [context.controls.cells[0], window] : () => { throw new Error("path"); },
+            });
+          } else if (kind === "native-key" || kind === "native-target") {
+            Object.defineProperty(native, kind === "native-key" ? "key" : "target", {
+              configurable: true, value: kind === "native-key" ? "ArrowLeft" : context.controls.cells[1],
+            });
+          } else if (kind === "native-query") {
+            Object.defineProperty(native, "defaultPrevented", { configurable: true, get: () => { throw new Error("native query"); } });
+          } else if (kind === "listener") {
+            const original = window.addEventListener;
+            window.addEventListener = () => {};
+            restore = () => { window.addEventListener = original; };
+          } else {
+            const original = context.controls.cells[1].focus;
+            context.controls.cells[1].focus = () => {};
+            restore = () => { context.controls.cells[1].focus = original; };
+          }
+          handler(delivery);
+        },
+      });
+      restore();
+      expectRejected(context, result);
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+    },
+  );
+
+  it.each(["capture-default", "bubble-default", "prevent", "stopped", "scalar", "source", "focus"] as const)(
+    "retains one prevention and no later effects after %s changes during prevention", (kind) => {
+      const context = setup();
+      let capture!: TablePublicEvent;
+      const result = deliverTableKey(context.controls, undefined, {
+        capture: (delivery, handler) => {
+          capture = delivery;
+          handler(delivery);
+        },
+        bubble: (delivery, handler) => {
+          const prevent = delivery.preventDefault;
+          delivery.preventDefault = function () {
+            Reflect.apply(prevent, this, []);
+            if (kind === "capture-default") capture.isDefaultPrevented = () => false;
+            if (kind === "prevent") delivery.preventDefault = () => {};
+            if (kind === "stopped") delivery.isPropagationStopped = () => true;
+            if (kind === "scalar") delivery.key = "ArrowLeft";
+            if (kind === "source") context.controls.cells[0].disabled = true;
+            if (kind === "focus") {
+              Reflect.apply(context.nativeFocus, document.body, []);
+              Object.defineProperty(document, "activeElement", { configurable: true, value: document.body });
+            }
+            if (kind === "bubble-default") {
+              const reactReplacement = delivery.isDefaultPrevented;
+              let reads = 0;
+              Object.defineProperty(delivery, "isDefaultPrevented", {
+                configurable: true, get: () => ++reads === 1 ? reactReplacement : () => true,
+              });
+            }
+          };
+          handler(delivery);
+        },
+      });
+      try {
+        expect(result.preventions[0]).not.toHaveBeenCalled();
+        expect(result.preventions[1]).toHaveBeenCalledOnce();
+        expect(context.focus).not.toHaveBeenCalled();
+        expectGrid(0, 0);
+        expectNoActions(context.actions);
+      } finally {
+        if (kind === "focus") Reflect.deleteProperty(document, "activeElement");
+      }
+    },
+  );
+
+  it("rejects a non-preventing bubble callback and a throwing prevention callback", () => {
+    const context = setup();
+    for (const throws of [false, true]) {
+      const prevention = vi.fn(() => {
+        if (throws) throw new Error("prevention failed");
+      });
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          delivery.preventDefault = prevention;
+          handler(delivery);
+        },
+      });
+      expect(prevention).toHaveBeenCalledOnce();
+      expectRejected(context, result);
+    }
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it("checks currentness after a replacing nativeEvent getter before consulting retired weak storage", () => {
+    const context = setup();
+    const replacement: TableActions = { onOpenChange: vi.fn(), onSubmit: vi.fn() };
+    let reads = 0;
+    const result = deliverTableKey(context.controls, undefined, {
+      bubble: (delivery, handler) => {
+        const native = delivery.nativeEvent;
+        let replaced = false;
+        Object.defineProperty(delivery, "nativeEvent", {
+          configurable: true,
+          get: () => {
+            if (!replaced) {
+              replaced = true;
+              flushSync(() => context.rerender(<TableDialog open {...replacement} />));
+              const nested = new Proxy({} as TablePublicEvent, { get: () => { reads++; return undefined; } });
+              const controls = tableGridControls();
+              controls.capture(nested);
+              controls.bubble(nested);
+            }
+            return native;
+          },
+        });
+        handler(delivery);
+      },
+    });
+    expectRejected(context, result);
+    expect(reads).toBe(0);
+    expectNoActions(replacement);
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it("keeps the claim excluded through focus-triggered state publication and a new visit", () => {
+    const context = setup();
+    const replacement: TableActions = { onOpenChange: vi.fn(), onSubmit: vi.fn() };
+    let reentryReads = 0;
+    context.focus.mockImplementation(function (this: HTMLElement, options) {
+      Reflect.apply(context.nativeFocus, this, [options]);
+      flushSync(() => context.rerender(<TableDialog open {...replacement} />));
+      const nested = new Proxy({} as TablePublicEvent, { get: () => { reentryReads++; return undefined; } });
+      const controls = tableGridControls();
+      controls.capture(nested);
+      controls.bubble(nested);
+    });
+    const result = deliverTableKey(context.controls);
+    expect(result.preventions[1]).toHaveBeenCalledOnce();
+    expect(context.focus).toHaveBeenCalledOnce();
+    expect(reentryReads).toBe(0);
+    expectNoActions(context.actions);
+    expectNoActions(replacement);
+    expectGrid(0, 0);
+    context.focus.mockImplementation(context.nativeFocus);
+    act(() => tableGridControls().cells[0].focus());
+    context.focus.mockClear();
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it.each(["throws", "changes-path", "reenters", "unmounts"] as const)(
+    "bounds retained native path callbacks that %s", (kind) => {
+      const original = Event.prototype.composedPath;
+      let hook: (() => void) | null = null;
+      let changePath = false;
+      vi.spyOn(Event.prototype, "composedPath").mockImplementation(function (this: Event) {
+        hook?.();
+        const path = Reflect.apply(original, this, []) as EventTarget[];
+        return changePath ? path.slice(1) : path;
+      });
+      const context = setup();
+      let nestedReads = 0;
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          hook = () => {
+            if (kind === "throws") throw new Error("native path read failed");
+            if (kind === "changes-path") changePath = true;
+            if (kind === "unmounts") flushSync(() => context.unmount());
+            if (kind === "reenters") {
+              const nested = new Proxy({} as TablePublicEvent, { get: () => { nestedReads++; return undefined; } });
+              context.controls.capture(nested);
+              context.controls.bubble(nested);
+            }
+          };
+          handler(delivery);
+        },
+      });
+      hook = null;
+      changePath = false;
+      expect(nestedReads).toBe(0);
+      if (kind === "reenters") expectAccepted(context, result, 0, 1);
+      else if (kind === "unmounts") {
+        expect(result.preventions.every((prevent) => prevent.mock.calls.length === 0)).toBe(true);
+        expect(context.focus).not.toHaveBeenCalled();
+        expectNoActions(context.actions);
+      } else {
+        expectRejected(context, result);
+        expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+      }
+    },
+  );
+
+  it("bounds parent traversal when a public DOM accessor returns a cycle", () => {
+    const context = setup();
+    const source = context.controls.cells[0];
+    let reads = 0;
+    const result = deliverTableKey(context.controls, undefined, {
+      bubble: (delivery, handler) => {
+        Object.defineProperty(source, "parentNode", {
+          configurable: true, get: () => { reads++; return source; },
+        });
+        try {
+          handler(delivery);
+        } finally {
+          Reflect.deleteProperty(source, "parentNode");
+        }
+      },
+    });
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThan(30);
+    expectRejected(context, result);
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it("rejects a proxy of the native event even when a transparent public wrapper is compatible", () => {
+    const context = setup();
+    const result = deliverTableKey(context.controls, undefined, {
+      bubble: (delivery, handler) => {
+        delivery.nativeEvent = new Proxy(delivery.nativeEvent, {});
+        handler(new Proxy(delivery, {}));
+      },
+    });
+    expectRejected(context, result);
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+  });
+
+  it("removes exact native listeners on cleanup and remains usable after Strict Mode remount", () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const context = setup(0, 0, true);
+    expectAccepted(context, deliverTableKey(context.controls), 0, 1);
+    context.unmount();
+    const installed = add.mock.calls.filter(([name, , capture]) => name === "keydown" && capture === true);
+    expect(installed.length).toBeGreaterThan(1);
+    for (const [, listener, capture] of installed) {
+      expect(remove).toHaveBeenCalledWith("keydown", listener, capture);
+    }
+    context.rerender = render(<StrictMode>{table(context.actions)}</StrictMode>).rerender;
+    act(() => tableGridControls().cells[0].focus());
+    context.focus.mockClear();
+    expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
   });
 });
 

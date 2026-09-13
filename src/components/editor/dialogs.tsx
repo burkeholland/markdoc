@@ -5860,13 +5860,355 @@ interface TableDraft {
   hover: GridCell | null;
 }
 
-interface TableCellOwner {
-  visit: DialogActionVisit;
-  element: HTMLButtonElement;
-}
-
 function tableDraft(visit: DialogActionVisit, open: boolean): TableDraft {
   return { visit, open, focused: { row: 0, col: 0 }, hover: null };
+}
+
+function captureTableGridIntrinsics(document: Document) {
+  const view = document.defaultView;
+  if (!view) return null;
+  const Keyboard = view.KeyboardEvent;
+  const Event = view.Event;
+  const UIEvent = view.UIEvent;
+  const descriptor = Object.getOwnPropertyDescriptor;
+  const event = captureNameVersionGetters(descriptor, Event.prototype, [
+    "type", "target", "currentTarget", "eventPhase", "bubbles", "cancelable",
+    "defaultPrevented", "cancelBubble", "timeStamp",
+  ] as const);
+  const keyboard = captureNameVersionGetters(descriptor, Keyboard.prototype, [
+    "key", "code", "location", "repeat", "isComposing",
+    "ctrlKey", "altKey", "metaKey", "shiftKey",
+  ] as const);
+  const ui = captureNameVersionGetters(descriptor, UIEvent.prototype, ["view"] as const);
+  const path = captureNameVersionMethod<Event["composedPath"]>(descriptor, Event.prototype, "composedPath");
+  const prevent = captureNameVersionMethod<Event["preventDefault"]>(descriptor, Event.prototype, "preventDefault");
+  const trusted = captureNameVersionTrustedAuthority(
+    descriptor, Reflect.apply, new Keyboard("table-grid-intrinsic"),
+  );
+  const add = captureNameVersionWindowMethod(view, "addEventListener");
+  const remove = captureNameVersionWindowMethod(view, "removeEventListener");
+  if (!event || !keyboard || !ui || !path || !prevent || !trusted || !add || !remove) return null;
+  return Object.freeze({
+    view, Keyboard, path: path.method, prevent: prevent.method, trusted, add, remove,
+    getters: Object.freeze({ ...event.getters, ...keyboard.getters, ...ui.getters }),
+    isCurrent: () =>
+      document.defaultView === view &&
+      view.KeyboardEvent === Keyboard && view.Event === Event && view.UIEvent === UIEvent &&
+      event.isCurrent() && keyboard.isCurrent() && ui.isCurrent() &&
+      path.isCurrent() && prevent.isCurrent() && trusted.isCurrent() &&
+      add.isCurrent() && remove.isCurrent(),
+  });
+}
+
+type TableGridIntrinsics = NonNullable<ReturnType<typeof captureTableGridIntrinsics>>;
+type TableGridFacts = Readonly<Pick<KeyboardEvent, keyof TableGridIntrinsics["getters"]>>;
+type TableGridEvent = ReactKeyboardEvent<HTMLDivElement>;
+type TableGridDelivery = Readonly<{
+  wrapper: TableGridEvent;
+  native: KeyboardEvent;
+  facts: TableGridFacts;
+  prevent: TableGridEvent["preventDefault"];
+  defaultQuery: TableGridEvent["isDefaultPrevented"];
+  stoppedQuery: TableGridEvent["isPropagationStopped"];
+}>;
+type TableGridDispatch = {
+  readonly receiver: EventTarget;
+  readonly path: readonly EventTarget[];
+  capture: TableGridDelivery | null;
+  claimed: boolean;
+};
+type TableGridEstablishment = Readonly<{
+  grid: HTMLDivElement;
+  cells: readonly HTMLButtonElement[];
+  focus: readonly HTMLButtonElement["focus"][];
+  document: Document;
+  intrinsics: TableGridIntrinsics;
+  dom: NameVersionDomSnapshot;
+  placement: NameVersionPlacement;
+  history: NameVersionDomGuard;
+  deliveries: WeakMap<KeyboardEvent, TableGridDispatch>;
+  seen: WeakSet<KeyboardEvent>;
+  listener: EventListener;
+}>;
+
+class TableGridRoute {
+  active: TableGridPublication | null = null;
+  busy = false;
+}
+
+class TableGridPublication {
+  private establishment: TableGridEstablishment | null = null;
+  readonly grid: LinkElementOwner<HTMLDivElement>;
+  readonly cells: readonly LinkElementOwner<HTMLButtonElement>[];
+
+  constructor(
+    private readonly route: TableGridRoute,
+    private readonly draft: TableDraft,
+    private readonly move: (next: GridCell) => void,
+  ) {
+    this.grid = new LinkElementOwner(() => this.retire());
+    this.cells = Object.freeze(Array.from(
+      { length: GRID_ROWS * GRID_COLS },
+      () => new LinkElementOwner<HTMLButtonElement>(() => this.retire()),
+    ));
+  }
+
+  readonly retire = () => {
+    const current = this.establishment;
+    this.establishment = null;
+    if (this.route.active === this) this.route.active = null;
+    if (!current) return;
+    current.history.release();
+    Reflect.apply(current.intrinsics.remove.value, current.intrinsics.view, [
+      "keydown", current.listener, true,
+    ]);
+  };
+
+  readonly establish = () => {
+    this.retire();
+    const grid = this.grid.element();
+    if (!this.draft.open || !grid) return;
+    const cells = this.cells.map((owner) => owner.element());
+    if (!cells.every((cell): cell is HTMLButtonElement => cell !== null)) return;
+    const document = grid.ownerDocument;
+    const intrinsics = captureTableGridIntrinsics(document);
+    const placement = captureNameVersionPlacement(grid);
+    if (!intrinsics || !placement) return;
+    const history = createNameVersionDomGuard(grid, placement);
+    if (!history) return;
+    const deliveries = new WeakMap<KeyboardEvent, TableGridDispatch>();
+    const seen = new WeakSet<KeyboardEvent>();
+    const route = this.route;
+    const isCurrent = () => this.isCurrent(current);
+    const listener: EventListener = function (this: EventTarget, event) {
+      if (route.busy || !isCurrent()) return;
+      route.busy = true;
+      try {
+        if (!(event instanceof intrinsics.Keyboard) || seen.has(event)) {
+          if (event instanceof intrinsics.Keyboard) deliveries.delete(event);
+          return;
+        }
+        seen.add(event);
+        const path = Reflect.apply(intrinsics.path, event, []) as EventTarget[];
+        if (
+          !isCurrent() || !intrinsics.isCurrent() ||
+          Reflect.apply(intrinsics.getters.currentTarget, event, []) !== this ||
+          Reflect.apply(intrinsics.getters.eventPhase, event, []) !== 1 ||
+          path.at(-1) !== this || path.at(-2) !== document ||
+          !path.includes(grid) || !isCurrent()
+        ) return;
+        deliveries.set(event, {
+          receiver: this, path: Object.freeze([...path]), capture: null, claimed: false,
+        });
+      } catch {
+        // A malformed native dispatch has no route; a different event can still recover.
+        if (isCurrent() && event instanceof intrinsics.Keyboard) deliveries.delete(event);
+      } finally {
+        route.busy = false;
+      }
+    };
+    const current: TableGridEstablishment = Object.freeze({
+      grid, cells: Object.freeze(cells), focus: Object.freeze(cells.map((cell) => cell.focus)),
+      document, intrinsics, dom: snapshotNameVersionDom(grid), placement, history,
+      deliveries, seen, listener,
+    });
+    this.establishment = current;
+    this.route.active = this;
+    Reflect.apply(intrinsics.add.value, intrinsics.view, ["keydown", listener, true]);
+    return this.retire;
+  };
+
+  private isCurrent(current: TableGridEstablishment) {
+    return this.route.active === this && this.establishment === current &&
+      this.grid.element() === current.grid &&
+      this.cells.every((owner, index) => owner.element() === current.cells[index]);
+  }
+
+  readonly capture = (event: TableGridEvent) => this.deliver(event, 1);
+  readonly bubble = (event: TableGridEvent) => this.deliver(event, 3);
+
+  private deliver(event: TableGridEvent, phase: 1 | 3) {
+    // Exclusion belongs to the component, not a publication: synchronous replacement cannot reset it.
+    if (this.route.busy) return;
+    this.route.busy = true;
+    const current = this.establishment;
+    let native: KeyboardEvent | null = null;
+    let dispatch: TableGridDispatch | undefined;
+    let acceptedCapture = false;
+    try {
+      if (!current || !this.isCurrent(current)) return;
+      const live = () => this.isCurrent(current) &&
+        (!native || !dispatch || current.deliveries.get(native) === dispatch);
+      const read = <T,>(callback: () => T): T => {
+        if (!live()) throw new Error("Retired table grid delivery");
+        const result = callback();
+        if (!live()) throw new Error("Retired table grid delivery");
+        return result;
+      };
+      const { intrinsics, grid, document, cells } = current;
+      native = read(() => event.nativeEvent);
+      // nativeEvent can be an accessor which synchronously closes or replaces this publication.
+      if (!live() || !(native instanceof intrinsics.Keyboard)) return;
+      dispatch = current.deliveries.get(native);
+      if (!dispatch || dispatch.claimed || (phase === 1 && dispatch.capture)) return;
+      const exactNative = native;
+      const sourceIndex = this.draft.focused.row * GRID_COLS + this.draft.focused.col;
+      const source = cells[sourceIndex];
+      const nativeFacts = (prevented: boolean): TableGridFacts | null => {
+        if (!read(() => intrinsics.isCurrent()) || !intrinsics.trusted.matches(exactNative)) return null;
+        const entries = Object.entries(intrinsics.getters).map(([field, getter]) => {
+          const value: unknown = read(() => Reflect.apply(getter, exactNative, []));
+          const publicValue: unknown = read(() => Reflect.get(exactNative, field));
+          if (value !== publicValue) throw new Error("Changed native table grid fact");
+          return [field, value];
+        });
+        const facts = Object.freeze(Object.fromEntries(entries)) as TableGridFacts;
+        const trusted = read(() => intrinsics.trusted.read(exactNative));
+        if (
+          trusted !== true || read(() => exactNative.isTrusted) !== true ||
+          facts.type !== "keydown" || facts.target !== source ||
+          facts.eventPhase !== phase || !facts.currentTarget ||
+          facts.bubbles !== true || facts.cancelable !== true ||
+          facts.defaultPrevented !== prevented || facts.cancelBubble !== false ||
+          facts.repeat !== false || facts.isComposing !== false ||
+          facts.altKey !== false || facts.shiftKey !== false ||
+          typeof facts.ctrlKey !== "boolean" || typeof facts.metaKey !== "boolean" ||
+          typeof facts.key !== "string" || !isNameVersionNavigationKey(facts.key) ||
+          facts.code !== facts.key || facts.location !== 0 ||
+          typeof facts.timeStamp !== "number" || !Number.isFinite(facts.timeStamp) ||
+          (facts.view !== intrinsics.view && facts.view !== dispatch?.receiver) ||
+          read(() => exactNative.composedPath) !== intrinsics.path ||
+          read(() => exactNative.preventDefault) !== intrinsics.prevent
+        ) return null;
+        const path = read(() => Reflect.apply(intrinsics.path, exactNative, [])) as EventTarget[];
+        const expectedPath: EventTarget[] = [];
+        let node: Node | null = source;
+        for (let index = 0; node && index < dispatch!.path.length; index++) {
+          expectedPath.push(node);
+          if (node === document) break;
+          node = read(() => node!.parentNode);
+        }
+        expectedPath.push(dispatch!.receiver);
+        if (
+          path.length !== expectedPath.length || path.length !== dispatch!.path.length ||
+          path.some((entry, index) => entry !== expectedPath[index] || entry !== dispatch!.path[index]) ||
+          path.at(-2) !== document || path.indexOf(grid) < 0 ||
+          path.indexOf(facts.currentTarget) <= path.indexOf(grid)
+        ) return null;
+        return facts;
+      };
+      const facts = nativeFacts(false);
+      if (!facts) return;
+      const next = gridCell(facts.key, this.draft.focused, GRID_ROWS, GRID_COLS, {
+        ctrl: facts.ctrlKey === true || facts.metaKey === true,
+      });
+      if (!next) return;
+      const destinationIndex = next.row * GRID_COLS + next.col;
+      const destination = cells[destinationIndex];
+      const focus = current.focus[destinationIndex];
+      const domMatches = () =>
+        read(() => document.defaultView) === intrinsics.view &&
+        read(() => document.activeElement) === source &&
+        read(() => nameVersionPlacementMatches(grid, current.placement)) &&
+        read(() => nameVersionDomMatches(current.dom)) &&
+        read(() => current.history.isClean()) &&
+        read(() => grid.children.length) === GRID_ROWS &&
+        cells.every((cell, index) =>
+          read(() => cell.ownerDocument) === document &&
+          read(() => cell.isConnected) &&
+          read(() => cell.closest("[inert], [hidden], [aria-disabled='true']")) === null &&
+          !read(() => cell.matches(":disabled")) &&
+          read(() => cell.tabIndex) === (index === sourceIndex ? 0 : -1) &&
+          read(() => cell.parentElement?.parentElement) === grid.children.item(Math.floor(index / GRID_COLS)) &&
+          read(() => cell.parentElement?.parentElement?.children.item(index % GRID_COLS)?.firstElementChild) === cell &&
+          read(() => cell.focus) === current.focus[index]) &&
+        live();
+      const delivery: TableGridDelivery = Object.freeze({
+        wrapper: event, native: exactNative, facts,
+        prevent: read(() => event.preventDefault),
+        defaultQuery: read(() => event.isDefaultPrevented),
+        stoppedQuery: read(() => event.isPropagationStopped),
+      });
+      const wrapperMatches = (
+        expected: TableGridDelivery,
+        currentTarget: HTMLDivElement | null,
+        prevented = false,
+        defaultQuery = expected.defaultQuery,
+      ) => {
+        const wrapper = expected.wrapper;
+        if (
+          read(() => wrapper.nativeEvent) !== expected.native ||
+          read(() => wrapper.currentTarget) !== currentTarget ||
+          read(() => wrapper.isTrusted) !== true ||
+          read(() => wrapper.defaultPrevented) !== prevented
+        ) return false;
+        for (const field of [
+          "type", "target", "eventPhase", "bubbles", "cancelable", "timeStamp",
+          "key", "code", "location", "repeat", "ctrlKey", "altKey", "metaKey", "shiftKey", "view",
+        ] as const) {
+          if (read(() => wrapper[field]) !== expected.facts[field]) return false;
+        }
+        if (
+          typeof expected.prevent !== "function" ||
+          typeof defaultQuery !== "function" || typeof expected.stoppedQuery !== "function" ||
+          read(() => wrapper.preventDefault) !== expected.prevent ||
+          read(() => wrapper.isDefaultPrevented) !== defaultQuery ||
+          read(() => Reflect.apply(defaultQuery, wrapper, [])) !== prevented ||
+          read(() => wrapper.isPropagationStopped) !== expected.stoppedQuery ||
+          read(() => Reflect.apply(expected.stoppedQuery, wrapper, [])) !== false
+        ) return false;
+        return read(() => wrapper.preventDefault) === expected.prevent &&
+          read(() => wrapper.isDefaultPrevented) === defaultQuery &&
+          read(() => wrapper.isPropagationStopped) === expected.stoppedQuery;
+      };
+      const nativeMatches = (prevented: boolean) => {
+        const observed = nativeFacts(prevented);
+        return observed !== null && Object.keys(facts).every((field) =>
+          field === "defaultPrevented" ||
+          observed[field as keyof TableGridFacts] === facts[field as keyof TableGridFacts]);
+      };
+      if (!wrapperMatches(delivery, grid) || !domMatches() || !nativeMatches(false)) return;
+      if (phase === 1) {
+        if (!live()) return;
+        dispatch.capture = delivery;
+        acceptedCapture = true;
+        return;
+      }
+      const capture = dispatch.capture;
+      if (!capture || capture.native !== exactNative ||
+        Object.keys(facts).some((field) =>
+          field !== "eventPhase" && capture.facts[field as keyof TableGridFacts] !== facts[field as keyof TableGridFacts])
+      ) return;
+      dispatch.claimed = true;
+      const checkpoint = (prevented: boolean, defaultQuery = delivery.defaultQuery) =>
+        wrapperMatches(capture, null) &&
+        wrapperMatches(delivery, grid, prevented, defaultQuery) &&
+        domMatches() && nativeMatches(prevented) &&
+        dispatch!.capture === capture && dispatch!.claimed && live();
+      if (!checkpoint(false) || read(() => event.preventDefault) !== delivery.prevent || !live()) return;
+      Reflect.apply(delivery.prevent, delivery.wrapper, []);
+      // React 19 replaces this one query in preventDefault. Retain it before any other public callback.
+      const preventedQuery = read(() => delivery.wrapper.isDefaultPrevented);
+      if (!live() || !checkpoint(true, preventedQuery)) return;
+      this.move(next);
+      if (!live() || !checkpoint(true, preventedQuery) ||
+        read(() => destination.focus) !== focus || !live()
+      ) return;
+      Reflect.apply(focus, destination, [{ preventScroll: true }]);
+    } catch {
+      // Public event reads/callbacks may throw. Reject this delivery without poisoning its successor.
+    } finally {
+      if (current && native && dispatch && !acceptedCapture && this.isCurrent(current)) {
+        current.deliveries.delete(native);
+      }
+      this.route.busy = false;
+    }
+  }
+}
+
+function TableGridPublicationBoundary({ publication }: { publication: TableGridPublication }) {
+  useLayoutEffect(() => publication.establish(), [publication]);
+  return null;
 }
 
 /**
@@ -5885,7 +6227,10 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
     setDraft(draft);
   }
   const { focused, hover } = draft;
-  const cells = useRef<(TableCellOwner | null)[]>([]);
+  const [gridRoute] = useState(() => new TableGridRoute());
+  const publication = new TableGridPublication(gridRoute, draft, (next) => {
+    setDraft({ ...draft, focused: next, hover: null });
+  });
   const after = useAfterClose(visit, activeVisit);
   useLayoutEffect(() => {
     activeVisit.current = visit;
@@ -5897,15 +6242,6 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
     openRef.current = open;
   }, [open]);
   const shown = hover ?? focused;
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (activeVisit.current !== visit || !openRef.current) return;
-    const next = gridCell(e.key, focused, GRID_ROWS, GRID_COLS, { ctrl: e.ctrlKey || e.metaKey });
-    if (!next) return;
-    e.preventDefault();
-    setDraft((current) => (current.visit === visit ? { ...current, focused: next, hover: null } : current));
-    const cell = cells.current[next.row * GRID_COLS + next.col];
-    if (cell?.visit === visit) cell.element.focus();
-  };
   const setOpen = (nextOpen: boolean) => {
     if (activeVisit.current === visit) onOpenChange(nextOpen);
   };
@@ -5914,6 +6250,7 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
       <DialogContent title="Insert table" description="Pick a size. The first row becomes the header." onClosed={after.onClosed}>
         <div className="flex flex-col items-center gap-3">
           <div
+            ref={(element) => publication.grid.capture(element)}
             className="flex flex-col gap-1"
             role="grid"
             aria-label="Table size"
@@ -5921,7 +6258,8 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
               if (activeVisit.current !== visit || !openRef.current) return;
               setDraft((current) => (current.visit === visit ? { ...current, hover: null } : current));
             }}
-            onKeyDown={onKeyDown}
+            onKeyDownCapture={publication.capture}
+            onKeyDown={publication.bubble}
             data-testid="table-grid"
           >
             {Array.from({ length: GRID_ROWS }, (_, r) => (
@@ -5931,11 +6269,7 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
                   return (
                     <div key={c} role="gridcell">
                       <button
-                        ref={(el) => {
-                          const index = r * GRID_COLS + c;
-                          if (el) cells.current[index] = { visit, element: el };
-                          else if (cells.current[index]?.visit === visit) cells.current[index] = null;
-                        }}
+                        ref={(element) => publication.cells[r * GRID_COLS + c].capture(element)}
                         type="button"
                         tabIndex={isFocused ? 0 : -1}
                         className={`block h-6 w-6 rounded border ${r < shown.row + 1 && c < shown.col + 1 ? "border-accent bg-accent-soft" : "border-line-2 bg-surface"}`}
@@ -5944,7 +6278,7 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
                           setDraft((current) => (current.visit === visit ? { ...current, hover: { row: r, col: c } } : current));
                         }}
                         onFocus={() => {
-                          if (activeVisit.current !== visit || !openRef.current) return;
+                          if (gridRoute.busy || activeVisit.current !== visit || !openRef.current) return;
                           setDraft((current) => (current.visit === visit ? { ...current, focused: { row: r, col: c }, hover: null } : current));
                         }}
                         onClick={() => {
@@ -5963,6 +6297,7 @@ export const TableDialog = memo(function TableDialog({ open, onOpenChange, onSub
           <div className="text-sm text-ink-3" data-testid="table-grid-label">
             {shown.row + 1} rows × {shown.col + 1} columns
           </div>
+          <TableGridPublicationBoundary publication={publication} />
         </div>
       </DialogContent>
     </Dialog>

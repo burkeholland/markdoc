@@ -417,6 +417,134 @@ describe("ReaderToc mobile disclosure", () => {
   });
 });
 
+describe("ReaderToc heading wrapping", () => {
+  const longHeadings: TestHeading[] = [
+    { id: "long-word", level: 2, text: "Heading".repeat(40), top: 120 },
+    { id: "long-url", level: 3, text: `https://example.com/${"section".repeat(40)}`, top: 240 },
+    { id: "ordinary-heading", level: 2, text: "An ordinary heading", top: 360 },
+    { id: "ordinary-child", level: 3, text: "An ordinary child heading", top: 480 },
+  ];
+
+  function expectEntries(links: HTMLAnchorElement[], expected: TestHeading[]) {
+    expect(links.map((link) => link.textContent)).toEqual(expected.map((heading) => heading.text));
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(expected.map((heading) => `#${heading.id}`));
+    links.forEach((link, index) => {
+      expect(link).toHaveClass("block", "wrap-anywhere", "rounded-md", "py-1", "pr-2", "text-[13px]", "leading-snug");
+      expect(link).toHaveClass(expected[index].level === 3 ? "pl-5" : "pl-2");
+      expect(link).not.toHaveClass(expected[index].level === 3 ? "pl-2" : "pl-5");
+      expect(link.childNodes).toHaveLength(1);
+      expect(link.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(link).not.toHaveAttribute("role");
+      expect(link).not.toHaveAttribute("tabindex");
+      expect(link).not.toHaveAttribute("target");
+    });
+  }
+
+  it("gives full long and multiword headings the shared wrapping rule in desktop and mobile markup without render side effects", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const click = vi.spyOn(HTMLElement.prototype, "click");
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    const send = vi.spyOn(XMLHttpRequest.prototype, "send");
+    const activeElement = document.activeElement;
+    const view = render(<ReaderBoundary currentHeadings={longHeadings} />);
+    const controls = directControls(view.container);
+
+    longHeadings.slice(0, 2).forEach((heading) => {
+      expect(heading.text.length).toBeGreaterThanOrEqual(200);
+      expect(heading.text).not.toMatch(/\s/);
+    });
+    expectEntries(controls.links, longHeadings);
+    expect(controls.nav).toHaveClass("lg:sticky", "lg:top-20");
+    expect(controls.toggle).toHaveClass("lg:hidden");
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.list).toHaveClass("hidden", "lg:flex", "flex-col");
+    expect(screen.getByText("On this page")).toHaveClass("hidden", "lg:block");
+    expect(currentLinks()).toEqual([controls.links[0]]);
+    expect(controls.links[0]).toHaveClass("bg-accent-soft", "font-medium", "text-accent");
+    expect(controls.links[1]).toHaveClass("text-ink-3", "hover:bg-surface-2", "hover:text-ink");
+
+    const observer = InstrumentedIntersectionObserver.instances[0];
+    observer.publish([{ target: document.getElementById("long-url")!, isIntersecting: true }]);
+    expect(currentLinks()).toEqual([controls.links[1]]);
+    expect(controls.links[1]).toHaveClass("wrap-anywhere", "pl-5", "bg-accent-soft", "font-medium", "text-accent");
+    expect(controls.links[0]).toHaveClass("wrap-anywhere", "pl-2", "text-ink-3");
+    expectEntries(controls.links, longHeadings);
+    expect(document.activeElement).toBe(activeElement);
+    expect(focus).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1])("keeps one accepted disclosure/link action and native href behavior for long entry %s under StrictMode", (index) => {
+    const view = directRoot(
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={longHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const toggleHandler = reactHandler<ClickHandler<HTMLButtonElement>>(controls.toggle, "onClick");
+    const toggleEvent = clickEvent(controls.toggle);
+    act(() => toggleEvent.dispatch(toggleHandler, toggleHandler));
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    expect(controls.list).toHaveClass("flex", "lg:flex");
+    expect(controls.list).not.toHaveClass("hidden");
+    expectEntries(controls.links, longHeadings);
+
+    const select = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[index], "onClick");
+    const activation = clickEvent(controls.links[index]);
+    act(() => activation.dispatch(select, select));
+    expect(activation.preventDefault).not.toHaveBeenCalled();
+    expect(activation.nativeEvent.defaultPrevented).toBe(false);
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.list).toHaveClass("hidden", "lg:flex");
+    expectEntries(controls.links, longHeadings);
+
+    fireEvent.click(controls.toggle);
+    act(() => activation.dispatch(select));
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    expect(focus).not.toHaveBeenCalled();
+    expect(InstrumentedIntersectionObserver.instances.filter((observer) => observer.connected)).toHaveLength(1);
+  });
+
+  it("keeps wrapping on replacement headings without stale labels, hrefs, or observer updates", () => {
+    const replacement: TestHeading[] = [
+      { id: "new-identifier", level: 2, text: "NewIdentifier".repeat(20), top: 120 },
+      { id: "long-url", level: 3, text: "ReplacementChild".repeat(20), top: 240 },
+      { id: "new-ordinary", level: 2, text: "A different ordinary heading", top: 360 },
+    ];
+    const view = render(<ReaderBoundary currentHeadings={longHeadings} />);
+    const oldObserver = InstrumentedIntersectionObserver.instances[0];
+    const staleUpdate = oldObserver.capture([{ target: document.getElementById("long-word")!, isIntersecting: true }]);
+    fireEvent.click(screen.getByRole("button", { name: "Contents" }));
+
+    view.rerender(<ReaderBoundary currentHeadings={replacement} />);
+    const controls = directControls(view.container);
+    expectEntries(controls.links, replacement);
+    expect(view.container.querySelector('a[href="#long-word"]')).toBeNull();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(currentLinks()).toEqual([controls.links[0]]);
+    expect(oldObserver.disconnect).toHaveBeenCalledOnce();
+    expect(InstrumentedIntersectionObserver.instances).toHaveLength(2);
+
+    const observer = InstrumentedIntersectionObserver.instances[1];
+    observer.publish([{ target: document.getElementById("long-url")!, isIntersecting: true }]);
+    act(staleUpdate);
+    expect(currentLinks()).toEqual([controls.links[1]]);
+    expectEntries(controls.links, replacement);
+    expect(observer.disconnect).not.toHaveBeenCalled();
+    fireEvent.click(controls.toggle);
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(controls.links[1]);
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    view.unmount();
+    expect(observer.disconnect).toHaveBeenCalledOnce();
+    expect(oldObserver.disconnect).toHaveBeenCalledOnce();
+  });
+});
+
 describe("ReaderToc keyboard navigation", () => {
   it("uses the stable KeyboardEvent-specific trust getter as keyboard authority", () => {
     const firstKeyboard = new window.KeyboardEvent("keydown", { key: "ArrowDown" });
