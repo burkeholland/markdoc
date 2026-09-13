@@ -735,6 +735,375 @@ describe("token name wrapping", () => {
   });
 });
 
+describe("token request error wrapping", () => {
+  const messages = [
+    { label: "unbroken", message: "E".repeat(320) },
+    { label: "ordinary", message: "The request could not be completed. Please try again later." },
+    { label: "literal markup", message: `<img src=x onerror="alert(1)"> <button>Retry</button> & 'quoted'` },
+    { label: "whitespace", message: " \t Request failed.\n  Keep this spacing. \t " },
+  ];
+  const focusable = "a, button, input, select, textarea, summary, [tabindex], [contenteditable]";
+  const issueResponse = (message: string) => response({
+    error: "Envelope error that must not replace the selected issue",
+    issues: [{ message }, { message: "Later issue that must not be selected" }],
+  }, 503);
+
+  function expectRequestError(paragraph: HTMLElement, message: string, className = "wrap-anywhere text-sm text-danger") {
+    const calls = [fetchMock, confirmMock, copyText].map((mock) => mock.mock.calls.length);
+    const activeElement = document.activeElement;
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, "focus"),
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+    ];
+    const scheduled = spies.map((spy) => spy.mock.calls.length);
+    const observer = new MutationObserver(vi.fn());
+    observer.observe(screen.getByTestId("token-manager"), {
+      attributes: true, childList: true, characterData: true, subtree: true,
+    });
+    try {
+      // Only inspect settled DOM synchronously, excluding setup and runner scheduling.
+      expect(paragraph.tagName).toBe("P");
+      expect(paragraph.textContent).toBe(message);
+      expect(paragraph.className).toBe(className);
+      expect(Array.from(paragraph.attributes, ({ name, value }) => [name, value])).toEqual([
+        ["role", "alert"], ["aria-atomic", "true"], ["class", className],
+      ]);
+      expect(paragraph.children).toHaveLength(0);
+      expect(paragraph.childNodes).toHaveLength(1);
+      expect(paragraph.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(paragraph.matches(focusable)).toBe(false);
+      expect(paragraph.querySelectorAll(focusable)).toHaveLength(0);
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(document.activeElement).toBe(activeElement);
+      expect([fetchMock, confirmMock, copyText].map((mock) => mock.mock.calls.length)).toEqual(calls);
+      expect(spies.map((spy, index) => spy.mock.calls.length - scheduled[index])).toEqual([0, 0, 0, 0, 0]);
+    } finally {
+      observer.disconnect();
+      spies.forEach((spy) => spy.mockRestore());
+    }
+  }
+
+  it.each(messages)("preserves the $label operation error and exact create form through repeated failure and recovery", async ({ message }) => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const recovery = deferred<Response>();
+    const created = minted();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(recovery.promise)
+      .mockResolvedValueOnce(response({ tokens: [token, { ...token, id: created.id }] }));
+    const view = render(<TokensPanel origin="https://markdoc.test" userLogin="alice" documentId="doc-one" />);
+    await openCreate();
+    fireEvent.change(screen.getByTestId("token-name"), { target: { value: "Retry agent" } });
+    fireEvent.click(screen.getByTestId("token-scope-full"));
+    fireEvent.change(screen.getByLabelText("Expires"), { target: { value: "30" } });
+    await settleDocumentChooserCommit();
+    const manager = screen.getByTestId("token-manager");
+    const children = Array.from(manager.children);
+    const form = screen.getByTestId("token-create-form");
+    const originalForm = form.innerHTML;
+    const row = screen.getByTestId("token-row");
+    const originalRow = row.innerHTML;
+    const controls = Array.from(manager.querySelectorAll(focusable));
+    const submit = () => act(() => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+
+    submit();
+    expect(mutations()).toHaveLength(1);
+    expect(form).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("token-add")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect an MCP client" })).toBeDisabled();
+    await act(async () => first.resolve(response({ error: message }, 503)));
+    await settleDocumentChooserCommit();
+
+    for (const [index, text] of [message, `Retry: ${message}`].entries()) {
+      const error = screen.getByRole("alert");
+      expectRequestError(error, text);
+      expect(error.parentElement).toBe(manager);
+      expect(error.nextElementSibling).toBe(screen.getByRole("region", { name: "Your tokens" }));
+      expect(Array.from(manager.children).filter((element) => element !== error)).toEqual(children);
+      expect(Array.from(manager.querySelectorAll(focusable))).toEqual(controls);
+      expect(manager.className).toBe("flex min-w-0 flex-col gap-4");
+      expect(form.className).toBe("flex min-w-0 flex-col gap-3 rounded-xl border border-line bg-surface p-3");
+      expect(form.innerHTML).toBe(originalForm);
+      expect(form).not.toHaveAttribute("aria-busy");
+      expect(row.innerHTML).toBe(originalRow);
+      expect(row).toHaveTextContent("Active");
+      expect(screen.getByTestId("token-name")).toHaveValue("Retry agent");
+      expect(screen.getByTestId("token-scope-full")).toBeChecked();
+      expect(screen.getByTestId("token-restrict")).toBeChecked();
+      expect(screen.getByLabelText("Expires")).toHaveValue("30");
+      expect(screen.getByTestId("token-create")).toBeEnabled();
+      expect(screen.queryByTestId("copy-token")).toBeNull();
+      submit();
+      expect(mutations()).toHaveLength(index + 2);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(error.isConnected).toBe(false);
+      if (index === 0) {
+        await act(async () => second.resolve(issueResponse(`Retry: ${message}`)));
+        await settleDocumentChooserCommit();
+      }
+    }
+    expect(mutations().map(([url, init]) => [url, init?.method, JSON.parse(String(init?.body))])).toEqual(
+      Array.from({ length: 3 }, () => ["/api/tokens", "POST", {
+        name: "Retry agent", expiresInDays: 30, scope: "full", documentIds: ["doc-one"],
+      }]),
+    );
+    await act(async () => recovery.resolve(response({ token: created }, 201)));
+    await waitFor(() => expect(screen.getAllByTestId("token-row")).toHaveLength(2));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("copy-token").textContent === created.token).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
+    view.unmount();
+    expect(screen.queryByTestId("token-manager")).toBeNull();
+    expect(screen.queryByTestId("copy-token")).toBeNull();
+  });
+
+  it.each(messages)("preserves the $label list error and recovery instructions without inventing an empty list", async ({ message }) => {
+    fetchMock.mockResolvedValueOnce(response({ error: message }, 503))
+      .mockResolvedValueOnce(issueResponse(`Retry: ${message}`))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    const view = renderPanel();
+    await screen.findByRole("alert");
+    const section = screen.getByRole("region", { name: "Your tokens" });
+    expect(section.className).toBe("min-w-0 rounded-xl border border-line bg-surface");
+    for (const [index, text] of [message, `Retry: ${message}`].entries()) {
+      await settleDocumentChooserCommit();
+      const error = screen.getByRole("alert");
+      expectRequestError(error, text, "wrap-anywhere text-danger");
+      const wrapper = error.parentElement!;
+      const retry = screen.getByRole("button", { name: "Retry token list" });
+      expect(wrapper.parentElement).toBe(section);
+      expect(wrapper.className).toBe("p-3 text-sm");
+      expect(Array.from(section.children).map((element) => element.tagName)).toEqual(["H2", "DIV"]);
+      expect(Array.from(wrapper.children)).toEqual([error, error.nextElementSibling, retry]);
+      expect(error.nextElementSibling?.textContent).toBe("The list could not be loaded. This does not mean you have no tokens.");
+      expect(error.nextElementSibling?.className).toBe("mt-1 text-ink-3");
+      expect(Array.from(wrapper.querySelectorAll(focusable))).toEqual([retry]);
+      expect(retry).toHaveAttribute("type", "button");
+      expect(retry.className).toBe("btn btn-outline btn-sm mt-2");
+      expect(retry).toBeEnabled();
+      expect(retry.tabIndex).toBe(0);
+      expect(screen.getByTestId("token-add")).toBeDisabled();
+      expect(screen.queryByText("No tokens yet.")).toBeNull();
+      expect(screen.queryByText("Loading tokens...")).toBeNull();
+      fireEvent.click(retry);
+      expect(fetchMock).toHaveBeenCalledTimes(index + 2);
+      expect(error.isConnected).toBe(false);
+      if (index === 0) await screen.findByRole("alert");
+    }
+    expect(await screen.findByTestId("token-row")).toHaveTextContent("Active");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry token list" })).toBeNull();
+    expect(screen.getByTestId("token-add")).toBeEnabled();
+    expect(fetchMock.mock.calls.every(([url]) => url === "/api/tokens?includeRevoked=true")).toBe(true);
+    expect(mutations()).toHaveLength(0);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
+    view.unmount();
+    expect(screen.queryByTestId("token-manager")).toBeNull();
+  });
+
+  it.each(messages)("preserves the $label document error, stale selections and exact current retry in Strict Mode", async ({ message }) => {
+    const initial = deferred<Response>();
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const recovery = deferred<Response>();
+    const requests = [initial, first, second, recovery];
+    let requestIndex = 0;
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/documents") return requests[requestIndex++].promise;
+      if (url === "/api/tokens?includeRevoked=true") return response({ tokens: [token] });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderDirect(<StrictMode><TokensPanel origin="https://markdoc.test" userLogin="alice" /></StrictMode>);
+    await openCreate();
+    fireEvent.click(screen.getByTestId("token-restrict"));
+    await act(async () => initial.resolve(response({ documents: [
+      { id: "doc-one", title: "First document" },
+      { id: "doc-two", title: "Second document" },
+    ] })));
+    fireEvent.click(screen.getByTestId("token-document-doc-one"));
+    await settleDocumentChooserCommit();
+    const chooser = screen.getByTestId("token-documents");
+    const children = Array.from(chooser.children);
+    const rows = children.slice(1).map((element) => element.outerHTML);
+    const controls = Array.from(chooser.querySelectorAll(focusable));
+    const tokenSection = screen.getByRole("region", { name: "Your tokens" });
+    const tokenHtml = tokenSection.innerHTML;
+    const refresh = screen.getByRole<HTMLButtonElement>("button", { name: "Refresh documents" });
+    let retired = captureReactCallback<TokenClickHandler>(refresh, "onClick");
+    fireEvent.click(refresh);
+    expect(requestIndex).toBe(2);
+    await act(async () => first.resolve(response({ error: message }, 503)));
+    await settleDocumentChooserCommit();
+
+    for (const [index, text] of [message, `Retry: ${message}`].entries()) {
+      const error = within(chooser).getByRole("alert");
+      expectRequestError(error, text);
+      expect(error.parentElement).toBe(chooser);
+      expect(chooser.className).toBe("max-h-48 overflow-y-auto");
+      expect(Array.from(chooser.children).filter((element) => element !== error)).toEqual(children);
+      expect(Array.from(chooser.children).slice(2).map((element) => element.outerHTML)).toEqual(rows);
+      expect(Array.from(chooser.querySelectorAll(focusable))).toEqual(controls);
+      expect(tokenSection.innerHTML).toBe(tokenHtml);
+      expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+      expect(screen.getByTestId("token-document-doc-two")).not.toBeChecked();
+      expect(screen.queryByText("No documents yet.")).toBeNull();
+      expect(screen.queryByTestId("token-document-error")).toBeNull();
+      expect(screen.getByTestId("token-create")).toBeDisabled();
+      expect(screen.queryByRole("status")).toBeNull();
+      const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry documents" });
+      expect(retry.className).toBe("btn btn-sm btn-outline");
+      expect(retry.parentElement?.className).toBe("flex flex-wrap items-center gap-2");
+      expect(retry.tabIndex).toBe(0);
+      expect(retry).toBeEnabled();
+      const current = captureReactCallback<TokenClickHandler>(retry, "onClick");
+      const restore = interceptTokenClick(retry, (_current, event) => retired(event));
+      try {
+        fireEvent.click(retry);
+        expect(requestIndex).toBe(index + 2);
+      } finally {
+        restore();
+      }
+      act(() => {
+        retry.click();
+        retry.click();
+      });
+      expect(requestIndex).toBe(index + 3);
+      expect(error.isConnected).toBe(false);
+      expect(retry).toBeDisabled();
+      expect(screen.getByRole("status")).toHaveTextContent("Refreshing your documents...");
+      expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+      retired = current;
+      if (index === 0) {
+        await act(async () => second.resolve(issueResponse(`Retry: ${message}`)));
+        await settleDocumentChooserCommit();
+      }
+    }
+    await act(async () => recovery.resolve(response({ documents: [
+      { id: "doc-one", title: "First document" },
+      { id: "doc-three", title: "Third document" },
+    ] })));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByTestId("token-document-doc-one")).toBeChecked();
+    expect(screen.queryByTestId("token-document-doc-two")).toBeNull();
+    expect(screen.getByTestId("token-document-doc-three")).not.toBeChecked();
+    expect(screen.getByTestId("token-create")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh documents" })).toBeEnabled();
+    expect(requestIndex).toBe(4);
+    expect(mutations()).toHaveLength(0);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the old token unchanged after replacement errors and rejects the retired row action", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const message = "R".repeat(320);
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    confirmMock.mockReturnValue(true);
+    const view = renderPanel();
+    const row = await screen.findByTestId("token-row");
+    const original = row.innerHTML;
+    const replace = screen.getByRole<HTMLButtonElement>("button", { name: `Replace ${token.name}` });
+    const retired = captureReactCallback<TokenClickHandler>(replace, "onClick");
+    fireEvent.click(replace);
+    expect(mutations()).toHaveLength(1);
+    await act(async () => first.resolve(response({ error: message }, 503)));
+    await settleDocumentChooserCommit();
+    expectRequestError(screen.getByRole("alert"), message);
+    expect(row.innerHTML).toBe(original);
+    const restore = interceptTokenClick(replace, (_current, event) => retired(event));
+    try {
+      fireEvent.click(replace);
+      expect(mutations()).toHaveLength(1);
+      expect(confirmMock).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+    act(() => {
+      replace.click();
+      replace.click();
+    });
+    expect(mutations()).toHaveLength(2);
+    expect(confirmMock).toHaveBeenCalledTimes(2);
+    await act(async () => second.resolve(issueResponse(message)));
+    await settleDocumentChooserCommit();
+    expectRequestError(screen.getByRole("alert"), message);
+    expect(row.innerHTML).toBe(original);
+    expect(row).toHaveTextContent("Active");
+    expect(mutations().every(([url, init]) => url === `/api/tokens/${token.id}/replace` && init?.method === "POST")).toBe(true);
+    expect(screen.queryByTestId("copy-token")).toBeNull();
+    expect(copyText).not.toHaveBeenCalled();
+    view.unmount();
+    fireEvent.click(replace);
+    expect(mutations()).toHaveLength(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(
+    (["operation", "list", "documents"] as const).flatMap((surface) =>
+      (["panel", "user", "document"] as const).map((boundary) => ({ surface, boundary }))),
+  )("removes the $surface error when the $boundary is replaced", async ({ surface, boundary }) => {
+    const message = `${surface}: ${"F".repeat(320)}`;
+    let listRequests = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/tokens?includeRevoked=true") {
+        listRequests += 1;
+        return surface === "list" && listRequests === 1
+          ? response({ error: message }, 503)
+          : response({ tokens: [token] });
+      }
+      if (url === "/api/tokens" && init?.method === "POST") return response({ error: message }, 503);
+      if (url === "/api/documents") return response({ error: message }, 503);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const view = renderPanel();
+    if (surface !== "list") {
+      await openCreate();
+      fireEvent.click(screen.getByTestId(surface === "operation" ? "token-create" : "token-restrict"));
+    }
+    const error = await screen.findByRole("alert");
+    await settleDocumentChooserCommit();
+    expectRequestError(error, message, surface === "list" ? "wrap-anywhere text-danger" : undefined);
+    const oldRequestCount = fetchMock.mock.calls.length;
+    if (boundary === "panel") view.rerender(<TokensPanel origin="https://markdoc.test" userLogin="alice" open={false} />);
+    view.rerender(<TokensPanel origin="https://markdoc.test"
+      userLogin={boundary === "user" ? "bob" : "alice"}
+      documentId={boundary === "document" ? "doc-one" : undefined} />);
+    await screen.findByTestId("token-row");
+    expect(error.isConnected).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("token-create-form")).toBeNull();
+    expect(screen.queryByTestId("token-documents")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(oldRequestCount + 1);
+    expect(listRequests).toBe(2);
+    await openCreate();
+    expect(screen.getByTestId("token-name")).toHaveValue(token.name);
+    expect(screen.getByTestId("token-create")).toBeEnabled();
+    expect(screen.getByTestId("token-restrict")).toHaveProperty("checked", boundary === "document");
+    view.unmount();
+    expect(screen.queryByTestId("token-manager")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(oldRequestCount + 1);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(confirmMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("synchronous mutation ownership", () => {
   it("sends one create request and locks every secret-hiding control through the accepted reload", async () => {
     const createRequest = deferred<Response>();
