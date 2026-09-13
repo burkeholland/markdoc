@@ -14,24 +14,31 @@ import { createRoot, type Root } from "react-dom/client";
 import type * as Y from "yjs";
 
 const ownerRealmRead = vi.hoisted(() => {
-  const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement");
-  const read = descriptor?.get;
-  if (!descriptor || !read) throw new Error("The owner realm publishes no activeElement getter");
   const apply = Reflect.apply;
-  const boundary: { enter: (() => (() => void) | undefined) | null } = { enter: null };
-  // Install before keyboard trust captures the getter. Its native browser implementation cannot
-  // call the page's Boolean binding, but jsdom's JavaScript implementation does.
-  Object.defineProperty(Document.prototype, "activeElement", {
-    ...descriptor,
-    get(this: Document) {
-      const leave = boundary.enter?.();
-      try {
-        return apply(read, this, []) as Element | null;
-      } finally {
-        leave?.();
-      }
-    },
-  });
+  const boundary: {
+    enter: ((property: "activeElement" | "isConnected") => (() => void) | undefined) | null;
+  } = { enter: null };
+  // Install before keyboard trust captures these getters. Native browser shadow-tree reads cannot
+  // call the page's Boolean binding, but jsdom implements them in JavaScript using that binding.
+  for (const [prototype, property] of [
+    [Document.prototype, "activeElement"],
+    [Node.prototype, "isConnected"],
+  ] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+    const read = descriptor?.get;
+    if (!descriptor || !read) throw new Error(`The owner realm publishes no ${property} getter`);
+    Object.defineProperty(prototype, property, {
+      ...descriptor,
+      get(this: Node) {
+        const leave = boundary.enter?.(property);
+        try {
+          return apply(read, this, []);
+        } finally {
+          leave?.();
+        }
+      },
+    });
+  }
   return boundary;
 });
 
@@ -4272,7 +4279,7 @@ describe("FindBar first-row action navigation", () => {
     let probing = false;
     let poisonCalls = 0;
     let sabotaged = false;
-    let nativeReads = 0;
+    const nativeReads = { activeElement: 0, isConnected: 0 };
     const poisonTrace: {
       first: { operation: string; receiver: unknown; phase: string; error: Error } | null;
     } = { first: null };
@@ -4331,11 +4338,11 @@ describe("FindBar first-row action navigation", () => {
       Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
     };
 
-    ownerRealmRead.enter = () => {
+    ownerRealmRead.enter = (property) => {
       if (!armed) return;
       const poisonedBinding = Object.getOwnPropertyDescriptor(globalThis, "Boolean");
       if (!poisonedBinding) throw new Error("The Boolean poison binding is missing");
-      nativeReads += 1;
+      nativeReads[property] += 1;
       Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
       return () => Object.defineProperty(globalThis, "Boolean", poisonedBinding);
     };
@@ -4433,7 +4440,7 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
 
       expect(installed).toBe(true);
-      expect(nativeReads).toBe(1);
+      expect(nativeReads).toEqual({ activeElement: 1, isConnected: 12 });
       const trace = poisonTrace.first;
       expect(poisonCalls, trace
         ? `${trace.operation} on ${Object.prototype.toString.call(trace.receiver)} in ${trace.phase}\n${trace.error.stack}`
