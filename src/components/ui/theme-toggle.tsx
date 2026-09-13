@@ -1525,14 +1525,14 @@ interface PickerKeyPair {
 
 interface PickerPairingStore {
   readonly isDisposed: () => boolean;
-  readonly isInvalid: (event: object) => boolean;
-  readonly has: (event: object) => boolean;
-  readonly stage: (event: object, pair: PickerKeyPair) => boolean;
-  readonly get: (event: object) => PickerKeyPair | null;
-  readonly begin: (event: object, pair: PickerKeyPair) => boolean;
-  readonly finish: (event: object, pair: PickerKeyPair) => void;
-  readonly consume: (event: object, pair: PickerKeyPair) => boolean;
-  readonly invalidate: (event: object) => void;
+  readonly isInvalid: (event: KeyboardEvent) => boolean;
+  readonly has: (event: KeyboardEvent) => boolean;
+  readonly stage: (event: KeyboardEvent, pair: PickerKeyPair) => boolean;
+  readonly get: (event: KeyboardEvent) => PickerKeyPair | null;
+  readonly begin: (event: KeyboardEvent, pair: PickerKeyPair) => boolean;
+  readonly finish: (event: KeyboardEvent, pair: PickerKeyPair) => void;
+  readonly consume: (event: KeyboardEvent, pair: PickerKeyPair) => boolean;
+  readonly invalidate: (event: KeyboardEvent) => void;
   readonly dispose: () => void;
 }
 
@@ -1542,59 +1542,59 @@ interface PickerKeyDelivery {
 }
 
 function createPickerPairingStore(): PickerPairingStore {
-  let pairs: WeakMap<object, PickerKeyPair> | null = new WeakMap();
-  let active: WeakMap<object, PickerKeyPair> | null = new WeakMap();
-  let invalid: WeakSet<object> | null = new WeakSet();
+  let pairs: WeakMap<KeyboardEvent, PickerKeyPair> | null = new WeakMap();
+  let active: WeakMap<KeyboardEvent, PickerKeyPair> | null = new WeakMap();
+  let invalid: WeakSet<KeyboardEvent> | null = new WeakSet();
   let disposed = false;
-  const isDisposed = () => disposed;
+  const isDisposed = (): boolean => disposed;
   return Object.freeze({
     isDisposed,
-    isInvalid: (event) => {
+    isInvalid: (event: KeyboardEvent): boolean => {
       if (disposed || !invalid) return true;
       return invalid.has(event);
     },
-    has: (event) => {
+    has: (event: KeyboardEvent): boolean => {
       if (disposed || !pairs) return false;
       return pairs.has(event);
     },
-    stage: (event, pair) => {
+    stage: (event: KeyboardEvent, pair: PickerKeyPair): boolean => {
       if (disposed || !pairs) return false;
       if (pairs.has(event)) return false;
       if (disposed || !pairs) return false;
       pairs.set(event, pair);
       return !disposed;
     },
-    get: (event) => {
+    get: (event: KeyboardEvent): PickerKeyPair | null => {
       if (disposed || !pairs) return null;
       return pairs.get(event) ?? null;
     },
-    begin: (event, pair) => {
+    begin: (event: KeyboardEvent, pair: PickerKeyPair): boolean => {
       if (disposed || !active) return false;
       if (active.has(event)) return false;
       if (disposed || !active) return false;
       active.set(event, pair);
       return !disposed;
     },
-    finish: (event, pair) => {
+    finish: (event: KeyboardEvent, pair: PickerKeyPair): void => {
       if (disposed || !active) return;
       if (active.get(event) !== pair) return;
       if (disposed || !active) return;
       active.delete(event);
     },
-    consume: (event, pair) => {
+    consume: (event: KeyboardEvent, pair: PickerKeyPair): boolean => {
       if (disposed || !pairs) return false;
       if (pairs.get(event) !== pair) return false;
       if (disposed || !pairs) return false;
       const consumed = pairs.delete(event);
       return !disposed && consumed;
     },
-    invalidate: (event) => {
+    invalidate: (event: KeyboardEvent): void => {
       if (disposed || !pairs || !invalid) return;
       pairs.delete(event);
       if (disposed || !invalid) return;
       invalid.add(event);
     },
-    dispose: () => {
+    dispose: (): void => {
       if (disposed) return;
       disposed = true;
       pairs = null;
@@ -2284,7 +2284,7 @@ function createPickerPresentation(
   const onKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const pairs = pairingStore;
     if (!pairs || pairs.isDisposed()) return;
-    let nativeEvent: unknown;
+    let nativeEvent: KeyboardEvent;
     let eventCurrentTarget: EventTarget | null;
     try {
       nativeEvent = event.nativeEvent;
@@ -2445,7 +2445,7 @@ function createPickerPresentation(
   ) => {
     const pairs = pairingStore;
     if (!pairs || pairs.isDisposed()) return;
-    let nativeEvent: unknown;
+    let nativeEvent: KeyboardEvent;
     let eventCurrentTarget: EventTarget | null;
     try {
       nativeEvent = event.nativeEvent;
