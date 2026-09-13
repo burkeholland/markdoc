@@ -244,10 +244,8 @@ interface TableMenuNativeKeyProof {
 
 interface TableMenuReactEventMethods {
   readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
 }
 
 interface TableMenuReactKeyProof {
@@ -264,6 +262,18 @@ interface TableMenuTerminalKeyProof {
   readonly native: TableMenuNativeKeyProof;
   readonly reactCapture: TableMenuReactKeyProof;
   readonly reactBubble: TableMenuReactKeyProof;
+}
+
+interface TableMenuNativeReactPair {
+  readonly native: TableMenuNativeKeyProof;
+  reactRootCapture: TableMenuReactKeyProof | null;
+  reactControlCapture: TableMenuReactKeyProof | null;
+  reactControlBubble: TableMenuReactKeyProof | null;
+  reactRootBubble: TableMenuReactKeyProof | null;
+  boundaryObserved: boolean;
+  terminal: TableMenuTerminalKeyProof | null;
+  consumed: boolean;
+  rejected: boolean;
 }
 
 interface TableMenuKeyboardRuntime {
@@ -349,7 +359,6 @@ interface TableMenuKeyboardAuthority {
 }
 
 const ROOT_REPLAY_REF = Symbol("table-menu-root-ref");
-const TABLE_MENU_MISSING = Symbol("table-menu-missing");
 
 function tableMenuDescriptorsMatch(
   current: PropertyDescriptor | undefined,
@@ -963,75 +972,49 @@ function readTableMenuReactKeyProof(
   authority: TableMenuKeyboardAuthority,
   expectedMethods?: TableMenuReactEventMethods,
 ): TableMenuReactKeyProof | null {
-  const ownValue = (property: PropertyKey) => {
-    const descriptor = authority.getOwnPropertyDescriptor(event, property);
-    return descriptor && "value" in descriptor
-      ? descriptor.value
-      : TABLE_MENU_MISSING;
-  };
-  const methodValue = (property: PropertyKey) => {
-    let current: object | null = event;
-    while (current) {
-      const descriptor = authority.getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        return "value" in descriptor && typeof descriptor.value === "function"
-          ? descriptor.value
-          : TABLE_MENU_MISSING;
-      }
-      current = authority.getPrototypeOf(current) as object | null;
-    }
-    return TABLE_MENU_MISSING;
-  };
-  const preventDefault = methodValue("preventDefault");
-  const stopPropagation = methodValue("stopPropagation");
-  const isDefaultPrevented = methodValue("isDefaultPrevented");
-  const isPropagationStopped = methodValue("isPropagationStopped");
-  const persist = methodValue("persist");
+  const publicValue = (property: PropertyKey) =>
+    (event as Record<PropertyKey, unknown>)[property];
+  const preventDefault = publicValue("preventDefault");
+  const isDefaultPrevented = publicValue("isDefaultPrevented");
+  const isPropagationStopped = publicValue("isPropagationStopped");
   if (
     typeof preventDefault !== "function"
-    || typeof stopPropagation !== "function"
     || typeof isDefaultPrevented !== "function"
     || typeof isPropagationStopped !== "function"
-    || typeof persist !== "function"
   ) {
     return null;
   }
   const methods = Object.freeze({
     preventDefault: preventDefault as (...args: never[]) => unknown,
-    stopPropagation: stopPropagation as (...args: never[]) => unknown,
     isDefaultPrevented: isDefaultPrevented as (...args: never[]) => unknown,
     isPropagationStopped: isPropagationStopped as (...args: never[]) => unknown,
-    persist: persist as (...args: never[]) => unknown,
   });
-  const composing = ownValue("isComposing");
-  const eventPhase = ownValue("eventPhase");
+  const composing = publicValue("isComposing");
+  const eventPhase = publicValue("eventPhase");
   if (
-    ownValue("_reactName") !== "onKeyDown"
-    || ownValue("type") !== "keydown"
-    || ownValue("nativeEvent") !== native.event
-    || ownValue("target") !== native.target
-    || ownValue("currentTarget") !== currentTarget
-    || ownValue("bubbles") !== true
-    || ownValue("cancelable") !== true
-    || ownValue("defaultPrevented") !== false
-    || ownValue("isTrusted") !== true
-    || ownValue("key") !== native.key
-    || ownValue("ctrlKey") !== false
-    || ownValue("metaKey") !== false
-    || ownValue("altKey") !== false
-    || ownValue("shiftKey") !== false
-    || ownValue("repeat") !== false
-    || (composing !== TABLE_MENU_MISSING && composing !== false)
-    || ownValue("view") !== native.publication.ownerWindow
+    publicValue("type") !== "keydown"
+    || publicValue("nativeEvent") !== native.event
+    || publicValue("target") !== native.target
+    || publicValue("currentTarget") !== currentTarget
+    || publicValue("bubbles") !== true
+    || publicValue("cancelable") !== true
+    || publicValue("defaultPrevented") !== false
+    || publicValue("isTrusted") !== true
+    || publicValue("key") !== native.key
+    || publicValue("ctrlKey") !== false
+    || publicValue("metaKey") !== false
+    || publicValue("altKey") !== false
+    || publicValue("shiftKey") !== false
+    || publicValue("repeat") !== false
+    || (composing !== undefined && composing !== false)
+    || publicValue("view") !== native.publication.ownerWindow
     || eventPhase !== authority.eventPhase.read(native.event)
     || authority.apply(isDefaultPrevented, event, []) !== false
     || authority.apply(isPropagationStopped, event, []) !== false
     || (expectedMethods && (
       methods.preventDefault !== expectedMethods.preventDefault
-      || methods.stopPropagation !== expectedMethods.stopPropagation
       || methods.isDefaultPrevented !== expectedMethods.isDefaultPrevented
       || methods.isPropagationStopped !== expectedMethods.isPropagationStopped
-      || methods.persist !== expectedMethods.persist
     ))
   ) {
     return null;
@@ -1043,7 +1026,7 @@ function readTableMenuReactKeyProof(
     key: native.key,
     eventPhase: eventPhase as number,
     methods,
-    composing: composing === false ? false : null,
+    composing: composing === undefined ? null : false,
   });
 }
 
@@ -1053,53 +1036,70 @@ function tableMenuReactProofIsCurrent(
   authority: TableMenuKeyboardAuthority,
 ) {
   const event = proof.event;
-  const ownValue = (property: PropertyKey) => {
-    const descriptor = authority.getOwnPropertyDescriptor(event, property);
-    return descriptor && "value" in descriptor
-      ? descriptor.value
-      : TABLE_MENU_MISSING;
-  };
-  const methodValue = (property: PropertyKey) => {
-    let current: object | null = event;
-    while (current) {
-      const descriptor = authority.getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        return "value" in descriptor && typeof descriptor.value === "function"
-          ? descriptor.value
-          : TABLE_MENU_MISSING;
-      }
-      current = authority.getPrototypeOf(current) as object | null;
-    }
-    return TABLE_MENU_MISSING;
-  };
-  return ownValue("_reactName") === "onKeyDown"
-    && ownValue("type") === "keydown"
-    && ownValue("nativeEvent") === native.event
-    && ownValue("target") === native.target
-    && ownValue("currentTarget") === null
-    && ownValue("bubbles") === true
-    && ownValue("cancelable") === true
-    && ownValue("defaultPrevented") === false
-    && ownValue("isTrusted") === true
-    && ownValue("key") === native.key
-    && ownValue("ctrlKey") === false
-    && ownValue("metaKey") === false
-    && ownValue("altKey") === false
-    && ownValue("shiftKey") === false
-    && ownValue("repeat") === false
+  const publicValue = (property: PropertyKey) =>
+    (event as Record<PropertyKey, unknown>)[property];
+  return publicValue("type") === "keydown"
+    && publicValue("nativeEvent") === native.event
+    && publicValue("target") === native.target
+    && publicValue("currentTarget") === null
+    && publicValue("bubbles") === true
+    && publicValue("cancelable") === true
+    && publicValue("defaultPrevented") === false
+    && publicValue("isTrusted") === true
+    && publicValue("key") === native.key
+    && publicValue("ctrlKey") === false
+    && publicValue("metaKey") === false
+    && publicValue("altKey") === false
+    && publicValue("shiftKey") === false
+    && publicValue("repeat") === false
     && (
       proof.composing === null
-        ? ownValue("isComposing") === TABLE_MENU_MISSING
-        : ownValue("isComposing") === false
+        ? publicValue("isComposing") === undefined
+        : publicValue("isComposing") === false
     )
-    && ownValue("view") === native.publication.ownerWindow
-    && ownValue("eventPhase") === proof.eventPhase
-    && methodValue("preventDefault") === proof.methods.preventDefault
-    && methodValue("stopPropagation") === proof.methods.stopPropagation
-    && methodValue("isDefaultPrevented") === proof.methods.isDefaultPrevented
-    && methodValue("isPropagationStopped") === proof.methods.isPropagationStopped
-    && methodValue("persist") === proof.methods.persist
+    && publicValue("view") === native.publication.ownerWindow
+    && publicValue("eventPhase") === proof.eventPhase
+    && publicValue("preventDefault") === proof.methods.preventDefault
+    && publicValue("isDefaultPrevented") === proof.methods.isDefaultPrevented
+    && publicValue("isPropagationStopped") === proof.methods.isPropagationStopped
     && authority.apply(proof.methods.isDefaultPrevented, event, []) === false
+    && authority.apply(proof.methods.isPropagationStopped, event, []) === false;
+}
+
+function tableMenuReactProofIsPrevented(
+  proof: TableMenuReactKeyProof,
+  native: TableMenuNativeKeyProof,
+  authority: TableMenuKeyboardAuthority,
+) {
+  const event = proof.event;
+  const publicValue = (property: PropertyKey) =>
+    (event as Record<PropertyKey, unknown>)[property];
+  const currentIsDefaultPrevented = publicValue("isDefaultPrevented");
+  return publicValue("type") === "keydown"
+    && publicValue("nativeEvent") === native.event
+    && publicValue("target") === native.target
+    && publicValue("currentTarget") === null
+    && publicValue("bubbles") === true
+    && publicValue("cancelable") === true
+    && publicValue("defaultPrevented") === true
+    && publicValue("isTrusted") === true
+    && publicValue("key") === native.key
+    && publicValue("ctrlKey") === false
+    && publicValue("metaKey") === false
+    && publicValue("altKey") === false
+    && publicValue("shiftKey") === false
+    && publicValue("repeat") === false
+    && (
+      proof.composing === null
+        ? publicValue("isComposing") === undefined
+        : publicValue("isComposing") === false
+    )
+    && publicValue("view") === native.publication.ownerWindow
+    && publicValue("eventPhase") === proof.eventPhase
+    && publicValue("preventDefault") === proof.methods.preventDefault
+    && typeof currentIsDefaultPrevented === "function"
+    && publicValue("isPropagationStopped") === proof.methods.isPropagationStopped
+    && authority.apply(currentIsDefaultPrevented, event, []) === true
     && authority.apply(proof.methods.isPropagationStopped, event, []) === false;
 }
 
@@ -1169,14 +1169,9 @@ function createTableMenuKeyboardRuntime(
 
   let released = false;
   let published = false;
-  let nativeProof: TableMenuNativeKeyProof | null = null;
-  let reactRootCapture: TableMenuReactKeyProof | null = null;
-  let reactControlCapture: TableMenuReactKeyProof | null = null;
-  let reactControlBubble: TableMenuReactKeyProof | null = null;
-  let reactRootBubble: TableMenuReactKeyProof | null = null;
-  let boundaryProof: TableMenuNativeKeyProof | null = null;
-  let terminal: TableMenuTerminalKeyProof | null = null;
-  let windowTerminal: TableMenuTerminalKeyProof | null = null;
+  // Keep capture state reachable only through the exact native event.
+  let nativePairs = new WeakMap<KeyboardEvent, TableMenuNativeReactPair>();
+  let activeNativeEvent: WeakRef<KeyboardEvent> | null = null;
   let windowListenerActive = false;
 
   const publicationIsCurrent = () => {
@@ -1220,22 +1215,23 @@ function createTableMenuKeyboardRuntime(
     );
     windowListenerActive = false;
   };
-  const clearProof = (proof?: TableMenuNativeKeyProof) => {
-    if (proof && nativeProof !== proof) return;
-    removeWindowListener();
-    nativeProof = null;
-    reactRootCapture = null;
-    reactControlCapture = null;
-    reactControlBubble = null;
-    reactRootBubble = null;
-    boundaryProof = null;
-    terminal = null;
-    windowTerminal = null;
+  const rejectPair = (
+    pair: TableMenuNativeReactPair,
+    retirePublication = false,
+  ) => {
+    if (pair.consumed) return;
+    pair.rejected = true;
+    if (!retirePublication) return;
+    nativePairs.delete(pair.native.event);
+    if (pair.terminal) removeWindowListener();
+    if (coordinator.ownsPublication(controlPublication)) {
+      coordinator.invalidate(controlPublication);
+    }
   };
-  const rejectObservedEvent = (proof: TableMenuNativeKeyProof) => {
-    if (nativeProof !== proof) return;
-    clearProof(proof);
-    coordinator.invalidate(controlPublication);
+  const replacePairs = () => {
+    removeWindowListener();
+    nativePairs = new WeakMap<KeyboardEvent, TableMenuNativeReactPair>();
+    activeNativeEvent = null;
   };
   const exactNativeEvent = (
     event: Event,
@@ -1283,6 +1279,7 @@ function createTableMenuKeyboardRuntime(
         authority.eventPath.call(event),
         ownerDocument,
       )
+      || authority.getOwnPropertyDescriptor(event, "preventDefault")
       || authority.getOwnPropertyDescriptor(event, "stopPropagation")
       || authority.getOwnPropertyDescriptor(event, "stopImmediatePropagation")
     ) {
@@ -1343,9 +1340,16 @@ function createTableMenuKeyboardRuntime(
     const target = authority.eventTarget.read(event);
     const entry = publication.entries.find(({ element }) => element === target);
     if (!entry) return;
-    if (nativeProof) {
-      if (nativeProof.event === event) return;
-      nativeProof.crossed = true;
+    const activeEvent = activeNativeEvent?.deref();
+    if (
+      activeEvent
+      && authority.eventPhase.read(activeEvent) !== ownerWindow.Event.NONE
+    ) {
+      const activePair = nativePairs.get(activeEvent);
+      if (activePair) {
+        activePair.native.crossed = true;
+        rejectPair(activePair);
+      }
       coordinator.attemptNativeEvent(event);
       return;
     }
@@ -1353,104 +1357,174 @@ function createTableMenuKeyboardRuntime(
     const proof = exactNativeEvent(event, entry);
     if (!proof) return;
     controlPublication.keyboardObserved = true;
-    nativeProof = proof;
-    queueMicrotask(() => {
-      if (nativeProof === proof && !terminal) rejectObservedEvent(proof);
+    nativePairs.set(proof.event, {
+      native: proof,
+      reactRootCapture: null,
+      reactControlCapture: null,
+      reactControlBubble: null,
+      reactRootBubble: null,
+      boundaryObserved: false,
+      terminal: null,
+      consumed: false,
+      rejected: false,
     });
+    activeNativeEvent = new WeakRef(proof.event);
+  };
+  const pairForReactEvent = (event: object) => {
+    const nativeEvent = (event as Record<PropertyKey, unknown>).nativeEvent;
+    return typeof nativeEvent === "object" && nativeEvent !== null
+      ? nativePairs.get(nativeEvent as KeyboardEvent)
+      : undefined;
   };
   const readReact = (
+    pair: TableMenuNativeReactPair,
     event: object,
     currentTarget: Element,
     expectedMethods?: TableMenuReactEventMethods,
-  ) => nativeProof
-    ? readTableMenuReactKeyProof(
-      event,
-      nativeProof,
-      currentTarget,
-      authority,
-      expectedMethods,
-    )
-    : null;
+  ) => readTableMenuReactKeyProof(
+    event,
+    pair.native,
+    currentTarget,
+    authority,
+    expectedMethods,
+  );
   const captureRoot = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!event || typeof event !== "object") return;
+    const pair = pairForReactEvent(event);
     if (
-      !event
-      || typeof event !== "object"
-      || !nativeProof
-      || reactRootCapture
-      || !coordinator.attemptReactEvent(event)
+      !pair
+      || pair.rejected
+      || pair.consumed
     ) {
       return;
     }
-    reactRootCapture = readReact(event, publication.root);
+    if (
+      pair.reactRootCapture
+      || !coordinator.attemptReactEvent(event, "capture")
+    ) {
+      rejectPair(pair);
+      return;
+    }
+    const proof = readReact(pair, event, publication.root);
+    if (!proof) {
+      rejectPair(pair);
+      return;
+    }
+    pair.reactRootCapture = proof;
   };
   const captureControl = (
     control: TableMenuControl,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
+    const pair = event && typeof event === "object"
+      ? pairForReactEvent(event)
+      : undefined;
     const entry = entryForControl(control);
     if (
-      !nativeProof
+      !pair
+      || pair.rejected
+      || pair.consumed
       || !entry
-      || nativeProof.entry !== entry
-      || !reactRootCapture
-      || reactControlCapture
-      || event !== reactRootCapture.event
+      || pair.native.entry !== entry
+      || !pair.reactRootCapture
+      || pair.reactControlCapture
+      || event !== pair.reactRootCapture.event
     ) {
+      if (pair) rejectPair(pair);
       return;
     }
-    reactControlCapture = readReact(
+    const proof = readReact(
+      pair,
       event,
       entry.element,
-      reactRootCapture.methods,
+      pair.reactRootCapture.methods,
     );
+    if (!proof) {
+      rejectPair(pair);
+      return;
+    }
+    pair.reactControlCapture = proof;
   };
   const bubbleControl = (
     control: TableMenuControl,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
+    if (!event || typeof event !== "object") return;
+    const pair = pairForReactEvent(event);
     const entry = entryForControl(control);
     if (
-      !event
-      || typeof event !== "object"
-      || !nativeProof
+      !pair
+      || pair.rejected
+      || pair.consumed
       || !entry
-      || nativeProof.entry !== entry
-      || !reactControlCapture
-      || reactControlBubble
-      || !coordinator.attemptReactEvent(event)
+      || pair.native.entry !== entry
+      || !pair.reactControlCapture
+      || pair.reactControlBubble
+      || !coordinator.attemptReactEvent(event, "bubble")
     ) {
+      if (pair) rejectPair(pair);
       return;
     }
-    reactControlBubble = readReact(
+    const proof = readReact(
+      pair,
       event,
       entry.element,
-      reactControlCapture.methods,
     );
-  };
-  const bubbleRoot = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (
-      !nativeProof
-      || !reactControlBubble
-      || reactRootBubble
-      || event !== reactControlBubble.event
-    ) {
+    if (!proof) {
+      rejectPair(pair);
       return;
     }
-    reactRootBubble = readReact(
+    pair.reactControlBubble = proof;
+  };
+  const bubbleRoot = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const pair = event && typeof event === "object"
+      ? pairForReactEvent(event)
+      : undefined;
+    if (
+      !pair
+      || pair.rejected
+      || pair.consumed
+      || !pair.reactControlBubble
+      || pair.reactRootBubble
+      || event !== pair.reactControlBubble.event
+    ) {
+      if (pair) rejectPair(pair);
+      return;
+    }
+    const proof = readReact(
+      pair,
       event,
       publication.root,
-      reactControlBubble.methods,
+      pair.reactControlBubble.methods,
     );
+    if (!proof) {
+      rejectPair(pair);
+      return;
+    }
+    pair.reactRootBubble = proof;
   };
-  const authenticateTerminal = (proof: TableMenuNativeKeyProof) => {
+  const authenticateTerminal = (pair: TableMenuNativeReactPair) => {
+    const proof = pair.native;
     if (
-      proof.crossed
-      || boundaryProof !== proof
-      || !reactRootCapture
-      || reactControlCapture?.event !== reactRootCapture.event
-      || !reactControlBubble
-      || reactRootBubble?.event !== reactControlBubble.event
+      pair.rejected
+      || pair.consumed
+      || proof.crossed
+      || !pair.boundaryObserved
+      || !pair.reactRootCapture
+      || pair.reactControlCapture?.event !== pair.reactRootCapture.event
+      || !pair.reactControlBubble
+      || pair.reactRootBubble?.event !== pair.reactControlBubble.event
       || !nativeStillMatches(proof)
+      || !tableMenuReactProofIsCurrent(
+        pair.reactRootCapture,
+        proof,
+        authority,
+      )
+      || !tableMenuReactProofIsCurrent(
+        pair.reactControlBubble,
+        proof,
+        authority,
+      )
       || !publicationIsCurrent()
       || authority.activeElement.read(ownerDocument) !== proof.target
     ) {
@@ -1458,16 +1532,18 @@ function createTableMenuKeyboardRuntime(
     }
     return Object.freeze({
       native: proof,
-      reactCapture: reactRootCapture,
-      reactBubble: reactControlBubble,
+      reactCapture: pair.reactRootCapture,
+      reactBubble: pair.reactControlBubble,
     });
   };
-  const settleTerminal = (proof: TableMenuTerminalKeyProof) => {
+  const settleTerminal = (
+    pair: TableMenuNativeReactPair,
+    proof: TableMenuTerminalKeyProof,
+  ) => {
     const native = proof.native;
     if (
-      terminal !== proof
-      || windowTerminal !== proof
-      || nativeProof !== native
+      !pair.consumed
+      || pair.terminal !== proof
       || released
       || native.crossed
       || native.propagationStopped()
@@ -1480,6 +1556,34 @@ function createTableMenuKeyboardRuntime(
       || !tableMenuReactProofIsCurrent(proof.reactCapture, native, authority)
       || !tableMenuReactProofIsCurrent(proof.reactBubble, native, authority)
       || !publicationIsCurrent()
+      || !coordinator.canClaimKeyboard(
+        publication,
+        native.entry,
+        native.action,
+        proof.reactCapture.event,
+        proof.reactBubble.event,
+        native.event,
+      )
+    ) {
+      return;
+    }
+    authority.apply(
+      proof.reactBubble.methods.preventDefault,
+      proof.reactBubble.event,
+      [],
+    );
+    if (
+      !authority.eventDefaultPrevented.read(native.event)
+      || authority.eventCancelBubble.read(native.event)
+      || native.propagationStopped()
+      || authority.activeElement.read(ownerDocument) !== native.target
+      || !nativeStillMatches(native)
+      || !tableMenuReactProofIsPrevented(
+        proof.reactBubble,
+        native,
+        authority,
+      )
+      || !publicationIsCurrent()
       || !coordinator.claimKeyboard(
         publication,
         native.entry,
@@ -1489,17 +1593,18 @@ function createTableMenuKeyboardRuntime(
         native.event,
       )
     ) {
-      rejectObservedEvent(native);
       return;
     }
-    clearProof(native);
-    authority.eventPreventDefault.call(native.event);
     authority.focus.call(native.destination.element, { preventScroll: true });
     coordinator.requestSuccessor(controlPublication);
   };
   function onNativeWindowBubble(event: Event) {
+    if (authority.getPrototypeOf(event) !== authority.keyboardPrototype) return;
+    const pair = nativePairs.get(event as KeyboardEvent);
+    const terminal = pair?.terminal;
     if (
-      !terminal
+      !pair
+      || !terminal
       || terminal.native.event !== event
       || !tableMenuIsOwnerWindow(
         keyboardAuthority.eventCurrentTarget.read(event),
@@ -1516,43 +1621,56 @@ function createTableMenuKeyboardRuntime(
         ownerDocument,
       )
     ) {
+      if (pair) rejectPair(pair, true);
       return;
     }
-    windowTerminal = terminal;
+    pair.consumed = true;
+    nativePairs.delete(pair.native.event);
+    removeWindowListener();
+    queueMicrotask(() => settleTerminal(pair, terminal));
   }
   const onNativeCapture = (event: Event) => {
     beginNativeEvent(event);
   };
   const onNativeBubble = (event: Event) => {
-    const proof = nativeProof;
+    if (authority.getPrototypeOf(event) !== authority.keyboardPrototype) return;
+    const pair = nativePairs.get(event as KeyboardEvent);
+    const proof = pair?.native;
     if (
-      !proof
+      !pair
+      || !proof
       || proof.event !== event
       || authority.eventCurrentTarget.read(event) !== ownerDocument
       || authority.eventPhase.read(event) !== ownerWindow.Event.BUBBLING_PHASE
       || authority.eventDefaultPrevented.read(event)
       || authority.eventCancelBubble.read(event)
     ) {
+      if (pair) rejectPair(pair, true);
       return;
     }
-    const authenticated = authenticateTerminal(proof);
-    if (!authenticated || proof.path.at(-1) !== ownerWindow) return;
-    terminal = authenticated;
+    const authenticated = authenticateTerminal(pair);
+    if (!authenticated || proof.path.at(-1) !== ownerWindow) {
+      rejectPair(pair, true);
+      return;
+    }
+    pair.terminal = authenticated;
     windowListenerActive = true;
     authority.addWindowEventListener.call(
       ownerWindow,
       "keydown",
       onNativeWindowBubble,
     );
-    queueMicrotask(() => {
-      if (terminal === authenticated) settleTerminal(authenticated);
-    });
   };
   const boundaryListeners = publication.entries.map((entry) => {
     const listener = (event: Event) => {
+      if (authority.getPrototypeOf(event) !== authority.keyboardPrototype) return;
+      const pair = nativePairs.get(event as KeyboardEvent);
       if (
-        nativeProof?.event === event
-        && nativeProof.entry === entry
+        pair
+        && !pair.rejected
+        && !pair.consumed
+        && pair.native.event === event
+        && pair.native.entry === entry
         && authority.eventCurrentTarget.read(event) === entry.element
         && (
           authority.eventPhase.read(event) === ownerWindow.Event.CAPTURING_PHASE
@@ -1561,7 +1679,7 @@ function createTableMenuKeyboardRuntime(
         && publicationIsCurrent()
         && authority.activeElement.read(ownerDocument) === entry.element
       ) {
-        boundaryProof = nativeProof;
+        pair.boundaryObserved = true;
       }
     };
     return Object.freeze({ entry, listener });
@@ -1586,7 +1704,7 @@ function createTableMenuKeyboardRuntime(
   const release = () => {
     if (released) return;
     released = true;
-    clearProof();
+    replacePairs();
     if (!published) return;
     authority.removeEventListener.call(ownerDocument, "keydown", onNativeCapture, true);
     authority.removeEventListener.call(ownerDocument, "keydown", onNativeBubble);
@@ -1645,7 +1763,7 @@ class TableMenuControlCoordinator {
   #claimedActions = new WeakSet<TableMenuKeyboardAction>();
   #claimedReactEvents = new WeakSet<object>();
   #claimedNativeEvents = new WeakSet<Event>();
-  #attemptedReactEvents = new WeakSet<object>();
+  #attemptedReactEvents = new WeakMap<object, number>();
   #attemptedNativeEvents = new WeakSet<Event>();
 
   publish(publication: TableMenuControlPublication) {
@@ -1729,9 +1847,11 @@ class TableMenuControlCoordinator {
     return true;
   }
 
-  attemptReactEvent(event: object) {
-    if (this.#attemptedReactEvents.has(event)) return false;
-    this.#attemptedReactEvents.add(event);
+  attemptReactEvent(event: object, phase: "capture" | "bubble") {
+    const phaseFlag = phase === "capture" ? 1 : 2;
+    const attempted = this.#attemptedReactEvents.get(event) ?? 0;
+    if (attempted & phaseFlag) return false;
+    this.#attemptedReactEvents.set(event, attempted | phaseFlag);
     return true;
   }
 
@@ -1743,8 +1863,36 @@ class TableMenuControlCoordinator {
     bubbleEvent: object,
     nativeEvent: Event,
   ) {
+    if (!this.canClaimKeyboard(
+      publication,
+      entry,
+      action,
+      captureEvent,
+      bubbleEvent,
+      nativeEvent,
+    )) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedEntries.add(entry);
+    this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(captureEvent);
+    this.#claimedReactEvents.add(bubbleEvent);
+    this.#claimedNativeEvents.add(nativeEvent);
+    publication.controlPublication.keyboardClaimed = true;
+    return true;
+  }
+
+  canClaimKeyboard(
+    publication: TableMenuKeyboardPublication,
+    entry: TableMenuKeyboardEntry,
+    action: TableMenuKeyboardAction,
+    captureEvent: object,
+    bubbleEvent: object,
+    nativeEvent: Event,
+  ) {
     const controlPublication = publication.controlPublication;
-    if (
+    return !(
       !this.ownsPublication(controlPublication)
       || controlPublication.keyboardRuntime?.publication !== publication
       || publication.entries[entry.index] !== entry
@@ -1757,17 +1905,7 @@ class TableMenuControlCoordinator {
       || this.#claimedReactEvents.has(captureEvent)
       || this.#claimedReactEvents.has(bubbleEvent)
       || this.#claimedNativeEvents.has(nativeEvent)
-    ) {
-      return false;
-    }
-    this.#claimedPublications.add(publication);
-    this.#claimedEntries.add(entry);
-    this.#claimedActions.add(action);
-    this.#claimedReactEvents.add(captureEvent);
-    this.#claimedReactEvents.add(bubbleEvent);
-    this.#claimedNativeEvents.add(nativeEvent);
-    controlPublication.keyboardClaimed = true;
-    return true;
+    );
   }
 
   requestSuccessor(publication: TableMenuControlPublication) {
