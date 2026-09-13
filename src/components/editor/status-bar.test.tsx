@@ -1113,8 +1113,12 @@ describe("status bar top-level keyboard navigation", () => {
         </StrictMode>,
       );
       const root = screen.getByTestId("status-bar");
-      rootCapture = reactHandler(root, "onKeyDownCapture");
-      rootBubble = reactHandler(root, "onKeyDown");
+      rootCapture = reactHandler<
+        (event: ReactKeyboardEvent<HTMLElement>) => void
+      >(root, "onKeyDownCapture");
+      rootBubble = reactHandler<
+        (event: ReactKeyboardEvent<HTMLElement>) => void
+      >(root, "onKeyDown");
       const source = statusControls()[1]!;
       const destination = statusControls()[2]!;
       source.addEventListener("keydown", () => {
@@ -1256,7 +1260,9 @@ describe("status bar top-level keyboard navigation", () => {
         </StrictMode>,
       );
       const root = screen.getByTestId("status-bar");
-      rootCapture = reactHandler(root, "onKeyDownCapture");
+      rootCapture = reactHandler<
+        (event: ReactKeyboardEvent<HTMLElement>) => void
+      >(root, "onKeyDownCapture");
       const source = statusControls()[1]!;
       const destination = statusControls()[2]!;
       source.focus();
