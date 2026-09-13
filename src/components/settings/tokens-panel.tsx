@@ -7334,29 +7334,51 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     currentTarget: HTMLInputElement | HTMLFormElement,
     phase: number,
   ): RenameEscapeReactProof | null => {
+    const { authority } = pair;
+    if (
+      !renameEscapePublicationIsCurrent(authority)
+      || authority.escape !== pair.publication
+    ) return null;
     const keyboard = pair.authority.keyboard;
     const nativeCurrentTarget = tokenRenameNativeValue<EventTarget | null>(
       keyboard, keyboard.event.currentTarget, pair.native.event,
     );
+    const nativeEvent = event.nativeEvent;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const target = event.target;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const deliveredTarget = event.currentTarget;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const eventPhase = event.eventPhase;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const defaultPrevented = event.defaultPrevented;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
     const record = event as unknown as Record<string, unknown>;
     const values: Record<string, unknown> = {};
     for (const field of [...escapeScalarFields, "which", "locale", "isComposing"]) {
       values[field] = record[field];
+      if (!renameEscapePublicationIsCurrent(authority)) return null;
     }
+    const preventDefault = event.preventDefault as RenameNavigationReactMethod;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const isDefaultPrevented = event.isDefaultPrevented as RenameNavigationReactMethod;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
+    const isPropagationStopped = event.isPropagationStopped as RenameNavigationReactMethod;
+    if (!renameEscapePublicationIsCurrent(authority)) return null;
     const methods = Object.freeze({
-      preventDefault: event.preventDefault as RenameNavigationReactMethod,
-      isDefaultPrevented: event.isDefaultPrevented as RenameNavigationReactMethod,
-      isPropagationStopped: event.isPropagationStopped as RenameNavigationReactMethod,
+      preventDefault,
+      isDefaultPrevented,
+      isPropagationStopped,
     });
     if (
       event === (pair.native.event as unknown)
-      || event.nativeEvent !== pair.native.event
+      || nativeEvent !== pair.native.event
       || !nativeCurrentTarget
       || tokenRenameNativeValue(keyboard, keyboard.event.eventPhase, pair.native.event) !== phase
-      || event.target !== pair.authority.input
-      || event.currentTarget !== currentTarget
-      || event.eventPhase !== phase
-      || event.defaultPrevented !== false
+      || target !== pair.authority.input
+      || deliveredTarget !== currentTarget
+      || eventPhase !== phase
+      || defaultPrevented !== false
       || escapeScalarFields.some((field) => !Object.is(values[field], pair.native.values[field]))
       || (values.isComposing !== undefined && values.isComposing !== false)
       || (values.which !== undefined && values.which !== values.keyCode)
@@ -7374,31 +7396,43 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     });
   };
   const renameEscapeReactIsCurrent = (
+    pair: PendingRenameEscape,
     proof: RenameEscapeReactProof,
     currentTarget: HTMLInputElement | HTMLFormElement | null,
     prevented: boolean,
     defaultQuery = proof.methods.isDefaultPrevented,
   ) => {
     const { event } = proof;
+    const { authority } = pair;
     const record = event as unknown as Record<string, unknown>;
-    return event.nativeEvent === proof.nativeEvent
+    return renameEscapePublicationIsCurrent(authority)
+      && event.nativeEvent === proof.nativeEvent
+      && renameEscapePublicationIsCurrent(authority)
       && event.target === proof.target
+      && renameEscapePublicationIsCurrent(authority)
       && event.currentTarget === currentTarget
+      && renameEscapePublicationIsCurrent(authority)
       && event.eventPhase === proof.eventPhase
+      && renameEscapePublicationIsCurrent(authority)
       && event.defaultPrevented === prevented
-      && Object.entries(proof.values).every(([field, value]) => Object.is(record[field], value))
+      && renameEscapePublicationIsCurrent(authority)
+      && Object.entries(proof.values).every(([field, value]) =>
+        Object.is(record[field], value) && renameEscapePublicationIsCurrent(authority))
       && event.preventDefault === proof.methods.preventDefault
+      && renameEscapePublicationIsCurrent(authority)
       && event.isDefaultPrevented === defaultQuery
+      && renameEscapePublicationIsCurrent(authority)
       && event.isPropagationStopped === proof.methods.isPropagationStopped
+      && renameEscapePublicationIsCurrent(authority)
       && typeof defaultQuery === "function";
   };
-  const renameEscapeContextIsCurrent = (
+  // This check never reads a public wrapper, so it is safe after selecting a callable.
+  const renameEscapePairIsCurrent = (
     pair: PendingRenameEscape,
     capture: RenameEscapeReactProof,
     bubble: RenameEscapeReactProof | null,
     claimed = false,
     prevented = false,
-    defaultQuery = bubble?.methods.isDefaultPrevented,
   ) => {
     const { authority, publication, native } = pair;
     // Check revocation before touching any weak store, including from retained handlers.
@@ -7430,7 +7464,6 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       || capture.nativeEvent !== native.event
       || capture.currentTarget !== authority.input
       || capture.target !== authority.input
-      || !renameEscapeReactIsCurrent(capture, bubble ? null : authority.input, false)
     ) return false;
     const retainedCapture = publication.wrappers?.get(capture.event);
     if (pair.capture ? retainedCapture !== capture : retainedCapture !== undefined) return false;
@@ -7442,7 +7475,6 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       && (claimed
         ? publication.wrappers?.get(bubble.event) === bubble
         : !publication.wrappers?.has(bubble.event))
-      && renameEscapeReactIsCurrent(bubble, authority.form, prevented, defaultQuery)
     );
     return wrappersAreCurrent
       && renameEscapePublicationIsCurrent(authority)
@@ -7456,6 +7488,19 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       && renameNavigationInProgress.current === null
       && !authority.navigation.publicCallActive;
   };
+  const renameEscapeContextIsCurrent = (
+    pair: PendingRenameEscape,
+    capture: RenameEscapeReactProof,
+    bubble: RenameEscapeReactProof | null,
+    claimed = false,
+    prevented = false,
+    defaultQuery = bubble?.methods.isDefaultPrevented,
+  ) => renameEscapePairIsCurrent(pair, capture, bubble, claimed, prevented)
+    && renameEscapeReactIsCurrent(pair, capture, bubble ? null : pair.authority.input, false)
+    && (!bubble || renameEscapeReactIsCurrent(
+      pair, bubble, pair.authority.form, prevented, defaultQuery,
+    ))
+    && renameEscapePairIsCurrent(pair, capture, bubble, claimed, prevented);
   const queryRenameEscape = (
     pair: PendingRenameEscape,
     capture: RenameEscapeReactProof,
@@ -7469,10 +7514,16 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     if (!renameEscapeContextIsCurrent(pair, capture, bubble, claimed, prevented, defaultQuery)) {
       return false;
     }
-    const callback = proof === bubble && method === "isDefaultPrevented"
+    const expected = proof === bubble && method === "isDefaultPrevented"
       ? defaultQuery
       : proof.methods[method];
-    if (!callback || !renameEscapeRouteActive.current) return false;
+    const callback = proof.event[method];
+    if (
+      callback !== expected
+      || typeof callback !== "function"
+      || !renameEscapeRouteActive.current
+      || !renameEscapePairIsCurrent(pair, capture, bubble, claimed, prevented)
+    ) return false;
     const result = pair.authority.keyboard.apply(callback, proof.event, []);
     return result === (proof === bubble && method === "isDefaultPrevented" && prevented)
       && renameEscapeContextIsCurrent(pair, capture, bubble, claimed, prevented, defaultQuery);
@@ -7704,6 +7755,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     renameEscapeRouteActive.current = true;
     try {
       const nativeEvent = event.nativeEvent;
+      if (!renameEscapePublicationIsCurrent(authority)) return;
       const pair = publication.current?.get(nativeEvent);
       if (!pair || pair.capture || publication.wrappers?.has(event)) return;
       const capture = readRenameEscapeReact(
@@ -7877,14 +7929,11 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       }
     }
   };
-  const stageRenameNavigation = (event: RenameNavigationReactEvent) => {
-    const authority = activeRenameEscape.current;
-    let nativeEvent: KeyboardEvent;
-    try {
-      nativeEvent = event.nativeEvent;
-    } catch {
-      return;
-    }
+  const stageRenameNavigation = (
+    event: RenameNavigationReactEvent,
+    nativeEvent: KeyboardEvent,
+    authority: RenameEscapeAuthority,
+  ) => {
     const publication = authority?.navigation;
     const current = publication?.current;
     const pair = current?.get(nativeEvent);
@@ -7948,14 +7997,11 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       reactCapture,
     }));
   };
-  const deliverRenameNavigation = (event: RenameNavigationReactEvent) => {
-    let nativeEvent: KeyboardEvent;
-    try {
-      nativeEvent = event.nativeEvent;
-    } catch {
-      return;
-    }
-    const authority = activeRenameEscape.current;
+  const deliverRenameNavigation = (
+    event: RenameNavigationReactEvent,
+    nativeEvent: KeyboardEvent,
+    authority: RenameEscapeAuthority,
+  ) => {
     const publication = authority?.navigation;
     const current = publication?.current;
     const pair = current?.get(nativeEvent);
@@ -8024,19 +8070,20 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     const claim = claimRenameNavigation(complete);
     if (claim) preventAndFocusRenameNavigation(claim);
   };
-  const deliverRenameEscape = (event: ReactKeyboardEvent<HTMLFormElement>) => {
-    const authority = activeRenameEscape.current;
+  const deliverRenameEscape = (
+    event: ReactKeyboardEvent<HTMLFormElement>,
+    nativeEvent: KeyboardEvent,
+    authority: RenameEscapeAuthority,
+  ) => {
     if (
-      renameEscapeRouteActive.current
-      || !authority
+      !renameEscapeRouteActive.current
       || !renameEscapePublicationIsCurrent(authority)
       || authority.claimed
     ) return;
     const publication = authority.escape;
-    renameEscapeRouteActive.current = true;
     let claimed = false;
     try {
-      const pair = publication.current?.get(event.nativeEvent);
+      const pair = publication.current?.get(nativeEvent);
       const capture = pair?.capture;
       if (!pair || !capture || publication.wrappers?.has(event)) return;
       const bubble = readRenameEscapeReact(
@@ -8049,16 +8096,22 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         }
       }
       if (!renameEscapeContextIsCurrent(pair, capture, bubble)) return;
+      const preventDefault = bubble.event.preventDefault;
+      if (
+        preventDefault !== bubble.methods.preventDefault
+        || !renameEscapePairIsCurrent(pair, capture, bubble)
+      ) return;
 
       // The complete immutable pair claims this publication only at the effect boundary.
       publication.wrappers?.set(event, bubble);
       publication.claimedEvents?.add(pair.native.event);
       authority.claimed = true;
       claimed = true;
-      if (!renameEscapeContextIsCurrent(pair, capture, bubble, true)) return;
-      authority.keyboard.apply(bubble.methods.preventDefault, bubble.event, []);
+      if (!renameEscapePairIsCurrent(pair, capture, bubble, true)) return;
+      authority.keyboard.apply(preventDefault, bubble.event, []);
 
       // React DOM replaces only this query as part of its public prevention method.
+      if (!renameEscapePublicationIsCurrent(authority)) return;
       const defaultQuery = bubble.event.isDefaultPrevented as RenameNavigationReactMethod;
       if (
         !renameEscapeContextIsCurrent(pair, capture, bubble, true, true, defaultQuery)
@@ -8073,6 +8126,30 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       return;
     } finally {
       if (claimed) authority.claimed = false;
+    }
+  };
+  const routeRenameKeyDown = (
+    event: RenameNavigationReactEvent,
+    phase: "capture" | "bubble",
+  ) => {
+    if (renameEscapeRouteActive.current) return;
+    const authority = activeRenameEscape.current;
+    if (!authority || !renameEscapePublicationIsCurrent(authority)) return;
+    // Own exclusion before either route can read a reentrant public accessor.
+    renameEscapeRouteActive.current = true;
+    try {
+      const nativeEvent = event.nativeEvent;
+      if (!renameEscapePublicationIsCurrent(authority)) return;
+      if (phase === "capture") {
+        stageRenameNavigation(event, nativeEvent, authority);
+      } else {
+        deliverRenameNavigation(event, nativeEvent, authority);
+        if (!renameEscapePublicationIsCurrent(authority)) return;
+        deliverRenameEscape(event, nativeEvent, authority);
+      }
+    } catch {
+      return;
+    } finally {
       renameEscapeRouteActive.current = false;
     }
   };
@@ -8423,11 +8500,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
           }} aria-label={facts.revokeLabel} data-testid="token-revoke">Revoke</button>
       </div>}
       {facts.renameVisit && <><form ref={(element) => bindElement(candidate.form, element)} className="flex min-w-0 flex-col gap-2"
-        onKeyDownCapture={stageRenameNavigation}
-        onKeyDown={(event) => {
-          deliverRenameNavigation(event);
-          deliverRenameEscape(event);
-        }}
+        onKeyDownCapture={(event) => routeRenameKeyDown(event, "capture")}
+        onKeyDown={(event) => routeRenameKeyDown(event, "bubble")}
         onSubmit={(event) => {
           const commit = claimSubmit(event);
           const visit = commit?.facts.renameVisit;

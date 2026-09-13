@@ -1170,6 +1170,8 @@ describe("Settings → Agents: token rename Escape authority", () => {
   type EscapeWrapper = ReactKeyboardEvent<HTMLInputElement | HTMLFormElement>;
   type EscapeHandler = (event: EscapeWrapper) => void;
   type EscapeHooks = {
+    formCaptureBefore?: (event: EscapeWrapper, handler: EscapeHandler) => void;
+    formCaptureAfter?: (event: EscapeWrapper, handler: EscapeHandler) => void;
     captureBefore?: (event: EscapeWrapper, handler: EscapeHandler) => void;
     captureAfter?: (event: EscapeWrapper, handler: EscapeHandler) => void;
     bubbleBefore?: (event: EscapeWrapper, handler: EscapeHandler) => void;
@@ -1197,6 +1199,7 @@ describe("Settings → Agents: token rename Escape authority", () => {
     const inputProperties = rename.input as unknown as Record<string, Record<string, unknown>>;
     const formProperties = rename.form as unknown as Record<string, Record<string, unknown>>;
     const captureHandler = captureProps.onKeyDownCapture as EscapeHandler;
+    const formCaptureHandler = bubbleProps.onKeyDownCapture as EscapeHandler;
     const bubbleHandler = bubbleProps.onKeyDown as EscapeHandler;
     const delivered: { capture?: EscapeWrapper; bubble?: EscapeWrapper } = {};
     const capturePrevent = vi.fn<(this: EscapeWrapper) => void>();
@@ -1227,6 +1230,17 @@ describe("Settings → Agents: token rename Escape authority", () => {
     };
     const wrappedBubble = {
       ...bubbleProps,
+      onKeyDownCapture: hooks.formCaptureBefore || hooks.formCaptureAfter
+        ? (event: EscapeWrapper) => {
+            if (event.nativeEvent !== nativeEvent) {
+              formCaptureHandler(event);
+              return;
+            }
+            hooks.formCaptureBefore?.(event, formCaptureHandler);
+            formCaptureHandler(event);
+            hooks.formCaptureAfter?.(event, formCaptureHandler);
+          }
+        : formCaptureHandler,
       onKeyDown: (event: EscapeWrapper) => wrap("bubble", event, bubbleHandler),
     };
     inputProperties[captureKey] = wrappedCapture;
@@ -1614,6 +1628,292 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     expectNoRequests();
   });
+
+  it.each([
+    ["capture default", "isDefaultPrevented", undefined],
+    ["capture propagation", "isPropagationStopped", "capture default"],
+    ["retained capture default", "isDefaultPrevented", undefined],
+    ["retained capture propagation", "isPropagationStopped", "retained capture default"],
+    ["bubble default", "isDefaultPrevented", "retained capture propagation"],
+    ["bubble propagation", "isPropagationStopped", "bubble default"],
+    ["prevention", "preventDefault", "bubble propagation"],
+    ["post default", "isDefaultPrevented", "prevention"],
+    ["post propagation", "isPropagationStopped", "post default"],
+  ] as const)(
+    "rejects late-getter replacement of the selected %s without calling either identity",
+    async (site, method, previous) => {
+      const rename = await showStrictRename();
+      const focus = vi.spyOn(rename.rename, "focus");
+      const replacement = vi.fn(() => false);
+      const afterReplacement = vi.fn();
+      let lastCallback: CallbackSite | undefined;
+      let reads = 0;
+      let replaced = false;
+      let capture: EscapeWrapper;
+      const observe = (current: CallbackSite) => {
+        if (replaced) afterReplacement(current);
+        lastCallback = current;
+        reads = 0;
+      };
+      const installLateGetter = (event: EscapeWrapper, selected: EscapeWrapper) => {
+        const propagation = event.isPropagationStopped;
+        Object.defineProperty(event, "isPropagationStopped", {
+          configurable: true,
+          get: () => {
+            if (!replaced && lastCallback === previous && ++reads === 2) {
+              replaced = true;
+              Object.defineProperty(selected, method, {
+                configurable: true, writable: true, value: replacement,
+              });
+            }
+            return propagation;
+          },
+        });
+      };
+      const pair = dispatchEscapePair(rename, {
+        captureBefore: (event) => {
+          capture = event;
+          instrumentCallbacks(event, "capture", observe);
+          if (site.startsWith("capture ")) installLateGetter(event, event);
+        },
+        bubbleBefore: (event) => {
+          instrumentCallbacks(event, "bubble", observe);
+          if (site.startsWith("capture ")) return;
+          if (site === "retained capture default") {
+            lastCallback = undefined;
+            reads = 0;
+          }
+          installLateGetter(event, site.startsWith("retained capture") ? capture : event);
+        },
+      });
+      expect(replaced).toBe(true);
+      expect(afterReplacement).not.toHaveBeenCalled();
+      expect(replacement).not.toHaveBeenCalled();
+      expect(pair.bubblePrevent).toHaveBeenCalledTimes(site.startsWith("post") ? 1 : 0);
+      expect(focus).not.toHaveBeenCalled();
+      expectOpen(rename);
+      const successor = dispatchEscapePair(rename);
+      expect(successor.bubblePrevent).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expectNoRequests();
+    },
+  );
+
+  it.each(["isDefaultPrevented", "isPropagationStopped", "preventDefault"] as const)(
+    "stops at selected-getter cleanup before invoking %s or reading another public property",
+    async (method) => {
+      const rename = await showStrictRename();
+      const focus = vi.spyOn(rename.rename, "focus");
+      const laterReads = vi.fn();
+      const laterCalls = vi.fn();
+      let cleaned = false;
+      let lastRead: string | undefined;
+      let lastCallback: CallbackSite | undefined;
+      let observing = false;
+      const install = (event: EscapeWrapper, phase: "capture" | "bubble") => {
+        instrumentCallbacks(event, phase, (site) => {
+          if (cleaned) laterCalls(site);
+          lastCallback = site;
+        });
+        const record = event as unknown as Record<string, unknown>;
+        for (const field of [
+          "nativeEvent", "target", "currentTarget", "eventPhase", "defaultPrevented",
+          "type", "bubbles", "cancelable", "isTrusted", "timeStamp", "key", "code",
+          "location", "charCode", "keyCode", "which", "locale", "repeat", "isComposing",
+          "altKey", "ctrlKey", "metaKey", "shiftKey", "detail", "view",
+          "preventDefault", "isDefaultPrevented", "isPropagationStopped",
+        ]) {
+          let value = record[field];
+          Object.defineProperty(event, field, {
+            configurable: true,
+            get: () => {
+              if (observing) {
+                if (cleaned) laterReads(field);
+                else if (
+                  field === method
+                  && lastRead === "isPropagationStopped"
+                  && (method !== "preventDefault" || lastCallback === "bubble propagation")
+                ) {
+                  cleaned = true;
+                  rename.root.unmount();
+                }
+                lastRead = field;
+              }
+              return value;
+            },
+            set: (next: unknown) => { value = next; },
+          });
+        }
+        observing = true;
+      };
+      const pair = dispatchEscapePair(rename, method === "preventDefault"
+        ? { bubbleBefore: (event) => install(event, "bubble"), bubbleAfter: () => { observing = false; } }
+        : { captureBefore: (event) => install(event, "capture"), captureAfter: () => { observing = false; } });
+      expect(cleaned).toBe(true);
+      expect(rename.host).toBeEmptyDOMElement();
+      expect(laterReads).not.toHaveBeenCalled();
+      expect(laterCalls).not.toHaveBeenCalled();
+      expect(pair.capturePrevent).not.toHaveBeenCalled();
+      expect(pair.bubblePrevent).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoRequests();
+      const successor = await showStrictRename();
+      expect(dispatchEscapePair(successor).bubblePrevent).toHaveBeenCalledOnce();
+      expect(successor.rename).toHaveFocus();
+      expectNoRequests();
+    },
+  );
+
+  it.each((["form capture", "input capture", "form bubble"] as const).flatMap((boundary) =>
+    (["live", "republished", "throwing"] as const).map((mutation) => [boundary, mutation] as const),
+  ))(
+    "excludes nested Escape at the outer %s nativeEvent getter (%s) and releases on unwind",
+    async (boundary, mutation) => {
+      const { flushSync } = await import("react-dom");
+      const rename = await showStrictRename();
+      const focus = vi.spyOn(rename.rename, "focus");
+      const laterReads = vi.fn();
+      let current = rename;
+      let attacked = false;
+      let nested: ReturnType<typeof dispatchEscapePair> | undefined;
+      const attack = (event: EscapeWrapper, handler: EscapeHandler) => {
+        const native = event.nativeEvent;
+        const candidate = Object.create(event) as EscapeWrapper;
+        Object.defineProperty(candidate, "nativeEvent", {
+          get: () => {
+            if (!attacked) {
+              attacked = true;
+              if (mutation === "republished") {
+                flushSync(() => fireEvent.change(rename.input, { target: { value: "Successor draft" } }));
+                const input = screen.getByLabelText("Token name") as HTMLInputElement;
+                current = { ...rename, input, form: input.form as HTMLFormElement };
+                expect(reactProp<EscapeHandler>(current.form, "onKeyDown")).not.toBe(oldBubble);
+              }
+              nested = dispatchEscapePair(current);
+            }
+            if (mutation === "throwing") throw new Error("Rejected outer nativeEvent getter");
+            return native;
+          },
+        });
+        Object.defineProperty(candidate, "target", {
+          get: () => {
+            laterReads();
+            return rename.rename;
+          },
+        });
+        handler(candidate);
+        expect(nested).toBeDefined();
+        expect(nested?.nativeEvent.defaultPrevented).toBe(false);
+        expect(nested?.capturePrevent).not.toHaveBeenCalled();
+        expect(nested?.bubblePrevent).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expectOpen(current);
+        if (mutation !== "live") expect(laterReads).not.toHaveBeenCalled();
+      };
+      const oldBubble = reactProp<EscapeHandler>(rename.form, "onKeyDown");
+      const pair = dispatchEscapePair(rename, boundary === "form capture"
+        ? { formCaptureBefore: attack }
+        : boundary === "input capture" ? { captureBefore: attack } : { bubbleBefore: attack });
+      expect(attacked).toBe(true);
+      if (mutation === "republished") {
+        expect(pair.bubblePrevent).not.toHaveBeenCalled();
+        expectOpen(current);
+        expect(dispatchEscapePair(current).bubblePrevent).toHaveBeenCalledOnce();
+      } else {
+        // The malformed candidate did not consume this still-live native delivery.
+        expect(pair.bubblePrevent).toHaveBeenCalledOnce();
+      }
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(screen.queryByLabelText("Token name")).toBeNull();
+      expectNoRequests();
+    },
+  );
+
+  it.each((["form capture", "input capture", "form bubble"] as const).flatMap((boundary) =>
+    (["cleanup", "republish"] as const).flatMap((mutation) =>
+      (boundary === "form capture" ? [1] : [1, 2, 3])
+        .map((read) => [boundary, mutation, read] as const)),
+  ))(
+    "stops immediately after %s nativeEvent getter %s at read %i without accessing retired stores",
+    async (boundary, mutation, read) => {
+      const { flushSync } = await import("react-dom");
+      const set = vi.spyOn(WeakMap.prototype, "set");
+      const weakAdd = vi.spyOn(WeakSet.prototype, "add");
+      const rename = await showStrictRename();
+      const focus = vi.spyOn(rename.rename, "focus");
+      const laterReads = vi.fn();
+      const queries = vi.fn(() => false);
+      const stores = new Set<unknown>();
+      let revoked = false;
+      let current = rename;
+      const get = vi.spyOn(WeakMap.prototype, "get");
+      const has = vi.spyOn(WeakMap.prototype, "has");
+      const erase = vi.spyOn(WeakMap.prototype, "delete");
+      const weakHas = vi.spyOn(WeakSet.prototype, "has");
+      const weakErase = vi.spyOn(WeakSet.prototype, "delete");
+      const spies = [get, has, erase, set, weakHas, weakErase, weakAdd];
+      const revoke = (event: EscapeWrapper, handler: EscapeHandler) => {
+        const native = event.nativeEvent;
+        let nativeReads = 0;
+        for (const spy of [set, weakAdd]) {
+          spy.mock.calls.forEach(([key], index) => {
+            if (key === native || key === event) stores.add(spy.mock.contexts[index]);
+          });
+        }
+        expect(stores.size).toBeGreaterThan(0);
+        const candidate = Object.create(event) as EscapeWrapper;
+        Object.defineProperty(candidate, "nativeEvent", {
+          get: () => {
+            nativeReads += 1;
+            if (nativeReads !== read) return native;
+            if (mutation === "cleanup") rename.root.unmount();
+            else {
+              flushSync(() => fireEvent.change(rename.input, { target: { value: "Republished draft" } }));
+              const input = screen.getByLabelText("Token name") as HTMLInputElement;
+              current = { ...rename, input, form: input.form as HTMLFormElement };
+            }
+            revoked = true;
+            spies.forEach((spy) => spy.mockClear());
+            return native;
+          },
+        });
+        for (const field of ["type", "target", "currentTarget", "key", "isDefaultPrevented", "isPropagationStopped", "preventDefault"]) {
+          const value = field.startsWith("is") || field === "preventDefault"
+            ? queries
+            : (event as unknown as Record<string, unknown>)[field];
+          Object.defineProperty(candidate, field, {
+            get: () => {
+              if (revoked) laterReads(field);
+              return value;
+            },
+          });
+        }
+        handler(candidate);
+        for (const spy of spies) {
+          expect(spy.mock.contexts.filter((context) => stores.has(context))).toEqual([]);
+        }
+        expect(laterReads).not.toHaveBeenCalled();
+        expect(queries).not.toHaveBeenCalled();
+      };
+      const pair = dispatchEscapePair(rename, boundary === "form capture"
+        ? { formCaptureBefore: revoke }
+        : boundary === "input capture" ? { captureBefore: revoke } : { bubbleBefore: revoke });
+      expect(revoked).toBe(true);
+      expect(pair.capturePrevent).not.toHaveBeenCalled();
+      expect(pair.bubblePrevent).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoRequests();
+      spies.forEach((spy) => spy.mockRestore());
+      if (mutation === "cleanup") {
+        expect(rename.host).toBeEmptyDOMElement();
+        current = await showStrictRename();
+      } else expectOpen(current);
+      const successor = dispatchEscapePair(current);
+      expect(successor.bubblePrevent).toHaveBeenCalledOnce();
+      expect(current.rename).toHaveFocus();
+      expectNoRequests();
+    },
+  );
 
   it("authenticates React's new post-prevention default query and never calls the old query afterward", async () => {
     const rename = await showStrictRename();
