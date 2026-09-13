@@ -19,6 +19,7 @@ const headings = [
 
 type TestHeading = RenderedHeading & { top: number };
 type ObserverEvent = { target: Element; isIntersecting: boolean };
+type NavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
 const documentA: TestHeading[] = [
   { id: "alpha", level: 2, text: "Alpha", top: 120 },
@@ -31,6 +32,11 @@ const documentB: TestHeading[] = [
 const documentWithMissing: TestHeading[] = [
   ...documentA,
   { id: "missing", level: 3, text: "Missing", top: 360 },
+];
+const navigationHeadings: TestHeading[] = [
+  { id: "first", level: 2, text: "First", top: 120 },
+  { id: "middle", level: 3, text: "Middle", top: 240 },
+  { id: "last", level: 2, text: "Last", top: 360 },
 ];
 
 class InstrumentedIntersectionObserver {
@@ -188,6 +194,84 @@ function escapeEvent(
   };
 }
 
+function setJsdomEventView(event: KeyboardEvent, view: Window) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((value): value is { view: Window | null } =>
+      Boolean(value && typeof value === "object" && "view" in value));
+  if (!implementation) throw new Error("The jsdom KeyboardEvent implementation was not found");
+  implementation.view = view;
+}
+
+function navigationEvent(
+  currentTarget: HTMLElement,
+  target: Element,
+  key: NavigationKey,
+  options: {
+    nativeEvent?: KeyboardEvent;
+    repeat?: boolean;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    isComposing?: boolean;
+    canceled?: boolean;
+    stopped?: boolean;
+    onNativeEventRead?: (read: number) => void;
+  } = {},
+) {
+  const ownerView = target.ownerDocument.defaultView ?? window;
+  const nativeEvent = options.nativeEvent ?? new ownerView.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    repeat: options.repeat,
+    altKey: options.altKey,
+    ctrlKey: options.ctrlKey,
+    metaKey: options.metaKey,
+    shiftKey: options.shiftKey,
+    isComposing: options.isComposing,
+  });
+  if (!options.nativeEvent) setJsdomEventView(nativeEvent, ownerView);
+  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
+  return {
+    nativeEvent,
+    preventDefault,
+    dispatch: (...handlers: KeyHandler[]) => {
+      target.addEventListener("keydown", (dispatched) => {
+        if (options.canceled) dispatched.preventDefault();
+        if (options.stopped) dispatched.stopPropagation();
+        const keyboard = dispatched as KeyboardEvent;
+        let nativeEventReads = 0;
+        const event = {
+          type: "keydown",
+          key: keyboard.key,
+          repeat: keyboard.repeat,
+          altKey: keyboard.altKey,
+          ctrlKey: keyboard.ctrlKey,
+          metaKey: keyboard.metaKey,
+          shiftKey: keyboard.shiftKey,
+          isComposing: keyboard.isComposing,
+          defaultPrevented: keyboard.defaultPrevented,
+          currentTarget,
+          target: dispatched.target,
+          get nativeEvent() {
+            nativeEventReads += 1;
+            options.onNativeEventRead?.(nativeEventReads);
+            return keyboard;
+          },
+          preventDefault,
+          isDefaultPrevented: () => keyboard.defaultPrevented,
+          isPropagationStopped: () => keyboard.cancelBubble,
+        } as unknown as ReactKeyboardEvent<HTMLElement>;
+        handlers.forEach((handler) => handler(event));
+        dispatched.stopImmediatePropagation();
+      }, { capture: true, once: true });
+      target.dispatchEvent(nativeEvent);
+    },
+  };
+}
+
 function directControls(host: HTMLElement) {
   const nav = host.querySelector<HTMLElement>('[data-testid="reader-toc"]');
   const toggle = host.querySelector<HTMLButtonElement>('[data-testid="reader-toc-toggle"]');
@@ -330,6 +414,473 @@ describe("ReaderToc mobile disclosure", () => {
     fireEvent.click(links[1]);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("list")).toHaveClass("hidden");
+  });
+});
+
+describe("ReaderToc keyboard navigation", () => {
+  it("uses the stable KeyboardEvent-specific trust getter as keyboard authority", () => {
+    const firstKeyboard = new window.KeyboardEvent("keydown", { key: "ArrowDown" });
+    const secondKeyboard = new window.KeyboardEvent("keydown", { key: "ArrowUp" });
+    const plainEvent = new window.Event("keydown");
+    const firstDescriptor = Object.getOwnPropertyDescriptor(firstKeyboard, "isTrusted");
+    const secondDescriptor = Object.getOwnPropertyDescriptor(secondKeyboard, "isTrusted");
+    const plainDescriptor = Object.getOwnPropertyDescriptor(plainEvent, "isTrusted");
+
+    expect(firstDescriptor?.get).toBeTypeOf("function");
+    expect(secondDescriptor?.get).toBe(firstDescriptor?.get);
+    expect(firstDescriptor?.configurable).toBe(false);
+    if (plainDescriptor?.get !== firstDescriptor?.get) {
+      expect(plainDescriptor?.get).not.toBe(firstDescriptor?.get);
+    }
+  });
+
+  it.each(["ArrowDown", "ArrowUp", "Home", "End"] as const)(
+    "rejects a unit-created untrusted %s event before prevention or focus",
+    (key) => {
+      const view = directRoot(
+        <StrictMode>
+          <ReaderToc headings={navigationHeadings} />
+        </StrictMode>,
+      );
+      const controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.toggle.focus();
+      const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      focus.mockClear();
+      const probe = navigationEvent(controls.nav, controls.toggle, key);
+
+      act(() => probe.dispatch(handler));
+
+      expect(probe.nativeEvent.isTrusted).toBe(false);
+      expect(probe.preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(controls.toggle).toHaveFocus();
+      expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    },
+  );
+
+  it.each([
+    ["repeat", { repeat: true }],
+    ["Alt", { altKey: true }],
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["composition", { isComposing: true }],
+    ["canceled", { canceled: true }],
+    ["stopped", { stopped: true }],
+  ] as const)("rejects a %s key before prevention or focus", (_label, options) => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown", options);
+
+    act(() => rejected.dispatch(handler));
+
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(controls.links[0]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("leaves Enter to the native anchor and keeps Escape close and focus return", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+
+    fireEvent.keyDown(controls.links[0], { key: "Enter" });
+    expect(controls.links[0]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+    const activate = reactHandler<ClickHandler<HTMLAnchorElement>>(controls.links[0], "onClick");
+    const activation = clickEvent(controls.links[0]);
+    act(() => activation.dispatch(activate));
+    expect(activation.preventDefault).not.toHaveBeenCalled();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(controls.toggle);
+    controls = directControls(view.host);
+    controls.links[1].focus();
+    fireEvent.keyDown(controls.links[1], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.toggle).toHaveFocus();
+  });
+
+  it("rejects a prototype-forged keyboard object with no native slots without throwing", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const preventDefault = vi.fn();
+    const forged = {
+      type: "keydown",
+      key: "ArrowDown",
+      repeat: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      isComposing: false,
+      defaultPrevented: false,
+      currentTarget: controls.nav,
+      target: controls.links[0],
+      nativeEvent: Object.create(window.KeyboardEvent.prototype),
+      preventDefault,
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+    } as unknown as ReactKeyboardEvent<HTMLElement>;
+
+    expect(() => act(() => handler(forged))).not.toThrow();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(controls.links[0]).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it.each([
+    ["Event.target", Event.prototype, "target"],
+    ["KeyboardEvent.key", KeyboardEvent.prototype, "key"],
+  ] as const)("retires a publication with a changed or throwing %s descriptor", (_label, owner, key) => {
+    const view = directRoot(
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={navigationHeadings} domKey="a" />
+      </StrictMode>,
+    );
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const descriptor = Object.getOwnPropertyDescriptor(owner, key)!;
+    const throwingGetter = vi.fn(() => {
+      throw new Error("changed descriptor must not run");
+    });
+    const nativeEvent = new window.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+    });
+    const preventDefault = vi.fn();
+    const rejected = {
+      type: "keydown",
+      key: "ArrowDown",
+      repeat: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      defaultPrevented: false,
+      currentTarget: controls.nav,
+      target: controls.links[0],
+      nativeEvent,
+      preventDefault,
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+    } as unknown as ReactKeyboardEvent<HTMLElement>;
+    Object.defineProperty(owner, key, { ...descriptor, get: throwingGetter });
+    try {
+      expect(() => act(() => handler(rejected))).not.toThrow();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(throwingGetter).not.toHaveBeenCalled();
+      expect(controls.links[0]).toHaveFocus();
+    } finally {
+      Object.defineProperty(owner, key, descriptor);
+    }
+
+    act(() => view.root.render(
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={navigationHeadings} domKey="b" />
+      </StrictMode>,
+    ));
+    controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    fireEvent.keyDown(controls.links[0], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.toggle).toHaveFocus();
+  });
+
+  it("does not invoke an own destination focus getter that tries to steal custody", () => {
+    const view = directRoot(
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={navigationHeadings} domKey="a" />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const focusGetter = vi.fn(() => {
+      outside.focus();
+      return HTMLElement.prototype.focus;
+    });
+    Object.defineProperty(controls.links[1], "focus", {
+      configurable: true,
+      get: focusGetter,
+    });
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    try {
+      expect(() => act(() => rejected.dispatch(handler))).not.toThrow();
+      expect(focusGetter).not.toHaveBeenCalled();
+      expect(rejected.preventDefault).not.toHaveBeenCalled();
+      expect(controls.links[0]).toHaveFocus();
+    } finally {
+      Reflect.deleteProperty(controls.links[1], "focus");
+      outside.remove();
+    }
+  });
+
+  it("rejects owner-realm focus prototype replacement before prevention or focus", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "focus")!;
+    const replacement = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "focus", { ...descriptor, value: replacement });
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    try {
+      expect(() => act(() => rejected.dispatch(handler))).not.toThrow();
+      expect(rejected.preventDefault).not.toHaveBeenCalled();
+      expect(replacement).not.toHaveBeenCalled();
+      expect(controls.links[0]).toHaveFocus();
+    } finally {
+      Object.defineProperty(HTMLElement.prototype, "focus", descriptor);
+    }
+  });
+
+  it("rejects a foreign owner-view keyboard event after its prototype is grafted", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow! as Window & typeof globalThis;
+    const foreignEvent = new foreignWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+    });
+    setJsdomEventView(foreignEvent, document.defaultView!);
+    Object.setPrototypeOf(foreignEvent, window.KeyboardEvent.prototype);
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown", {
+      nativeEvent: foreignEvent,
+    });
+    try {
+      expect(() => act(() => rejected.dispatch(handler))).not.toThrow();
+      expect(rejected.preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(controls.links[0]).toHaveFocus();
+    } finally {
+      frame.remove();
+    }
+  });
+
+  it("rejects custody loss while revalidating event facts", () => {
+    const view = directRoot(
+      <StrictMode>
+        <ReaderToc headings={navigationHeadings} />
+      </StrictMode>,
+    );
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    let reads = 0;
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown", {
+      onNativeEventRead: (read) => {
+        reads = read;
+        if (read === 3) outside.focus();
+      },
+    });
+
+    act(() => rejected.dispatch(handler));
+
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(outside).toHaveFocus();
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+    outside.remove();
+  });
+
+  it("rejects mutation history introduced while revalidating event facts", () => {
+    const renderBoundary = (domKey: string) => (
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={navigationHeadings} domKey={domKey} />
+      </StrictMode>
+    );
+    const view = directRoot(renderBoundary("a"));
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const handler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown", {
+      onNativeEventRead: (read) => {
+        if (read !== 3) return;
+        controls.nav.setAttribute("aria-label", "Changed contents");
+        controls.nav.setAttribute("aria-label", "Table of contents");
+      },
+    });
+
+    act(() => rejected.dispatch(handler));
+
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(controls.links[0]).toHaveFocus();
+    fireEvent.keyDown(controls.links[0], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "true");
+
+    act(() => view.root.render(renderBoundary("b")));
+    controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    fireEvent.keyDown(controls.links[0], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("rejects stale and replayed events while a complete clean successor remains usable", () => {
+    const renderBoundary = (headings: TestHeading[], domKey: string) => (
+      <StrictMode>
+        <DirectReaderBoundary currentHeadings={headings} domKey={domKey} />
+      </StrictMode>
+    );
+    const view = directRoot(renderBoundary(documentA, "a"));
+    let controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    const staleHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+
+    act(() => view.root.render(renderBoundary(documentB, "b")));
+    controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const stale = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => stale.dispatch(staleHandler));
+    expect(stale.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const currentHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    const replayed = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => replayed.dispatch(currentHandler, currentHandler));
+    expect(replayed.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    fireEvent.keyDown(controls.links[0], { key: "Escape" });
+    expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+    expect(controls.toggle).toHaveFocus();
+  });
+
+  it.each(["attribute-restore", "detach-restore", "reorder-restore"] as const)(
+    "retires %s history and leaves a distinct complete successor usable",
+    (kind) => {
+      const renderBoundary = (domKey: string) => (
+        <StrictMode>
+          <DirectReaderBoundary currentHeadings={navigationHeadings} domKey={domKey} />
+        </StrictMode>
+      );
+      const view = directRoot(renderBoundary("a"));
+      let controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.links[0].focus();
+      const staleHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+      const firstItem = controls.links[0].parentElement as HTMLLIElement;
+      const secondItem = controls.links[1].parentElement as HTMLLIElement;
+      if (kind === "attribute-restore") {
+        controls.links[0].setAttribute("href", "#changed");
+        controls.links[0].setAttribute("href", "#first");
+      } else if (kind === "detach-restore") {
+        firstItem.remove();
+        controls.list.insertBefore(firstItem, secondItem);
+      } else {
+        controls.list.insertBefore(secondItem, firstItem);
+        controls.list.insertBefore(firstItem, secondItem);
+      }
+      const focusBefore = document.activeElement;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      focus.mockClear();
+      const stale = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+
+      act(() => stale.dispatch(staleHandler));
+
+      expect(stale.preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focusBefore);
+
+      act(() => view.root.render(renderBoundary("b")));
+      controls = directControls(view.host);
+      fireEvent.click(controls.toggle);
+      controls.links[0].focus();
+      fireEvent.keyDown(controls.links[0], { key: "Escape" });
+      expect(controls.toggle).toHaveAttribute("aria-expanded", "false");
+      expect(controls.toggle).toHaveFocus();
+    },
+  );
+
+  it("rejects a partial Strict replay and accepts the exact current key handler", () => {
+    const captures: CapturedControls[] = [];
+    const view = directRoot(
+      <StrictMode>
+        <StrictReaderBoundary
+          currentHeadings={documentA}
+          onLayout={(capture) => captures.push(capture)}
+        />
+      </StrictMode>,
+    );
+    expect(captures).toHaveLength(2);
+    const controls = directControls(view.host);
+    fireEvent.click(controls.toggle);
+    controls.links[0].focus();
+    const stale = captures[0];
+    act(() => {
+      stale.refs[0](controls.nav);
+      stale.refs[1](controls.toggle);
+      stale.refs[0](null);
+      stale.refs[1](null);
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    focus.mockClear();
+    const rejected = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    act(() => rejected.dispatch(stale.escapeHandler));
+    expect(rejected.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const current = navigationEvent(controls.nav, controls.links[0], "ArrowDown");
+    const currentHandler = reactHandler<KeyHandler>(controls.nav, "onKeyDown");
+    act(() => current.dispatch(currentHandler));
+    expect(current.preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(controls.links[0]).toHaveFocus();
   });
 });
 
