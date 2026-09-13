@@ -759,6 +759,220 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Settings → Webhooks: native metadata titles", () => {
+  const now = "2026-09-13T12:00:00.000Z";
+  const destination = `https://receiver.example/${"similar-destination-".repeat(12)}`;
+  const firstUrl = `${destination}?target=one&label="<img src=x onerror='alert(1)'>"&encoded=%26%3C`;
+  const secondUrl = `${destination}?target=two&label='A&B'&encoded=%22%3E`;
+  const events = [
+    "request.created",
+    "mention",
+    "comment.added",
+    "comment.replied",
+    "review.created",
+    "suggestion.accepted",
+    "suggestion.rejected",
+    "content.changed",
+  ];
+  const eventText = "request.created, mention, comment.added, comment.replied, review.created, suggestion.accepted, suggestion.rejected, content.changed";
+  const first = {
+    ...activeWebhook,
+    url: firstUrl,
+    events,
+    documentIds: ["doc-one", "doc-two", "doc-three"],
+    createdAt: now,
+  };
+  const second = {
+    ...activeWebhook,
+    id: "second-hook",
+    url: secondUrl,
+    events,
+    createdAt: now,
+  };
+  const scopedDetails = `${eventText} · 3 documents · added just now`;
+  const allDetails = `${eventText} · all documents · added just now`;
+
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(now));
+  });
+
+  function expectMetadata(row: HTMLElement, url: string, details: string) {
+    const metadata = row.firstElementChild;
+    expect(metadata).toHaveAttribute("class", "min-w-0 flex-1");
+    expect(metadata?.children).toHaveLength(2);
+    const urlLine = metadata?.children.item(0);
+    const detailsLine = metadata?.children.item(1);
+    if (!(urlLine instanceof HTMLDivElement) || !(detailsLine instanceof HTMLDivElement)) {
+      throw new Error("Webhook metadata must remain two divs");
+    }
+    expect(urlLine).toHaveAttribute("class", "truncate font-mono text-sm text-ink");
+    expect(detailsLine).toHaveAttribute("class", "truncate text-xs text-ink-3");
+    for (const [line, text] of [[urlLine, url], [detailsLine, details]] as const) {
+      expect(line.textContent).toBe(text);
+      expect(line).toHaveAttribute("title", text);
+      expect(line.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(line.children).toHaveLength(0);
+      expect(line.tabIndex).toBe(-1);
+    }
+    expect(row.querySelectorAll("a, [tabindex], [contenteditable], [aria-live], [role], img, script")).toHaveLength(0);
+    return [urlLine, detailsLine];
+  }
+
+  it.each([
+    { label: "ordinary", active: true, failures: 0, lastDelivery: null, status: "no deliveries yet", tone: "text-ink-3" },
+    { label: "disabled", active: false, failures: 20, lastDelivery: disabledWebhook.lastDelivery, status: "disabled after 20 failures", tone: "text-danger" },
+    { label: "error", active: true, failures: 2, lastDelivery: { ...disabledWebhook.lastDelivery, at: now }, status: "failed ×2 · 500 · just now", tone: "text-danger" },
+  ])("preserves full literal titles, metadata structure and controls for $label rows", async ({
+    active, failures, lastDelivery, status, tone,
+  }) => {
+    expect(firstUrl.length).toBeGreaterThanOrEqual(200);
+    expect(secondUrl.length).toBeGreaterThanOrEqual(200);
+    expect(firstUrl).not.toBe(secondUrl);
+    expect(scopedDetails.length).toBeGreaterThan(150);
+    fetchMock.mockResolvedValueOnce(response({
+      webhooks: [{ ...first, active, failures, lastDelivery }, second],
+    }));
+    render(<WebhooksPanel />);
+
+    const rows = await screen.findAllByTestId("webhook-row");
+    expectMetadata(rows[0], firstUrl, scopedDetails);
+    expectMetadata(rows[1], secondUrl, allDetails);
+    expect(within(rows[0]).getByTestId("webhook-status").textContent).toBe(status);
+    expect(within(rows[0]).getByTestId("webhook-status")).toHaveAttribute("class", `shrink-0 text-xs ${tone}`);
+    expect(within(rows[1]).getByTestId("webhook-status").textContent).toBe("no deliveries yet");
+    for (const [index, row] of rows.entries()) {
+      expect(row).toHaveAttribute("class", "flex items-center gap-4 px-5 py-3");
+      expect(within(row).getByRole("button", { name: "Send test" })).toBeEnabled();
+      expect(within(row).getByRole("button", { name: `Delete webhook ${index === 0 ? firstUrl : secondUrl}` })).toBeEnabled();
+      const disabled = index === 0 && !active;
+      expect(within(row).getAllByRole("button")).toHaveLength(disabled ? 3 : 2);
+      expect(row.children).toHaveLength(disabled ? 5 : 4);
+      if (disabled) {
+        expect(within(row).getByRole("button", { name: "Enable" })).toBeEnabled();
+      } else {
+        expect(within(row).queryByRole("button", { name: "Enable" })).toBeNull();
+      }
+    }
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps only current titles through row updates, replacement and removal on reload", async () => {
+    const updated = { ...first, url: secondUrl, events: ["mention"], documentIds: ["doc-one"] };
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [first] }))
+      .mockResolvedValueOnce(response({ webhooks: [updated] }))
+      .mockResolvedValueOnce(response({ webhooks: [{ ...second, url: firstUrl }] }))
+      .mockResolvedValueOnce(response({ webhooks: [] }));
+    render(<WebhooksPanel />);
+
+    const original = await screen.findByTestId("webhook-row");
+    expectMetadata(original, firstUrl, scopedDetails);
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await screen.findByTitle(secondUrl);
+    const updatedRow = screen.getByTestId("webhook-row");
+    expect(updatedRow).toBe(original);
+    expectMetadata(updatedRow, secondUrl, "mention · 1 document · added just now");
+    expect(screen.queryByTitle(firstUrl)).toBeNull();
+    expect(screen.queryByTitle(scopedDetails)).toBeNull();
+
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await screen.findByTitle(firstUrl);
+    expect(original).not.toBeInTheDocument();
+    expectMetadata(screen.getByTestId("webhook-row"), firstUrl, allDetails);
+    expect(screen.queryByTitle(secondUrl)).toBeNull();
+    expect(screen.queryByTitle("mention · 1 document · added just now")).toBeNull();
+    expect(screen.getByTestId("webhook-row").querySelectorAll("[title]")).toHaveLength(2);
+
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await screen.findByTestId("webhooks-empty");
+    expect(screen.queryByTestId("webhook-row")).toBeNull();
+    expect(screen.queryByTitle(firstUrl)).toBeNull();
+    expect(screen.queryByTitle(allDetails)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("does no work on metadata hover and still accepts and settles one explicit Send test", async () => {
+    const pendingTest = deferred<Response>();
+    const disabled = { ...first, active: false, failures: 20 };
+    const confirmMock = vi.fn(() => true);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("confirm", confirmMock);
+    const navigatorWithClipboard = Object.create(window.navigator) as Navigator;
+    Object.defineProperty(navigatorWithClipboard, "clipboard", { value: { writeText } });
+    vi.stubGlobal("navigator", navigatorWithClipboard);
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabled] }))
+      .mockResolvedValueOnce(response({ webhook: { ...second, secret: crypto.randomUUID() } }))
+      .mockResolvedValueOnce(response({ webhooks: [disabled, second] }))
+      .mockReturnValueOnce(pendingTest.promise)
+      .mockResolvedValueOnce(response({ webhooks: [disabled, second] }));
+    const view = render(<WebhooksPanel />);
+    await screen.findByTestId("webhook-row");
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: secondUrl } });
+    fireEvent.click(screen.getByTestId("webhook-create"));
+    await screen.findByTitle(secondUrl);
+    expect(screen.getByRole("button", { name: "Copy secret" })).toBeEnabled();
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: firstUrl } });
+    expect(screen.getByTestId("webhook-create")).toBeEnabled();
+    await settle();
+
+    const rows = screen.getAllByTestId("webhook-row");
+    const lines = [
+      ...expectMetadata(rows[0], firstUrl, scopedDetails),
+      ...expectMetadata(rows[1], secondUrl, allDetails),
+    ];
+    screen.getByTestId("webhook-url").focus();
+    const focused = document.activeElement;
+    const before = view.container.innerHTML;
+    const requestCount = fetchMock.mock.calls.length;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const blur = vi.spyOn(HTMLElement.prototype, "blur");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animation = vi.spyOn(window, "requestAnimationFrame");
+    const action = vi.fn();
+    view.container.addEventListener("click", action);
+    view.container.addEventListener("submit", action);
+    try {
+      // Observe only synchronous hover work, after all rendering/setup has settled.
+      for (const line of lines) {
+        fireEvent.pointerOver(line);
+        fireEvent.mouseOver(line);
+        fireEvent.mouseMove(line);
+        fireEvent.mouseOut(line);
+        fireEvent.pointerOut(line);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(requestCount);
+      for (const spy of [confirmMock, writeText, focus, blur, timeout, interval, animation, action]) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+      expect(document.activeElement).toBe(focused);
+      expect(view.container.innerHTML).toBe(before);
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      for (const spy of [focus, blur, timeout, interval, animation]) spy.mockRestore();
+      view.container.removeEventListener("click", action);
+      view.container.removeEventListener("submit", action);
+    }
+
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "Send test" }));
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount + 1);
+    expect(fetchMock).toHaveBeenLastCalledWith(`/api/webhooks/${first.id}/test`, expect.objectContaining({ method: "POST" }));
+    expect(within(rows[0]).getByTestId("webhook-test")).toBeDisabled();
+    await act(async () => pendingTest.resolve(response({ ok: true })));
+    await waitFor(() => expect(within(screen.getAllByTestId("webhook-row")[0]).getByTestId("webhook-test")).toBeEnabled());
+    expect(fetchMock).toHaveBeenCalledTimes(requestCount + 2);
+    expect(fetchMock.mock.calls.filter(([url]) => url === `/api/webhooks/${first.id}/test`)).toHaveLength(1);
+    expectMetadata(screen.getAllByTestId("webhook-row")[0], firstUrl, scopedDetails);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
+  });
+});
+
 describe("Settings → Webhooks: list recovery", () => {
   it("replaces a settled initial failure with its API reason and one atomic Retry alert", async () => {
     fetchMock.mockResolvedValueOnce(response({ error: "Webhook service unavailable" }, 503));

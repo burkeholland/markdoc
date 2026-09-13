@@ -4932,7 +4932,9 @@ export function WebhooksPanel() {
           !content ||
           content.children.length !== 2 ||
           content.children.item(0)?.textContent !== row.url ||
+          content.children.item(0)?.getAttribute("title") !== row.url ||
           content.children.item(1)?.textContent !== row.details ||
+          content.children.item(1)?.getAttribute("title") !== row.details ||
           status?.getAttribute("data-testid") !== "webhook-status" ||
           status.textContent?.trim() !== row.statusText ||
           !status.classList.contains(row.statusTone === "ok" ? "text-success" : row.statusTone === "bad" ? "text-danger" : "text-ink-3") ||
@@ -6171,8 +6173,8 @@ export function WebhooksPanel() {
                 }}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="truncate font-mono text-sm text-ink">{row.url}</div>
-                  <div className="truncate text-xs text-ink-3">{row.details}</div>
+                  <div className="truncate font-mono text-sm text-ink" title={row.url}>{row.url}</div>
+                  <div className="truncate text-xs text-ink-3" title={row.details}>{row.details}</div>
                 </div>
                 <div
                   className={`shrink-0 text-xs ${row.statusTone === "ok" ? "text-success" : row.statusTone === "bad" ? "text-danger" : "text-ink-3"}`}
