@@ -701,6 +701,7 @@ interface ImageDraft {
   readonly altRevision: number;
   readonly previewFailed: boolean;
   readonly upload: ImageUploadOwner | null;
+  readonly uploadAdmission: ImageUploadOwner | null;
 }
 
 interface ImageAuthority {
@@ -718,7 +719,9 @@ interface ImageAuthority {
   readonly altRevision: number;
   readonly previewFailed: boolean;
   readonly upload: ImageUploadOwner | null;
+  readonly uploadAdmission: ImageUploadOwner | null;
   readonly uploading: boolean;
+  readonly uploadDisabled: boolean;
   readonly uploadAvailable: boolean;
   readonly normalizedSrc: string;
   readonly normalizedAlt: string;
@@ -1119,6 +1122,7 @@ function imageDraft(visit: ImageVisit, open: boolean): ImageDraft {
     altRevision: 0,
     previewFailed: false,
     upload: null,
+    uploadAdmission: null,
   });
 }
 
@@ -1307,7 +1311,8 @@ class ImagePublicationCoordinator {
       draft === publication.authority.draft ||
       draft.visit !== publication.authority.visit ||
       draft.open !== publication.authority.open ||
-      draft.upload !== null
+      draft.upload !== null ||
+      draft.uploadAdmission === null
     ) {
       return false;
     }
@@ -1441,7 +1446,7 @@ class ImageDismissalListener {
       const ownerWindow = ownerDocument.defaultView;
       if (
         !publication ||
-        publication.isRetired() ||
+        !this.coordinator.isAuthoritative(publication) ||
         publication.ownerDocument !== ownerDocument ||
         !ownerWindow ||
         (!(event instanceof ownerWindow.KeyboardEvent) &&
@@ -1803,7 +1808,9 @@ function imageAuthoritiesMatch(
     Object.is(previous.altRevision, current.altRevision) &&
     previous.previewFailed === current.previewFailed &&
     previous.upload === current.upload &&
+    previous.uploadAdmission === current.uploadAdmission &&
     previous.uploading === current.uploading &&
+    previous.uploadDisabled === current.uploadDisabled &&
     previous.uploadAvailable === current.uploadAvailable &&
     previous.normalizedSrc === current.normalizedSrc &&
     previous.normalizedAlt === current.normalizedAlt &&
@@ -2489,15 +2496,15 @@ function resolveImageDom(
       urlRow.children.item(2) !== file ||
       upload.type !== "button" ||
       upload.form !== form ||
-      upload.disabled !== authority.uploading ||
-      upload.matches(":disabled") !== authority.uploading ||
+      upload.disabled !== authority.uploadDisabled ||
+      upload.matches(":disabled") !== authority.uploadDisabled ||
       upload.className !== IMAGE_UPLOAD_CLASS ||
       upload.dataset.testid !== "image-upload" ||
       upload.textContent !== (authority.uploading ? "Uploading…" : "Upload…") ||
       file.type !== "file" ||
       file.form !== form ||
-      file.disabled !== authority.uploading ||
-      file.matches(":disabled") !== authority.uploading ||
+      file.disabled !== authority.uploadDisabled ||
+      file.matches(":disabled") !== authority.uploadDisabled ||
       file.accept !== IMAGE_FILE_ACCEPT ||
       file.className !== "hidden" ||
       file.dataset.testid !== "image-file" ||
@@ -4101,6 +4108,10 @@ function createImagePresentation(
     input: HTMLInputElement,
     fallbackAlt: string,
   ) => void,
+  releaseUploadAdmission: (
+    publication: ImagePublication,
+    authority: ImageAuthority,
+  ) => void,
   resumeUploadSettlement: () => void,
   abandonDeferredUpload: () => boolean,
   releaseTerminalResources: (publication: ImagePublication) => void,
@@ -4299,10 +4310,13 @@ function createImagePresentation(
       Object.is(draft.altRevision, authority.altRevision) &&
       draft.previewFailed === authority.previewFailed &&
       draft.upload === authority.upload &&
+      draft.uploadAdmission === authority.uploadAdmission &&
       authority.visit.onOpenChange === authority.onOpenChange &&
       authority.visit.onSubmit === authority.onSubmit &&
       authority.visit.onUpload === authority.onUpload &&
       authority.uploading === (authority.upload !== null) &&
+      authority.uploadDisabled ===
+        (authority.uploading || authority.draft.uploadAdmission !== null) &&
       authority.uploadAvailable === (authority.onUpload !== undefined) &&
       authority.normalizedSrc === authority.src.trim() &&
       authority.normalizedAlt === authority.alt.trim() &&
@@ -4551,6 +4565,7 @@ function createImagePresentation(
     }
     currentRuntime = runtime;
     lastRuntime = runtime;
+    releaseUploadAdmission(runtime.publication, authority);
     resumeUploadSettlement();
     return runtime.retireForLayout;
   };
@@ -4692,7 +4707,7 @@ function createImagePresentation(
       !button ||
       !input ||
       !authority.uploadAvailable ||
-      authority.uploading ||
+      authority.uploadDisabled ||
       activeUpload() !== null ||
       publication.dom.upload !== button ||
       publication.dom.file !== input ||
@@ -4711,7 +4726,7 @@ function createImagePresentation(
       !owns(publication) ||
       publication.dom.upload !== upload.owner.element() ||
       publication.dom.file !== file.owner.element() ||
-      authority.uploading ||
+      authority.uploadDisabled ||
       activeUpload() !== null ||
       !claim(
         publication,
@@ -5405,6 +5420,7 @@ export const ImageDialog = memo(function ImageDialog({
         if (!succeeded) {
           return nextImageDraft(current, {
             upload: null,
+            uploadAdmission: owner,
             error: message ?? "Upload failed",
           });
         }
@@ -5418,6 +5434,7 @@ export const ImageDialog = memo(function ImageDialog({
           error: null,
           previewFailed: false,
           upload: null,
+          uploadAdmission: owner,
         });
       };
       const successorDraft = applyOutcome(publication.authority.draft);
@@ -5470,6 +5487,27 @@ export const ImageDialog = memo(function ImageDialog({
     deferredUploadOutcome,
     settleUpload,
   ]);
+  const releaseUploadAdmission = useCallback(
+    (publication: ImagePublication, authority: ImageAuthority) => {
+      const owner = authority.uploadAdmission;
+      if (
+        !owner ||
+        coordinator.active() !== publication ||
+        latestAuthority.get() !== authority ||
+        !coordinator.isCurrent(publication)
+      ) {
+        return;
+      }
+      setDraft((current) =>
+        current === authority.draft &&
+        current.upload === null &&
+        current.uploadAdmission === owner
+          ? nextImageDraft(current, { uploadAdmission: null })
+          : current,
+      );
+    },
+    [coordinator, latestAuthority],
+  );
   const startUpload = useCallback(
     (
       publication: ImagePublication,
@@ -5565,7 +5603,10 @@ export const ImageDialog = memo(function ImageDialog({
         altRevision: draft.altRevision,
         previewFailed: draft.previewFailed,
         upload: draft.upload,
+        uploadAdmission: draft.uploadAdmission,
         uploading: draft.upload !== null,
+        uploadDisabled:
+          draft.upload !== null || draft.uploadAdmission !== null,
         uploadAvailable: onUpload !== undefined,
         normalizedSrc: draft.src.trim(),
         normalizedAlt: draft.alt.trim(),
@@ -5594,6 +5635,7 @@ export const ImageDialog = memo(function ImageDialog({
         () => activeUpload.get(),
         setDraft,
         startUpload,
+        releaseUploadAdmission,
         resumeUploadSettlement,
         abandonDeferredUpload,
         releaseTerminalResources,
@@ -5611,6 +5653,7 @@ export const ImageDialog = memo(function ImageDialog({
       latestAuthority,
       requestSuccessor,
       releaseTerminalResources,
+      releaseUploadAdmission,
       resumeUploadSettlement,
       startUpload,
     ],
@@ -5717,7 +5760,7 @@ export const ImageDialog = memo(function ImageDialog({
                         type="button"
                         className={IMAGE_UPLOAD_CLASS}
                         onClick={onUploadClick}
-                        disabled={current.uploading}
+                        disabled={current.uploadDisabled}
                         data-testid="image-upload"
                       >
                         {current.uploading ? "Uploading…" : "Upload…"}
@@ -5727,7 +5770,7 @@ export const ImageDialog = memo(function ImageDialog({
                         type="file"
                         accept={IMAGE_FILE_ACCEPT}
                         className="hidden"
-                        disabled={current.uploading}
+                        disabled={current.uploadDisabled}
                         onChange={onFileChange}
                         data-testid="image-file"
                       />

@@ -643,20 +643,33 @@ describe("ImageDialog upload lifecycle", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("File reset failed");
     expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-file")).toBe(input);
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("");
 
     const retryFile = new File(["retry"], "retry.webp", {
       type: "image/webp",
     });
-    await chooseFromCommittedSuccessor(retryFile, input);
+    fireEvent.change(input, { target: { files: [retryFile] } });
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
+    expect(input).toBeDisabled();
+    const readRetryUrl = vi.fn(() => "/api/assets/reset-retry");
+    const retryResult = {} as UploadResult;
+    Object.defineProperty(retryResult, "url", { get: readRetryUrl });
     await act(async () => {
-      retry.resolve({ url: "/api/assets/reset-retry" });
+      retry.resolve(retryResult);
       await retry.promise;
     });
+    expect(readRetryUrl).toHaveBeenCalledOnce();
+    expect(onUpload).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("image-url")).toHaveValue(
       "/api/assets/reset-retry",
     );
+    expect(screen.getByTestId("image-file")).toBe(input);
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("");
   });
 
   it.each(["returns", "throws"] as const)(
@@ -1552,122 +1565,155 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
-  it("keeps the committed authority live when a callback replacement suspends", async () => {
-    const committedClose = vi.fn();
-    const pendingClose = vi.fn();
-    const onSubmit = vi.fn();
-    const upload = deferred<UploadResult>();
-    const retry = deferred<UploadResult>();
-    const onUpload = vi
-      .fn()
-      .mockReturnValueOnce(upload.promise)
-      .mockReturnValueOnce(retry.promise);
-    const never = new Promise<never>(() => {});
-    const pendingRender = vi.fn();
-    const pendingCommit = vi.fn();
-    let begin = () => {};
+  it.each(["cancel", "escape", "outside"] as const)(
+    "keeps the committed %s authority live when a callback replacement suspends",
+    async (dismissal) => {
+      const committedClose = vi.fn();
+      const pendingClose = vi.fn();
+      const onSubmit = vi.fn();
+      const upload = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const onUpload = vi
+        .fn()
+        .mockReturnValueOnce(upload.promise)
+        .mockReturnValueOnce(retry.promise);
+      const never = new Promise<never>(() => {});
+      const pendingRender = vi.fn();
+      const pendingCommit = vi.fn();
+      let begin = () => {};
 
-    function PendingCommitProbe() {
-      useLayoutEffect(() => {
-        pendingCommit();
-      }, []);
-      return null;
-    }
+      function PendingCommitProbe() {
+        useLayoutEffect(() => {
+          pendingCommit();
+        }, []);
+        return null;
+      }
 
-    function PendingRender(): ReactNode {
-      pendingRender();
-      throw never;
-    }
+      function PendingRender(): ReactNode {
+        pendingRender();
+        throw never;
+      }
 
-    function ConcurrentHarness() {
-      const [pending, setPending] = useState(false);
-      useLayoutEffect(() => {
-        begin = () => {
-          startTransition(() => setPending(true));
-        };
-      }, []);
-      return (
-        <Suspense fallback={null}>
-          <ImageDialog
-            open
-            onOpenChange={pending ? pendingClose : committedClose}
-            onSubmit={onSubmit}
-            onUpload={onUpload}
-          />
-          {pending && (
-            <>
-              <PendingCommitProbe />
-              <PendingRender />
-            </>
-          )}
-        </Suspense>
-      );
-    }
+      function ConcurrentHarness() {
+        const [pending, setPending] = useState(false);
+        useLayoutEffect(() => {
+          begin = () => {
+            startTransition(() => setPending(true));
+          };
+        }, []);
+        return (
+          <Suspense fallback={null}>
+            <ImageDialog
+              open
+              onOpenChange={pending ? pendingClose : committedClose}
+              onSubmit={onSubmit}
+              onUpload={onUpload}
+            />
+            {pending && (
+              <>
+                <PendingCommitProbe />
+                <PendingRender />
+              </>
+            )}
+          </Suspense>
+        );
+      }
 
-    await renderStrictRoot(<ConcurrentHarness />);
-    choose(new File(["current"], "current.png", { type: "image/png" }));
-    expect(onUpload).toHaveBeenCalledOnce();
-    const committedInput = screen.getByTestId(
-      "image-file",
-    ) as HTMLInputElement;
-    expect(committedInput).toBeDisabled();
-    setInputValue(committedInput, "current-selection");
-    const committedCancel = screen.getByRole("button", {
-      name: "Cancel",
-    }) as HTMLButtonElement;
-    await act(async () => begin());
-    expect(pendingRender).toHaveBeenCalled();
-    expect(pendingCommit).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
-      committedCancel,
-    );
-    await act(async () => {
-      upload.reject(new Error("Concurrent upload failed"));
-      await upload.promise.catch(() => undefined);
+      await renderStrictRoot(<ConcurrentHarness />);
+      choose(new File(["current"], "current.png", { type: "image/png" }));
+      expect(onUpload).toHaveBeenCalledOnce();
+      const committedInput = screen.getByTestId(
+        "image-file",
+      ) as HTMLInputElement;
       expect(committedInput).toBeDisabled();
-      expect(committedInput).toHaveValue("");
+      setInputValue(committedInput, "current-selection");
+      const committedCancel = screen.getByRole("button", {
+        name: "Cancel",
+      }) as HTMLButtonElement;
+      const committedContent = dialogContent();
+      const committedOverlay = document.querySelector(".dialog-overlay");
+      if (!(committedOverlay instanceof HTMLDivElement)) {
+        throw new Error("Image overlay was not rendered");
+      }
+      const dismiss = () => {
+        if (dismissal === "cancel") {
+          fireEvent.click(committedCancel);
+        } else if (dismissal === "escape") {
+          fireEvent.keyDown(committedContent, { key: "Escape" });
+        } else {
+          committedOverlay.dispatchEvent(
+            new ControlledPointerEvent("pointerdown", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              pointerId: 11,
+            }),
+          );
+          committedOverlay.dispatchEvent(
+            new ControlledPointerEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+              pointerId: 11,
+            }),
+          );
+        }
+      };
+      await act(async () => begin());
+      expect(pendingRender).toHaveBeenCalled();
+      expect(pendingCommit).not.toHaveBeenCalled();
       expect(screen.getByRole("button", { name: "Cancel" })).toBe(
         committedCancel,
       );
-      fireEvent.click(committedCancel);
+      await act(async () => {
+        upload.reject(new Error("Concurrent upload failed"));
+        await upload.promise.catch(() => undefined);
+        expect(committedInput).toBeDisabled();
+        expect(committedInput).toHaveValue("");
+        expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+          committedCancel,
+        );
+        dismiss();
+        dismiss();
+        expect(committedClose).toHaveBeenCalledOnce();
+        expect(committedClose).toHaveBeenCalledWith(false);
+        expect(pendingClose).not.toHaveBeenCalled();
+        expect(pendingCommit).not.toHaveBeenCalled();
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("image-upload-error")).toHaveTextContent(
+          "Concurrent upload failed",
+        );
+      });
+      expect(pendingRender).toHaveBeenCalled();
+      expect(pendingCommit).not.toHaveBeenCalled();
+      expect(screen.getByTestId("image-file")).toBe(committedInput);
+      expect(committedInput).toBeEnabled();
+      expect(committedInput).toHaveValue("");
+
+      const retryFile = new File(["retry"], "retry.png", {
+        type: "image/png",
+      });
+      await chooseFromCommittedSuccessor(retryFile, committedInput);
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      await act(async () => {
+        retry.resolve({ url: "/api/assets/retry", alt: "Retry Alt" });
+        await retry.promise;
+      });
+      await act(async () => {
+        upload.resolve({ url: "/api/assets/stale", alt: "Stale Alt" });
+        await Promise.resolve();
+      });
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/retry");
+      expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
+      expect(screen.queryByRole("alert")).toBeNull();
       expect(committedClose).toHaveBeenCalledOnce();
-      expect(committedClose).toHaveBeenCalledWith(false);
       expect(pendingClose).not.toHaveBeenCalled();
       expect(pendingCommit).not.toHaveBeenCalled();
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("image-upload-error")).toHaveTextContent(
-        "Concurrent upload failed",
-      );
-    });
-    expect(pendingRender).toHaveBeenCalled();
-    expect(pendingCommit).not.toHaveBeenCalled();
-    expect(screen.getByTestId("image-file")).toBe(committedInput);
-    expect(committedInput).toBeEnabled();
-    expect(committedInput).toHaveValue("");
-
-    const retryFile = new File(["retry"], "retry.png", {
-      type: "image/png",
-    });
-    await chooseFromCommittedSuccessor(retryFile, committedInput);
-    expect(onUpload).toHaveBeenCalledTimes(2);
-    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
-    await act(async () => {
-      retry.resolve({ url: "/api/assets/retry", alt: "Retry Alt" });
-      await retry.promise;
-    });
-    await act(async () => {
-      upload.resolve({ url: "/api/assets/stale", alt: "Stale Alt" });
-      await Promise.resolve();
-    });
-    expect(onUpload).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/retry");
-    expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
-    expect(screen.queryByRole("alert")).toBeNull();
-    expect(committedClose).toHaveBeenCalledOnce();
-    expect(pendingClose).not.toHaveBeenCalled();
-    expect(pendingCommit).not.toHaveBeenCalled();
-  });
+    },
+  );
 
   it("rejects stale, crossed, and fabricated changes without poisoning current controls", async () => {
     const onOpenChangeA = vi.fn();
