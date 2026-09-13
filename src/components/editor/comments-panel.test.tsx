@@ -109,6 +109,7 @@ function deferred<T>() {
 
 type RequestModeKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 type CommentMenuKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+type ReactionPickerKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 
 function markRequestModeEventTrusted(event: Event) {
   const implementation = Object.getOwnPropertySymbols(event)
@@ -133,6 +134,36 @@ function markRequestModeEventTrusted(event: Event) {
     set: () => undefined,
   });
   if (!event.isTrusted) throw new Error("The request-mode event trust slot did not update");
+}
+
+function replaceReactionPickerPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's reaction keyboard path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The reaction keyboard path terminal did not update");
+  }
 }
 
 function requestModeKeyboardEvent(
@@ -190,6 +221,36 @@ function commentMenuKey(
   return event;
 }
 
+function reactionPickerKeyboardEvent(
+  element: HTMLButtonElement,
+  key: "ArrowRight" | "ArrowDown" | "ArrowLeft" | "ArrowUp" | "Home" | "End",
+  init: Omit<KeyboardEventInit, "key" | "code"> = {},
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The reaction option has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markRequestModeEventTrusted(event);
+  return event;
+}
+
+function reactionPickerKey(
+  element: HTMLButtonElement,
+  key: "ArrowRight" | "ArrowDown" | "ArrowLeft" | "ArrowUp" | "Home" | "End",
+  init: Omit<KeyboardEventInit, "key" | "code"> = {},
+) {
+  const event = reactionPickerKeyboardEvent(element, key, init);
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
 function mentionKeyboardEvent(
   element: HTMLTextAreaElement,
   key: string,
@@ -229,6 +290,10 @@ function commentMenuHandler(element: HTMLButtonElement) {
 
 function commentMenuCaptureHandler(element: HTMLButtonElement) {
   return reactProperty<CommentMenuKeyHandler>(element, "onKeyDownCapture");
+}
+
+function reactionPickerHandler(element: HTMLButtonElement) {
+  return reactProperty<ReactionPickerKeyHandler>(element, "onKeyDownCapture");
 }
 
 function commentMenuItemRef(element: HTMLElement) {
@@ -4251,6 +4316,1100 @@ describe("CommentsPanel", () => {
       await screen.findByRole("menuitem", { name: "Edit" });
       fireEvent.pointerDown(document.body);
       await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    });
+  });
+
+  describe("quick reaction picker keyboard focus", () => {
+    type ReactionTarget = "Comment" | "Reply";
+    const directViews: {
+      host: HTMLDivElement;
+      root: ReturnType<typeof createRoot>;
+      session: CollabSession;
+    }[] = [];
+
+    beforeEach(() => {
+      vi.mocked(api.documents.comment).mockClear();
+      Element.prototype.scrollIntoView ??= () => {};
+    });
+
+    afterEach(() => {
+      for (const view of directViews.splice(0)) {
+        act(() => view.root.unmount());
+        view.host.remove();
+        if (view.session !== session) view.session.destroy();
+      }
+    });
+
+    const mountPickers = async ({
+      role = "owner",
+      withReaction = false,
+    }: {
+      role?: "owner" | "commenter";
+      withReaction?: boolean;
+    } = {}) => {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const current = new CollabSession({
+        docId: `reaction-picker-${role}-${directViews.length}`,
+        user,
+        role,
+        getToken: async () => "token",
+        autoConnect: false,
+      });
+      session = current;
+      current.keepAlive();
+      current.synced = true;
+      current.ytext.insert(0, "Alpha beta gamma.");
+      const threadId = current.comments.add({
+        from: 0,
+        to: 5,
+        body: "Root.",
+        author: user,
+      });
+      const replyId = current.comments.reply(threadId, "Reply.", user)!;
+      if (withReaction) {
+        current.comments.toggleReaction(threadId, null, "👍", user);
+        current.comments.toggleReaction(threadId, replyId, "👍", user);
+      }
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      directViews.push({ host, root, session: current });
+      act(() => {
+        root.render(
+          <StrictMode>
+            <TooltipProvider>
+              <CommentsPanel
+                session={current}
+                onClose={() => {}}
+                onReveal={() => {}}
+              />
+            </TooltipProvider>
+          </StrictMode>,
+        );
+      });
+      const card = await waitFor(() => {
+        const element = host.querySelector<HTMLElement>(
+          `[data-testid="comment-thread"][data-thread-id="${threadId}"]`,
+        );
+        if (!element) throw new Error("The direct reaction comment did not mount");
+        return element;
+      });
+      const reply = card.querySelector<HTMLElement>(
+        `[data-testid="comment-reply"][data-reply-id="${replyId}"]`,
+      );
+      if (!reply) throw new Error("The direct reaction reply did not mount");
+      const row = (target: ReactionTarget) =>
+        target === "Comment"
+          ? within(card).getAllByTestId("reaction-row")[0]!
+          : within(reply).getByTestId("reaction-row");
+      const trigger = (target: ReactionTarget) =>
+        within(row(target)).getByRole("button", {
+          name: "Add reaction",
+        }) as HTMLButtonElement;
+      return {
+        card,
+        host,
+        reply,
+        replyId,
+        root,
+        row,
+        session: current,
+        threadId,
+        trigger,
+      };
+    };
+
+    const openPicker = async (
+      view: Awaited<ReturnType<typeof mountPickers>>,
+      target: ReactionTarget,
+      method: "pointer" | "Enter" | " " = "pointer",
+    ) => {
+      const trigger = view.trigger(target);
+      if (method === "pointer") {
+        if (trigger.dataset.state === "closed") {
+          fireEvent.click(trigger);
+        } else {
+          fireEvent.pointerDown(trigger, { button: 0 });
+        }
+      } else {
+        trigger.focus();
+        fireEvent.keyDown(trigger, { key: method });
+      }
+      const picker = await screen.findByTestId("reaction-picker");
+      const options = within(picker).getAllByTestId(
+        "reaction-option",
+      ) as HTMLButtonElement[];
+      await waitFor(() => expect(options[0]).toHaveFocus());
+      return { options, picker, trigger: view.trigger(target) };
+    };
+
+    const targetReactions = (
+      view: Awaited<ReturnType<typeof mountPickers>>,
+      target: ReactionTarget,
+    ) => {
+      const thread = view.session.comments
+        .list()
+        .find((candidate) => candidate.id === view.threadId)!;
+      return target === "Comment"
+        ? thread.reactions
+        : thread.replies.find((candidate) => candidate.id === view.replyId)!.reactions;
+    };
+
+    it.each([
+      ["Comment", "ArrowRight", 5, 0],
+      ["Comment", "ArrowDown", 1, 2],
+      ["Comment", "ArrowLeft", 0, 5],
+      ["Comment", "ArrowUp", 4, 3],
+      ["Comment", "Home", 3, 0],
+      ["Comment", "End", 2, 5],
+      ["Reply", "ArrowRight", 5, 0],
+      ["Reply", "ArrowDown", 1, 2],
+      ["Reply", "ArrowLeft", 0, 5],
+      ["Reply", "ArrowUp", 4, 3],
+      ["Reply", "Home", 3, 0],
+      ["Reply", "End", 2, 5],
+    ] as const)(
+      "moves the direct Strict Mode %s picker once with %s from %d to %d",
+      async (target, key, sourceIndex, destinationIndex) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options, picker, trigger } = await openPicker(view, target);
+        const toggle = vi.spyOn(view.session.comments, "toggleReaction");
+        const beforeText = view.session.ytext.toString();
+        const beforeReactions = structuredClone(targetReactions(view, target));
+        const panelScroll = view.card.parentElement!;
+        view.host.scrollTop = 11;
+        panelScroll.scrollTop = 17;
+        const beforeWindowScroll = [window.scrollX, window.scrollY];
+        options[sourceIndex]!.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        toggle.mockClear();
+        vi.mocked(api.documents.comment).mockClear();
+        const publicFocus = vi.fn();
+        Object.defineProperty(options[destinationIndex], "focus", {
+          configurable: true,
+          value: publicFocus,
+        });
+
+        const event = reactionPickerKey(options[sourceIndex]!, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(options[destinationIndex]).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(focus.mock.instances[0]).toBe(options[destinationIndex]);
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+        expect(publicFocus).not.toHaveBeenCalled();
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(picker).toBeInTheDocument();
+        expect(toggle).not.toHaveBeenCalled();
+        expect(api.documents.comment).not.toHaveBeenCalled();
+        expect(targetReactions(view, target)).toEqual(beforeReactions);
+        expect(view.session.ytext.toString()).toBe(beforeText);
+        expect(view.host.querySelector("[data-testid='comment-edit']")).toBeNull();
+        expect(view.host.scrollTop).toBe(11);
+        expect(panelScroll.scrollTop).toBe(17);
+        expect([window.scrollX, window.scrollY]).toEqual(beforeWindowScroll);
+      },
+    );
+
+    it.each([
+      ["Comment", "Home", 0],
+      ["Comment", "End", 5],
+      ["Reply", "Home", 0],
+      ["Reply", "End", 5],
+    ] as const)(
+      "leaves the direct Strict Mode %s picker %s boundary at %d inert",
+      async (target, key, index) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options, picker, trigger } = await openPicker(view, target);
+        options[index]!.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const before = structuredClone(targetReactions(view, target));
+
+        const event = reactionPickerKey(options[index]!, key);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(options[index]).toHaveFocus();
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(picker).toBeInTheDocument();
+        expect(targetReactions(view, target)).toEqual(before);
+        expect(api.documents.comment).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["Comment", "pointer"],
+      ["Comment", "Enter"],
+      ["Comment", " "],
+      ["Reply", "pointer"],
+      ["Reply", "Enter"],
+      ["Reply", " "],
+    ] as const)(
+      "retains %s Add reaction %s opening and Radix autofocus",
+      async (target, method) => {
+        const view = await mountPickers();
+        const { options, trigger } = await openPicker(view, target, method);
+
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(options[0]).toHaveFocus();
+        expect(api.documents.comment).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ["Comment", "pointer"],
+      ["Comment", "Enter"],
+      ["Comment", " "],
+      ["Reply", "pointer"],
+      ["Reply", "Enter"],
+      ["Reply", " "],
+    ] as const)(
+      "retains %s emoji %s activation without an earlier navigation toggle",
+      async (target, activation) => {
+        const view = await mountPickers();
+        const { options } = await openPicker(view, target);
+        const selected = options[2]!;
+
+        if (activation === "pointer") {
+          fireEvent.click(selected);
+        } else {
+          selected.focus();
+          await userEvent
+            .setup()
+            .keyboard(activation === "Enter" ? "{Enter}" : " ");
+        }
+
+        await waitFor(() =>
+          expect(screen.queryByTestId("reaction-picker")).toBeNull(),
+        );
+        expect(targetReactions(view, target)["🎉"]).toEqual([
+          view.session.user.id,
+        ]);
+      },
+    );
+
+    it.each(["Comment", "Reply"] as const)(
+      "retains %s Escape/outside close and trigger focus return",
+      async (target) => {
+        const view = await mountPickers();
+        let opened = await openPicker(view, target);
+
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        await userEvent.setup().click(document.body);
+        await waitFor(() =>
+          expect(screen.queryByTestId("reaction-picker")).toBeNull(),
+        );
+        expect(targetReactions(view, target)).toEqual({});
+
+        opened = await openPicker(view, target);
+        fireEvent.keyDown(opened.options[0]!, { key: "Escape" });
+        await waitFor(() =>
+          expect(screen.queryByTestId("reaction-picker")).toBeNull(),
+        );
+        expect(view.trigger(target)).toHaveFocus();
+        expect(targetReactions(view, target)).toEqual({});
+      },
+    );
+
+    it("uses captured owner-realm native path, prevention, and focus intrinsics", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const destination = options[1]!;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = reactionPickerKeyboardEvent(source, "ArrowRight");
+      const publicPath = vi.fn(() => []);
+      const publicPrevent = vi.fn();
+      const publicFocus = vi.fn();
+      Object.defineProperties(event, {
+        composedPath: { configurable: true, value: publicPath },
+        preventDefault: { configurable: true, value: publicPrevent },
+      });
+      Object.defineProperty(destination, "focus", {
+        configurable: true,
+        value: publicFocus,
+      });
+
+      act(() => source.dispatchEvent(event));
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(publicPath).not.toHaveBeenCalled();
+      expect(publicPrevent).not.toHaveBeenCalled();
+      expect(publicFocus).not.toHaveBeenCalled();
+    });
+
+    it("authenticates exact group/option capture and bubble wrappers around the backing Window receiver", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const destination = options[1]!;
+      const group = source.parentElement;
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!(group instanceof HTMLDivElement) || !ownerWindow) {
+        throw new Error("The reaction keyboard boundary did not mount");
+      }
+      const groupCapture = reactProperty<
+        (event: ReactKeyboardEvent<HTMLDivElement>) => void
+      >(group, "onKeyDownCapture");
+      const optionCapture = reactProperty<ReactionPickerKeyHandler>(
+        source,
+        "onKeyDownCapture",
+      );
+      const optionBubble = reactProperty<ReactionPickerKeyHandler>(
+        source,
+        "onKeyDown",
+      );
+      const groupBubble = reactProperty<
+        (event: ReactKeyboardEvent<HTMLDivElement>) => void
+      >(group, "onKeyDown");
+      const boundaries: {
+        name: string;
+        wrapper: object;
+        isDefaultPrevented: () => boolean;
+        isPropagationStopped: () => boolean;
+        defaultPrevented: boolean;
+        propagationStopped: boolean;
+      }[] = [];
+      const record = (
+        name: string,
+        event: ReactKeyboardEvent<HTMLElement>,
+      ) => {
+        boundaries.push({
+          name,
+          wrapper: event,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+          defaultPrevented: event.isDefaultPrevented(),
+          propagationStopped: event.isPropagationStopped(),
+        });
+      };
+      const restoreGroup = replaceReactProperties(group, {
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          record("group capture", event);
+          groupCapture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          record("group bubble", event);
+          groupBubble(event);
+        },
+      });
+      const restoreOption = replaceReactProperties(source, {
+        onKeyDownCapture: (
+          event: ReactKeyboardEvent<HTMLButtonElement>,
+        ) => {
+          record("option capture", event);
+          optionCapture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          record("option bubble", event);
+          optionBubble(event);
+        },
+      });
+      const nativeEvent = reactionPickerKeyboardEvent(
+        source,
+        "ArrowRight",
+      );
+      const currentTargetGetter = Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get;
+      const composedPath = ownerWindow.Event.prototype.composedPath;
+      if (!currentTargetGetter) {
+        throw new Error("Event.currentTarget has no intrinsic getter");
+      }
+      const nativeDelivery: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        terminal?: EventTarget;
+      } = {};
+      const observeNativeReceiver = function (
+        this: EventTarget,
+        event: Event,
+      ) {
+        if (event !== nativeEvent) return;
+        nativeDelivery.receiver = this;
+        nativeDelivery.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          event,
+          [],
+        ) as EventTarget | null;
+        nativeDelivery.terminal = Reflect.apply(
+          composedPath,
+          event,
+          [],
+        ).at(-1);
+      };
+      ownerWindow.addEventListener(
+        "keydown",
+        observeNativeReceiver,
+        true,
+      );
+      source.focus();
+      focus.mockClear();
+
+      try {
+        act(() => source.dispatchEvent(nativeEvent));
+      } finally {
+        ownerWindow.removeEventListener(
+          "keydown",
+          observeNativeReceiver,
+          true,
+        );
+        restoreOption();
+        restoreGroup();
+      }
+
+      expect(boundaries.map(({ name }) => name)).toEqual([
+        "group capture",
+        "option capture",
+        "option bubble",
+        "group bubble",
+      ]);
+      expect(boundaries[0]!.wrapper).toBe(boundaries[1]!.wrapper);
+      expect(boundaries[2]!.wrapper).toBe(boundaries[3]!.wrapper);
+      expect(boundaries[0]!.wrapper).not.toBe(boundaries[2]!.wrapper);
+      expect(boundaries[0]!.isDefaultPrevented).toBe(
+        boundaries[1]!.isDefaultPrevented,
+      );
+      expect(boundaries[0]!.isPropagationStopped).toBe(
+        boundaries[1]!.isPropagationStopped,
+      );
+      expect(boundaries[2]!.isDefaultPrevented).toBe(
+        boundaries[3]!.isDefaultPrevented,
+      );
+      expect(boundaries[2]!.isPropagationStopped).toBe(
+        boundaries[3]!.isPropagationStopped,
+      );
+      expect(
+        boundaries.every(
+          ({ defaultPrevented, propagationStopped }) =>
+            defaultPrevented === false && propagationStopped === false,
+        ),
+      ).toBe(true);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+      expect(nativeEvent.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(targetReactions(view, "Comment")).toEqual({});
+    });
+
+    it.each([
+      ["Comment", "capture", "present"],
+      ["Comment", "capture", "absent"],
+      ["Comment", "capture", "mutated"],
+      ["Comment", "bubble", "present"],
+      ["Comment", "bubble", "absent"],
+      ["Comment", "bubble", "mutated"],
+      ["Reply", "capture", "present"],
+      ["Reply", "capture", "absent"],
+      ["Reply", "capture", "mutated"],
+      ["Reply", "bubble", "present"],
+      ["Reply", "bubble", "absent"],
+      ["Reply", "bubble", "mutated"],
+    ] as const)(
+      "ignores a %s picker private React name on its real %s wrapper when %s",
+      async (target, phase, state) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, target);
+        const source = options[0]!;
+        const destination = options[1]!;
+        const group = source.parentElement;
+        if (!(group instanceof HTMLDivElement)) {
+          throw new Error("The reaction keyboard group did not mount");
+        }
+        const property =
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
+        const element = phase === "capture" ? group : source;
+        const handler = reactProperty<
+          (event: ReactKeyboardEvent<HTMLElement>) => void
+        >(element, property);
+        const restore = replaceReactProperties(element, {
+          [property]: (event: ReactKeyboardEvent<HTMLElement>) => {
+            const wrapper = event as ReactKeyboardEvent<HTMLElement> & {
+              _reactName?: unknown;
+            };
+            if (state === "absent") {
+              expect(Reflect.deleteProperty(wrapper, "_reactName")).toBe(true);
+              expect("_reactName" in wrapper).toBe(false);
+            } else {
+              wrapper._reactName =
+                state === "present" ? "onKeyDown" : "irrelevant-private-name";
+              expect(wrapper._reactName).toBe(
+                state === "present" ? "onKeyDown" : "irrelevant-private-name",
+              );
+            }
+            handler(event);
+          },
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        try {
+          const accepted = reactionPickerKey(source, "ArrowRight");
+          expect(accepted.defaultPrevented).toBe(true);
+        } finally {
+          restore();
+        }
+
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(targetReactions(view, target)).toEqual({});
+      },
+    );
+
+    it("rejects a structural Window terminal while retaining exact backing-receiver recovery", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The reaction option has no owner window");
+      const structural = Object.create(
+        ownerWindow.Window.prototype,
+      ) as EventTarget;
+      Object.defineProperties(structural, {
+        document: { value: source.ownerDocument },
+        Window: { value: ownerWindow.Window },
+        Event: { value: ownerWindow.Event },
+        EventTarget: { value: ownerWindow.EventTarget },
+        KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+        Node: { value: ownerWindow.Node },
+        Object: { value: ownerWindow.Object },
+        Reflect: { value: ownerWindow.Reflect },
+        UIEvent: { value: ownerWindow.UIEvent },
+        window: { value: structural },
+        self: { value: structural },
+      });
+      const rejected = reactionPickerKeyboardEvent(
+        source,
+        "ArrowRight",
+      );
+      const currentTargetGetter = Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get;
+      const composedPath = ownerWindow.Event.prototype.composedPath;
+      if (!currentTargetGetter) {
+        throw new Error("Event.currentTarget has no intrinsic getter");
+      }
+      const listenerObservation: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        originalPathTerminal?: EventTarget;
+      } = {};
+      const stageStructuralTerminal = function (
+        this: EventTarget,
+        event: Event,
+      ) {
+        if (event !== rejected) return;
+        listenerObservation.receiver = this;
+        listenerObservation.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          event,
+          [],
+        ) as EventTarget | null;
+        listenerObservation.originalPathTerminal = Reflect.apply(
+          composedPath,
+          event,
+          [],
+        ).at(-1);
+        replaceReactionPickerPathTerminal(event, structural);
+      };
+      ownerWindow.addEventListener(
+        "keydown",
+        stageStructuralTerminal,
+        true,
+      );
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      try {
+        act(() => source.dispatchEvent(rejected));
+      } finally {
+        ownerWindow.removeEventListener(
+          "keydown",
+          stageStructuralTerminal,
+          true,
+        );
+      }
+
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.currentTarget,
+      );
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.originalPathTerminal,
+      );
+      expect(listenerObservation.receiver).not.toBe(structural);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(targetReactions(view, "Comment")).toEqual({});
+
+      const accepted = reactionPickerKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(options[1]).toHaveFocus();
+    });
+
+    it.each([
+      ["capture", "isDefaultPrevented"],
+      ["capture", "isPropagationStopped"],
+      ["bubble", "isDefaultPrevented"],
+      ["bubble", "isPropagationStopped"],
+    ] as const)(
+      "rejects a replaced %s wrapper %s method before a clean successor",
+      async (phase, method) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, "Comment");
+        const source = options[0]!;
+        const property =
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
+        const handler = reactProperty<ReactionPickerKeyHandler>(
+          source,
+          property,
+        );
+        const restore = replaceReactProperties(source, {
+          [property]: (
+            event: ReactKeyboardEvent<HTMLButtonElement>,
+          ) => {
+            handler(event);
+            Object.defineProperty(event, method, {
+              configurable: true,
+              value: () => false,
+            });
+          },
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = reactionPickerKey(source, "ArrowRight");
+        restore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(targetReactions(view, "Comment")).toEqual({});
+
+        const accepted = reactionPickerKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options[1]).toHaveFocus();
+      },
+    );
+
+    it.each([
+      ["Alt-modified", { altKey: true }],
+      ["Control-modified", { ctrlKey: true }],
+      ["Meta-modified", { metaKey: true }],
+      ["Shift-modified", { shiftKey: true }],
+      ["repeating", { repeat: true }],
+      ["composing", { isComposing: true }],
+      ["non-bubbling", { bubbles: false }],
+      ["non-cancelable", { cancelable: false }],
+    ] as const)(
+      "rejects a %s picker key before a clean successor",
+      async (_label, init) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, "Comment");
+        const source = options[0]!;
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = reactionPickerKey(source, "ArrowRight", init);
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(targetReactions(view, "Comment")).toEqual({});
+
+        const accepted = reactionPickerKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options[1]).toHaveFocus();
+      },
+    );
+
+    it.each(["prevented", "propagation-stopped"] as const)(
+      "rejects a previously %s picker key without poisoning the publication",
+      async (state) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, "Comment");
+        const source = options[0]!;
+        source.focus();
+        focus.mockClear();
+        const rejected = reactionPickerKeyboardEvent(source, "ArrowRight");
+        if (state === "prevented") rejected.preventDefault();
+        else rejected.stopPropagation();
+
+        act(() => source.dispatchEvent(rejected));
+
+        expect(rejected.defaultPrevented).toBe(state === "prevented");
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        const accepted = reactionPickerKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options[1]).toHaveFocus();
+      },
+    );
+
+    it("rejects untrusted, fabricated, proxied, foreign, and wrong-focus input", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      const { options, picker } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      const handler = reactionPickerHandler(source);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      const nativeForFabrication = reactionPickerKeyboardEvent(
+        source,
+        "ArrowRight",
+      );
+      const fabricated = {
+        type: "keydown",
+        currentTarget: source,
+        target: source,
+        nativeEvent: nativeForFabrication,
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const foreignWindow = frame.contentDocument?.defaultView;
+      if (!foreignWindow) throw new Error("The foreign picker realm did not mount");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markRequestModeEventTrusted(foreign);
+
+      act(() => {
+        source.dispatchEvent(untrusted);
+        handler(fabricated);
+        source.dispatchEvent(foreign);
+      });
+
+      const restore = replaceReactProperties(source, {
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+          handler(new Proxy(event, {})),
+      });
+      const proxied = reactionPickerKey(source, "ArrowRight");
+      restore();
+      picker.focus();
+      focus.mockClear();
+      const wrongFocus = reactionPickerKey(source, "ArrowRight");
+
+      expect(untrusted.defaultPrevented).toBe(false);
+      expect(nativeForFabrication.defaultPrevented).toBe(false);
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(proxied.defaultPrevented).toBe(false);
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(targetReactions(view, "Comment")).toEqual({});
+      source.focus();
+      focus.mockClear();
+      const accepted = reactionPickerKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(options[1]).toHaveFocus();
+      frame.remove();
+    });
+
+    it("rejects stale reaction/callback authority and accepts the current handler", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      let opened = await openPicker(view, "Comment");
+      const staleHandler = reactionPickerHandler(opened.options[0]!);
+      act(() => {
+        view.session.comments.toggleReaction(
+          view.threadId,
+          null,
+          "👍",
+          view.session.user,
+        );
+      });
+      await waitFor(() =>
+        expect(screen.getByLabelText("React with 👍")).toHaveAttribute(
+          "data-mine",
+          "true",
+        ),
+      );
+      opened = {
+        ...opened,
+        options: screen.getAllByTestId(
+          "reaction-option",
+        ) as HTMLButtonElement[],
+      };
+      const current = opened.options[0]!;
+      const restore = replaceReactProperties(current, {
+        onKeyDownCapture: staleHandler,
+      });
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = reactionPickerKey(current, "ArrowRight");
+      restore();
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(current).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      const accepted = reactionPickerKey(current, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(opened.options[1]).toHaveFocus();
+      expect(targetReactions(view, "Comment")["👍"]).toEqual([
+        view.session.user.id,
+      ]);
+    });
+
+    it("retires changed permission facts until a complete clean render", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      source.focus();
+      (view.session as unknown as { role: string }).role = "viewer";
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = reactionPickerKey(source, "ArrowRight");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      (view.session as unknown as { role: string }).role = "owner";
+      act(() => {
+        view.session.comments.editBody(view.threadId, "Permission successor.");
+      });
+      await screen.findByText("Permission successor.");
+      const current = screen.getAllByTestId(
+        "reaction-option",
+      ) as HTMLButtonElement[];
+      current[0]!.focus();
+      focus.mockClear();
+      const accepted = reactionPickerKey(current[0]!, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(current[1]).toHaveFocus();
+    });
+
+    it("does no picker work while its exact target is busy and recovers afterward", async () => {
+      const pending = deferred<CommentResponse>();
+      vi.mocked(api.documents.comment).mockReturnValue(pending.promise);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await mountPickers({ role: "commenter", withReaction: true });
+      const { options } = await openPicker(view, "Reply");
+      const staleSource = options[0]!;
+      fireEvent.click(
+        within(view.row("Reply")).getByTestId("reaction-chip"),
+      );
+      await waitFor(() => expect(staleSource).toBeDisabled());
+      staleSource.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = reactionPickerKey(staleSource, "ArrowRight");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      await act(async () => pending.resolve({} as CommentResponse));
+      await waitFor(() => expect(staleSource).toBeEnabled());
+      staleSource.focus();
+      focus.mockClear();
+      const accepted = reactionPickerKey(staleSource, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(options[1]).toHaveFocus();
+    });
+
+    it.each([
+      "detached and reinserted portal",
+      "detached and reinserted group",
+      "reordered and restored options",
+      "replaced and restored option",
+      "attribute-mutated and restored option",
+    ] as const)(
+      "retains %s history and permits a clean reopened picker",
+      async (mutation) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        let opened = await openPicker(view, "Comment");
+        const source = opened.options[0]!;
+        if (mutation === "detached and reinserted portal") {
+          const parent = opened.picker.parentNode!;
+          const next = opened.picker.nextSibling;
+          opened.picker.remove();
+          parent.insertBefore(opened.picker, next);
+        } else if (mutation === "detached and reinserted group") {
+          const group = source.parentElement!;
+          const parent = group.parentNode!;
+          const next = group.nextSibling;
+          group.remove();
+          parent.insertBefore(group, next);
+        } else if (mutation === "reordered and restored options") {
+          const group = source.parentElement!;
+          const second = opened.options[1]!;
+          group.append(source);
+          group.insertBefore(source, second);
+        } else if (mutation === "replaced and restored option") {
+          const replacement = source.cloneNode(true);
+          if (!(replacement instanceof HTMLButtonElement)) {
+            throw new Error("The replacement reaction option was not a button");
+          }
+          source.replaceWith(replacement);
+          replacement.replaceWith(source);
+        } else {
+          source.setAttribute("data-mine", "true");
+          source.removeAttribute("data-mine");
+        }
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = reactionPickerKey(source, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(targetReactions(view, "Comment")).toEqual({});
+
+        fireEvent.keyDown(source, { key: "Escape" });
+        await waitFor(() =>
+          expect(screen.queryByTestId("reaction-picker")).toBeNull(),
+        );
+        opened = await openPicker(view, "Comment");
+        opened.options[0]!.focus();
+        focus.mockClear();
+        const accepted = reactionPickerKey(
+          opened.options[0]!,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(opened.options[1]).toHaveFocus();
+      },
+    );
+
+    it("claims publication, movement, wrapper, native event, and destination before replay or prevention reentry", async () => {
+      const nativePreventDefault = Event.prototype.preventDefault;
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = await mountPickers();
+      const { options } = await openPicker(view, "Comment");
+      const source = options[0]!;
+      source.focus();
+      focus.mockClear();
+      let reentered: KeyboardEvent | null = null;
+      preventDefault.mockImplementation(function (this: Event) {
+        if (this instanceof KeyboardEvent && !reentered) {
+          reentered = reactionPickerKeyboardEvent(source, "ArrowRight");
+          source.dispatchEvent(reentered);
+        }
+        return nativePreventDefault.call(this);
+      });
+      preventDefault.mockClear();
+      const event = reactionPickerKeyboardEvent(source, "ArrowRight");
+
+      act(() => {
+        source.dispatchEvent(event);
+        source.dispatchEvent(event);
+        options[1]!.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(reentered).not.toBeNull();
+      expect(reentered!.defaultPrevented).toBe(false);
+      expect(options[1]).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(targetReactions(view, "Comment")).toEqual({});
+    });
+
+    it("rejects cleanup input and lets a distinct complete Strict Mode picker recover", async () => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const stale = await mountPickers();
+      const opened = await openPicker(stale, "Comment");
+      const source = opened.options[0]!;
+      const handler = reactionPickerHandler(source);
+      act(() => stale.root.unmount());
+      directViews.splice(
+        directViews.findIndex((view) => view.root === stale.root),
+        1,
+      );
+      stale.host.remove();
+      const nativeEvent = reactionPickerKeyboardEvent(source, "ArrowRight");
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      handler({
+        type: "keydown",
+        currentTarget: source,
+        target: source,
+        nativeEvent,
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+
+      expect(nativeEvent.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const clean = await mountPickers();
+      const successor = await openPicker(clean, "Reply");
+      successor.options[0]!.focus();
+      focus.mockClear();
+      const accepted = reactionPickerKey(
+        successor.options[0]!,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(successor.options[1]).toHaveFocus();
     });
   });
 
