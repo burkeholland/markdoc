@@ -79,14 +79,14 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
             a click in the text focuses the article too, and the first PageDown after it would frame the whole column. */}
         <article className="reader-article min-w-0 flex-1 scroll-mt-[88px] focus-visible:outline-none" id="reader-article" tabIndex={-1} data-testid="reader-article">
           <header className="mb-8 border-b border-line pb-6">
-            <h1 className="reader-title text-[2.25rem] font-bold leading-tight tracking-tight text-ink" data-testid="reader-title">
+            <h1 className="reader-title wrap-anywhere text-[2.25rem] font-bold leading-tight tracking-tight text-ink" data-testid="reader-title">
               {title}
             </h1>
-            <div className="mt-3 flex items-center gap-2 text-sm text-ink-3" data-testid="reader-byline">
+            <div className="mt-3 flex min-w-0 flex-wrap items-center gap-2 wrap-anywhere text-sm text-ink-3" data-testid="reader-byline">
               {owner && (
                 <>
-                  <Avatar name={owner.name} src={owner.image} size={22} />
-                  <span className="font-medium text-ink-2">{owner.name}</span>
+                  <Avatar name={owner.name} src={owner.image} size={22} className="shrink-0" />
+                  <span className="min-w-0 font-medium text-ink-2">{owner.name}</span>
                   <span aria-hidden>·</span>
                 </>
               )}
