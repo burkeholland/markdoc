@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { StrictMode, useCallback, useLayoutEffect, useState, type ChangeEvent, type FocusEvent, type KeyboardEvent, type MouseEvent, type RefCallback } from "react";
 
 type SearchAnswer = {
@@ -438,10 +439,101 @@ function alterNonPublicReactKeyFields(
   }
 }
 
-function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
+type KeyDeliveryEvent = KeyboardEvent<HTMLInputElement | HTMLDivElement>;
+type KeyBoundary = "root-capture" | "input-capture" | "input-bubble" | "root-bubble";
+const KEY_BOUNDARIES: readonly KeyBoundary[] = [
+  "root-capture",
+  "input-capture",
+  "input-bubble",
+  "root-bubble",
+];
+
+function interceptKeyboardRoute(
+  target: HTMLInputElement,
+  invoke: (
+    boundary: KeyBoundary,
+    deliver: (event: KeyDeliveryEvent) => void,
+    event: KeyDeliveryEvent,
+  ) => void,
+) {
+  const root = target.parentElement;
+  if (!root) throw new Error("The keyboard input root was unavailable");
+  const restore = KEY_BOUNDARIES.map((boundary) =>
+    interceptReactHandler<KeyDeliveryEvent>(
+      boundary.startsWith("root") ? root : target,
+      boundary.endsWith("capture") ? "onKeyDownCapture" : "onKeyDown",
+      (deliver, event) => invoke(boundary, deliver, event),
+    ),
+  );
+  return () => restore.toReversed().forEach((undo) => undo());
+}
+
+function independentKeyboardDelivery(
+  source: KeyDeliveryEvent,
+  wrapper: "plain" | "proxy" | "forwarding" = "plain",
+) {
+  const prototype = Object.create(null);
+  const target = Object.create(prototype) as KeyDeliveryEvent;
+  const event = wrapper === "proxy"
+    ? new Proxy(target, {})
+    : wrapper === "forwarding"
+      ? Object.create(prototype) as KeyDeliveryEvent
+      : target;
+  const values = new Map<PropertyKey, unknown>();
+  const original = source as unknown as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_PUBLIC_SCALARS) {
+    values.set(property, original[property]);
+  }
+  const defaultQuery = vi.fn(function (this: object) {
+    expect(this).toBe(event);
+    return values.get("defaultPrevented");
+  });
+  const propagationQuery = vi.fn(function (this: object) {
+    expect(this).toBe(event);
+    return false;
+  });
+  const sourcePrevent = source.preventDefault;
+  const preventDefault = vi.fn(function (this: object) {
+    expect(this).toBe(event);
+    // Keep React's enclosing form/dialog delivery in sync with this public wrapper.
+    Reflect.apply(sourcePrevent, source, []);
+    values.set("defaultPrevented", true);
+    values.set("isDefaultPrevented", source.isDefaultPrevented);
+  });
+  values.set("preventDefault", preventDefault);
+  values.set("isDefaultPrevented", defaultQuery);
+  values.set("isPropagationStopped", propagationQuery);
+  for (const property of [...REACT_KEY_PUBLIC_SCALARS, ...REACT_KEY_REQUIRED_METHODS]) {
+    Object.defineProperty(target, property, {
+      configurable: true,
+      enumerable: true,
+      get: () => values.get(property),
+      set: (value) => values.set(property, value),
+    });
+    if (wrapper === "forwarding") {
+      Object.defineProperty(event, property, {
+        configurable: true,
+        enumerable: true,
+        get: () => Reflect.get(target, property),
+        set: (value) => Reflect.set(target, property, value),
+      });
+    }
+  }
+  return { event, prototype, values, preventDefault, defaultQuery, propagationQuery };
+}
+
+function reactRef<T extends HTMLElement>(element: T, current = false): RefCallback<T> {
+  type RefFiber = { ref?: unknown; memoizedProps?: unknown; alternate?: RefFiber | null };
   const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
   if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
-  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
+  let fiber = (element as unknown as Record<string, RefFiber | undefined>)[fiberKey];
+  if (current) {
+    const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+    if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
+    const props = (element as unknown as Record<string, unknown>)[propsKey];
+    if (fiber?.memoizedProps !== props) fiber = fiber?.alternate ?? undefined;
+    if (fiber?.memoizedProps !== props) throw new Error(`The committed fiber was unavailable for ${element.tagName}`);
+  }
   if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
   return fiber.ref as RefCallback<T>;
 }
@@ -694,6 +786,909 @@ describe("CollaboratorLoginInput", () => {
     // The picked login is not searched again.
     await settle(1000);
     expect(searchUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["absent", "replaced", "non-function", "throwing"] as const)(
+    "authenticates four independent accessor-backed keyboard deliveries with %s private members",
+    async (privateMembers) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      const onRoleChange = vi.fn();
+      const onDialogClose = vi.fn();
+      render(
+        <StrictMode>
+          <KeyboardHarness
+            onChange={onChange}
+            onPick={onPick}
+            onSubmit={onSubmit}
+            onRoleChange={onRoleChange}
+            onDialogClose={onDialogClose}
+          />
+        </StrictMode>,
+      );
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const nativeStop = vi.spyOn(window.Event.prototype, "stopPropagation");
+      const forbiddenRead = vi.fn(() => { throw new Error("Private wrapper authority was read"); });
+      const list = screen.getByTestId("share-login-suggestions");
+      const scrollCalls = [
+        vi.spyOn(window, "scrollTo"),
+        vi.spyOn(window, "scrollBy"),
+        ...[exactInput, list, ...listOptions()].flatMap((element) =>
+          ["scrollTo", "scrollBy", "scrollIntoView"].map((method) => {
+            const scroll = vi.fn();
+            Object.defineProperty(element, method, { configurable: true, value: scroll });
+            return scroll;
+          }),
+        ),
+      ];
+      document.documentElement.scrollTop = 31;
+      list.scrollTop = 17;
+      exactInput.setSelectionRange(1, 3);
+      const setTimer = vi.spyOn(globalThis, "setTimeout");
+      const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+
+      const dispatch = (key: string) => {
+        const deliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+        const restore = interceptKeyboardRoute(exactInput, (_boundary, deliver, source) => {
+          const delivery = independentKeyboardDelivery(source);
+          deliveries.push(delivery);
+          if (privateMembers === "throwing") {
+            for (const property of ["_reactName", "persist", "isPersistent", "stopPropagation", "constructor"]) {
+              Object.defineProperty(delivery.event, property, { get: forbiddenRead });
+            }
+          } else {
+            alterNonPublicReactKeyFields(delivery.event, privateMembers);
+          }
+          deliver(delivery.event);
+          delivery.values.set("currentTarget", null);
+        });
+        const native = dispatchKeyDown(exactInput, key);
+        restore();
+        expect(deliveries).toHaveLength(4);
+        expect(new Set(deliveries.map(({ event }) => event)).size).toBe(4);
+        expect(new Set(deliveries.map(({ prototype }) => prototype)).size).toBe(4);
+        for (const method of REACT_KEY_REQUIRED_METHODS) {
+          expect(new Set(deliveries.map(({ values }) => values.get(method))).size).toBe(4);
+        }
+        for (const delivery of deliveries.slice(0, 3)) {
+          expect(delivery.preventDefault).not.toHaveBeenCalled();
+        }
+        expect(deliveries[3].preventDefault).toHaveBeenCalledOnce();
+        expect(native.defaultPrevented).toBe(true);
+        expect(forbiddenRead).not.toHaveBeenCalled();
+        return native;
+      };
+
+      for (const [key, destination] of [
+        ["ArrowDown", 0], ["ArrowDown", 1], ["ArrowDown", 2], ["ArrowDown", 0],
+        ["ArrowUp", 2], ["ArrowUp", 1], ["ArrowUp", 0], ["ArrowUp", 2],
+        ["Home", 0], ["End", 2],
+      ] as const) {
+        nativePrevent.mockClear();
+        dispatch(key);
+        expect(nativePrevent).toHaveBeenCalledOnce();
+        expect(listOptions().filter((row) => row.getAttribute("aria-selected") === "true")).toEqual([listOptions()[destination]]);
+        expect(exactInput).toHaveAttribute("aria-activedescendant", listOptions()[destination].id);
+        expect(exactInput).toHaveFocus();
+        expect([exactInput.selectionStart, exactInput.selectionEnd]).toEqual([1, 3]);
+        expect(document.documentElement.scrollTop).toBe(31);
+        expect(list.scrollTop).toBe(17);
+      }
+      nativePrevent.mockClear();
+      dispatch("Escape");
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      expect(exactInput).toHaveValue("octo");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onRoleChange).not.toHaveBeenCalled();
+      expect(onDialogClose).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(nativeStop).not.toHaveBeenCalled();
+      expect(setTimer).not.toHaveBeenCalled();
+      expect(clearTimer).not.toHaveBeenCalled();
+      scrollCalls.forEach((scroll) => expect(scroll).not.toHaveBeenCalled());
+      expect(searchUsers).toHaveBeenCalledOnce();
+
+      nativePrevent.mockClear();
+      const nativeEnter = dispatchKeyDown(exactInput, "Enter");
+      expect(nativeEnter.defaultPrevented).toBe(false);
+      expect(nativePrevent).not.toHaveBeenCalled();
+      fireEvent.submit(exactInput.closest("form")!);
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith("octo");
+      onSubmit.mockClear();
+      dispatch("ArrowDown");
+      nativePrevent.mockClear();
+      dispatch("Enter");
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(exactInput).toHaveValue("octocat");
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octocat");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octocat");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onRoleChange).not.toHaveBeenCalled();
+      expect(onDialogClose).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+      expect(setTimer).not.toHaveBeenCalled();
+      expect(clearTimer).not.toHaveBeenCalled();
+    },
+  );
+
+  it("accepts transparent proxies forwarding the actual React keyboard phase wrappers", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    fireEvent.mouseOver(listOptions()[1]);
+    const wrappers = new WeakMap<KeyDeliveryEvent, KeyDeliveryEvent>();
+    const restore = interceptKeyboardRoute(exactInput, (_boundary, deliver, source) => {
+      let wrapper = wrappers.get(source);
+      if (!wrapper) {
+        wrapper = new Proxy(source, {});
+        wrappers.set(source, wrapper);
+      }
+      deliver(wrapper);
+    });
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    const event = dispatchKeyDown(exactInput, "Enter");
+    restore();
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+    expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+  });
+
+  it.each(["proxy", "forwarding"] as const)(
+    "accepts stable public keyboard %s wrappers without asserting React origin",
+    async (wrapper) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const deliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+      const restore = interceptKeyboardRoute(exactInput, (_boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source, wrapper);
+        deliveries.push(delivery);
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const event = dispatchKeyDown(exactInput, "Enter");
+      restore();
+      expect(event.defaultPrevented).toBe(true);
+      expect(deliveries).toHaveLength(4);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      deliveries.slice(0, 3).forEach(({ preventDefault }) => expect(preventDefault).not.toHaveBeenCalled());
+      expect(deliveries[3].preventDefault).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { key: "ArrowDown", source: -1, destination: 0 },
+    { key: "ArrowDown", source: 0, destination: 1 },
+    { key: "ArrowDown", source: 1, destination: 2 },
+    { key: "ArrowDown", source: 2, destination: 0 },
+    { key: "ArrowUp", source: -1, destination: 2 },
+    { key: "ArrowUp", source: 0, destination: 2 },
+    { key: "ArrowUp", source: 1, destination: 0 },
+    { key: "ArrowUp", source: 2, destination: 1 },
+    { key: "Home", source: -1, destination: 0 },
+    { key: "End", source: -1, destination: 2 },
+  ])("moves $key from keyboard index $source to $destination once", async ({ key, source, destination }) => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+    input().focus();
+    await settle();
+    if (source >= 0) fireEvent.mouseOver(listOptions()[source]);
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    const event = dispatchKeyDown(input(), key);
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledOnce();
+    expect(listOptions().filter((row) => row.getAttribute("aria-selected") === "true")).toEqual([listOptions()[destination]]);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onPick).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(searchUsers).toHaveBeenCalledOnce();
+  });
+
+  it.each(KEY_BOUNDARIES)(
+    "leaves the rightful %s keyboard delivery eligible after malformed, partial, and duplicate attempts",
+    async (boundaryUnderTest) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const foreignInput = document.createElement("input");
+      const foreignRoot = document.createElement("div");
+      const root = exactInput.parentElement!;
+      const partial = reactHandler<(event: KeyDeliveryEvent) => void>(root, "onKeyDown");
+      const invalidPrevent = vi.fn();
+      const throwingQuery = vi.fn(() => { throw new Error("Rejected public query"); });
+      const throwingAccessor = vi.fn(() => { throw new Error("Rejected public accessor"); });
+      let accepted: ReturnType<typeof independentKeyboardDelivery> | undefined;
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        if (boundary === boundaryUnderTest) {
+          for (const [property, value] of [
+            ["target", foreignInput],
+            ["currentTarget", boundary.startsWith("root") ? foreignRoot : foreignInput],
+            ["eventPhase", boundary.endsWith("capture") ? 3 : 1],
+            ["nativeEvent", keyboardEvent(exactInput, "Home")],
+            ["key", 42],
+            ["defaultPrevented", true],
+            ["view", new Proxy(window, {})],
+            ["isDefaultPrevented", () => true],
+            ["isPropagationStopped", () => true],
+            ["isDefaultPrevented", throwingQuery],
+            ["preventDefault", null],
+          ] as const) {
+            const rejected = independentKeyboardDelivery(source);
+            rejected.values.set("preventDefault", invalidPrevent);
+            rejected.values.set(property, value);
+            deliver(rejected.event);
+          }
+          const rejected = independentKeyboardDelivery(source);
+          Object.defineProperty(rejected.event, "key", { get: throwingAccessor });
+          deliver(rejected.event);
+          if (boundary !== "root-bubble") partial(source);
+        }
+        const current = independentKeyboardDelivery(source);
+        if (boundary === boundaryUnderTest) accepted = current;
+        deliver(current.event);
+        deliver(current.event);
+        current.values.set("currentTarget", null);
+      });
+      const event = dispatchKeyDown(exactInput, "Home");
+      restore();
+      expect(event.defaultPrevented).toBe(true);
+      expect(accepted).toBeDefined();
+      expect(invalidPrevent).not.toHaveBeenCalled();
+      expect(throwingQuery).toHaveBeenCalledOnce();
+      expect(throwingAccessor).toHaveBeenCalled();
+      expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(KEY_BOUNDARIES.flatMap((boundary) =>
+    (["isDefaultPrevented", "isPropagationStopped"] as const).flatMap((query) =>
+      REACT_KEY_REQUIRED_METHODS.map((replaced) => ({ boundary, query, replaced })),
+    ),
+  ))(
+    "rejects keyboard $boundary $query replacing $replaced before another callback",
+    async ({ boundary: affectedBoundary, query, replaced }) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const replacement = vi.fn(() => false);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        if (boundary === affectedBoundary) {
+          const retained = delivery.event[query];
+          delivery.values.set(query, function (this: object) {
+            const result = Reflect.apply(retained, this, []);
+            delivery.values.set(replaced, replacement);
+            return result;
+          });
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      const rejected = dispatchKeyDown(exactInput, "Enter");
+      restore();
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(nativePrevent).not.toHaveBeenCalled();
+      expect(replacement).not.toHaveBeenCalled();
+      expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      const recovered = dispatchKeyDown(exactInput, "Enter");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+    },
+  );
+
+  it.each(KEY_BOUNDARIES.flatMap((boundary) =>
+    (["isDefaultPrevented", "isPropagationStopped"] as const).map((query) => ({ boundary, query })),
+  ))(
+    "excludes reentry from every $boundary keyboard $query without poisoning the rightful route",
+    async ({ boundary: affectedBoundary, query }) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      let reentries = 0;
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        if (boundary === affectedBoundary) {
+          const retained = delivery.event[query];
+          delivery.values.set(query, function (this: object) {
+            reentries++;
+            deliver(delivery.event);
+            return Reflect.apply(retained, this, []);
+          });
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      const accepted = dispatchKeyDown(exactInput, "Enter");
+      restore();
+      expect(reentries).toBeGreaterThan(0);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("keeps two genuinely dispatched keyboard routes live across crossed deliveries without poisoning either", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    fireEvent.mouseOver(listOptions()[0]);
+    // Both destinations are already current: completing B must not stale A's selection.
+    const first = keyboardEvent(exactInput, "Home", { code: "Home" });
+    const second = keyboardEvent(exactInput, "Home", { code: "Numpad7", location: 3 });
+    const finals: ReturnType<typeof independentKeyboardDelivery>[] = [];
+    const crossed: ReturnType<typeof independentKeyboardDelivery>[] = [];
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    let firstSource: KeyDeliveryEvent | undefined;
+    let nested = false;
+    const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+      if (boundary === "root-capture" && source.nativeEvent === second) {
+        expect(firstSource).toBeDefined();
+        expect(first.eventPhase).toBe(1);
+        expect(second.eventPhase).toBe(1);
+        const wrongSecond = independentKeyboardDelivery(firstSource!);
+        wrongSecond.values.set("nativeEvent", second);
+        const wrongFirst = independentKeyboardDelivery(source);
+        wrongFirst.values.set("nativeEvent", first);
+        crossed.push(wrongFirst, wrongSecond);
+        deliver(wrongSecond.event);
+        deliver(wrongFirst.event);
+      }
+      const delivery = independentKeyboardDelivery(source);
+      if (boundary === "root-bubble") finals.push(delivery);
+      deliver(delivery.event);
+      if (boundary === "root-capture" && source.nativeEvent === first && !nested) {
+        nested = true;
+        firstSource = source;
+        exactInput.dispatchEvent(second);
+        expect(second.defaultPrevented).toBe(true);
+        expect(first.defaultPrevented).toBe(false);
+      }
+      delivery.values.set("currentTarget", null);
+    });
+    act(() => { exactInput.dispatchEvent(first); });
+    restore();
+    expect(nested).toBe(true);
+    expect(first.defaultPrevented).toBe(true);
+    expect(second.defaultPrevented).toBe(true);
+    expect(finals).toHaveLength(2);
+    expect(nativePrevent).toHaveBeenCalledTimes(2);
+    finals.forEach(({ preventDefault }) => expect(preventDefault).toHaveBeenCalledOnce());
+    crossed.forEach(({ preventDefault }) => expect(preventDefault).not.toHaveBeenCalled());
+    expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onPick).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(searchUsers).toHaveBeenCalledOnce();
+    act(() => {
+      exactInput.dispatchEvent(first);
+      exactInput.dispatchEvent(second);
+    });
+    expect(nativePrevent).toHaveBeenCalledTimes(2);
+    expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+    const successor = dispatchKeyDown(exactInput, "ArrowDown");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledTimes(3);
+    expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+  });
+
+  it.each([
+    "capture default query",
+    "input bubble default query",
+    "final propagation query",
+    "final prevention",
+    "non-callable final default query",
+    "final query replacing propagation",
+  ] as const)(
+    "rejects %s drift during final keyboard prevention without invoking stale callbacks",
+    async (mutation) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const deliveries = new Map<KeyBoundary, ReturnType<typeof independentKeyboardDelivery>>();
+      const replacement = vi.fn(() => false);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        deliveries.set(boundary, delivery);
+        if (boundary === "root-bubble") {
+          delivery.values.set("preventDefault", function (this: object) {
+            Reflect.apply(delivery.preventDefault, this, []);
+            if (mutation === "capture default query" || mutation === "input bubble default query") {
+              deliveries.get(mutation === "capture default query" ? "root-capture" : "input-bubble")!.values.set("isDefaultPrevented", replacement);
+            } else if (mutation === "final propagation query") {
+              delivery.values.set("isPropagationStopped", replacement);
+            } else if (mutation === "final prevention") {
+              delivery.values.set("preventDefault", replacement);
+            } else if (mutation === "non-callable final default query") {
+              delivery.values.set("isDefaultPrevented", null);
+            } else {
+              delivery.values.set("isDefaultPrevented", () => {
+                delivery.values.set("isPropagationStopped", replacement);
+                return true;
+              });
+            }
+          });
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      const rejected = dispatchKeyDown(exactInput, "Enter");
+      restore();
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(deliveries.get("root-bubble")!.preventDefault).toHaveBeenCalledOnce();
+      expect(replacement).not.toHaveBeenCalled();
+      expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+      expect(exactInput).toHaveValue("octo");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      const successor = dispatchKeyDown(exactInput, "Enter");
+      expect(successor.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledTimes(2);
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it("authenticates React 19's final keyboard default query replacement and fences prevention reentry", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    fireEvent.mouseOver(listOptions()[1]);
+    const postQuery = vi.fn(() => true);
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    let final: ReturnType<typeof independentKeyboardDelivery> | undefined;
+    const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+      const delivery = independentKeyboardDelivery(source);
+      if (boundary === "root-bubble") {
+        final = delivery;
+        delivery.values.set("preventDefault", function (this: object) {
+          deliver(delivery.event);
+          Reflect.apply(delivery.preventDefault, this, []);
+          delivery.values.set("isDefaultPrevented", postQuery);
+          deliver(delivery.event);
+        });
+      }
+      deliver(delivery.event);
+      delivery.values.set("currentTarget", null);
+    });
+    const accepted = dispatchKeyDown(exactInput, "Enter");
+    restore();
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledOnce();
+    expect(final!.preventDefault).toHaveBeenCalledOnce();
+    expect(postQuery).toHaveBeenCalled();
+    expect(postQuery.mock.contexts.every((receiver) => receiver === final!.event)).toBe(true);
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+    expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+  });
+
+  it.each(["onChange", "onPick"] as const)(
+    "surfaces keyboard pick %s errors without replaying the claimed effect",
+    async (callback) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+      const failure = new Error("Keyboard pick callback failed");
+      const callbacks = { onChange: vi.fn(), onPick: vi.fn() };
+      callbacks[callback].mockImplementation(() => { throw failure; });
+      render(<KeyboardHarness {...callbacks} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const errors: unknown[] = [];
+      const onError = (event: ErrorEvent) => {
+        if (event.error !== failure) return;
+        errors.push(event.error);
+        event.preventDefault();
+      };
+      window.addEventListener("error", onError);
+      try {
+        const accepted = dispatchKeyDown(exactInput, "Enter");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(errors).toEqual([failure]);
+        expect(callbacks.onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+        expect(callbacks.onPick).toHaveBeenCalledTimes(callback === "onPick" ? 1 : 0);
+        act(() => { exactInput.dispatchEvent(accepted); });
+        expect(errors).toEqual([failure]);
+        expect(callbacks.onChange).toHaveBeenCalledOnce();
+        expect(callbacks.onPick).toHaveBeenCalledTimes(callback === "onPick" ? 1 : 0);
+      } finally {
+        window.removeEventListener("error", onError);
+      }
+    },
+  );
+
+  it.each((["isDefaultPrevented", "isPropagationStopped", "preventDefault"] as const).flatMap((callback) =>
+    ([
+      "query", "callbacks", "exclusions", "active index", "rerender",
+      "input detach/restore", "root detach/restore", "list detach/restore",
+      "row reorder/restore", "focus away/back", "partial Strict replay", "cleanup",
+    ] as const).map((mutation) => ({ callback, mutation })),
+  ))(
+    "revalidates $mutation after keyboard $callback before another query or effect",
+    async ({ callback, mutation }) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const replacementChange = vi.fn();
+      const replacementPick = vi.fn();
+      const host = document.createElement("div");
+      const outside = document.createElement("button");
+      document.body.append(outside, host);
+      const root = createRoot(host);
+      const view = (
+        instance = "initial",
+        value = "octo",
+        change = onChange,
+        pick = onPick,
+        exclude: string[] = [],
+      ) => (
+        <StrictMode>
+          <AuthorityBoundary instance={instance} value={value} onChange={change} onPick={pick} exclude={exclude} />
+        </StrictMode>
+      );
+      try {
+        await act(async () => root.render(view()));
+        const exactInput = input();
+        exactInput.focus();
+        await settle();
+        fireEvent.mouseOver(listOptions()[1]);
+        const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+        let mutated = false;
+        const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+          const delivery = independentKeyboardDelivery(source);
+          if (boundary === "root-bubble") {
+            const retained = delivery.event[callback];
+            delivery.values.set(callback, function (this: object) {
+              const result = Reflect.apply(retained, this, []);
+              if (mutated) return result;
+              mutated = true;
+              if (mutation === "query") {
+                flushSync(() => root.render(view("initial", "octof")));
+              } else if (mutation === "callbacks") {
+                flushSync(() => root.render(view("initial", "octo", replacementChange, replacementPick)));
+              } else if (mutation === "exclusions") {
+                flushSync(() => root.render(view("initial", "octo", onChange, onPick, ["octocat"])));
+              } else if (mutation === "active index") {
+                flushSync(() => fireEvent.mouseOver(listOptions()[0]));
+              } else if (mutation === "rerender") {
+                flushSync(() => root.render(view()));
+              } else if (mutation.endsWith("detach/restore")) {
+                const element = mutation.startsWith("input")
+                  ? exactInput
+                  : mutation.startsWith("root")
+                    ? exactInput.parentElement!
+                    : screen.getByTestId("share-login-suggestions");
+                const parent = element.parentNode!;
+                const next = element.nextSibling;
+                element.remove();
+                parent.insertBefore(element, next);
+              } else if (mutation === "row reorder/restore") {
+                const row = listOptions()[0];
+                const list = row.parentNode!;
+                const next = row.nextSibling;
+                list.appendChild(row);
+                list.insertBefore(row, next);
+              } else if (mutation === "focus away/back") {
+                flushSync(() => {
+                  outside.focus();
+                  exactInput.focus();
+                });
+              } else if (mutation === "partial Strict replay") {
+                const row = listOptions()[0];
+                const ref = reactRef(row, true);
+                ref(null);
+                ref(row);
+              } else {
+                flushSync(() => root.render(null));
+              }
+              return result;
+            });
+          }
+          deliver(delivery.event);
+          delivery.values.set("currentTarget", null);
+        });
+        const rejected = dispatchKeyDown(exactInput, "Enter");
+        restore();
+        expect(mutated).toBe(true);
+        expect(rejected.defaultPrevented).toBe(callback === "preventDefault");
+        expect(nativePrevent).toHaveBeenCalledTimes(callback === "preventDefault" ? 1 : 0);
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+        expect(replacementChange).not.toHaveBeenCalled();
+        expect(replacementPick).not.toHaveBeenCalled();
+        act(() => { exactInput.dispatchEvent(rejected); });
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+        await act(async () => root.render(view("successor")));
+        input().focus();
+        await settle();
+        nativePrevent.mockClear();
+        const recovered = dispatchKeyDown(input(), "End");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(nativePrevent).toHaveBeenCalledOnce();
+        expect(listOptions()[2]).toHaveAttribute("aria-selected", "true");
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        outside.remove();
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["focus", "DOM"] as const)(
+    "rechecks keyboard method identities after an arbitrary %s observation",
+    async (observation) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const replacement = vi.fn(() => false);
+      let changed = false;
+      let final: ReturnType<typeof independentKeyboardDelivery> | undefined;
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        if (boundary === "root-bubble") final = delivery;
+        if (boundary === "root-bubble") {
+          let armed = false;
+          const defaultQuery = delivery.event.isDefaultPrevented;
+          delivery.values.set("isDefaultPrevented", function (this: object) {
+            armed = true;
+            return Reflect.apply(defaultQuery, this, []);
+          });
+          const mutate = () => {
+            if (armed && !changed) {
+              changed = true;
+              delivery.values.set("isPropagationStopped", replacement);
+            }
+          };
+          if (observation === "focus") {
+            const activeElement = document.activeElement;
+            Object.defineProperty(document, "activeElement", {
+              configurable: true,
+              get() { mutate(); return activeElement; },
+            });
+          } else {
+            const matches = exactInput.matches;
+            vi.spyOn(exactInput, "matches").mockImplementation(function (this: HTMLInputElement, selectors: string) {
+              mutate();
+              return Reflect.apply(matches, this, [selectors]);
+            });
+          }
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      try {
+        const rejected = dispatchKeyDown(exactInput, "Enter");
+        expect(changed).toBe(true);
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(final!.preventDefault).not.toHaveBeenCalled();
+        expect(replacement).not.toHaveBeenCalled();
+        expect(nativePrevent).not.toHaveBeenCalled();
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+      } finally {
+        restore();
+        if (observation === "focus") Reflect.deleteProperty(document, "activeElement");
+        else vi.mocked(exactInput.matches).mockRestore();
+      }
+      expect(dispatchKeyDown(exactInput, "Enter").defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+    },
+  );
+
+  it.each(["ArrowUp", "ArrowDown", "Home", "End", "Enter", "Escape"])(
+    "leaves unsupported native keyboard $key facts inert and accepts a distinct clean route",
+    async (key) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      for (const init of [
+        { ctrlKey: true }, { altKey: true }, { shiftKey: true }, { metaKey: true },
+        { repeat: true }, { isComposing: true }, { bubbles: false }, { cancelable: false },
+        { view: new Proxy(window, {}) },
+      ] satisfies KeyboardEventInit[]) {
+        const event = dispatchKeyDown(exactInput, key, init);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(dispatchKeyDown(exactInput, key, {}, false).defaultPrevented).toBe(false);
+      for (const unsupported of ["ArrowLeft", "ArrowRight", "Tab", "a"]) {
+        expect(dispatchKeyDown(exactInput, unsupported).defaultPrevented).toBe(false);
+      }
+      expect(nativePrevent).not.toHaveBeenCalled();
+      expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+      expect(exactInput).toHaveValue("octo");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      const successor = dispatchKeyDown(exactInput, key);
+      expect(successor.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onPick).toHaveBeenCalledTimes(key === "Enter" ? 1 : 0);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("accepts null public keyboard view without inventing a Window facade", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    render(<KeyboardHarness onChange={onChange} />);
+    input().focus();
+    await settle();
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    const event = dispatchKeyDown(input(), "End", { view: null });
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledOnce();
+    expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it.each(["preventDefault", "stopPropagation"] as const)(
+    "does not complete or replay a native keyboard route canceled by %s after capture",
+    async (cancel) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      exactInput.addEventListener("keydown", (event) => event[cancel](), { capture: true, once: true });
+      const canceled = dispatchKeyDown(exactInput, "Enter");
+      expect(canceled.defaultPrevented).toBe(cancel === "preventDefault");
+      expect(nativePrevent).toHaveBeenCalledTimes(cancel === "preventDefault" ? 1 : 0);
+      expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      act(() => { exactInput.dispatchEvent(canceled); });
+      expect(nativePrevent).toHaveBeenCalledTimes(cancel === "preventDefault" ? 1 : 0);
+      expect(onPick).not.toHaveBeenCalled();
+      nativePrevent.mockClear();
+      expect(dispatchKeyDown(exactInput, "Enter").defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+    },
+  );
+
+  it("rejects wrong-receiver terminal keyboard calls without releasing the rightful Window listener", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const registered: EventListener[] = [];
+    const add = window.addEventListener;
+    vi.spyOn(window, "addEventListener").mockImplementation(function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      if (type === "keydown" && typeof listener === "function" && options !== true && !(typeof options === "object" && options.capture)) {
+        registered.push(listener);
+      }
+      Reflect.apply(add, this, [type, listener, options]);
+    });
+    render(<KeyboardHarness onChange={onChange} onPick={onPick} />);
+    const exactInput = input();
+    exactInput.focus();
+    await settle();
+    fireEvent.mouseOver(listOptions()[1]);
+    const listener = registered.at(-1);
+    expect(listener).toBeDefined();
+    const facade = { document, window, self: window };
+    let attempted = false;
+    const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+      const delivery = independentKeyboardDelivery(source);
+      if (boundary === "root-bubble") {
+        delivery.values.set("preventDefault", function (this: object) {
+          Reflect.apply(delivery.preventDefault, this, []);
+          attempted = true;
+          Reflect.apply(listener!, facade, [source.nativeEvent]);
+          Reflect.apply(listener!, window, [source.nativeEvent]);
+        });
+      }
+      deliver(delivery.event);
+      delivery.values.set("currentTarget", null);
+    });
+    const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+    const event = dispatchKeyDown(exactInput, "Enter");
+    restore();
+    expect(attempted).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePrevent).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+    expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
   });
 
   it("uses React-public keydown authority for wraps, boundaries, pick, native Enter, and Escape isolation", async () => {
@@ -972,7 +1967,7 @@ describe("CollaboratorLoginInput", () => {
     },
   );
 
-  it.each([1, 2] as const)(
+  it.each([1, 2, 5] as const)(
     "keeps the exact keyboard pair through %s nested microtask checkpoint(s)",
     async (checkpoints) => {
       searchUsers.mockImplementation(() =>
@@ -1874,7 +2869,7 @@ describe("CollaboratorLoginInput", () => {
     { key: "Home", destination: 0 },
     { key: "End", destination: 2 },
   ])(
-    "$key rejects proxy, clone, and duplicate wrapper attempts without poisoning a clean successor",
+    "$key ignores wrong-source and duplicate keyboard deliveries without poisoning the rightful route",
     async ({ key, destination }) => {
       searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
       const onChange = vi.fn();
@@ -1900,13 +2895,12 @@ describe("CollaboratorLoginInput", () => {
           exactInput,
           "onKeyDown",
           (current, event) => {
-            const proxy = new Proxy(event, {});
-            const clone = Object.assign(
-              Object.create(Object.getPrototypeOf(event)),
-              event,
-            ) as KeyboardEvent<HTMLInputElement>;
-            current(proxy);
-            current(clone);
+            const wrongInput = independentKeyboardDelivery(event);
+            wrongInput.values.set("currentTarget", document.createElement("input"));
+            const wrongRoot = independentKeyboardDelivery(event);
+            wrongRoot.values.set("target", exactInput.parentElement);
+            current(wrongInput.event as KeyboardEvent<HTMLInputElement>);
+            current(wrongRoot.event as KeyboardEvent<HTMLInputElement>);
             current(event);
             current(event);
           },
@@ -1915,13 +2909,14 @@ describe("CollaboratorLoginInput", () => {
         const event = dispatchKeyDown(exactInput, key);
         restore();
 
-        expect(event.defaultPrevented).toBe(false);
-        expect(preventDefault).not.toHaveBeenCalled();
-        expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[destination]).toHaveAttribute("aria-selected", "true");
         expect(onChange).not.toHaveBeenCalled();
         expect(onPick).not.toHaveBeenCalled();
         expect(searchUsers).toHaveBeenCalledOnce();
 
+        preventDefault.mockClear();
         const recovered = dispatchKeyDown(exactInput, key);
         expect(recovered.defaultPrevented).toBe(true);
         expect(preventDefault).toHaveBeenCalledOnce();

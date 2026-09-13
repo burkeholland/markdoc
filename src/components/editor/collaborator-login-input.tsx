@@ -268,6 +268,7 @@ interface InputKeyboardReactProof {
   readonly nativeEvent: globalThis.KeyboardEvent;
   readonly target: HTMLInputElement;
   readonly currentTarget: Element;
+  readonly nativeCurrentTarget: EventTarget;
   readonly eventPhase: number;
   readonly key: string;
   readonly code: string;
@@ -278,7 +279,7 @@ interface InputKeyboardReactProof {
   readonly which: number;
   readonly detail: number;
   readonly timeStamp: number;
-  readonly view: Window;
+  readonly view: Window | null;
   readonly composing: false | null;
   readonly methods: InputKeyboardReactMethods;
 }
@@ -312,7 +313,8 @@ interface InputKeyboardNativeProof {
   readonly target: HTMLInputElement;
   readonly path: readonly EventTarget[];
   readonly pathTerminal: EventTarget;
-  readonly view: Window;
+  readonly window: InputKeyboardWindowProof;
+  readonly view: Window | null;
   readonly key: string;
   readonly code: string;
   readonly location: number;
@@ -329,37 +331,28 @@ interface InputKeyboardNativeProof {
   readonly repeat: false;
   readonly composing: false;
   readonly intent: InputKeyboardIntent;
-  crossed: boolean;
 }
 
-interface InputKeyboardTerminalProof {
-  readonly native: InputKeyboardNativeProof;
-  readonly reactRootCapture: InputKeyboardReactProof;
-  readonly reactInputCapture: InputKeyboardReactProof;
-  readonly reactInputBubble: InputKeyboardReactProof;
-  readonly reactRootBubble: InputKeyboardReactProof;
+interface InputKeyboardWindowProof {
+  readonly receiver: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly addEventListener: EventTarget["addEventListener"];
+  readonly removeEventListener: EventTarget["removeEventListener"];
 }
 
 interface InputKeyboardPreventionProof {
-  readonly terminal: InputKeyboardTerminalProof;
+  readonly final: InputKeyboardReactProof;
   readonly currentIsDefaultPrevented: InputKeyboardReactMethod;
-  readonly capturePrevented: boolean;
 }
 
 interface InputKeyboardNativeReactPair {
   readonly native: InputKeyboardNativeProof;
-  reactRootCapture: InputKeyboardReactProof | null;
-  reactInputCapture: InputKeyboardReactProof | null;
-  reactInputBubble: InputKeyboardReactProof | null;
-  reactRootBubble: InputKeyboardReactProof | null;
+  react: readonly InputKeyboardReactProof[];
   boundaryObserved: boolean;
-  terminal: InputKeyboardTerminalProof | null;
+  documentObserved: boolean;
   prevention: InputKeyboardPreventionProof | null;
-  windowReceiver: EventTarget | null;
   consumed: boolean;
   handling: boolean;
-  finalizing: boolean;
-  rejected: boolean;
 }
 
 interface InputKeyboardRuntime {
@@ -369,75 +362,6 @@ interface InputKeyboardRuntime {
   readonly captureInput: (event: KeyboardEvent<HTMLInputElement>) => void;
   readonly bubbleInput: (event: KeyboardEvent<HTMLInputElement>) => void;
   readonly bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
-}
-
-type InputKeyboardIntrinsicGetter<T> = {
-  readonly read: (target: object) => T;
-  readonly isCurrent: () => boolean;
-};
-
-type InputKeyboardIntrinsicMethod<
-  Args extends readonly unknown[],
-  Result,
-> = {
-  readonly call: (target: object, ...args: Args) => Result;
-  readonly isCurrent: () => boolean;
-};
-
-interface InputKeyboardAuthority {
-  readonly ownerWindow: Window & typeof globalThis;
-  readonly eventPrototype: object;
-  readonly keyboardPrototype: object;
-  readonly eventType: InputKeyboardIntrinsicGetter<string>;
-  readonly eventTarget: InputKeyboardIntrinsicGetter<EventTarget | null>;
-  readonly eventCurrentTarget: InputKeyboardIntrinsicGetter<EventTarget | null>;
-  readonly eventPhase: InputKeyboardIntrinsicGetter<number>;
-  readonly eventBubbles: InputKeyboardIntrinsicGetter<boolean>;
-  readonly eventCancelable: InputKeyboardIntrinsicGetter<boolean>;
-  readonly eventDefaultPrevented: InputKeyboardIntrinsicGetter<boolean>;
-  readonly eventCancelBubble: InputKeyboardIntrinsicGetter<boolean>;
-  readonly eventTimeStamp: InputKeyboardIntrinsicGetter<number>;
-  readonly eventPath: InputKeyboardIntrinsicMethod<readonly [], EventTarget[]>;
-  readonly eventView: InputKeyboardIntrinsicGetter<Window | null>;
-  readonly eventDetail: InputKeyboardIntrinsicGetter<number>;
-  readonly keyboardKey: InputKeyboardIntrinsicGetter<string>;
-  readonly keyboardCode: InputKeyboardIntrinsicGetter<string>;
-  readonly keyboardLocation: InputKeyboardIntrinsicGetter<number>;
-  readonly keyboardLocale: InputKeyboardIntrinsicGetter<string> | null;
-  readonly keyboardCharCode: InputKeyboardIntrinsicGetter<number>;
-  readonly keyboardKeyCode: InputKeyboardIntrinsicGetter<number>;
-  readonly keyboardWhich: InputKeyboardIntrinsicGetter<number>;
-  readonly keyboardCtrl: InputKeyboardIntrinsicGetter<boolean>;
-  readonly keyboardMeta: InputKeyboardIntrinsicGetter<boolean>;
-  readonly keyboardAlt: InputKeyboardIntrinsicGetter<boolean>;
-  readonly keyboardShift: InputKeyboardIntrinsicGetter<boolean>;
-  readonly keyboardRepeat: InputKeyboardIntrinsicGetter<boolean>;
-  readonly keyboardComposing: InputKeyboardIntrinsicGetter<boolean>;
-  readonly activeElement: InputKeyboardIntrinsicGetter<Element | null>;
-  readonly addEventListener: InputKeyboardIntrinsicMethod<
-    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
-    void
-  >;
-  readonly removeEventListener: InputKeyboardIntrinsicMethod<
-    readonly [string, EventListener, (boolean | EventListenerOptions)?],
-    void
-  >;
-  readonly addWindowEventListener: InputKeyboardIntrinsicMethod<
-    readonly [string, EventListener, (boolean | AddEventListenerOptions)?],
-    void
-  >;
-  readonly removeWindowEventListener: InputKeyboardIntrinsicMethod<
-    readonly [string, EventListener, (boolean | EventListenerOptions)?],
-    void
-  >;
-  readonly isTrusted: {
-    readonly matches: (event: object) => boolean;
-    readonly read: (event: object) => boolean;
-    readonly isCurrent: () => boolean;
-  };
-  readonly apply: typeof Reflect.apply;
-  readonly getPrototypeOf: typeof Object.getPrototypeOf;
-  readonly isCurrent: () => boolean;
 }
 
 interface InputElementOwnerView {
@@ -523,6 +447,7 @@ interface InputPublicationCells {
   readonly claimedReactEvents: WeakSet<object>;
   readonly deliveredReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly observedKeyboardEvents: WeakSet<globalThis.KeyboardEvent>;
   readonly consumedPublications: WeakSet<InputPublication>;
   readonly seenElements: WeakSet<HTMLElement>;
 }
@@ -941,429 +866,6 @@ function isReactEvent(
   }
 }
 
-function inputKeyboardDescriptorsMatch(
-  current: PropertyDescriptor | undefined,
-  expected: PropertyDescriptor,
-) {
-  return Boolean(
-    current &&
-      current.configurable === expected.configurable &&
-      current.enumerable === expected.enumerable &&
-      current.writable === expected.writable &&
-      current.value === expected.value &&
-      current.get === expected.get &&
-      current.set === expected.set,
-  );
-}
-
-function captureInputKeyboardAuthority(
-  ownerWindow: Window & typeof globalThis,
-): InputKeyboardAuthority | null {
-  const getOwnPropertyDescriptor =
-    ownerWindow.Object.getOwnPropertyDescriptor;
-  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
-  const apply = ownerWindow.Reflect.apply;
-  const eventPrototype = ownerWindow.Event.prototype;
-  const uiEventPrototype = ownerWindow.UIEvent.prototype;
-  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
-  const documentPrototype = ownerWindow.Document.prototype;
-  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
-  const authorities: Array<{ readonly isCurrent: () => boolean }> = [];
-  const prototypeLinks: Array<readonly [object, object | null]> = [];
-  const linkedPrototypes = new Set<object>();
-
-  const capturePrototypeChain = (prototype: object) => {
-    let current: object | null = prototype;
-    while (current && !linkedPrototypes.has(current)) {
-      linkedPrototypes.add(current);
-      const parent = getPrototypeOf(current) as object | null;
-      prototypeLinks.push(Object.freeze([current, parent] as const));
-      current = parent;
-    }
-  };
-  capturePrototypeChain(eventPrototype);
-  capturePrototypeChain(uiEventPrototype);
-  capturePrototypeChain(keyboardPrototype);
-  capturePrototypeChain(documentPrototype);
-  capturePrototypeChain(eventTargetPrototype);
-
-  const captureGetter = <T,>(
-    prototype: object,
-    property: PropertyKey,
-  ): InputKeyboardIntrinsicGetter<T> | null => {
-    let current: object | null = prototype;
-    while (current) {
-      const descriptor = getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        if (typeof descriptor.get !== "function") return null;
-        const owner = current;
-        const expected = Object.freeze({ ...descriptor });
-        const getter = descriptor.get;
-        const authority = Object.freeze({
-          read: (target: object) => apply(getter, target, []) as T,
-          isCurrent: () =>
-            inputKeyboardDescriptorsMatch(
-              getOwnPropertyDescriptor(owner, property),
-              expected,
-            ),
-        });
-        authorities.push(authority);
-        return authority;
-      }
-      current = getPrototypeOf(current) as object | null;
-    }
-    return null;
-  };
-
-  const captureMethod = <
-    Args extends readonly unknown[],
-    Result,
-  >(
-    prototype: object,
-    property: PropertyKey,
-  ): InputKeyboardIntrinsicMethod<Args, Result> | null => {
-    let current: object | null = prototype;
-    while (current) {
-      const descriptor = getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        if (typeof descriptor.value !== "function") return null;
-        const owner = current;
-        const expected = Object.freeze({ ...descriptor });
-        const method = descriptor.value as (...args: Args) => Result;
-        const authority = Object.freeze({
-          call: (target: object, ...args: Args) =>
-            apply(method, target, args) as Result,
-          isCurrent: () =>
-            inputKeyboardDescriptorsMatch(
-              getOwnPropertyDescriptor(owner, property),
-              expected,
-            ),
-        });
-        authorities.push(authority);
-        return authority;
-      }
-      current = getPrototypeOf(current) as object | null;
-    }
-    return null;
-  };
-
-  const captureCallableProperty = <
-    Args extends readonly unknown[],
-    Result,
-  >(
-    target: object,
-    property: PropertyKey,
-  ): InputKeyboardIntrinsicMethod<Args, Result> | null => {
-    let current: object | null = target;
-    while (current) {
-      const descriptor = getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        const method =
-          typeof descriptor.value === "function"
-            ? descriptor.value
-            : typeof descriptor.get === "function"
-              ? apply(descriptor.get, target, [])
-              : null;
-        if (typeof method !== "function") return null;
-        const owner = current;
-        const expected = Object.freeze({ ...descriptor });
-        const authority = Object.freeze({
-          call: (receiver: object, ...args: Args) =>
-            apply(
-              method as (...values: Args) => Result,
-              receiver,
-              args,
-            ) as Result,
-          isCurrent: () => {
-            const currentDescriptor = getOwnPropertyDescriptor(
-              owner,
-              property,
-            );
-            return (
-              inputKeyboardDescriptorsMatch(
-                currentDescriptor,
-                expected,
-              ) &&
-              (typeof expected.get !== "function" ||
-                apply(expected.get, target, []) === method)
-            );
-          },
-        });
-        authorities.push(authority);
-        return authority;
-      }
-      current = getPrototypeOf(current) as object | null;
-    }
-    return null;
-  };
-
-  const eventType = captureGetter<string>(eventPrototype, "type");
-  const eventTarget = captureGetter<EventTarget | null>(
-    eventPrototype,
-    "target",
-  );
-  const eventCurrentTarget = captureGetter<EventTarget | null>(
-    eventPrototype,
-    "currentTarget",
-  );
-  const eventPhase = captureGetter<number>(
-    eventPrototype,
-    "eventPhase",
-  );
-  const eventBubbles = captureGetter<boolean>(
-    eventPrototype,
-    "bubbles",
-  );
-  const eventCancelable = captureGetter<boolean>(
-    eventPrototype,
-    "cancelable",
-  );
-  const eventDefaultPrevented = captureGetter<boolean>(
-    eventPrototype,
-    "defaultPrevented",
-  );
-  const eventCancelBubble = captureGetter<boolean>(
-    eventPrototype,
-    "cancelBubble",
-  );
-  const eventTimeStamp = captureGetter<number>(
-    eventPrototype,
-    "timeStamp",
-  );
-  const eventPath = captureMethod<readonly [], EventTarget[]>(
-    eventPrototype,
-    "composedPath",
-  );
-  const eventView = captureGetter<Window | null>(
-    uiEventPrototype,
-    "view",
-  );
-  const eventDetail = captureGetter<number>(
-    uiEventPrototype,
-    "detail",
-  );
-  const keyboardKey = captureGetter<string>(
-    keyboardPrototype,
-    "key",
-  );
-  const keyboardCode = captureGetter<string>(
-    keyboardPrototype,
-    "code",
-  );
-  const keyboardLocation = captureGetter<number>(
-    keyboardPrototype,
-    "location",
-  );
-  const keyboardLocale = captureGetter<string>(
-    keyboardPrototype,
-    "locale",
-  );
-  const keyboardCharCode = captureGetter<number>(
-    keyboardPrototype,
-    "charCode",
-  );
-  const keyboardKeyCode = captureGetter<number>(
-    keyboardPrototype,
-    "keyCode",
-  );
-  const keyboardWhich = captureGetter<number>(
-    keyboardPrototype,
-    "which",
-  );
-  const keyboardCtrl = captureGetter<boolean>(
-    keyboardPrototype,
-    "ctrlKey",
-  );
-  const keyboardMeta = captureGetter<boolean>(
-    keyboardPrototype,
-    "metaKey",
-  );
-  const keyboardAlt = captureGetter<boolean>(
-    keyboardPrototype,
-    "altKey",
-  );
-  const keyboardShift = captureGetter<boolean>(
-    keyboardPrototype,
-    "shiftKey",
-  );
-  const keyboardRepeat = captureGetter<boolean>(
-    keyboardPrototype,
-    "repeat",
-  );
-  const keyboardComposing = captureGetter<boolean>(
-    keyboardPrototype,
-    "isComposing",
-  );
-  const activeElement = captureGetter<Element | null>(
-    documentPrototype,
-    "activeElement",
-  );
-  const addEventListener = captureMethod<
-    readonly [
-      string,
-      EventListener,
-      (boolean | AddEventListenerOptions)?,
-    ],
-    void
-  >(eventTargetPrototype, "addEventListener");
-  const removeEventListener = captureMethod<
-    readonly [
-      string,
-      EventListener,
-      (boolean | EventListenerOptions)?,
-    ],
-    void
-  >(eventTargetPrototype, "removeEventListener");
-  const addWindowEventListener = captureCallableProperty<
-    readonly [
-      string,
-      EventListener,
-      (boolean | AddEventListenerOptions)?,
-    ],
-    void
-  >(ownerWindow, "addEventListener");
-  const removeWindowEventListener = captureCallableProperty<
-    readonly [
-      string,
-      EventListener,
-      (boolean | EventListenerOptions)?,
-    ],
-    void
-  >(ownerWindow, "removeEventListener");
-
-  let trustProbe: globalThis.KeyboardEvent;
-  try {
-    trustProbe = new ownerWindow.KeyboardEvent(
-      "collaborator-login-keyboard-intrinsic",
-    );
-  } catch {
-    return null;
-  }
-  const trustDescriptor = getOwnPropertyDescriptor(
-    trustProbe,
-    "isTrusted",
-  );
-  if (
-    !trustDescriptor ||
-    trustDescriptor.configurable !== false ||
-    typeof trustDescriptor.get !== "function" ||
-    trustDescriptor.set !== undefined
-  ) {
-    return null;
-  }
-  const expectedTrustDescriptor = Object.freeze({
-    ...trustDescriptor,
-  });
-  const isTrusted = Object.freeze({
-    matches: (event: object) =>
-      inputKeyboardDescriptorsMatch(
-        getOwnPropertyDescriptor(event, "isTrusted"),
-        expectedTrustDescriptor,
-      ),
-    read: (event: object) =>
-      apply(
-        trustDescriptor.get as (this: object) => boolean,
-        event,
-        [],
-      ),
-    isCurrent: () =>
-      inputKeyboardDescriptorsMatch(
-        getOwnPropertyDescriptor(trustProbe, "isTrusted"),
-        expectedTrustDescriptor,
-      ),
-  });
-
-  if (
-    !eventType ||
-    !eventTarget ||
-    !eventCurrentTarget ||
-    !eventPhase ||
-    !eventBubbles ||
-    !eventCancelable ||
-    !eventDefaultPrevented ||
-    !eventCancelBubble ||
-    !eventTimeStamp ||
-    !eventPath ||
-    !eventView ||
-    !eventDetail ||
-    !keyboardKey ||
-    !keyboardCode ||
-    !keyboardLocation ||
-    !keyboardCharCode ||
-    !keyboardKeyCode ||
-    !keyboardWhich ||
-    !keyboardCtrl ||
-    !keyboardMeta ||
-    !keyboardAlt ||
-    !keyboardShift ||
-    !keyboardRepeat ||
-    !keyboardComposing ||
-    !activeElement ||
-    !addEventListener ||
-    !removeEventListener ||
-    !addWindowEventListener ||
-    !removeWindowEventListener
-  ) {
-    return null;
-  }
-
-  const isCurrent = () =>
-    ownerWindow.Object.getOwnPropertyDescriptor ===
-      getOwnPropertyDescriptor &&
-    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
-    ownerWindow.Reflect.apply === apply &&
-    ownerWindow.Event.prototype === eventPrototype &&
-    ownerWindow.UIEvent.prototype === uiEventPrototype &&
-    ownerWindow.KeyboardEvent.prototype === keyboardPrototype &&
-    ownerWindow.Document.prototype === documentPrototype &&
-    ownerWindow.EventTarget.prototype === eventTargetPrototype &&
-    prototypeLinks.every(
-      ([prototype, parent]) => getPrototypeOf(prototype) === parent,
-    ) &&
-    isTrusted.isCurrent() &&
-    authorities.every((authority) => authority.isCurrent());
-
-  return Object.freeze({
-    ownerWindow,
-    eventPrototype,
-    keyboardPrototype,
-    eventType,
-    eventTarget,
-    eventCurrentTarget,
-    eventPhase,
-    eventBubbles,
-    eventCancelable,
-    eventDefaultPrevented,
-    eventCancelBubble,
-    eventTimeStamp,
-    eventPath,
-    eventView,
-    eventDetail,
-    keyboardKey,
-    keyboardCode,
-    keyboardLocation,
-    keyboardLocale,
-    keyboardCharCode,
-    keyboardKeyCode,
-    keyboardWhich,
-    keyboardCtrl,
-    keyboardMeta,
-    keyboardAlt,
-    keyboardShift,
-    keyboardRepeat,
-    keyboardComposing,
-    activeElement,
-    addEventListener,
-    removeEventListener,
-    addWindowEventListener,
-    removeWindowEventListener,
-    isTrusted,
-    apply,
-    getPrototypeOf,
-    isCurrent,
-  });
-}
-
 function inputKeyboardPath(
   target: HTMLInputElement,
   ownerDocument: Document,
@@ -1454,9 +956,8 @@ function readInputKeyboardReactProof(
   event: object,
   native: InputKeyboardNativeProof,
   currentTarget: Element,
-  authority: InputKeyboardAuthority,
+  nativeCurrentTarget: EventTarget,
   expectedPhase: number,
-  queryFenceIsCurrent: () => boolean,
 ): InputKeyboardReactProof | null {
   try {
     const values = event as Record<PropertyKey, unknown>;
@@ -1476,11 +977,21 @@ function readInputKeyboardReactProof(
       isPropagationStopped,
     });
     const composing = values.isComposing;
+    const view = values.view;
+    if (
+      (composing !== undefined && composing !== false) ||
+      (view !== null &&
+        view !== native.window.receiver &&
+        view !== native.publication.ownerDocument.defaultView)
+    ) {
+      return null;
+    }
     const proof: InputKeyboardReactProof = Object.freeze({
       event,
       nativeEvent: native.event,
       target: native.target,
       currentTarget,
+      nativeCurrentTarget,
       eventPhase: expectedPhase,
       key: native.key,
       code: native.code,
@@ -1491,82 +1002,22 @@ function readInputKeyboardReactProof(
       which: native.which,
       detail: native.detail,
       timeStamp: native.timeStamp,
-      view: native.view,
+      view: view as Window | null,
       composing: composing === undefined ? null : false,
       methods,
     });
-    if (
-      authority.eventPhase.read(native.event) !== expectedPhase ||
-      (composing !== undefined && composing !== false) ||
-      !inputKeyboardReactFieldsMatch(
-        proof,
-        native,
-        currentTarget,
-        false,
-        isDefaultPrevented,
-      )
-    ) {
-      return null;
-    }
-    if (
-      authority.apply(isDefaultPrevented, event, []) !== false ||
-      !queryFenceIsCurrent() ||
-      !inputKeyboardReactFieldsMatch(
-        proof,
-        native,
-        currentTarget,
-        false,
-        isDefaultPrevented,
-      )
-    ) {
-      return null;
-    }
-    if (
-      authority.apply(isPropagationStopped, event, []) !== false ||
-      !queryFenceIsCurrent() ||
-      !inputKeyboardReactFieldsMatch(
-        proof,
-        native,
-        currentTarget,
-        false,
-        isDefaultPrevented,
-      )
-    ) {
-      return null;
-    }
-    return proof;
+    return inputKeyboardReactFieldsMatch(
+      proof,
+      native,
+      currentTarget,
+      false,
+      isDefaultPrevented,
+    )
+      ? proof
+      : null;
   } catch {
     return null;
   }
-}
-
-function inputKeyboardPhaseProofsMatch(
-  rootProof: InputKeyboardReactProof,
-  inputProof: InputKeyboardReactProof,
-  native: InputKeyboardNativeProof,
-  root: HTMLDivElement,
-  phase: number,
-) {
-  return (
-    rootProof.event === inputProof.event &&
-    rootProof.nativeEvent === native.event &&
-    inputProof.nativeEvent === native.event &&
-    rootProof.target === native.target &&
-    inputProof.target === native.target &&
-    rootProof.currentTarget === root &&
-    inputProof.currentTarget === native.target &&
-    rootProof.eventPhase === phase &&
-    inputProof.eventPhase === phase &&
-    rootProof.key === native.key &&
-    inputProof.key === native.key &&
-    rootProof.composing === inputProof.composing &&
-    rootProof.methods.preventDefault ===
-      inputProof.methods.preventDefault &&
-    rootProof.methods.isDefaultPrevented ===
-      inputProof.methods.isDefaultPrevented &&
-    rootProof.methods.isPropagationStopped ===
-      inputProof.methods.isPropagationStopped
-  );
 }
 
 function createInputPublication(
@@ -2753,46 +2204,104 @@ function createInputPublication(
       if (!capturedWindow) return null;
       const keyboardWindow: Window & typeof globalThis =
         capturedWindow;
-      const capturedAuthority =
-        captureInputKeyboardAuthority(keyboardWindow);
-      if (!capturedAuthority?.isCurrent()) return null;
-      const authority: InputKeyboardAuthority =
-        capturedAuthority;
-
+      const KeyboardEventConstructor = keyboardWindow.KeyboardEvent;
+      const EventConstructor = keyboardWindow.Event;
+      const EventTargetConstructor = keyboardWindow.EventTarget;
+      const composedPath = EventConstructor.prototype.composedPath;
+      const addEventListener =
+        EventTargetConstructor.prototype.addEventListener;
+      const removeEventListener =
+        EventTargetConstructor.prototype.removeEventListener;
+      const apply = keyboardWindow.Reflect.apply;
+      const listenerOwners = [
+        keyboardWindow,
+        ownerDocument,
+        publication.input,
+      ].map((target) => ({
+        target,
+        add: target.addEventListener,
+        remove: target.removeEventListener,
+      }));
+      if (
+        typeof KeyboardEventConstructor !== "function" ||
+        typeof composedPath !== "function" ||
+        typeof addEventListener !== "function" ||
+        typeof removeEventListener !== "function" ||
+        listenerOwners.some(
+          (owner) =>
+            typeof owner.add !== "function" ||
+            typeof owner.remove !== "function",
+        )
+      ) {
+        return null;
+      }
       let released = false;
       let published = false;
-      let windowListenerActive = false;
+      let listenersActive = false;
       let nativePairs = new WeakMap<
         globalThis.KeyboardEvent,
         InputKeyboardNativeReactPair
       >();
-      let attemptedNativeEvents =
-        new WeakSet<globalThis.KeyboardEvent>();
-      let activeNativeEvent:
-        | WeakRef<globalThis.KeyboardEvent>
-        | null = null;
+      let windowProofs = new WeakMap<Event, InputKeyboardWindowProof>();
+      let readingWrappers = new WeakSet<object>();
+      let readingNativeEvents = new WeakSet<object>();
 
-      const publicationIsCurrent = () => {
-        if (
-          !released &&
-          authority.isCurrent() &&
-          currentRuntime === runtime &&
-          !runtime.isRetired() &&
-          !publication.isRetired() &&
-          cells.active === publication &&
-          publication.presentation === presentation &&
-          ownerDocument.defaultView === keyboardWindow &&
-          factsAreCurrent() &&
-          exactDomIsCurrent() &&
-          runtime.publishedDomMatches()
-        ) {
-          return true;
+      const publicationMemoryIsCurrent = () =>
+        !released &&
+        currentRuntime === runtime &&
+        !retired &&
+        cells.active === publication &&
+        cells.renderToken === renderToken &&
+        cells.renderBinding === presentation.binding &&
+        context.coordinator.binding() === presentation.binding &&
+        context.coordinator.query() === presentation.query &&
+        context.coordinator.published() === presentation.sourceState &&
+        !cells.retiredPublications.has(publication);
+
+      const listenersAreCurrent = () =>
+        ownerDocument.defaultView === keyboardWindow &&
+        keyboardWindow.document === ownerDocument &&
+        keyboardWindow.KeyboardEvent === KeyboardEventConstructor &&
+        keyboardWindow.Event === EventConstructor &&
+        keyboardWindow.EventTarget === EventTargetConstructor &&
+        EventConstructor.prototype.composedPath === composedPath &&
+        EventTargetConstructor.prototype.addEventListener ===
+          addEventListener &&
+        EventTargetConstructor.prototype.removeEventListener ===
+          removeEventListener &&
+        keyboardWindow.Reflect.apply === apply &&
+        listenerOwners.every(
+          ({ target, add, remove }) =>
+            target.addEventListener === add &&
+            target.removeEventListener === remove,
+        );
+
+      const drainDomChanges = () => {
+        const observer = domObserver;
+        if (!observer || recordMutations(observer.takeRecords(), false)) {
+          return false;
         }
-        if (!released && currentRuntime === runtime) {
-          retire("other");
-        }
-        return false;
+        return domObserver === observer && !domChanged && !released;
       };
+
+      const publicationIsCurrent = (requireFocus = true) =>
+        publicationMemoryIsCurrent() &&
+        listenersAreCurrent() &&
+        factsAreCurrent() &&
+        drainDomChanges() &&
+        Boolean(
+          domSnapshot &&
+            publishedPlacement &&
+            rootOwner.element() === publication.root &&
+            inputOwner.element() === publication.input &&
+            inputPlacementMatches(publication.root, publishedPlacement) &&
+            inputDomMatches(domSnapshot),
+        ) &&
+        exactDomIsCurrent() &&
+        (!requireFocus ||
+          ownerDocument.activeElement === publication.input) &&
+        drainDomChanges() &&
+        publicationMemoryIsCurrent();
 
       const makeIntent = (
         key: string,
@@ -2875,16 +2384,9 @@ function createInputPublication(
 
       const intentIsCurrent = (
         intent: InputKeyboardIntent,
-        claimed: boolean,
       ) => {
         const row = intent.row;
         const query = intent.query;
-        const candidateStatus = claimed
-          ? cells.claimedPublications.has(publication) &&
-            cells.claimedActions.has(intent.action) &&
-            (!row || cells.claimedRows.has(row)) &&
-            (!query || cells.claimedQueries.has(query))
-          : candidateIsCurrent(row, intent.action);
         const currentDestination =
           intent.destinationIndex < 0
             ? null
@@ -2892,7 +2394,14 @@ function createInputPublication(
                 intent.destinationIndex
               ] ?? null;
         return (
-          candidateStatus &&
+          publicationMemoryIsCurrent() &&
+          !cells.claimedPublications.has(publication) &&
+          !cells.claimedActions.has(intent.action) &&
+          !cells.retiredActions.has(intent.action) &&
+          (!row ||
+            (!cells.claimedRows.has(row) &&
+              !cells.retiredRows.has(row))) &&
+          (!query || !cells.claimedQueries.has(query)) &&
           intent.publicationIdentity === publication.identity &&
           intent.action === inputActions.keydown &&
           intent.action.kind === "keydown" &&
@@ -2921,851 +2430,429 @@ function createInputPublication(
           (row === null ||
             (intent.destination !== null &&
               publication.rows[intent.destinationIndex] === row &&
-              row.authority === intent.destination &&
-              row.element.ownerDocument === ownerDocument &&
-              row.element.isConnected)) &&
-          authority.activeElement.read(ownerDocument) ===
-            publication.input &&
-          publicationIsCurrent()
+              row.authority === intent.destination)) &&
+          factsAreCurrent()
         );
       };
 
       const nativeStillMatches = (
         proof: InputKeyboardNativeProof,
+        currentTarget: EventTarget,
+        phase: number,
+        prevented: boolean,
       ) => {
-        try {
+        const event = proof.event;
+        return (
+          event instanceof KeyboardEventConstructor &&
+          event.isTrusted === true &&
+          event.type === "keydown" &&
+          event.target === proof.target &&
+          event.currentTarget === currentTarget &&
+          event.eventPhase === phase &&
+          event.bubbles === true &&
+          event.cancelable === true &&
+          event.defaultPrevented === prevented &&
+          event.cancelBubble === false &&
+          event.view === proof.view &&
+          (proof.view === null ||
+            proof.view === keyboardWindow ||
+            proof.view === proof.window.receiver) &&
+          event.timeStamp === proof.timeStamp &&
+          event.detail === proof.detail &&
+          event.key === proof.key &&
+          event.code === proof.code &&
+          event.location === proof.location &&
+          (event as globalThis.KeyboardEvent & { locale?: string })
+            .locale === proof.locale &&
+          event.charCode === proof.charCode &&
+          event.keyCode === proof.keyCode &&
+          event.which === proof.which &&
+          event.ctrlKey === false &&
+          event.metaKey === false &&
+          event.altKey === false &&
+          event.shiftKey === false &&
+          event.repeat === false &&
+          event.isComposing === false &&
+          inputKeyboardPathsMatch(
+            proof.path,
+            apply(composedPath, event, []) as EventTarget[],
+          )
+        );
+      };
+
+      const windowIsCurrent = (proof: InputKeyboardNativeProof) => {
+        const window = proof.window;
+        return (
+          listenersActive &&
+          listenersAreCurrent() &&
+          windowProofs.get(proof.event) === window &&
+          window.receiver === proof.pathTerminal &&
+          (window.receiver as Window).document === ownerDocument &&
+          window.receiver.addEventListener === window.addEventListener &&
+          window.receiver.removeEventListener ===
+            window.removeEventListener &&
+          inputKeyboardPathsMatch(window.path, proof.path)
+        );
+      };
+
+      type Validation = Readonly<{
+        registered: boolean;
+        retainedReact: readonly InputKeyboardReactProof[];
+        retainedPrevention: InputKeyboardPreventionProof | null;
+        boundaryObserved: boolean;
+        documentObserved: boolean;
+        react: readonly InputKeyboardReactProof[];
+        active: InputKeyboardReactProof | null;
+        prevention: InputKeyboardPreventionProof | null;
+        currentTarget: EventTarget;
+        phase: number;
+      }>;
+
+      const validationAt = (
+        pair: InputKeyboardNativeReactPair,
+        currentTarget: EventTarget,
+        phase: number,
+        active: InputKeyboardReactProof | null = null,
+        react = pair.react,
+        prevention = pair.prevention,
+        registered = true,
+      ): Validation => ({
+        registered,
+        retainedReact: pair.react,
+        retainedPrevention: pair.prevention,
+        boundaryObserved: pair.boundaryObserved,
+        documentObserved: pair.documentObserved,
+        react,
+        active,
+        prevention,
+        currentTarget,
+        phase,
+      });
+
+      const pairIsCurrent = (
+        pair: InputKeyboardNativeReactPair,
+        state: Validation,
+      ) =>
+        published &&
+        listenersActive &&
+        publicationMemoryIsCurrent() &&
+        pair.handling &&
+        !pair.consumed &&
+        (state.registered
+          ? nativePairs.get(pair.native.event) === pair
+          : !nativePairs.has(pair.native.event)) &&
+        pair.react === state.retainedReact &&
+        pair.prevention === state.retainedPrevention &&
+        pair.boundaryObserved === state.boundaryObserved &&
+        pair.documentObserved === state.documentObserved &&
+        !cells.claimedNativeEvents.has(pair.native.event) &&
+        state.react.every(
+          (proof) => !cells.claimedReactEvents.has(proof.event),
+        ) &&
+        intentIsCurrent(pair.native.intent);
+
+      const wasPrevented = (
+        proof: InputKeyboardReactProof,
+        state: Validation,
+      ) =>
+        state.prevention !== null &&
+        proof.event === state.prevention.final.event &&
+        proof.eventPhase === EventConstructor.BUBBLING_PHASE;
+
+      const defaultQuery = (
+        proof: InputKeyboardReactProof,
+        state: Validation,
+      ) =>
+        wasPrevented(proof, state)
+          ? state.prevention!.currentIsDefaultPrevented
+          : proof.methods.isDefaultPrevented;
+
+      const reactMethodsMatch = (state: Validation) =>
+        state.react.every((proof) => {
+          const event = proof.event as Record<PropertyKey, unknown>;
           return (
-            authority.isCurrent() &&
-            authority.getPrototypeOf(proof.event) ===
-              authority.keyboardPrototype &&
-            authority.isTrusted.matches(proof.event) &&
-            authority.isTrusted.read(proof.event) === true &&
-            authority.eventType.read(proof.event) === "keydown" &&
-            authority.eventTarget.read(proof.event) ===
-              proof.target &&
-            authority.eventBubbles.read(proof.event) === true &&
-            authority.eventCancelable.read(proof.event) === true &&
-            authority.eventView.read(proof.event) === proof.view &&
-            authority.eventTimeStamp.read(proof.event) ===
-              proof.timeStamp &&
-            authority.eventDetail.read(proof.event) ===
-              proof.detail &&
-            authority.keyboardKey.read(proof.event) === proof.key &&
-            authority.keyboardCode.read(proof.event) ===
-              proof.code &&
-            authority.keyboardLocation.read(proof.event) ===
-              proof.location &&
-            (authority.keyboardLocale
-              ? authority.keyboardLocale.read(proof.event) ===
-                proof.locale
-              : proof.locale === undefined) &&
-            authority.keyboardCharCode.read(proof.event) ===
-              proof.charCode &&
-            authority.keyboardKeyCode.read(proof.event) ===
-              proof.keyCode &&
-            authority.keyboardWhich.read(proof.event) ===
-              proof.which &&
-            authority.keyboardCtrl.read(proof.event) === false &&
-            authority.keyboardMeta.read(proof.event) === false &&
-            authority.keyboardAlt.read(proof.event) === false &&
-            authority.keyboardShift.read(proof.event) === false &&
-            authority.keyboardRepeat.read(proof.event) === false &&
-            authority.keyboardComposing.read(proof.event) ===
-              false &&
-            inputKeyboardPathsMatch(
-              proof.path,
-              authority.eventPath.call(proof.event),
+            event.preventDefault === proof.methods.preventDefault &&
+            event.isDefaultPrevented === defaultQuery(proof, state) &&
+            event.isPropagationStopped ===
+              proof.methods.isPropagationStopped
+          );
+        });
+
+      const reactFieldsMatch = (
+        pair: InputKeyboardNativeReactPair,
+        state: Validation,
+      ) =>
+        state.react.every((proof) => {
+          const latest = state.react.findLast(
+            (other) => other.event === proof.event,
+          )!;
+          const actual = (proof.event as Record<PropertyKey, unknown>)
+            .currentTarget;
+          const currentTarget =
+            state.active?.event === proof.event
+              ? state.active.currentTarget
+              : actual === null
+                ? null
+                : latest.currentTarget;
+          return (
+            proof.nativeEvent === pair.native.event &&
+            (proof.view === null ||
+              proof.view === keyboardWindow ||
+              proof.view === pair.native.window.receiver) &&
+            inputKeyboardReactFieldsMatch(
+              proof,
+              pair.native,
+              currentTarget,
+              wasPrevented(proof, state),
+              defaultQuery(proof, state),
             )
           );
-        } catch {
+        });
+
+      const validate = (
+        pair: InputKeyboardNativeReactPair,
+        state: Validation,
+      ) => {
+        // DOM and public event reads can synchronously call back into this route.
+        // Keep the exclusion through both observations and the final identity reads.
+        if (
+          !pairIsCurrent(pair, state) ||
+          !windowIsCurrent(pair.native) ||
+          !nativeStillMatches(
+            pair.native,
+            state.currentTarget,
+            state.phase,
+            state.prevention !== null,
+          ) ||
+          !reactFieldsMatch(pair, state) ||
+          !publicationIsCurrent()
+        ) {
           return false;
         }
-      };
-
-      const exactNativeEvent = (
-        event: Event,
-      ): InputKeyboardNativeProof | null => {
-        try {
-          if (
-            !publicationIsCurrent() ||
-            authority.getPrototypeOf(event) !==
-              authority.keyboardPrototype ||
-            !authority.isTrusted.matches(event) ||
-            authority.isTrusted.read(event) !== true ||
-            authority.eventCurrentTarget.read(event) !==
-              ownerDocument ||
-            authority.eventPhase.read(event) !==
-              keyboardWindow.Event.CAPTURING_PHASE ||
-            authority.eventTarget.read(event) !== publication.input ||
-            authority.activeElement.read(ownerDocument) !==
-              publication.input ||
-            !authority.eventBubbles.read(event) ||
-            !authority.eventCancelable.read(event) ||
-            authority.eventDefaultPrevented.read(event) ||
-            authority.eventCancelBubble.read(event) ||
-            authority.keyboardCtrl.read(event) ||
-            authority.keyboardMeta.read(event) ||
-            authority.keyboardAlt.read(event) ||
-            authority.keyboardShift.read(event) ||
-            authority.keyboardRepeat.read(event) ||
-            authority.keyboardComposing.read(event)
-          ) {
-            return null;
-          }
-          const nativeEvent = event as globalThis.KeyboardEvent;
-          if (
-            attemptedNativeEvents.has(nativeEvent) ||
-            cells.claimedNativeEvents.has(nativeEvent)
-          ) {
-            return null;
-          }
-          const path = inputKeyboardPath(
-            publication.input,
-            ownerDocument,
-            authority.eventPath.call(event),
-          );
-          if (!path) return null;
-          const pathTerminal = path.at(-1);
-          const view = authority.eventView.read(event);
-          if (
-            !pathTerminal ||
-            view === null ||
-            (view !== keyboardWindow && view !== pathTerminal)
-          ) {
-            return null;
-          }
-          const key = authority.keyboardKey.read(event);
-          const intent = makeIntent(key);
-          if (!intent) return null;
-          return {
-            identity: Symbol("collaborator native keyboard event"),
-            publication,
-            event: nativeEvent,
-            target: publication.input,
-            path,
-            pathTerminal,
-            view,
-            key,
-            code: authority.keyboardCode.read(event),
-            location: authority.keyboardLocation.read(event),
-            locale: authority.keyboardLocale?.read(event),
-            charCode: authority.keyboardCharCode.read(event),
-            keyCode: authority.keyboardKeyCode.read(event),
-            which: authority.keyboardWhich.read(event),
-            detail: authority.eventDetail.read(event),
-            timeStamp: authority.eventTimeStamp.read(event),
-            ctrlKey: false,
-            metaKey: false,
-            altKey: false,
-            shiftKey: false,
-            repeat: false,
-            composing: false,
-            intent,
-            crossed: false,
-          };
-        } catch {
-          return null;
-        }
-      };
-
-      const rejectPair = (
-        pair: InputKeyboardNativeReactPair,
-        retirePublication = false,
-      ) => {
-        pair.rejected = true;
-        if (pair.consumed || !retirePublication) return;
-        nativePairs.delete(pair.native.event);
-        if (currentRuntime === runtime) retire("other");
-      };
-
-      const removeWindowListener = () => {
-        if (!windowListenerActive) return;
-        authority.removeWindowEventListener.call(
-          keyboardWindow,
-          "keydown",
-          onNativeWindowBubble,
+        return (
+          windowIsCurrent(pair.native) &&
+          nativeStillMatches(
+            pair.native,
+            state.currentTarget,
+            state.phase,
+            state.prevention !== null,
+          ) &&
+          reactFieldsMatch(pair, state) &&
+          drainDomChanges() &&
+          pairIsCurrent(pair, state) &&
+          reactMethodsMatch(state) &&
+          drainDomChanges() &&
+          reactMethodsMatch(state) &&
+          publicationMemoryIsCurrent()
         );
-        windowListenerActive = false;
       };
 
-      const replaceStores = () => {
-        removeWindowListener();
-        nativePairs = new WeakMap<
-          globalThis.KeyboardEvent,
-          InputKeyboardNativeReactPair
-        >();
-        attemptedNativeEvents =
-          new WeakSet<globalThis.KeyboardEvent>();
-        activeNativeEvent = null;
+      const invokeQuery = (
+        pair: InputKeyboardNativeReactPair,
+        state: Validation,
+        proof: InputKeyboardReactProof,
+        name: "isDefaultPrevented" | "isPropagationStopped",
+      ) => {
+        if (!validate(pair, state)) return false;
+        const method =
+          name === "isDefaultPrevented"
+            ? defaultQuery(proof, state)
+            : proof.methods.isPropagationStopped;
+        if (
+          (proof.event as Record<PropertyKey, unknown>)[name] !== method ||
+          !pairIsCurrent(pair, state)
+        ) {
+          return false;
+        }
+        const result = apply(method, proof.event, []);
+        return (
+          result ===
+            (name === "isDefaultPrevented" && wasPrevented(proof, state)) &&
+          validate(pair, state)
+        );
       };
 
-      const beginNativeEvent = (event: Event) => {
-        try {
+      const authenticateQueries = (
+        pair: InputKeyboardNativeReactPair,
+        state: Validation,
+      ) => {
+        const final = state.prevention?.final;
+        if (final && !invokeQuery(pair, state, final, "isDefaultPrevented")) {
+          return false;
+        }
+        const queried = new Set<object>();
+        for (const proof of state.react) {
+          if (queried.has(proof.event)) continue;
+          queried.add(proof.event);
           if (
-            released ||
-            authority.eventType.read(event) !== "keydown" ||
-            authority.getPrototypeOf(event) !==
-              authority.keyboardPrototype ||
-            authority.eventTarget.read(event) !== publication.input
+            (proof.event !== final?.event &&
+              !invokeQuery(pair, state, proof, "isDefaultPrevented")) ||
+            !invokeQuery(pair, state, proof, "isPropagationStopped")
           ) {
-            return;
+            return false;
           }
-          const nativeEvent = event as globalThis.KeyboardEvent;
-          const activeEvent = activeNativeEvent?.deref();
-          if (
-            activeEvent &&
-            authority.eventPhase.read(activeEvent) !==
-              keyboardWindow.Event.NONE
-          ) {
-            const activePair = nativePairs.get(activeEvent);
-            if (activePair) {
-              activePair.native.crossed = true;
-              rejectPair(activePair);
-            }
-            attemptedNativeEvents.add(nativeEvent);
-            return;
-          }
-          const proof = exactNativeEvent(event);
-          attemptedNativeEvents.add(nativeEvent);
-          if (!proof) return;
-          const pair: InputKeyboardNativeReactPair = {
-            native: proof,
-            reactRootCapture: null,
-            reactInputCapture: null,
-            reactInputBubble: null,
-            reactRootBubble: null,
-            boundaryObserved: false,
-            terminal: null,
-            prevention: null,
-            windowReceiver: null,
-            consumed: false,
-            handling: false,
-            finalizing: false,
-            rejected: false,
-          };
-          nativePairs.set(nativeEvent, pair);
-          activeNativeEvent = new WeakRef(nativeEvent);
-        } catch {
+        }
+        return validate(pair, state);
+      };
+
+      const withNativePair = (
+        event: Event,
+        run: (pair: InputKeyboardNativeReactPair) => (() => void) | void,
+      ) => {
+        if (
+          released ||
+          !event ||
+          typeof event !== "object" ||
+          readingNativeEvents.has(event)
+        ) {
           return;
         }
-      };
-
-      const pairForReactEvent = (event: object) => {
-        try {
-          const nativeEvent = (
-            event as Record<PropertyKey, unknown>
-          ).nativeEvent;
-          return (
-            typeof nativeEvent === "object" &&
-            nativeEvent !== null &&
-            authority.getPrototypeOf(nativeEvent) ===
-              authority.keyboardPrototype
-              ? nativePairs.get(
-                  nativeEvent as globalThis.KeyboardEvent,
-                )
-              : undefined
-          );
-        } catch {
-          return undefined;
-        }
-      };
-
-      const readReactBoundary = (
-        pair: InputKeyboardNativeReactPair,
-        event: object,
-        currentTarget: Element,
-        phase: number,
-      ) => {
-        if (pair.handling) {
-          rejectPair(pair);
-          return null;
-        }
+        const pair = nativePairs.get(event as globalThis.KeyboardEvent);
+        if (!pair || pair.handling || pair.consumed) return;
         pair.handling = true;
+        readingNativeEvents.add(event);
         try {
-          return readInputKeyboardReactProof(
+          let effect: (() => void) | void;
+          try {
+            effect = run(pair);
+          } catch {
+            return;
+          }
+          effect?.();
+        } finally {
+          pair.handling = false;
+          readingNativeEvents.delete(event);
+        }
+      };
+
+      const deliverReact = (index: number, event: object) => {
+        if (
+          released ||
+          !event ||
+          typeof event !== "object" ||
+          readingWrappers.has(event)
+        ) {
+          return;
+        }
+        readingWrappers.add(event);
+        let pair: InputKeyboardNativeReactPair | undefined;
+        let handling = false;
+        try {
+          const native = (event as Record<PropertyKey, unknown>).nativeEvent;
+          if (!native || typeof native !== "object") return;
+          pair = nativePairs.get(native as globalThis.KeyboardEvent);
+          if (
+            !pair ||
+            pair.handling ||
+            pair.consumed ||
+            pair.react.length !== index ||
+            pair.documentObserved ||
+            pair.prevention ||
+            pair.boundaryObserved !== (index >= 2)
+          ) {
+            return;
+          }
+          pair.handling = true;
+          handling = true;
+          const currentTarget =
+            index === 0 || index === 3
+              ? publication.root
+              : publication.input;
+          const phase =
+            index < 2
+              ? EventConstructor.CAPTURING_PHASE
+              : EventConstructor.BUBBLING_PHASE;
+          const nativeCurrentTarget = pair.native.event.currentTarget;
+          if (
+            !nativeCurrentTarget ||
+            pair.native.path.indexOf(nativeCurrentTarget) <=
+              pair.native.path.indexOf(publication.root) ||
+            nativeCurrentTarget === pair.native.pathTerminal
+          ) {
+            return;
+          }
+          const proof = readInputKeyboardReactProof(
             event,
             pair.native,
             currentTarget,
-            authority,
+            nativeCurrentTarget,
             phase,
-            () =>
-              pair.handling &&
-              !pair.rejected &&
-              !pair.consumed &&
-              !pair.finalizing &&
-              activeNativeEvent?.deref() === pair.native.event &&
-              nativePairs.get(pair.native.event) === pair &&
-              authority.eventPhase.read(pair.native.event) === phase &&
-              !authority.eventDefaultPrevented.read(
-                pair.native.event,
-              ) &&
-              !authority.eventCancelBubble.read(
-                pair.native.event,
-              ) &&
-              nativeStillMatches(pair.native) &&
-              intentIsCurrent(pair.native.intent, false),
           );
-        } finally {
-          pair.handling = false;
-        }
-      };
-
-      const captureRoot = (
-        event: KeyboardEvent<HTMLDivElement>,
-      ) => {
-        if (!event || typeof event !== "object") return;
-        const pair = pairForReactEvent(event);
-        if (
-          pair?.reactRootCapture &&
-          event === pair.reactRootCapture.event
-        ) {
-          return;
-        }
-        if (
-          !pair ||
-          pair.rejected ||
-          pair.consumed ||
-          pair.handling ||
-          pair.finalizing ||
-          pair.reactRootCapture
-        ) {
-          if (pair) rejectPair(pair);
-          return;
-        }
-        const proof = readReactBoundary(
-          pair,
-          event,
-          publication.root,
-          keyboardWindow.Event.CAPTURING_PHASE,
-        );
-        if (!proof) {
-          rejectPair(pair);
-          return;
-        }
-        pair.reactRootCapture = proof;
-      };
-
-      const captureInput = (
-        event: KeyboardEvent<HTMLInputElement>,
-      ) => {
-        const pair =
-          event && typeof event === "object"
-            ? pairForReactEvent(event)
-            : undefined;
-        if (
-          pair?.reactInputCapture &&
-          event === pair.reactInputCapture.event
-        ) {
-          return;
-        }
-        if (
-          !pair ||
-          pair.rejected ||
-          pair.consumed ||
-          pair.handling ||
-          pair.finalizing ||
-          !pair.reactRootCapture ||
-          pair.reactInputCapture ||
-          event !== pair.reactRootCapture.event
-        ) {
-          if (pair) rejectPair(pair);
-          return;
-        }
-        const proof = readReactBoundary(
-          pair,
-          event,
-          publication.input,
-          keyboardWindow.Event.CAPTURING_PHASE,
-        );
-        if (
-          !proof ||
-          !inputKeyboardPhaseProofsMatch(
-            pair.reactRootCapture,
+          if (!proof) return;
+          const react = Object.freeze([...pair.react, proof]);
+          const state = validationAt(
+            pair,
+            nativeCurrentTarget,
+            phase,
             proof,
-            pair.native,
-            publication.root,
-            keyboardWindow.Event.CAPTURING_PHASE,
-          )
-        ) {
-          rejectPair(pair);
-          return;
-        }
-        pair.reactInputCapture = proof;
-      };
-
-      const bubbleInput = (
-        event: KeyboardEvent<HTMLInputElement>,
-      ) => {
-        if (!event || typeof event !== "object") return;
-        const pair = pairForReactEvent(event);
-        if (
-          pair?.reactInputBubble &&
-          event === pair.reactInputBubble.event
-        ) {
-          return;
-        }
-        if (
-          !pair ||
-          pair.rejected ||
-          pair.consumed ||
-          pair.handling ||
-          pair.finalizing ||
-          !pair.reactInputCapture ||
-          pair.reactInputBubble
-        ) {
-          if (pair) rejectPair(pair);
-          return;
-        }
-        const proof = readReactBoundary(
-          pair,
-          event,
-          publication.input,
-          keyboardWindow.Event.BUBBLING_PHASE,
-        );
-        if (!proof) {
-          rejectPair(pair);
-          return;
-        }
-        pair.reactInputBubble = proof;
-      };
-
-      const bubbleRoot = (
-        event: KeyboardEvent<HTMLDivElement>,
-      ) => {
-        const pair =
-          event && typeof event === "object"
-            ? pairForReactEvent(event)
-            : undefined;
-        if (
-          pair?.reactRootBubble &&
-          event === pair.reactRootBubble.event
-        ) {
-          return;
-        }
-        if (
-          !pair ||
-          pair.rejected ||
-          pair.consumed ||
-          pair.handling ||
-          pair.finalizing ||
-          !pair.reactInputBubble ||
-          pair.reactRootBubble ||
-          event !== pair.reactInputBubble.event
-        ) {
-          if (pair) rejectPair(pair);
-          return;
-        }
-        const proof = readReactBoundary(
-          pair,
-          event,
-          publication.root,
-          keyboardWindow.Event.BUBBLING_PHASE,
-        );
-        const reactRootCapture = pair.reactRootCapture;
-        const reactInputCapture = pair.reactInputCapture;
-        const reactInputBubble = pair.reactInputBubble;
-        if (
-          !proof ||
-          !reactRootCapture ||
-          !reactInputCapture ||
-          !reactInputBubble ||
-          !inputKeyboardPhaseProofsMatch(
-            proof,
-            reactInputBubble,
-            pair.native,
-            publication.root,
-            keyboardWindow.Event.BUBBLING_PHASE,
-          )
-        ) {
-          rejectPair(pair);
-          return;
-        }
-        pair.reactRootBubble = proof;
-        const terminal: InputKeyboardTerminalProof =
-          Object.freeze({
-            native: pair.native,
-            reactRootCapture,
-            reactInputCapture,
-            reactInputBubble,
-            reactRootBubble: proof,
-          });
-        pair.terminal = terminal;
-        pair.finalizing = true;
-        try {
-          const prevention = prepareTerminal(pair, terminal);
-          if (!prevention) {
-            rejectPair(pair);
+            react,
+          );
+          if (
+            !invokeQuery(pair, state, proof, "isDefaultPrevented") ||
+            !invokeQuery(pair, state, proof, "isPropagationStopped")
+          ) {
             return;
           }
-          pair.prevention = prevention;
-        } finally {
-          pair.finalizing = false;
-        }
-      };
-
-      const terminalCancellationStateIsCurrent = (
-        pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
-        prevention: InputKeyboardPreventionProof,
-        {
-          consumed,
-          nativeCurrentTarget,
-          reactCurrentTarget,
-          preventionRegistered,
-          windowRequired,
-        }: {
-          consumed: boolean;
-          nativeCurrentTarget?: EventTarget;
-          reactCurrentTarget: Element | null;
-          preventionRegistered: boolean;
-          windowRequired: boolean;
-        },
-      ) => {
-        const native = terminal.native;
-        const capturePrevented = prevention.capturePrevented;
-        const captureCurrentTarget = capturePrevented
-          ? reactCurrentTarget
-          : null;
-        return (
-          !released &&
-          !pair.rejected &&
-          pair.consumed === consumed &&
-          pair.finalizing &&
-          pair.native === native &&
-          pair.terminal === terminal &&
-          (!preventionRegistered ||
-            pair.prevention === prevention) &&
-          activeNativeEvent?.deref() === native.event &&
-          nativePairs.get(native.event) === pair &&
-          !native.crossed &&
-          pair.boundaryObserved &&
-          (!windowRequired ||
-            (windowListenerActive &&
-              pair.windowReceiver === native.pathTerminal)) &&
-          (nativeCurrentTarget === undefined ||
-            authority.eventCurrentTarget.read(native.event) ===
-              nativeCurrentTarget) &&
-          authority.eventPhase.read(native.event) ===
-            keyboardWindow.Event.BUBBLING_PHASE &&
-          authority.eventDefaultPrevented.read(native.event) &&
-          !authority.eventCancelBubble.read(native.event) &&
-          nativeStillMatches(native) &&
-          inputKeyboardPhaseProofsMatch(
-            terminal.reactRootCapture,
-            terminal.reactInputCapture,
-            native,
-            publication.root,
-            keyboardWindow.Event.CAPTURING_PHASE,
-          ) &&
-          inputKeyboardPhaseProofsMatch(
-            terminal.reactRootBubble,
-            terminal.reactInputBubble,
-            native,
-            publication.root,
-            keyboardWindow.Event.BUBBLING_PHASE,
-          ) &&
-          inputKeyboardReactFieldsMatch(
-            terminal.reactRootCapture,
-            native,
-            captureCurrentTarget,
-            capturePrevented,
-            capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : terminal.reactRootCapture.methods
-                  .isDefaultPrevented,
-          ) &&
-          inputKeyboardReactFieldsMatch(
-            terminal.reactInputCapture,
-            native,
-            captureCurrentTarget,
-            capturePrevented,
-            capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : terminal.reactInputCapture.methods
-                  .isDefaultPrevented,
-          ) &&
-          inputKeyboardReactFieldsMatch(
-            terminal.reactInputBubble,
-            native,
-            reactCurrentTarget,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) &&
-          inputKeyboardReactFieldsMatch(
-            terminal.reactRootBubble,
-            native,
-            reactCurrentTarget,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) &&
-          (consumed
-            ? claimedIntentIsCurrent(pair, terminal)
-            : intentIsCurrent(native.intent, false))
-        );
-      };
-
-      const authenticateCancellationQueries = (
-        pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
-        prevention: InputKeyboardPreventionProof,
-        state: {
-          consumed: boolean;
-          nativeCurrentTarget?: EventTarget;
-          reactCurrentTarget: Element | null;
-          preventionRegistered: boolean;
-          windowRequired: boolean;
-        },
-      ) => {
-        const captureProof = terminal.reactRootCapture;
-        const bubbleProof = terminal.reactInputBubble;
-        const invoke = (
-          method: InputKeyboardReactMethod,
-          receiver: object,
-          expected: boolean,
-        ) => {
+          if (index !== 3) {
+            pair.react = react;
+            return;
+          }
+          if (!authenticateQueries(pair, state)) return;
           if (
-            !terminalCancellationStateIsCurrent(
-              pair,
-              terminal,
-              prevention,
-              state,
-            )
+            (proof.event as Record<PropertyKey, unknown>).preventDefault !==
+              proof.methods.preventDefault ||
+            !pairIsCurrent(pair, state)
           ) {
-            return false;
+            return;
           }
-          let result: unknown;
-          try {
-            result = authority.apply(method, receiver, []);
-          } catch {
-            return false;
-          }
-          return (
-            result === expected &&
-            terminalCancellationStateIsCurrent(
-              pair,
-              terminal,
-              prevention,
-              state,
-            )
-          );
-        };
-
-        return (
-          invoke(
-            prevention.currentIsDefaultPrevented,
-            bubbleProof.event,
-            true,
-          ) &&
-          invoke(
-            captureProof.methods.isPropagationStopped,
-            captureProof.event,
-            false,
-          ) &&
-          invoke(
-            bubbleProof.methods.isPropagationStopped,
-            bubbleProof.event,
-            false,
-          )
-        );
-      };
-
-      const prepareTerminal = (
-        pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
-      ): InputKeyboardPreventionProof | null => {
-        const native = terminal.native;
-        const captureProof = terminal.reactRootCapture;
-        const bubbleProof = terminal.reactInputBubble;
-        if (
-          pair.rejected ||
-          pair.consumed ||
-          !pair.finalizing ||
-          pair.terminal !== terminal ||
-          native.crossed ||
-          !pair.boundaryObserved ||
-          authority.eventPhase.read(native.event) !==
-            keyboardWindow.Event.BUBBLING_PHASE ||
-          authority.eventDefaultPrevented.read(native.event) ||
-          authority.eventCancelBubble.read(native.event) ||
-          !nativeStillMatches(native) ||
-          !inputKeyboardPhaseProofsMatch(
-            terminal.reactRootCapture,
-            terminal.reactInputCapture,
-            native,
-            publication.root,
-            keyboardWindow.Event.CAPTURING_PHASE,
-          ) ||
-          !inputKeyboardPhaseProofsMatch(
-            terminal.reactRootBubble,
-            terminal.reactInputBubble,
-            native,
-            publication.root,
-            keyboardWindow.Event.BUBBLING_PHASE,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            terminal.reactRootCapture,
-            native,
-            null,
-            false,
-            terminal.reactRootCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            terminal.reactInputCapture,
-            native,
-            null,
-            false,
-            terminal.reactInputCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            terminal.reactInputBubble,
-            native,
-            publication.root,
-            false,
-            terminal.reactInputBubble.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            terminal.reactRootBubble,
-            native,
-            publication.root,
-            false,
-            terminal.reactRootBubble.methods.isDefaultPrevented,
-          ) ||
-          !intentIsCurrent(native.intent, false)
-        ) {
-          return null;
-        }
-
-        try {
-          authority.apply(
-            bubbleProof.methods.preventDefault,
-            bubbleProof.event,
-            [],
-          );
+          apply(proof.methods.preventDefault, proof.event, []);
           const currentIsDefaultPrevented = (
-            bubbleProof.event as Record<PropertyKey, unknown>
+            proof.event as Record<PropertyKey, unknown>
           ).isDefaultPrevented;
-          if (
-            !isInputKeyboardReactMethod(currentIsDefaultPrevented)
-          ) {
-            return null;
-          }
-          const capturePrevented =
-            captureProof.event === bubbleProof.event;
+          if (!isInputKeyboardReactMethod(currentIsDefaultPrevented)) return;
           const prevention = Object.freeze({
-            terminal,
+            final: proof,
             currentIsDefaultPrevented,
-            capturePrevented,
           });
-          return authenticateCancellationQueries(
-            pair,
-            terminal,
-            prevention,
-            {
-              consumed: false,
-              reactCurrentTarget: publication.root,
-              preventionRegistered: false,
-              windowRequired: false,
-            },
-          )
-            ? prevention
-            : null;
+          const preventedState: Validation = { ...state, prevention };
+          if (!authenticateQueries(pair, preventedState)) return;
+          pair.react = react;
+          pair.prevention = prevention;
         } catch {
-          return null;
+          return;
+        } finally {
+          if (handling && pair) pair.handling = false;
+          readingWrappers.delete(event);
         }
       };
 
-      const authenticateTerminal = (
-        pair: InputKeyboardNativeReactPair,
-      ): InputKeyboardTerminalProof | null => {
-        const native = pair.native;
-        const terminal = pair.terminal;
-        const prevention = pair.prevention;
-        const reactRootCapture = pair.reactRootCapture;
-        const reactInputCapture = pair.reactInputCapture;
-        const reactInputBubble = pair.reactInputBubble;
-        const reactRootBubble = pair.reactRootBubble;
-        if (
-          pair.rejected ||
-          pair.consumed ||
-          !pair.finalizing ||
-          !terminal ||
-          prevention?.terminal !== terminal ||
-          native.crossed ||
-          !pair.boundaryObserved ||
-          !reactRootCapture ||
-          !reactInputCapture ||
-          !reactInputBubble ||
-          !reactRootBubble ||
-          authority.eventCurrentTarget.read(native.event) !==
-            ownerDocument ||
-          authority.eventPhase.read(native.event) !==
-            keyboardWindow.Event.BUBBLING_PHASE ||
-          !authority.eventDefaultPrevented.read(native.event) ||
-          authority.eventCancelBubble.read(native.event) ||
-          !nativeStillMatches(native) ||
-          !inputKeyboardPhaseProofsMatch(
-            reactRootCapture,
-            reactInputCapture,
-            native,
-            publication.root,
-            keyboardWindow.Event.CAPTURING_PHASE,
-          ) ||
-          !inputKeyboardPhaseProofsMatch(
-            reactRootBubble,
-            reactInputBubble,
-            native,
-            publication.root,
-            keyboardWindow.Event.BUBBLING_PHASE,
-          ) ||
-          !authenticateCancellationQueries(
-            pair,
-            terminal,
-            prevention,
-            {
-              consumed: false,
-              nativeCurrentTarget: ownerDocument,
-              reactCurrentTarget: null,
-              preventionRegistered: true,
-              windowRequired: false,
-            },
-          )
-        ) {
-          return null;
-        }
-        return terminal;
-      };
+      const captureRoot = (event: KeyboardEvent<HTMLDivElement>) =>
+        deliverReact(0, event);
+      const captureInput = (event: KeyboardEvent<HTMLInputElement>) =>
+        deliverReact(1, event);
+      const bubbleInput = (event: KeyboardEvent<HTMLInputElement>) =>
+        deliverReact(2, event);
+      const bubbleRoot = (event: KeyboardEvent<HTMLDivElement>) =>
+        deliverReact(3, event);
 
       const claimKeyboard = (
         pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
+        changesState: boolean,
       ) => {
-        const native = terminal.native;
+        const native = pair.native;
         const intent = native.intent;
-        const captureEvent = terminal.reactRootCapture.event;
-        const bubbleEvent = terminal.reactInputBubble.event;
         const query = intent.query;
         const row = intent.row;
-        if (
-          !pair.consumed ||
-          !pair.finalizing ||
-          pair.terminal !== terminal ||
-          !intentIsCurrent(intent, false) ||
-          cells.claimedReactEvents.has(captureEvent) ||
-          cells.claimedReactEvents.has(bubbleEvent) ||
-          cells.claimedNativeEvents.has(native.event) ||
-          (query && cells.claimedQueries.has(query))
-        ) {
-          return null;
-        }
+        pair.consumed = true;
         cells.claimedPublications.add(publication);
         cells.claimedActions.add(intent.action);
         if (row) cells.claimedRows.add(row);
         if (query) cells.claimedQueries.add(query);
-        cells.claimedReactEvents.add(captureEvent);
-        cells.claimedReactEvents.add(bubbleEvent);
+        pair.react.forEach(({ event }) =>
+          cells.claimedReactEvents.add(event),
+        );
         cells.claimedNativeEvents.add(native.event);
-        cells.consumedPublications.add(publication);
-        context.coordinator.beginReactEvent(native.event);
+        if (changesState) cells.consumedPublications.add(publication);
         return {
           release: () => {
             cells.claimedPublications.delete(publication);
@@ -3776,88 +2863,26 @@ function createInputPublication(
         };
       };
 
-      const claimedIntentIsCurrent = (
-        pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
-      ) => {
-        const native = terminal.native;
-        const intent = native.intent;
-        return (
-          pair.consumed &&
-          pair.finalizing &&
-          !pair.rejected &&
-          !native.crossed &&
-          pair.native === native &&
-          pair.terminal === terminal &&
-          pair.reactRootCapture === terminal.reactRootCapture &&
-          pair.reactInputCapture === terminal.reactInputCapture &&
-          pair.reactInputBubble === terminal.reactInputBubble &&
-          pair.reactRootBubble === terminal.reactRootBubble &&
-          cells.claimedReactEvents.has(
-            terminal.reactRootCapture.event,
-          ) &&
-          cells.claimedReactEvents.has(
-            terminal.reactInputBubble.event,
-          ) &&
-          cells.claimedNativeEvents.has(native.event) &&
-          cells.consumedPublications.has(publication) &&
-          intentIsCurrent(intent, true)
-        );
-      };
-
       const settleTerminal = (
         pair: InputKeyboardNativeReactPair,
-        terminal: InputKeyboardTerminalProof,
       ) => {
-        const native = terminal.native;
-        const prevention = pair.prevention;
-        if (
-          !prevention ||
-          prevention.terminal !== terminal
-        ) {
-          return;
-        }
-        const claim = claimKeyboard(pair, terminal);
-        if (!claim) return;
+        const intent = pair.native.intent;
+        const changesState =
+          intent.kind !== "move" ||
+          !intent.state.open ||
+          intent.state.active !== intent.destinationIndex;
+        const claim = claimKeyboard(pair, changesState);
         try {
-          if (
-            !authenticateCancellationQueries(
-              pair,
-              terminal,
-              prevention,
-              {
-                consumed: true,
-                nativeCurrentTarget: pair.windowReceiver ?? undefined,
-                reactCurrentTarget: null,
-                preventionRegistered: true,
-                windowRequired: true,
-              },
-            ) ||
-            !terminalCancellationStateIsCurrent(
-              pair,
-              terminal,
-              prevention,
-              {
-                consumed: true,
-                nativeCurrentTarget: pair.windowReceiver ?? undefined,
-                reactCurrentTarget: null,
-                preventionRegistered: true,
-                windowRequired: true,
-              },
-            )
-          ) {
-            return;
-          }
-
-          const intent = native.intent;
           if (intent.kind === "move") {
-            updateState((state) =>
-              freezePublished({
-                ...state,
-                open: true,
-                active: intent.destinationIndex,
-              }),
-            );
+            if (changesState) {
+              updateState((state) =>
+                freezePublished({
+                  ...state,
+                  open: true,
+                  active: intent.destinationIndex,
+                }),
+              );
+            }
           } else if (intent.kind === "dismiss") {
             updateState((state) =>
               freezePublished({
@@ -3871,7 +2896,7 @@ function createInputPublication(
           }
         } finally {
           claim.release();
-          requestSuccessor();
+          if (changesState) requestSuccessor();
         }
       };
 
@@ -3879,182 +2904,290 @@ function createInputPublication(
         this: EventTarget,
         event: Event,
       ) {
-        let pair: InputKeyboardNativeReactPair | undefined;
+        withNativePair(event, (pair) => {
+          if (
+            !pair.documentObserved ||
+            !pair.boundaryObserved ||
+            pair.react.length !== 4 ||
+            !pair.prevention ||
+            this !== pair.native.window.receiver ||
+            this !== pair.native.pathTerminal
+          ) {
+            return;
+          }
+          const state = validationAt(
+            pair,
+            this,
+            EventConstructor.BUBBLING_PHASE,
+          );
+          if (authenticateQueries(pair, state) && validate(pair, state)) {
+            return () => settleTerminal(pair);
+          }
+        });
+      }
+
+      function onNativeWindowCapture(
+        this: EventTarget,
+        event: Event,
+      ) {
+        if (
+          released ||
+          !published ||
+          !listenersActive ||
+          !event ||
+          typeof event !== "object" ||
+          readingNativeEvents.has(event) ||
+          nativePairs.get(event as globalThis.KeyboardEvent)?.handling
+        ) {
+          return;
+        }
+        readingNativeEvents.add(event);
         try {
           if (
-            authority.getPrototypeOf(event) !==
-              authority.keyboardPrototype
+            !listenersAreCurrent() ||
+            !(event instanceof KeyboardEventConstructor) ||
+            event.type !== "keydown" ||
+            event.target !== publication.input ||
+            event.currentTarget !== this ||
+            event.eventPhase !== EventConstructor.CAPTURING_PHASE ||
+            (this as Window).document !== ownerDocument
           ) {
             return;
           }
-          pair = nativePairs.get(
-            event as globalThis.KeyboardEvent,
+          const path = inputKeyboardPath(
+            publication.input,
+            ownerDocument,
+            apply(composedPath, event, []) as EventTarget[],
           );
-          const terminal = pair?.terminal;
+          if (!path || path.at(-1) !== this) return;
+          const proof: InputKeyboardWindowProof = Object.freeze({
+            receiver: this,
+            path,
+            addEventListener: this.addEventListener,
+            removeEventListener: this.removeEventListener,
+          });
           if (
-            !pair ||
-            !terminal ||
-            pair.rejected ||
-            pair.consumed ||
-            pair.finalizing ||
-            terminal.native.event !== event ||
-            this !== terminal.native.pathTerminal ||
-            authority.eventCurrentTarget.read(event) !== this ||
-            authority.eventPhase.read(event) !==
-              keyboardWindow.Event.BUBBLING_PHASE ||
-            !authority.eventDefaultPrevented.read(event) ||
-            authority.eventCancelBubble.read(event) ||
+            typeof proof.addEventListener !== "function" ||
+            typeof proof.removeEventListener !== "function" ||
+            !publicationIsCurrent() ||
+            !listenersAreCurrent() ||
+            (this as Window).document !== ownerDocument ||
+            this.addEventListener !== proof.addEventListener ||
+            this.removeEventListener !== proof.removeEventListener ||
+            event.currentTarget !== this ||
+            event.eventPhase !== EventConstructor.CAPTURING_PHASE ||
+            event.target !== publication.input ||
             !inputKeyboardPathsMatch(
-              terminal.native.path,
-              authority.eventPath.call(event),
+              path,
+              apply(composedPath, event, []) as EventTarget[],
             ) ||
-            !authority.isCurrent() ||
-            !windowListenerActive
+            !drainDomChanges() ||
+            !publicationMemoryIsCurrent()
           ) {
-            if (pair) rejectPair(pair);
             return;
           }
-          pair.windowReceiver = this;
-          pair.consumed = true;
-          pair.finalizing = true;
-          settleTerminal(pair, terminal);
+          // A new native traversal cannot borrow a partial pair from a past dispatch.
+          // A live dispatch cannot return to Window capture or dispatch itself again.
+          windowProofs.set(event, proof);
         } catch {
-          if (pair) rejectPair(pair);
+          return;
         } finally {
-          if (pair) {
-            pair.finalizing = false;
-            if (nativePairs.get(pair.native.event) === pair) {
-              nativePairs.delete(pair.native.event);
-            }
-            if (
-              activeNativeEvent?.deref() === pair.native.event
-            ) {
-              activeNativeEvent = null;
-            }
-          }
-          removeWindowListener();
+          readingNativeEvents.delete(event);
         }
       }
 
       const onNativeCapture = (event: Event) => {
-        beginNativeEvent(event);
+        if (
+          released ||
+          !event ||
+          typeof event !== "object" ||
+          readingNativeEvents.has(event) ||
+          nativePairs.has(event as globalThis.KeyboardEvent) ||
+          cells.observedKeyboardEvents.has(event as globalThis.KeyboardEvent)
+        ) {
+          return;
+        }
+        readingNativeEvents.add(event);
+        try {
+          const window = windowProofs.get(event);
+          if (
+            !window ||
+            !listenersAreCurrent() ||
+            !(event instanceof KeyboardEventConstructor) ||
+            event.currentTarget !== ownerDocument ||
+            event.eventPhase !== EventConstructor.CAPTURING_PHASE
+          ) {
+            return;
+          }
+          const key = event.key;
+          const intent = makeIntent(key);
+          if (!intent) return;
+          const path = inputKeyboardPath(
+            publication.input,
+            ownerDocument,
+            apply(composedPath, event, []) as EventTarget[],
+          );
+          if (!path || !inputKeyboardPathsMatch(window.path, path)) return;
+          const native: InputKeyboardNativeProof = Object.freeze({
+            identity: Symbol("collaborator native keyboard event"),
+            publication,
+            event,
+            target: publication.input,
+            path,
+            pathTerminal: window.receiver,
+            window,
+            view: event.view,
+            key,
+            code: event.code,
+            location: event.location,
+            locale: (event as globalThis.KeyboardEvent & { locale?: string })
+              .locale,
+            charCode: event.charCode,
+            keyCode: event.keyCode,
+            which: event.which,
+            detail: event.detail,
+            timeStamp: event.timeStamp,
+            ctrlKey: false,
+            metaKey: false,
+            altKey: false,
+            shiftKey: false,
+            repeat: false,
+            composing: false,
+            intent,
+          });
+          if (
+            typeof native.key !== "string" ||
+            typeof native.code !== "string" ||
+            !Number.isInteger(native.location) ||
+            native.location < 0 ||
+            native.location > 3 ||
+            (native.locale !== undefined && typeof native.locale !== "string") ||
+            ![
+              native.charCode,
+              native.keyCode,
+              native.which,
+              native.detail,
+              native.timeStamp,
+            ].every((value) => typeof value === "number" && Number.isFinite(value))
+          ) {
+            return;
+          }
+          const pair: InputKeyboardNativeReactPair = {
+            native,
+            react: Object.freeze([]),
+            boundaryObserved: false,
+            documentObserved: false,
+            prevention: null,
+            consumed: false,
+            handling: true,
+          };
+          const state = validationAt(
+            pair,
+            ownerDocument,
+            EventConstructor.CAPTURING_PHASE,
+            null,
+            pair.react,
+            null,
+            false,
+          );
+          if (validate(pair, state)) {
+            // This weak tombstone rejects redispatch after a render, not later
+            // deliveries within the admitted publication-local pair.
+            cells.observedKeyboardEvents.add(event);
+            nativePairs.set(event, pair);
+          }
+          pair.handling = false;
+        } catch {
+          return;
+        } finally {
+          readingNativeEvents.delete(event);
+        }
       };
 
       const onNativeBoundary = (event: Event) => {
-        try {
+        withNativePair(event, (pair) => {
           if (
-            authority.getPrototypeOf(event) !==
-              authority.keyboardPrototype
+            pair.react.length !== 2 ||
+            pair.boundaryObserved ||
+            pair.documentObserved ||
+            pair.prevention
           ) {
             return;
           }
-          const pair = nativePairs.get(
-            event as globalThis.KeyboardEvent,
+          const state = validationAt(
+            pair,
+            publication.input,
+            EventConstructor.AT_TARGET,
           );
-          if (
-            pair &&
-            !pair.rejected &&
-            !pair.consumed &&
-            !pair.finalizing &&
-            pair.native.event === event &&
-            authority.eventCurrentTarget.read(event) ===
-              publication.input &&
-            (authority.eventPhase.read(event) ===
-              keyboardWindow.Event.CAPTURING_PHASE ||
-              authority.eventPhase.read(event) ===
-                keyboardWindow.Event.AT_TARGET) &&
-            authority.activeElement.read(ownerDocument) ===
-              publication.input &&
-            publicationIsCurrent()
-          ) {
+          if (authenticateQueries(pair, state)) {
             pair.boundaryObserved = true;
           }
-        } catch {
-          return;
-        }
+        });
       };
 
       const onNativeBubble = (event: Event) => {
-        let pair: InputKeyboardNativeReactPair | undefined;
-        try {
+        withNativePair(event, (pair) => {
           if (
-            authority.getPrototypeOf(event) !==
-              authority.keyboardPrototype
+            pair.react.length !== 4 ||
+            !pair.boundaryObserved ||
+            pair.documentObserved ||
+            !pair.prevention
           ) {
             return;
           }
-          pair = nativePairs.get(
-            event as globalThis.KeyboardEvent,
+          const state = validationAt(
+            pair,
+            ownerDocument,
+            EventConstructor.BUBBLING_PHASE,
           );
-          if (
-            !pair ||
-            pair.rejected ||
-            pair.consumed ||
-            pair.finalizing ||
-            pair.native.event !== event ||
-            authority.eventCurrentTarget.read(event) !==
-              ownerDocument ||
-            authority.eventPhase.read(event) !==
-              keyboardWindow.Event.BUBBLING_PHASE ||
-            !authority.eventDefaultPrevented.read(event) ||
-            authority.eventCancelBubble.read(event)
-          ) {
-            if (pair) rejectPair(pair);
-            return;
+          if (authenticateQueries(pair, state)) {
+            pair.documentObserved = true;
           }
-          pair.finalizing = true;
-          let terminal: InputKeyboardTerminalProof | null;
-          try {
-            terminal = authenticateTerminal(pair);
-          } finally {
-            pair.finalizing = false;
-          }
-          if (!terminal) {
-            rejectPair(pair);
-            return;
-          }
-          pair.terminal = terminal;
-          windowListenerActive = true;
-          authority.addWindowEventListener.call(
-            keyboardWindow,
-            "keydown",
-            onNativeWindowBubble,
-          );
-        } catch {
-          if (pair) rejectPair(pair, true);
-          removeWindowListener();
-        }
+        });
       };
 
+      const registrations = [
+        { owner: listenerOwners[0]!, listener: onNativeWindowCapture, capture: true },
+        { owner: listenerOwners[1]!, listener: onNativeCapture, capture: true },
+        { owner: listenerOwners[2]!, listener: onNativeBoundary, capture: true },
+        { owner: listenerOwners[1]!, listener: onNativeBubble, capture: false },
+        { owner: listenerOwners[0]!, listener: onNativeWindowBubble, capture: false },
+      ].map((registration) => ({
+        ...registration,
+        // Window's public hooks bridge a WindowProxy to its backing receiver.
+        add: registration.owner.target === keyboardWindow
+          ? registration.owner.add
+          : addEventListener,
+        remove: registration.owner.target === keyboardWindow
+          ? registration.owner.remove
+          : removeEventListener,
+        installed: false,
+      }));
+
       const publish = () => {
-        if (
-          published ||
-          released ||
-          !publicationIsCurrent()
-        ) {
-          return false;
-        }
         try {
+          if (published || released || !publicationIsCurrent(false)) {
+            return false;
+          }
           published = true;
-          authority.addEventListener.call(
-            ownerDocument,
-            "keydown",
-            onNativeCapture,
-            true,
-          );
-          authority.addEventListener.call(
-            publication.input,
-            "keydown",
-            onNativeBoundary,
-            true,
-          );
-          authority.addEventListener.call(
-            ownerDocument,
-            "keydown",
-            onNativeBubble,
-          );
-          return true;
-        } catch {
+          for (const registration of registrations) {
+            if (!listenersAreCurrent() || !publicationMemoryIsCurrent()) {
+              release();
+              return false;
+            }
+            registration.installed = true;
+            apply(registration.add, registration.owner.target, [
+              "keydown",
+              registration.listener,
+              registration.capture,
+            ]);
+          }
+          listenersActive = true;
+          if (publicationIsCurrent(false)) return true;
+          release();
+          return false;
+        } catch (error) {
+          if (released) throw error;
           release();
           return false;
         }
@@ -4063,25 +3196,32 @@ function createInputPublication(
       const release = () => {
         if (released) return;
         released = true;
-        replaceStores();
-        if (!published) return;
-        authority.removeEventListener.call(
-          ownerDocument,
-          "keydown",
-          onNativeCapture,
-          true,
-        );
-        authority.removeEventListener.call(
-          publication.input,
-          "keydown",
-          onNativeBoundary,
-          true,
-        );
-        authority.removeEventListener.call(
-          ownerDocument,
-          "keydown",
-          onNativeBubble,
-        );
+        published = false;
+        listenersActive = false;
+        nativePairs = new WeakMap();
+        windowProofs = new WeakMap();
+        readingWrappers = new WeakSet();
+        readingNativeEvents = new WeakSet();
+        const failures: unknown[] = [];
+        for (const registration of registrations) {
+          if (!registration.installed) continue;
+          registration.installed = false;
+          try {
+            apply(registration.remove, registration.owner.target, [
+              "keydown",
+              registration.listener,
+              registration.capture,
+            ]);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            "Could not remove collaborator keyboard listeners",
+          );
+        }
       };
 
       return Object.freeze({
@@ -4870,6 +4010,7 @@ export function CollaboratorLoginInput({
     claimedReactEvents: new WeakSet(),
     deliveredReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    observedKeyboardEvents: new WeakSet(),
     consumedPublications: new WeakSet(),
     seenElements: new WeakSet(),
   }));
