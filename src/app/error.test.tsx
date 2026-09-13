@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   createElement,
@@ -11,6 +13,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { compile } from "tailwindcss";
 
 import AppError from "./error";
 import GlobalError from "./global-error";
@@ -237,6 +240,186 @@ describe("error boundary presentation", () => {
     expect(html).toContain("boom");
     expect(html).toContain("prefers-color-scheme: dark");
     expect(html).not.toContain("class=");
+  });
+});
+
+describe.each(BOUNDARIES)("$name bounded details", (definition) => {
+  it.each([
+    { name: "ordinary", digest: "abc123", message: "Could not load this document." },
+    { name: "unbroken", digest: "d".repeat(320), message: "m".repeat(320) },
+    { name: "multiline", digest: "  first\t reference\nsecond  ", message: "\n  first\tline\n\nsecond  \n" },
+    { name: "literal HTML", digest: '<a href="/">reference</a>', message: '<button autofocus>retry</button><br><script>throw 1</script>&amp;' },
+  ])("preserves exact $name text in the native disclosure without new elements or tabstops", ({ digest, message }) => {
+    const reset = vi.fn();
+    const view = renderDirect(boundaryNode(definition, {
+      error: Object.assign(new Error(message), { digest }),
+      reset,
+    }));
+    const details = view.host.querySelector("details");
+    const summary = details?.querySelector("summary");
+    if (!details || !summary) throw new Error("The native disclosure was not rendered");
+
+    expect(details.open).toBe(false);
+    expect(details.hasAttribute("open")).toBe(false);
+    expect(summary.textContent).toBe("Details");
+    expect([...details.querySelectorAll("*")].map((element) => element.tagName)).toEqual(["SUMMARY", "P", "PRE"]);
+    expect(details.querySelector("p")?.textContent).toBe(`Reference: ${digest}`);
+    expect(details.querySelector("pre")?.textContent).toBe(message);
+    expect(details.querySelector("[title], [tabindex], a, button, input, [contenteditable]")).toBeNull();
+
+    const current = captureRetry(view.host);
+    const actionMarkup = current.actions.outerHTML;
+    fireEvent.click(summary);
+    expect(details.open).toBe(true);
+    expect(current.actions.outerHTML).toBe(actionMarkup);
+    expect(reset).not.toHaveBeenCalled();
+    fireEvent.click(summary);
+    expect(details.open).toBe(false);
+    fireEvent.click(current.button);
+    fireEvent.click(current.button);
+    expect(reset).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { name: "digest only", digest: "reference", message: "" },
+    { name: "message only", digest: undefined, message: "message" },
+    { name: "message with empty digest", digest: "", message: "message" },
+    { name: "both", digest: "reference", message: "message" },
+    { name: "neither", digest: undefined, message: "" },
+    { name: "empty fields", digest: "", message: "" },
+  ])("retains the omission rules and surrounding tree for $name", ({ digest, message }) => {
+    const parse = (error: BoundaryError) => new DOMParser().parseFromString(
+      renderToStaticMarkup(boundaryNode(definition, { error, reset: () => {} })),
+      "text/html",
+    );
+    const empty = parse(new Error(""));
+    const populated = parse(Object.assign(new Error(message), { digest }));
+    const details = populated.querySelector("details");
+    if (!details) throw new Error("The native disclosure was not rendered");
+    expect(details.open).toBe(false);
+    expect([...details.children].map((element) => element.tagName)).toEqual([
+      "SUMMARY", ...(digest ? ["P"] : []), ...(message ? ["PRE"] : []),
+    ]);
+    expect(details.querySelector("p")?.textContent).toBe(digest ? `Reference: ${digest}` : undefined);
+    expect(details.querySelector("pre")?.textContent).toBe(message || undefined);
+    details.querySelector("p")?.remove();
+    details.querySelector("pre")?.remove();
+    expect(populated.documentElement.outerHTML).toBe(empty.documentElement.outerHTML);
+  });
+
+  it("replaces and removes facts on the same instance without reviving stale retry callbacks", () => {
+    const resetA = vi.fn();
+    const resetB = vi.fn();
+    const error: BoundaryError = Object.assign(new Error("old-message".repeat(32)), { digest: "old-reference".repeat(32) });
+    const view = renderDirect(boundaryNode(definition, { error, reset: resetA }));
+    const details = view.host.querySelector("details");
+    const summary = details?.querySelector("summary");
+    if (!details || !summary) throw new Error("The native disclosure was not rendered");
+    const stale = captureRetry(view.host);
+    fireEvent.click(summary);
+
+    const replacement = { digest: " new-reference\n", message: "\nnew-message  " };
+    Object.assign(error, replacement);
+    act(() => view.root.render(boundaryNode(definition, { error, reset: resetB })));
+    expect(view.host.querySelector("details")).toBe(details);
+    expect(details.open).toBe(true);
+    expect(details.querySelector("p")?.textContent).toBe(`Reference: ${replacement.digest}`);
+    expect(details.querySelector("pre")?.textContent).toBe(replacement.message);
+    expect(view.host.textContent).not.toContain("old-message");
+    expect(view.host.textContent).not.toContain("old-reference");
+    expectRejected(stale, capturedClick(stale), resetA, view.host);
+    expect(resetB).not.toHaveBeenCalled();
+    const current = captureRetry(view.host);
+    fireEvent.click(current.button);
+    fireEvent.click(current.button);
+    expect(resetB).toHaveBeenCalledOnce();
+
+    error.message = "";
+    delete error.digest;
+    act(() => view.root.render(boundaryNode(definition, { error, reset: resetB })));
+    expect(details.children).toHaveLength(1);
+    expect(details.firstElementChild).toBe(summary);
+    expect(details.open).toBe(true);
+  });
+
+  it("keeps passive detail inspection free of application scheduling, network, and focus effects", () => {
+    const reset = vi.fn();
+    const view = renderDirect(boundaryNode(definition, {
+      error: Object.assign(new Error("message".repeat(40)), { digest: "reference".repeat(40) }),
+      reset,
+    }));
+    const details = view.host.querySelector("details");
+    const summary = details?.querySelector("summary");
+    if (!details || !summary) throw new Error("The native disclosure was not rendered");
+    // Open first: the browser itself schedules the native details toggle notification.
+    fireEvent.click(summary);
+    const activeElement = document.activeElement;
+    const markup = view.host.innerHTML;
+    const effects = [
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+      vi.spyOn(globalThis, "fetch"),
+      vi.spyOn(XMLHttpRequest.prototype, "send"),
+      vi.spyOn(HTMLElement.prototype, "focus"),
+    ];
+
+    fireEvent(details, new Event("toggle"));
+    fireEvent.mouseOver(summary);
+    fireEvent.mouseOver(details.querySelector("pre")!);
+    fireEvent.mouseOut(details);
+    expect(document.activeElement).toBe(activeElement);
+    expect(view.host.innerHTML).toBe(markup);
+    expect(reset).not.toHaveBeenCalled();
+    for (const effect of effects) expect(effect).not.toHaveBeenCalled();
+
+    const link = view.host.querySelector("a");
+    if (!link) throw new Error("The recovery link was not rendered");
+    expect(link.getAttribute("href")).toBe("/");
+    expect(link.hasAttribute("target")).toBe(false);
+    expect(reactProperty(link, "onClick")).toBeUndefined();
+  });
+});
+
+describe("bounded details styling", () => {
+  it("uses installed Tailwind declarations for the route width bound and unbroken text wrapping", async () => {
+    render(<AppError error={Object.assign(new Error("m".repeat(320)), { digest: "d".repeat(320) })} reset={() => {}} />);
+    const main = screen.getByTestId("app-error");
+    const details = main.querySelector("details");
+    expect(main).toHaveAttribute("class", "flex min-h-screen flex-col items-center justify-center bg-surface-2 px-4 py-4 text-center");
+    expect(details).toHaveAttribute("class", "mt-6 w-full max-w-sm text-left text-xs text-ink-3");
+    expect(details?.querySelector("p")).toHaveAttribute("class", "wrap-anywhere");
+    expect(details?.querySelector("pre")).toHaveAttribute("class", "mt-1 whitespace-pre-wrap wrap-anywhere");
+    expect(screen.getByRole("button", { name: "Try again" })).toHaveAttribute("class", "btn btn-primary max-sm:h-10");
+    expect(screen.getByRole("link", { name: "Back to your documents" })).toHaveAttribute("class", "btn btn-ghost max-sm:h-10");
+
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["w-full", "max-w-sm", "wrap-anywhere", "whitespace-pre-wrap"]);
+    expect(css).toMatch(/\.w-full\s*\{\s*width:\s*100%;\s*\}/);
+    expect(css).toMatch(/\.max-w-sm\s*\{\s*max-width:\s*var\(--container-sm\);\s*\}/);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.whitespace-pre-wrap\s*\{\s*white-space:\s*pre-wrap;\s*\}/);
+  });
+
+  it("bounds the standalone document with inline wrapping, preserving its palette and outer layout", () => {
+    const html = renderToStaticMarkup(
+      <GlobalError error={Object.assign(new Error("m".repeat(320)), { digest: "d".repeat(320) })} reset={() => {}} />,
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.documentElement.lang).toBe("en");
+    expect(doc.body.getAttribute("style")).toBe('margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem;background:var(--bg);color:var(--ink);text-align:center;font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif');
+    expect(doc.querySelector("main")?.getAttribute("style")).toBe("width:100%;max-width:28rem");
+    expect(doc.querySelector("details")?.getAttribute("style")).toBe("width:100%;overflow-wrap:anywhere;margin-top:1.5rem;font-size:0.75rem;text-align:left;color:var(--ink-3)");
+    expect(doc.querySelector("pre")?.getAttribute("style")).toBe("margin:0.25rem 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace, SFMono-Regular, Menlo, monospace");
+    expect(doc.querySelector("details > p")?.hasAttribute("style")).toBe(false);
+    expect(doc.querySelectorAll("style")).toHaveLength(1);
+    expect(doc.querySelector("style")?.textContent).toBe(`:root { --bg: #f7f5f0; --ink: #1c1917; --ink-2: #44403c; --ink-3: #57534e; --accent: #0f766e; --on-accent: #ffffff; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1c1f24; --ink: #e7e5e4; --ink-2: #d6d3d1; --ink-3: #a8a29e; --accent: #2dd4bf; --on-accent: #14161a; }
+}`);
+    expect(doc.querySelector("[class], link, script")).toBeNull();
   });
 });
 
