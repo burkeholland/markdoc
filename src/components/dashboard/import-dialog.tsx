@@ -1752,12 +1752,12 @@ function createImportResultPublication(
         return false;
       }
       const details = item.children.item(1);
-      const name = details?.querySelector("span[title]");
+      const name = details?.firstElementChild?.children.item(1);
       const warnings = details?.querySelectorAll('[data-testid="import-warning"]');
       if (
         !(details instanceof ownerWindow.HTMLDivElement) ||
         details.className !== "min-w-0 flex-1" ||
-        name?.getAttribute("title") !== row.name ||
+        name?.getAttribute("title") !== (row.title ?? row.name) ||
         !warnings ||
         warnings.length !== row.warnings.length ||
         row.warnings.some(
@@ -3676,10 +3676,10 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <FileText size={14} className="shrink-0 text-ink-4" />
-                      <span className="truncate text-sm text-ink" title={item.name}>
+                      <span className="truncate text-sm text-ink" title={item.title ?? item.name}>
                         {item.title ?? item.name}
                       </span>
-                      {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4">{item.name}</span>}
+                      {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4" title={item.name}>{item.name}</span>}
                     </div>
                     {item.error && <div className="mt-0.5 text-xs text-red-600">{item.error}</div>}
                     {item.warnings.map((w, j) => (
