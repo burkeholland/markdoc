@@ -138,6 +138,7 @@ class ElementOwner<T extends HTMLElement> implements ElementOwnerView {
 
 interface PublicationCells {
   readonly active: CurrentCell<DownloadPublication | null>;
+  readonly readingKeyboard: CurrentCell<boolean>;
   readonly successorOf: CurrentCell<DownloadPublication | null>;
   readonly replay: CurrentCell<DownloadReplay | null>;
   readonly focused: WeakSet<DisclosureVisit>;
@@ -209,11 +210,6 @@ interface DownloadKeyboardIntrinsics {
     Window["removeEventListener"]
   >;
   readonly isCurrent: () => boolean;
-  readonly methodMatches: (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => boolean;
 }
 
 interface DownloadKeyboardSnapshot {
@@ -819,26 +815,6 @@ function captureDownloadKeyboardIntrinsics(
     addEventListener,
     removeEventListener,
     isCurrent,
-    methodMatches: (
-      event: object,
-      property: PropertyKey,
-      value: unknown,
-    ) => {
-      if (typeof value !== "function") return false;
-      try {
-        let owner: object | null = event;
-        while (owner) {
-          const descriptor = getOwnPropertyDescriptor(owner, property);
-          if (descriptor) {
-            return "value" in descriptor && descriptor.value === value;
-          }
-          owner = getPrototypeOf(owner) as object | null;
-        }
-        return false;
-      } catch {
-        return false;
-      }
-    },
   };
   return isCurrent() ? Object.freeze(intrinsics) : null;
 }
@@ -995,27 +971,17 @@ function downloadKeyboardPathMatches(
 
 function readDownloadReactCancellation(
   event: ReactKeyboardEvent<HTMLElement>,
-  keyboard: DownloadKeyboardIntrinsics,
+  isCurrent: () => boolean,
 ): DownloadReactCancellation | null {
   try {
     const preventDefault = event.preventDefault;
+    if (!isCurrent() || typeof preventDefault !== "function") return null;
     const isDefaultPrevented = event.isDefaultPrevented;
+    if (!isCurrent() || typeof isDefaultPrevented !== "function") return null;
     const isPropagationStopped = event.isPropagationStopped;
     if (
-      !keyboard.isCurrent() ||
-      !keyboard.methodMatches(event, "preventDefault", preventDefault) ||
-      !keyboard.methodMatches(
-        event,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) ||
-      !keyboard.methodMatches(
-        event,
-        "isPropagationStopped",
-        isPropagationStopped,
-      ) ||
-      keyboard.apply(isDefaultPrevented, event, []) !== false ||
-      keyboard.apply(isPropagationStopped, event, []) !== false
+      !isCurrent() ||
+      typeof isPropagationStopped !== "function"
     ) {
       return null;
     }
@@ -1032,65 +998,143 @@ function readDownloadReactCancellation(
 function downloadReactCancellationMatches(
   event: ReactKeyboardEvent<HTMLElement>,
   expected: DownloadReactCancellation,
-  keyboard: DownloadKeyboardIntrinsics,
+  isCurrent: () => boolean,
+  defaultQuery = expected.isDefaultPrevented,
 ): boolean {
   try {
-    const preventDefault = event.preventDefault;
     const isDefaultPrevented = event.isDefaultPrevented;
+    if (!isCurrent() || isDefaultPrevented !== defaultQuery) return false;
     const isPropagationStopped = event.isPropagationStopped;
+    if (!isCurrent() || isPropagationStopped !== expected.isPropagationStopped) return false;
+    const preventDefault = event.preventDefault;
+    return isCurrent() && preventDefault === expected.preventDefault;
+  } catch {
+    return false;
+  }
+}
+
+function downloadReactPredicatesMatch(
+  proof: DownloadReactKey,
+  keyboard: DownloadKeyboardIntrinsics,
+  revalidate: () => boolean,
+  isCurrent: () => boolean,
+  defaultPrevented = false,
+  defaultQuery = proof.cancellation.isDefaultPrevented,
+): boolean {
+  try {
+    const event = proof.event;
+    // Every public walk precedes the selected callable's final identity read.
     return (
-      keyboard.isCurrent() &&
-      preventDefault === expected.preventDefault &&
-      isDefaultPrevented === expected.isDefaultPrevented &&
-      isPropagationStopped === expected.isPropagationStopped &&
-      keyboard.methodMatches(event, "preventDefault", preventDefault) &&
-      keyboard.methodMatches(
-        event,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) &&
-      keyboard.methodMatches(
-        event,
-        "isPropagationStopped",
-        isPropagationStopped,
-      ) &&
-      keyboard.apply(isDefaultPrevented, event, []) === false &&
-      keyboard.apply(isPropagationStopped, event, []) === false
+      revalidate() &&
+      event.isDefaultPrevented === defaultQuery &&
+      isCurrent() &&
+      keyboard.apply(defaultQuery, event, []) === defaultPrevented &&
+      isCurrent() &&
+      revalidate() &&
+      event.isPropagationStopped === proof.cancellation.isPropagationStopped &&
+      isCurrent() &&
+      keyboard.apply(proof.cancellation.isPropagationStopped, event, []) === false &&
+      isCurrent() &&
+      revalidate()
     );
   } catch {
     return false;
   }
 }
 
-function downloadReactDefaultPrevented(
-  event: ReactKeyboardEvent<HTMLElement>,
-  keyboard: DownloadKeyboardIntrinsics,
+function downloadReactKeyMatches(
+  proof: DownloadReactKey,
+  isCurrent: () => boolean,
+  retained = false,
+  defaultPrevented = false,
+  defaultQuery = proof.cancellation.isDefaultPrevented,
 ): boolean {
+  const { event, snapshot } = proof;
   try {
-    const isDefaultPrevented = event.isDefaultPrevented;
+    const matches = (
+      property: keyof ReactKeyboardEvent<HTMLElement>,
+      expected: unknown,
+    ) => {
+      const value = event[property];
+      return isCurrent() && Object.is(value, expected);
+    };
+    const currentTarget = event.currentTarget;
     return (
-      keyboard.isCurrent() &&
-      keyboard.methodMatches(
-        event,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) &&
-      keyboard.apply(isDefaultPrevented, event, []) === true
+      isCurrent() &&
+      (currentTarget === proof.boundary || (retained && currentTarget === null)) &&
+      matches("nativeEvent", proof.nativeEvent) &&
+      matches("type", snapshot.type) &&
+      matches("target", proof.source) &&
+      matches("eventPhase", snapshot.eventPhase) &&
+      matches("bubbles", snapshot.bubbles) &&
+      matches("cancelable", snapshot.cancelable) &&
+      matches("defaultPrevented", defaultPrevented) &&
+      matches("isTrusted", snapshot.isTrusted) &&
+      matches("key", snapshot.key) &&
+      matches("code", snapshot.code) &&
+      matches("location", snapshot.location) &&
+      matches("altKey", snapshot.altKey) &&
+      matches("ctrlKey", snapshot.ctrlKey) &&
+      matches("metaKey", snapshot.metaKey) &&
+      matches("shiftKey", snapshot.shiftKey) &&
+      matches("repeat", snapshot.repeat) &&
+      matches("view", snapshot.view) &&
+      downloadReactCancellationMatches(event, proof.cancellation, isCurrent, defaultQuery)
     );
   } catch {
     return false;
+  }
+}
+
+function readDownloadReactRoute(
+  event: ReactKeyboardEvent<HTMLElement>,
+  isCurrent: () => boolean,
+) {
+  try {
+    const key = event.key;
+    if (!isCurrent()) return null;
+    const nativeEvent = event.nativeEvent;
+    return isCurrent() && nativeEvent && typeof nativeEvent === "object"
+      ? { key, nativeEvent }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function preventDownloadReactKey(
+  proof: DownloadReactKey,
+  keyboard: DownloadKeyboardIntrinsics,
+  claim: () => boolean,
+  isCurrent: () => boolean,
+): (() => boolean) | null {
+  try {
+    const event = proof.event;
+    if (
+      event.preventDefault !== proof.cancellation.preventDefault ||
+      !isCurrent() ||
+      !claim()
+    ) {
+      return null;
+    }
+    keyboard.apply(proof.cancellation.preventDefault, event, []);
+    // React 19 replaces this query on the prevented wrapper, not on its capture.
+    const defaultQuery = event.isDefaultPrevented;
+    return isCurrent() && typeof defaultQuery === "function" ? defaultQuery : null;
+  } catch {
+    return null;
   }
 }
 
 function readDownloadReactKey(
   event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: KeyboardEvent,
   boundary: HTMLElement,
   publication: DownloadPublication,
   expectedPhase: number,
+  isCurrent: () => boolean,
 ): DownloadReactKey | null {
-  if (!event || typeof event !== "object") return null;
   const keyboard = publication.keyboard;
-  const nativeEvent = event.nativeEvent;
   const listenerProof = publication.keyListener.proofFor(
     nativeEvent,
     publication,
@@ -1099,7 +1143,7 @@ function readDownloadReactKey(
     ? readDownloadKeyboardEvent(nativeEvent, keyboard)
     : null;
   const cancellation = snapshot
-    ? readDownloadReactCancellation(event, keyboard)
+    ? readDownloadReactCancellation(event, isCurrent)
     : null;
   const source = listenerProof?.source ?? null;
   if (
@@ -1107,27 +1151,9 @@ function readDownloadReactKey(
     !snapshot ||
     !cancellation ||
     !source ||
-    !keyboard.isCurrent() ||
+    !isCurrent() ||
     event === (nativeEvent as unknown) ||
-    event.type !== "keydown" ||
-    event.type !== snapshot.type ||
-    event.nativeEvent !== nativeEvent ||
-    event.currentTarget !== boundary ||
-    event.target !== source ||
-    event.eventPhase !== snapshot.eventPhase ||
-    event.bubbles !== snapshot.bubbles ||
-    event.cancelable !== snapshot.cancelable ||
-    event.defaultPrevented !== snapshot.defaultPrevented ||
-    event.isTrusted !== snapshot.isTrusted ||
-    event.key !== snapshot.key ||
-    event.code !== snapshot.code ||
-    event.location !== snapshot.location ||
-    event.altKey !== snapshot.altKey ||
-    event.ctrlKey !== snapshot.ctrlKey ||
-    event.metaKey !== snapshot.metaKey ||
-    event.shiftKey !== snapshot.shiftKey ||
-    event.repeat !== snapshot.repeat ||
-    !Object.is(event.view, snapshot.view) ||
+    snapshot.type !== "keydown" ||
     snapshot.target !== source ||
     snapshot.currentTarget === null ||
     snapshot.eventPhase !== expectedPhase ||
@@ -1150,12 +1176,11 @@ function readDownloadReactKey(
       source,
       publication.ownerDocument,
       listenerProof.receiver,
-    ) ||
-    !downloadReactCancellationMatches(event, cancellation, keyboard)
+    )
   ) {
     return null;
   }
-  return Object.freeze({
+  const proof: DownloadReactKey = Object.freeze({
     event,
     boundary,
     source,
@@ -1164,6 +1189,14 @@ function readDownloadReactKey(
     snapshot,
     cancellation,
   });
+  const revalidate = () => {
+    if (!isCurrent() || !downloadReactKeyMatches(proof, isCurrent)) return false;
+    const current = readDownloadKeyboardEvent(nativeEvent, keyboard);
+    return !!current && downloadKeyboardFactsMatch(snapshot, current) && isCurrent();
+  };
+  return downloadReactPredicatesMatch(proof, keyboard, revalidate, isCurrent)
+    ? proof
+    : null;
 }
 
 function downloadReactKeyPairMatches(
@@ -1187,16 +1220,6 @@ function downloadReactKeyPairMatches(
     capture.snapshot.eventPhase === keyboard.capturingPhase &&
     bubble.snapshot.eventPhase === keyboard.bubblingPhase &&
     downloadKeyboardStableFactsMatch(capture.snapshot, bubble.snapshot) &&
-    downloadReactCancellationMatches(
-      capture.event,
-      capture.cancellation,
-      keyboard,
-    ) &&
-    downloadReactCancellationMatches(
-      bubble.event,
-      bubble.cancellation,
-      keyboard,
-    ) &&
     downloadKeyboardPathMatches(
       capture.snapshot.path,
       capture.source,
@@ -1215,9 +1238,9 @@ function downloadReactKeyPairMatches(
 function createDownloadKeyListener(
   keyboard: DownloadKeyboardIntrinsics,
 ): DownloadKeyListener {
-  const proofs = new WeakMap<KeyboardEvent, DownloadWindowProof>();
-  const invalidEvents = new WeakSet<Event>();
-  const claimedProofs = new WeakSet<object>();
+  let proofs = new WeakMap<KeyboardEvent, DownloadWindowProof>();
+  let invalidEvents = new WeakSet<Event>();
+  let claimedProofs = new WeakSet<object>();
   let publication: DownloadPublication | null = null;
   let active = false;
   let released = false;
@@ -1387,6 +1410,10 @@ function createDownloadKeyListener(
       released = true;
       const wasActive = active;
       active = false;
+      publication = null;
+      proofs = new WeakMap();
+      invalidEvents = new WeakSet();
+      claimedProofs = new WeakSet();
       if (wasActive) {
         keyboard.apply(
           keyboard.removeEventListener.value,
@@ -2018,142 +2045,145 @@ function createDownloadPublication({
           key === "End"
         : key === "Escape";
 
-  const captureKeyboard = (
+  const handleKeyboard = (
     event: ReactKeyboardEvent<HTMLElement>,
     route: KeyboardRoute,
+    phase: "capture" | "bubble",
   ) => {
-    if (!event || typeof event !== "object") return;
-    if (!routeAcceptsKey(route, event.key)) return;
+    if (cells.readingKeyboard.current || !event || typeof event !== "object") return;
     const runtime = currentRuntime;
     const publication = runtime?.publication;
-    const nativeEvent = event.nativeEvent;
-    const publications =
-      publication && nativeEvent
-        ? cells.reactKeys.get(publication)
-        : undefined;
-    if (publications && nativeEvent && publications.has(nativeEvent)) {
-      publications.delete(nativeEvent);
-      return;
+    if (!runtime || !publication || !ownsIdentity(publication)) return;
+    // This mount-local exclusion belongs to the stack, not the publication.
+    // Ref/layout cleanup and synchronous visit replacement must not clear it.
+    cells.readingKeyboard.current = true;
+    try {
+      handleOwnedKeyboard(event, route, phase, runtime, publication);
+    } finally {
+      cells.readingKeyboard.current = false;
     }
-    if (!runtime || !publication || !nativeEvent) return;
+  };
+
+  const handleOwnedKeyboard = (
+    event: ReactKeyboardEvent<HTMLElement>,
+    route: KeyboardRoute,
+    phase: "capture" | "bubble",
+    runtime: DownloadPublicationRuntime,
+    publication: DownloadPublication,
+  ) => {
     const keyboard = publication.keyboard;
     if (!keyboard.isCurrent()) {
       if (publication.retire()) requestSuccessor();
       return;
     }
+    const isCurrent = () =>
+      currentRuntime === runtime &&
+      cells.active.current === publication &&
+      !publication.isRetired() &&
+      keyboard.isCurrent();
+    const delivery = readDownloadReactRoute(event, isCurrent);
+    if (!delivery || !isCurrent() || !routeAcceptsKey(route, delivery.key)) return;
+    const { nativeEvent } = delivery;
     const boundary = boundaryFor(publication, route);
-    const captured = readDownloadReactKey(
+    const proof = readDownloadReactKey(
       event,
+      nativeEvent,
       boundary,
       publication,
-      keyboard.capturingPhase,
+      phase === "capture" ? keyboard.capturingPhase : keyboard.bubblingPhase,
+      isCurrent,
     );
-    const candidate = captured
+    if (!isCurrent() || !proof) return;
+    const candidate = routeAcceptsKey(route, proof.snapshot.key)
       ? candidateFor(
           publication,
           route,
-          captured.snapshot.key,
-          captured.source,
+          proof.snapshot.key,
+          proof.source,
         )
       : null;
     if (
-      !captured ||
       !candidate ||
-      !keyboard.isCurrent() ||
       !routeIsOwned(
         publication,
         route,
         boundary,
-        captured.source,
+        proof.source,
         candidate.destination,
       ) ||
+      !isCurrent() ||
       cells.claimedReactEvents.has(event) ||
       cells.claimedEvents.has(nativeEvent) ||
       cells.activeKeyboardActions.has(publication) ||
-      cells.claimedSources.has(captured.source) ||
+      cells.claimedSources.has(proof.source) ||
       cells.claimedDestinations.has(candidate.destination) ||
       !ownsAuthority(publication)
     ) {
       return;
     }
     let reactKeys = cells.reactKeys.get(publication);
-    if (!reactKeys) {
-      reactKeys = new WeakMap();
-      cells.reactKeys.set(publication, reactKeys);
-    }
-    reactKeys.set(nativeEvent, captured);
-  };
-
-  const navigateKeyboard = (
-    event: ReactKeyboardEvent<HTMLElement>,
-    route: KeyboardRoute,
-  ) => {
-    if (!event || typeof event !== "object") return;
-    if (!routeAcceptsKey(route, event.key)) return;
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const nativeEvent = event.nativeEvent;
-    const reactKeys = publication
-      ? cells.reactKeys.get(publication)
-      : undefined;
-    const captured =
-      reactKeys && nativeEvent ? reactKeys.get(nativeEvent) : undefined;
-    if (!runtime || !publication || !captured || !nativeEvent) return;
-    const keyboard = publication.keyboard;
-    if (!keyboard.isCurrent()) {
-      if (publication.retire()) requestSuccessor();
+    const captured = reactKeys?.get(nativeEvent);
+    if (phase === "capture") {
+      // A duplicate or crossed candidate never replaces a rightful native pair.
+      if (captured) return;
+      if (!reactKeys) {
+        reactKeys = new WeakMap();
+        cells.reactKeys.set(publication, reactKeys);
+      }
+      reactKeys.set(nativeEvent, proof);
       return;
     }
-    const boundary = boundaryFor(publication, route);
-    const bubble = readDownloadReactKey(
-      event,
-      boundary,
-      publication,
-      keyboard.bubblingPhase,
-    );
-    const candidate = bubble
-      ? candidateFor(
-          publication,
-          route,
-          bubble.snapshot.key,
-          bubble.source,
-        )
-      : null;
-    if (bubble && reactKeys) reactKeys.delete(nativeEvent);
+    const bubble = proof;
     if (
-      !bubble ||
-      !candidate ||
-      !keyboard.isCurrent() ||
+      !captured ||
+      !reactKeys ||
       !downloadReactKeyPairMatches(captured, bubble, publication) ||
-      !routeIsOwned(
-        publication,
-        route,
-        boundary,
-        bubble.source,
-        candidate.destination,
-      ) ||
-      cells.claimedKeyboardPublications.has(publication) ||
+      cells.claimedKeyboardPublications.has(publication)
+    ) {
+      return;
+    }
+
+    const nativeIsCurrent = (prevented: boolean) => {
+      if (!isCurrent()) return false;
+      const snapshot = readDownloadKeyboardEvent(nativeEvent, keyboard);
+      return (
+        !!snapshot &&
+        downloadKeyboardFactsMatch(
+          prevented ? { ...bubble.snapshot, defaultPrevented: true } : bubble.snapshot,
+          snapshot,
+        ) &&
+        routeIsOwned(publication, route, boundary, bubble.source, candidate.destination) &&
+        isCurrent()
+      );
+    };
+    const publicProofsMatch = (
+      prevented = false,
+      defaultQuery = bubble.cancellation.isDefaultPrevented,
+    ) =>
+      isCurrent() &&
+      downloadReactKeyMatches(captured, isCurrent, true) &&
+      downloadReactKeyMatches(bubble, isCurrent, false, prevented, defaultQuery) &&
+      nativeIsCurrent(prevented);
+    const predicatesMatch = (
+      prevented = false,
+      defaultQuery = bubble.cancellation.isDefaultPrevented,
+    ) => {
+      const revalidate = () => publicProofsMatch(prevented, defaultQuery);
+      const current = () => nativeIsCurrent(prevented);
+      return (
+        downloadReactPredicatesMatch(captured, keyboard, revalidate, current) &&
+        downloadReactPredicatesMatch(
+          bubble, keyboard, revalidate, current, prevented, defaultQuery,
+        )
+      );
+    };
+    if (
+      !predicatesMatch() ||
+      !isCurrent() ||
+      cells.reactKeys.get(publication) !== reactKeys ||
+      reactKeys.get(nativeEvent) !== captured ||
       cells.claimedReactEvents.has(captured.event) ||
-      cells.claimedReactEvents.has(event) ||
-      cells.claimedEvents.has(nativeEvent) ||
-      cells.activeKeyboardActions.has(publication) ||
-      cells.claimedSources.has(bubble.source) ||
-      cells.claimedDestinations.has(candidate.destination) ||
-      !ownsAuthority(publication) ||
-      !downloadReactCancellationMatches(
-        captured.event,
-        captured.cancellation,
-        keyboard,
-      ) ||
-      !downloadReactCancellationMatches(
-        event,
-        bubble.cancellation,
-        keyboard,
-      ) ||
-      !publication.keyListener.claim(
-        bubble.listenerProof,
-        publication,
-      )
+      publication.keyListener.proofFor(nativeEvent, publication) !== bubble.listenerProof
     ) {
       return;
     }
@@ -2173,93 +2203,62 @@ function createDownloadPublication({
       destinationClaimed: false,
       focusClaimed: false,
     };
-    cells.claimedKeyboardPublications.add(publication);
-    cells.claimedKeyboardActions.add(action);
-    cells.claimedReactEvents.add(captured.event);
-    cells.claimedReactEvents.add(event);
-    cells.claimedEvents.add(nativeEvent);
-    cells.claimedSources.set(action.source, action);
-    cells.claimedDestinations.set(action.destination, action);
-    cells.activeKeyboardActions.set(publication, action);
-    action.claimed = true;
-    action.sourceClaimed = true;
-    action.destinationClaimed = true;
-
     let retainedForSuccessor = false;
     try {
-      const currentSnapshot = readDownloadKeyboardEvent(
-        nativeEvent,
+      const actionIsCurrent = (prevented: boolean) =>
+        nativeIsCurrent(prevented) &&
+        publication.keyListener.retains(bubble.listenerProof, publication) &&
+        cells.activeKeyboardActions.get(publication) === action &&
+        cells.claimedKeyboardActions.has(action) &&
+        cells.claimedSources.get(action.source) === action &&
+        cells.claimedDestinations.get(action.destination) === action &&
+        action.claimed &&
+        action.sourceClaimed &&
+        action.destinationClaimed &&
+        !action.focusClaimed &&
+        action.focus === keyboard.focus;
+      const claim = () => {
+        if (
+          !nativeIsCurrent(false) ||
+          cells.reactKeys.get(publication) !== reactKeys ||
+          reactKeys.get(nativeEvent) !== captured ||
+          cells.claimedKeyboardPublications.has(publication) ||
+          cells.claimedReactEvents.has(captured.event) ||
+          cells.claimedReactEvents.has(event) ||
+          cells.claimedEvents.has(nativeEvent) ||
+          cells.activeKeyboardActions.has(publication) ||
+          cells.claimedSources.has(action.source) ||
+          cells.claimedDestinations.has(action.destination) ||
+          !publication.keyListener.claim(bubble.listenerProof, publication)
+        ) return false;
+        cells.claimedKeyboardPublications.add(publication);
+        cells.claimedKeyboardActions.add(action);
+        cells.claimedReactEvents.add(captured.event);
+        cells.claimedReactEvents.add(event);
+        cells.claimedEvents.add(nativeEvent);
+        cells.claimedSources.set(action.source, action);
+        cells.claimedDestinations.set(action.destination, action);
+        cells.activeKeyboardActions.set(publication, action);
+        reactKeys.delete(nativeEvent);
+        action.claimed = true;
+        action.sourceClaimed = true;
+        action.destinationClaimed = true;
+        return true;
+      };
+      if (!predicatesMatch()) return;
+      const defaultQuery = preventDownloadReactKey(
+        bubble,
         keyboard,
+        claim,
+        isCurrent,
       );
       if (
-        !currentSnapshot ||
-        !downloadKeyboardFactsMatch(bubble.snapshot, currentSnapshot) ||
-        !publication.keyListener.retains(
-          bubble.listenerProof,
-          publication,
-        ) ||
-        !downloadReactCancellationMatches(
-          captured.event,
-          captured.cancellation,
-          keyboard,
-        ) ||
-        !downloadReactCancellationMatches(
-          event,
-          bubble.cancellation,
-          keyboard,
-        ) ||
-        cells.activeKeyboardActions.get(publication) !== action ||
-        !cells.claimedKeyboardActions.has(action) ||
-        cells.claimedSources.get(action.source) !== action ||
-        cells.claimedDestinations.get(action.destination) !== action ||
-        !action.claimed ||
-        !action.sourceClaimed ||
-        !action.destinationClaimed ||
-        action.focusClaimed ||
-        action.focus !== keyboard.focus ||
-        !routeIsOwned(
-          publication,
-          route,
-          boundary,
-          bubble.source,
-          candidate.destination,
-        ) ||
-        !ownsAuthority(publication)
-      ) {
-        return;
-      }
-      keyboard.apply(
-        bubble.cancellation.preventDefault,
-        bubble.event,
-        [],
-      );
-      if (
-        !keyboard.apply(
-          keyboard.event.defaultPrevented,
-          nativeEvent,
-          [],
-        ) ||
-        bubble.event.defaultPrevented !== true ||
-        !downloadReactDefaultPrevented(bubble.event, keyboard) ||
-        !publication.keyListener.retains(
-          bubble.listenerProof,
-          publication,
-        ) ||
-        cells.activeKeyboardActions.get(publication) !== action ||
-        cells.claimedSources.get(action.source) !== action ||
-        cells.claimedDestinations.get(action.destination) !== action ||
-        action.focusClaimed ||
-        !routeIsOwned(
-          publication,
-          route,
-          boundary,
-          bubble.source,
-          candidate.destination,
-        ) ||
-        !ownsAuthority(publication)
-      ) {
-        return;
-      }
+        !defaultQuery ||
+        !isCurrent() ||
+        !predicatesMatch(true, defaultQuery) ||
+        !publicProofsMatch(true, defaultQuery) ||
+        !actionIsCurrent(true)
+      ) return;
 
       if (action.kind === "open" && candidate.format) {
         retainedForSuccessor = transition(
@@ -2312,22 +2311,22 @@ function createDownloadPublication({
 
   const onToggleKeyDownCapture = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) => captureKeyboard(event, "toggle");
+  ) => handleKeyboard(event, "toggle", "capture");
   const onToggleKeyDown = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) => navigateKeyboard(event, "toggle");
+  ) => handleKeyboard(event, "toggle", "bubble");
   const onListKeyDownCapture = (
     event: ReactKeyboardEvent<HTMLDivElement>,
-  ) => captureKeyboard(event, "list");
+  ) => handleKeyboard(event, "list", "capture");
   const onListKeyDown = (
     event: ReactKeyboardEvent<HTMLDivElement>,
-  ) => navigateKeyboard(event, "list");
+  ) => handleKeyboard(event, "list", "bubble");
   const onRootKeyDownCapture = (
     event: ReactKeyboardEvent<HTMLDivElement>,
-  ) => captureKeyboard(event, "root");
+  ) => handleKeyboard(event, "root", "capture");
   const onRootKeyDown = (
     event: ReactKeyboardEvent<HTMLDivElement>,
-  ) => navigateKeyboard(event, "root");
+  ) => handleKeyboard(event, "root", "bubble");
   const onRootBlur = (event: ReactFocusEvent<HTMLDivElement>) => {
     const runtime = currentRuntime;
     const publication = runtime?.publication;
@@ -2476,6 +2475,7 @@ function createDownloadPublication({
         cells.successorOf.current = publication;
       }
       if (currentRuntime?.publication === publication) currentRuntime = null;
+      cells.reactKeys.delete(publication);
       keyListener.release(publication);
       uninstallPointer();
       if (reason === "layout") {
@@ -2873,6 +2873,7 @@ export function DownloadMenu({ docId }: { docId: string }) {
   );
   const [cells] = useState<PublicationCells>(() => ({
     active: new CurrentCell<DownloadPublication | null>(null),
+    readingKeyboard: new CurrentCell(false),
     successorOf: new CurrentCell<DownloadPublication | null>(null),
     replay: new CurrentCell<DownloadReplay | null>(null),
     focused: new WeakSet<DisclosureVisit>(),

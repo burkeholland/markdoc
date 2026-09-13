@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DownloadMenu } from "./download-menu";
@@ -313,6 +314,127 @@ function distinctReactKey(
     });
   }
   return wrapper;
+}
+
+type PublicKeyPlacement =
+  | "own-null"
+  | "own-unrelated"
+  | "inherited-null"
+  | "inherited-unrelated";
+
+function publicGetterKey(
+  event: DeliveredKey,
+  placement: PublicKeyPlacement = "own-null",
+  optional: "absent" | "throwing" = "absent",
+) {
+  const values: DeliveredKey = {
+    type: event.type,
+    currentTarget: event.currentTarget,
+    target: event.target,
+    nativeEvent: event.nativeEvent,
+    eventPhase: event.eventPhase,
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    defaultPrevented: event.defaultPrevented,
+    isTrusted: event.isTrusted,
+    key: event.key,
+    code: event.code,
+    location: event.location,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    repeat: event.repeat,
+    view: event.view,
+    preventDefault: event.preventDefault,
+    isDefaultPrevented: event.isDefaultPrevented,
+    isPropagationStopped: event.isPropagationStopped,
+  };
+  const originalPrevent = values.preventDefault;
+  const prevent = vi.fn(function (this: DeliveredKey) {
+    Reflect.apply(originalPrevent, this, []);
+  });
+  values.preventDefault = prevent;
+  const prototype = placement.endsWith("null") ? null : { unrelated: true };
+  const owner = Object.create(prototype) as object;
+  const wrapper = (
+    placement.startsWith("inherited") ? Object.create(owner) : owner
+  ) as DeliveredKey;
+  const read = vi.fn<(property: keyof DeliveredKey) => void>();
+  const define = <K extends keyof DeliveredKey>(property: K) =>
+    Object.defineProperty(owner, property, {
+      configurable: true,
+      get: () => {
+        read(property);
+        return values[property];
+      },
+      set: (value: DeliveredKey[K]) => { values[property] = value; },
+    });
+  for (const property of Object.keys(values) as (keyof DeliveredKey)[]) define(property);
+  const forbidden = vi.fn(() => { throw new Error("Unsupported wrapper field"); });
+  if (optional === "throwing") {
+    for (const property of [
+      "persist", "isPersistent", "stopPropagation", "isComposing", "constructor",
+      "_reactName", "_targetInst", "_dispatchListeners", "_dispatchInstances",
+      "__reactProps$", "__reactFiber$",
+    ]) {
+      Object.defineProperty(owner, property, { configurable: true, get: forbidden });
+    }
+  }
+  return { event: wrapper, values, read, prevent, forbidden };
+}
+
+type PublicKeyFixture = ReturnType<typeof publicGetterKey>;
+type PublicKeyDelivery = (
+  fixture: PublicKeyFixture,
+  deliver: (event: DeliveredKey) => void,
+) => void;
+
+function dispatchPublicKey(
+  source: HTMLElement,
+  key: string | KeyboardEvent,
+  boundary: HTMLElement,
+  {
+    placement = "own-null",
+    optional = "absent",
+    capture,
+    bubble,
+  }: {
+    placement?: PublicKeyPlacement;
+    optional?: "absent" | "throwing";
+    capture?: PublicKeyDelivery;
+    bubble?: PublicKeyDelivery;
+  } = {},
+) {
+  const propsKey = Object.keys(boundary).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the keyboard boundary");
+  const properties = boundary as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey];
+  const captureHandler = reactHandler<(event: DeliveredKey) => void>(boundary, "onKeyDownCapture");
+  const bubbleHandler = reactHandler<(event: DeliveredKey) => void>(boundary, "onKeyDown");
+  const delivered: { capture?: PublicKeyFixture; bubble?: PublicKeyFixture } = {};
+  const replacement = {
+    ...props,
+    onKeyDownCapture: (event: DeliveredKey) => {
+      const fixture = publicGetterKey(event, placement, optional);
+      delivered.capture = fixture;
+      if (capture) capture(fixture, captureHandler);
+      else captureHandler(fixture.event);
+    },
+    onKeyDown: (event: DeliveredKey) => {
+      const fixture = publicGetterKey(event, placement, optional);
+      delivered.bubble = fixture;
+      if (bubble) bubble(fixture, bubbleHandler);
+      else bubbleHandler(fixture.event);
+    },
+  };
+  properties[propsKey] = replacement;
+  try {
+    const nativeEvent = dispatchToggleKey(source, key);
+    return { ...delivered, nativeEvent };
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
 }
 
 function blurEvent(
@@ -1347,6 +1469,642 @@ describe("DownloadMenu trusted toggle directions", () => {
     expect(menuElements().links.md).toHaveFocus();
     iframe.remove();
   });
+});
+
+describe("DownloadMenu public accessor keyboard navigation", () => {
+  const routes = ["toggle", "list", "root"] as const;
+  type Route = (typeof routes)[number];
+  const setup = (route: Route) => {
+    const prevent = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const open = vi.spyOn(window, "open");
+    const click = vi.spyOn(HTMLElement.prototype, "click");
+    const rendered = render(<StrictMode><DownloadMenu docId={DOC_ID} /></StrictMode>);
+    if (route !== "toggle") fireEvent.click(menuElements().toggle);
+    const menu = menuElements();
+    const source = route === "toggle" ? menu.toggle : menu.links.md;
+    const boundary = menu[route];
+    const key = route === "root" ? "Escape" : "ArrowDown";
+    source.focus();
+    focus.mockClear();
+    prevent.mockClear();
+    return { ...rendered, menu, source, boundary, key, prevent, focus, fetch, open, click };
+  };
+  const expectRejected = (state: ReturnType<typeof setup>, prevented = false) => {
+    expect(state.prevent).toHaveBeenCalledTimes(prevented ? 1 : 0);
+    expect(state.focus).not.toHaveBeenCalled();
+    expect(state.fetch).not.toHaveBeenCalled();
+    expect(state.open).not.toHaveBeenCalled();
+    expect(state.click).not.toHaveBeenCalled();
+    expect(state.source).toHaveFocus();
+    expect(state.menu.toggle).toHaveAttribute(
+      "aria-expanded", state.source === state.menu.toggle ? "false" : "true",
+    );
+  };
+
+  it.each([
+    ["own-null", "absent"],
+    ["own-null", "throwing"],
+    ["own-unrelated", "absent"],
+    ["own-unrelated", "throwing"],
+    ["inherited-null", "absent"],
+    ["inherited-null", "throwing"],
+    ["inherited-unrelated", "absent"],
+    ["inherited-unrelated", "throwing"],
+  ] as const)("keeps every direction exact with %s getters and %s optional fields", (placement, optional) => {
+    const state = setup("toggle");
+    const { menu, focus, prevent } = state;
+    const href = window.location.href;
+    const steps = [
+      [menu.toggle, menu.toggle, "ArrowDown", menu.links.md],
+      [menu.toggle, menu.toggle, "ArrowUp", menu.links.pdf],
+      [menu.toggle, menu.toggle, "ArrowDown", menu.links.md],
+      [menu.links.md, menu.list, "Home", menu.links.md],
+      [menu.links.md, menu.list, "ArrowUp", menu.links.pdf],
+      [menu.links.pdf, menu.list, "End", menu.links.pdf],
+      [menu.links.pdf, menu.list, "ArrowDown", menu.links.md],
+      [menu.links.md, menu.list, "ArrowDown", menu.links.html],
+      [menu.links.html, menu.list, "ArrowUp", menu.links.md],
+      [menu.links.md, menu.list, "End", menu.links.pdf],
+      [menu.links.pdf, menu.list, "Home", menu.links.md],
+      [menu.links.md, menu.root, "Escape", menu.toggle],
+      [menu.toggle, menu.toggle, "ArrowUp", menu.links.pdf],
+      [menu.links.pdf, menu.root, "Escape", menu.toggle],
+    ] as const;
+    const activations = FORMATS.map((format) => {
+      const listener = vi.fn();
+      menu.links[format].addEventListener("click", listener);
+      return listener;
+    });
+    for (const [source, boundary, key, destination] of steps) {
+      source.focus();
+      focus.mockClear();
+      prevent.mockClear();
+      const result = dispatchPublicKey(source, key, boundary, { placement, optional });
+      expect(result.nativeEvent.defaultPrevented).toBe(true);
+      expect(prevent).toHaveBeenCalledOnce();
+      expect(result.capture?.prevent).not.toHaveBeenCalled();
+      expect(result.bubble?.prevent).toHaveBeenCalledOnce();
+      expect(result.bubble?.prevent.mock.contexts[0]).toBe(result.bubble?.event);
+      expect(result.capture?.values.isDefaultPrevented()).toBe(false);
+      expect(result.capture?.values.defaultPrevented).toBe(false);
+      expect(result.bubble?.values.isDefaultPrevented()).toBe(true);
+      expect(result.bubble?.values.defaultPrevented).toBe(true);
+      expect(result.capture?.forbidden).not.toHaveBeenCalled();
+      expect(result.bubble?.forbidden).not.toHaveBeenCalled();
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(menu.toggle).toHaveAttribute("aria-expanded", key === "Escape" ? "false" : "true");
+      expect(FORMATS.map((format) => menu.links[format].getAttribute("href"))).toEqual(
+        FORMATS.map((format) => downloadHref(DOC_ID, format)),
+      );
+      expect(FORMATS.map((format) => menu.links[format].textContent?.trim())).toEqual(
+        ["Markdown", "HTML", "PDF"],
+      );
+    }
+    expect(activations.every((listener) => listener.mock.calls.length === 0)).toBe(true);
+    expect(state.fetch).not.toHaveBeenCalled();
+    expect(state.open).not.toHaveBeenCalled();
+    expect(state.click).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(href);
+  });
+
+  const driftFields: (keyof DeliveredKey)[] = [
+    "type", "currentTarget", "target", "nativeEvent", "eventPhase", "bubbles",
+    "cancelable", "defaultPrevented", "isTrusted", "key", "code", "location",
+    "altKey", "ctrlKey", "metaKey", "shiftKey", "repeat", "view",
+    "preventDefault", "isDefaultPrevented", "isPropagationStopped",
+  ];
+  it.each(routes.flatMap((route) => driftFields.map((field) => [route, field] as const)))(
+    "rejects %s required %s getter drift before prevention",
+    (route, field) => {
+      const state = setup(route);
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        bubble: (fixture, deliver) => {
+          let reads = 0;
+          fixture.read.mockImplementation((property) => {
+            if (property !== field || ++reads !== 2) return;
+            const value = fixture.values[property];
+            const replacement =
+              typeof value === "function" ? vi.fn(() => false) :
+              typeof value === "boolean" ? !value :
+              typeof value === "number" ? value + 1 :
+              typeof value === "string" ? "wrong" :
+              property === "nativeEvent" ? toggleKeyEvent(state.source, state.key) :
+              property === "view" ? {} : state.menu.primary;
+            Object.defineProperty(fixture.values, property, { configurable: true, value: replacement });
+          });
+          deliver(fixture.event);
+        },
+      });
+      expect(result.nativeEvent.defaultPrevented).toBe(false);
+      expectRejected(state);
+    },
+  );
+
+  it.each(routes)("accepts stable transparent public proxies for the %s route", (route) => {
+    const state = setup(route);
+    const receivers: DeliveredKey[] = [];
+    const deliverProxy: PublicKeyDelivery = (fixture, deliver) => {
+      const proxy = new Proxy(fixture.event, {});
+      receivers.push(proxy);
+      deliver(proxy);
+    };
+    const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+      placement: "inherited-unrelated",
+      optional: "throwing",
+      capture: deliverProxy,
+      bubble: deliverProxy,
+    });
+    expect(result.nativeEvent.defaultPrevented).toBe(true);
+    expect(state.prevent).toHaveBeenCalledOnce();
+    expect(result.bubble?.prevent.mock.contexts[0]).toBe(receivers[1]);
+    expect(result.capture?.prevent).not.toHaveBeenCalled();
+    expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it.each(routes)("reads each %s selected callable last and captures Q1 immediately", (route) => {
+    const state = setup(route);
+    const orderingErrors: string[] = [];
+    const trace: string[] = [];
+    const configure: PublicKeyDelivery = (fixture, deliver) => {
+      fixture.read.mockImplementation((property) => { trace.push(`read:${property}`); });
+      const check = (method: keyof DeliveredKey, receiver: DeliveredKey) => {
+        if (trace.at(-1) !== `read:${method}`) orderingErrors.push(method);
+        if (receiver !== fixture.event) orderingErrors.push("receiver");
+        trace.push(`call:${method}`);
+      };
+      fixture.values.isDefaultPrevented = function () {
+        check("isDefaultPrevented", this);
+        return false;
+      };
+      fixture.values.isPropagationStopped = function () {
+        check("isPropagationStopped", this);
+        return false;
+      };
+      const prevent = fixture.values.preventDefault;
+      fixture.values.preventDefault = function () {
+        check("preventDefault", this);
+        Reflect.apply(prevent, this, []);
+        fixture.values.isDefaultPrevented = function () {
+          check("isDefaultPrevented", this);
+          return true;
+        };
+        trace.push("prevented");
+      };
+      deliver(fixture.event);
+    };
+    const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+      capture: configure,
+      bubble: configure,
+    });
+    expect(result.nativeEvent.defaultPrevented).toBe(true);
+    expect(orderingErrors).toEqual([]);
+    const index = trace.indexOf("prevented");
+    expect(index).toBeGreaterThan(-1);
+    expect(trace[index + 1]).toBe("read:isDefaultPrevented");
+    expect(state.prevent).toHaveBeenCalledOnce();
+    expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it.each(routes.flatMap((route) =>
+    (["preventDefault", "isDefaultPrevented", "isPropagationStopped"] as const)
+      .map((method) => [route, method] as const)))(
+    "rejects %s late getter replacement of selected %s without invoking a stale callable",
+    (route, method) => {
+      const state = setup(route);
+      const stale = vi.fn(() => false);
+      const replacement = vi.fn(() => false);
+      dispatchPublicKey(state.source, state.key, state.boundary, {
+        bubble: (fixture, deliver) => {
+          fixture.values[method] = stale;
+          fixture.read.mockImplementation((property) => {
+            if (property === "view") fixture.values[method] = replacement;
+          });
+          deliver(fixture.event);
+        },
+      });
+      expect(stale).not.toHaveBeenCalled();
+      expect(replacement).not.toHaveBeenCalled();
+      expectRejected(state);
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["capture-changes-bubble", "bubble-changes-capture"] as const)
+      .map((direction) => [route, direction] as const)))(
+    "rejects %s cross-proof query mutation: %s",
+    (route, direction) => {
+      const state = setup(route);
+      let captured: PublicKeyFixture;
+      let bubbled: PublicKeyFixture | undefined;
+      const replacement = vi.fn(() => false);
+      dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          captured = fixture;
+          fixture.values.isDefaultPrevented = () => {
+            if (bubbled && direction === "capture-changes-bubble") {
+              bubbled.values.isPropagationStopped = replacement;
+            }
+            return false;
+          };
+          deliver(fixture.event);
+        },
+        bubble: (fixture, deliver) => {
+          bubbled = fixture;
+          fixture.values.isDefaultPrevented = () => {
+            if (direction === "bubble-changes-capture") {
+              captured.values.isDefaultPrevented = replacement;
+            }
+            return false;
+          };
+          deliver(fixture.event);
+        },
+      });
+      expect(replacement).not.toHaveBeenCalled();
+      expectRejected(state);
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["field-getter", "capture-query", "bubble-query"] as const)
+      .map((callback) => [route, callback] as const)))(
+    "pins %s prevention-installed Q1 before a %s replaces it with Q2",
+    (route, callback) => {
+      const state = setup(route);
+      const q1 = vi.fn(() => true);
+      const q2 = vi.fn(() => true);
+      let bubbled: PublicKeyFixture | undefined;
+      dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          fixture.values.isDefaultPrevented = () => {
+            if (callback === "capture-query" && bubbled?.values.defaultPrevented) {
+              bubbled.values.isDefaultPrevented = q2;
+            }
+            return false;
+          };
+          deliver(fixture.event);
+        },
+        bubble: (fixture, deliver) => {
+          bubbled = fixture;
+          const prevent = fixture.values.preventDefault;
+          fixture.values.preventDefault = function () {
+            Reflect.apply(prevent, this, []);
+            fixture.values.isDefaultPrevented = q1;
+          };
+          fixture.read.mockImplementation((property) => {
+            if (
+              callback === "field-getter" &&
+              property === "defaultPrevented" &&
+              fixture.values.defaultPrevented
+            ) fixture.values.isDefaultPrevented = q2;
+          });
+          fixture.values.isPropagationStopped = () => {
+            if (callback === "bubble-query" && fixture.values.defaultPrevented) {
+              fixture.values.isDefaultPrevented = q2;
+            }
+            return false;
+          };
+          deliver(fixture.event);
+        },
+      });
+      expect(q2).not.toHaveBeenCalled();
+      expectRejected(state, true);
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["key", "nativeEvent", "view", "isDefaultPrevented", "isPropagationStopped", "preventDefault"] as const)
+      .map((entry) => [route, entry] as const)))(
+    "excludes nested %s callbacks from the first %s read or invocation until unwind",
+    (route, entry) => {
+      const state = setup(route);
+      let attempted = false;
+      const nestedReads = vi.fn(() => { throw new Error("Nested wrapper was read"); });
+      const nested = Object.create(null) as DeliveredKey;
+      for (const property of driftFields) {
+        Object.defineProperty(nested, property, { get: nestedReads });
+      }
+      const nestedNative: KeyboardEvent[] = [];
+      const handlers = [state.menu.toggle, state.menu.list, state.menu.root].flatMap(
+        (boundary) => [
+          reactHandler<(event: DeliveredKey) => void>(boundary, "onKeyDownCapture"),
+          reactHandler<(event: DeliveredKey) => void>(boundary, "onKeyDown"),
+        ],
+      );
+      const reenter = () => {
+        if (attempted) return;
+        attempted = true;
+        for (const handler of handlers) handler(nested);
+        const native = toggleKeyEvent(state.source, state.key);
+        nestedNative.push(native);
+        state.source.dispatchEvent(native);
+      };
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          fixture.read.mockImplementation((property) => {
+            if (property === entry && ["key", "nativeEvent", "view"].includes(entry)) reenter();
+          });
+          deliver(fixture.event);
+        },
+        bubble: (fixture, deliver) => {
+          if (entry === "preventDefault") {
+            const prevent = fixture.values.preventDefault;
+            fixture.values.preventDefault = function () {
+              reenter();
+              Reflect.apply(prevent, this, []);
+            };
+          } else if (entry === "isDefaultPrevented" || entry === "isPropagationStopped") {
+            fixture.values[entry] = () => { reenter(); return false; };
+          }
+          deliver(fixture.event);
+        },
+      });
+      expect(attempted).toBe(true);
+      expect(nestedReads).not.toHaveBeenCalled();
+      expect(nestedNative).toHaveLength(1);
+      expect(nestedNative[0].defaultPrevented).toBe(false);
+      expect(result.nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["key", "nativeEvent", "view", "query", "prevention"] as const)
+      .map((entry) => [route, entry] as const)))(
+    "keeps %s exclusion through synchronous visit replacement from %s",
+    (route, entry) => {
+      const state = setup(route);
+      const oldCapture = reactHandler<(event: DeliveredKey) => void>(state.boundary, "onKeyDownCapture");
+      const oldBubble = reactHandler<(event: DeliveredKey) => void>(state.boundary, "onKeyDown");
+      let replaced = false;
+      let nested: KeyboardEvent | undefined;
+      const replace = () => {
+        if (replaced) return;
+        replaced = true;
+        flushSync(() => state.rerender(
+          <StrictMode><DownloadMenu docId={NEXT_DOC_ID} /></StrictMode>,
+        ));
+        const successor = menuElements();
+        successor.toggle.focus();
+        state.focus.mockClear();
+        nested = toggleKeyEvent(successor.toggle, "ArrowDown");
+        successor.toggle.dispatchEvent(nested);
+      };
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          fixture.read.mockImplementation((property) => {
+            if (property === entry) replace();
+          });
+          deliver(fixture.event);
+        },
+        bubble: (fixture, deliver) => {
+          if (entry === "query") {
+            fixture.values.isDefaultPrevented = () => { replace(); return false; };
+          } else if (entry === "prevention") {
+            const prevent = fixture.values.preventDefault;
+            fixture.values.preventDefault = function () {
+              Reflect.apply(prevent, this, []);
+              replace();
+            };
+          }
+          deliver(fixture.event);
+        },
+      });
+      expect(replaced).toBe(true);
+      expect(nested?.defaultPrevented).toBe(false);
+      expect(result.nativeEvent.defaultPrevented).toBe(entry === "prevention");
+      expect(state.prevent).toHaveBeenCalledTimes(entry === "prevention" ? 1 : 0);
+      expect(state.focus).not.toHaveBeenCalled();
+      expect(menuElements().list).not.toBeVisible();
+      const forbidden = vi.fn(() => { throw new Error("Retained callback read a retired wrapper"); });
+      const stale = Object.create(null) as DeliveredKey;
+      for (const property of driftFields) Object.defineProperty(stale, property, { get: forbidden });
+      oldCapture(stale);
+      oldBubble(stale);
+      expect(forbidden).not.toHaveBeenCalled();
+      state.prevent.mockClear();
+      const successor = menuElements();
+      expect(dispatchPublicKey(successor.toggle, "ArrowUp", successor.toggle).nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(successor.links.pdf).toHaveFocus();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(successor.links.pdf).toHaveAttribute("href", downloadHref(NEXT_DOC_ID, "pdf"));
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["key", "nativeEvent", "view", "query", "prevention"] as const)
+      .map((entry) => [route, entry] as const)))(
+    "revokes %s retained callbacks and pairs when %s cleans up",
+    (route, entry) => {
+      const state = setup(route);
+      const capture = reactHandler<(event: DeliveredKey) => void>(state.boundary, "onKeyDownCapture");
+      const bubble = reactHandler<(event: DeliveredKey) => void>(state.boundary, "onKeyDown");
+      let cleaned = false;
+      const clean = () => {
+        if (cleaned) return;
+        cleaned = true;
+        flushSync(() => state.unmount());
+      };
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          fixture.read.mockImplementation((property) => {
+            if (property === entry) clean();
+          });
+          deliver(fixture.event);
+        },
+        bubble: (fixture, deliver) => {
+          if (entry === "query") {
+            fixture.values.isDefaultPrevented = () => { clean(); return false; };
+          } else if (entry === "prevention") {
+            const prevent = fixture.values.preventDefault;
+            fixture.values.preventDefault = function () {
+              Reflect.apply(prevent, this, []);
+              clean();
+            };
+          }
+          deliver(fixture.event);
+        },
+      });
+      expect(cleaned).toBe(true);
+      expect(result.nativeEvent.defaultPrevented).toBe(entry === "prevention");
+      expect(state.prevent).toHaveBeenCalledTimes(entry === "prevention" ? 1 : 0);
+      expect(state.focus).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("reader-download-menu")).not.toBeInTheDocument();
+      const stale = result.capture;
+      if (!stale) throw new Error("The real capture was not delivered");
+      stale.read.mockImplementation(() => { throw new Error("Retired wrapper read"); });
+      stale.read.mockClear();
+      capture(stale.event);
+      bubble(stale.event);
+      expect(stale.read).not.toHaveBeenCalled();
+      render(<DownloadMenu docId={NEXT_DOC_ID} />);
+      const successor = menuElements();
+      successor.toggle.focus();
+      state.focus.mockClear();
+      state.prevent.mockClear();
+      expect(dispatchPublicKey(successor.toggle, "ArrowDown", successor.toggle).nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(successor.links.md).toHaveFocus();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it.each(routes)(
+    "keeps %s exclusion after ref cleanup and publishes a clean replay successor",
+    (route) => {
+      const state = setup(route);
+      const ref = reactRef(state.menu.root);
+      const oldBubble = reactHandler<(event: DeliveredKey) => void>(state.boundary, "onKeyDown");
+      let retired = false;
+      const nestedRead = vi.fn(() => { throw new Error("Nested retired wrapper read"); });
+      dispatchPublicKey(state.source, state.key, state.boundary, {
+        bubble: (fixture, deliver) => {
+          fixture.read.mockImplementation((property) => {
+            if (property !== "nativeEvent" || retired) return;
+            retired = true;
+            ref(null);
+            ref(state.menu.root);
+            const nested = Object.create(null) as DeliveredKey;
+            Object.defineProperty(nested, "key", { get: nestedRead });
+            oldBubble(nested);
+          });
+          deliver(fixture.event);
+        },
+      });
+      expect(retired).toBe(true);
+      expect(nestedRead).not.toHaveBeenCalled();
+      expectRejected(state);
+      state.rerender(<StrictMode><DownloadMenu docId={DOC_ID} /></StrictMode>);
+      const current = menuElements();
+      const source = route === "toggle" ? current.toggle : current.links.md;
+      source.focus();
+      state.focus.mockClear();
+      expect(dispatchPublicKey(source, state.key, current[route]).nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it.each(routes.flatMap((route) =>
+    (["target", "currentTarget", "eventPhase", "nativeEvent", "view", "throwing", "same-wrapper"] as const)
+      .map((malformation) => [route, malformation] as const)))(
+    "preserves the %s rightful pair through malformed %s and duplicate deliveries",
+    (route, malformation) => {
+      const state = setup(route);
+      let captured: PublicKeyFixture;
+      const malformed = (fixture: PublicKeyFixture) => {
+        if (malformation === "throwing") {
+          fixture.read.mockImplementation(() => { throw new Error("Malformed public getter"); });
+        } else if (malformation === "target" || malformation === "currentTarget") {
+          fixture.values[malformation] = state.menu.primary;
+        } else if (malformation === "eventPhase") {
+          fixture.values.eventPhase = 2;
+        } else if (malformation === "nativeEvent") {
+          fixture.values.nativeEvent = toggleKeyEvent(state.source, state.key);
+        } else if (malformation === "view") {
+          Object.defineProperty(fixture.values, "view", { value: Object.create(window) });
+        }
+        return fixture.event;
+      };
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          captured = fixture;
+          if (malformation !== "same-wrapper") {
+            deliver(malformed(publicGetterKey(fixture.event)));
+          }
+          deliver(fixture.event);
+          deliver(fixture.event);
+          if (malformation !== "same-wrapper") {
+            deliver(malformed(publicGetterKey(fixture.event, "inherited-null")));
+          }
+        },
+        bubble: (fixture, deliver) => {
+          deliver(malformation === "same-wrapper"
+            ? captured.event
+            : malformed(publicGetterKey(fixture.event)));
+          expect(state.prevent).not.toHaveBeenCalled();
+          expect(state.focus).not.toHaveBeenCalled();
+          deliver(fixture.event);
+          deliver(fixture.event);
+        },
+      });
+      expect(result.nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(result.capture?.prevent).not.toHaveBeenCalled();
+      expect(result.bubble?.prevent).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(routes)("retains the %s genuine pair across nested capture microtasks", (route) => {
+    const state = setup(route);
+    const ticks: number[] = [];
+    vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+    try {
+      const result = dispatchPublicKey(state.source, state.key, state.boundary, {
+        capture: (fixture, deliver) => {
+          deliver(fixture.event);
+          queueMicrotask(() => {
+            ticks.push(1);
+            queueMicrotask(() => {
+              ticks.push(2);
+              queueMicrotask(() => ticks.push(3));
+            });
+          });
+          vi.runAllTicks();
+          expect(fixture.values.nativeEvent.eventPhase).toBe(Event.CAPTURING_PHASE);
+        },
+      });
+      expect(ticks).toEqual([1, 2, 3]);
+      expect(result.nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(routes.flatMap((route) =>
+    (["unfocused", "altKey", "ctrlKey", "metaKey", "shiftKey", "repeat", "isComposing",
+      "untrusted", "canceled", "stopped", "Tab", "Enter", " "] as const)
+      .map((reason) => [route, reason] as const)))(
+    "leaves %s %s attempts without an owned keyboard action",
+    (route, reason) => {
+      const state = setup(route);
+      const init: KeyboardEventInit = {};
+      if (["altKey", "ctrlKey", "metaKey", "shiftKey", "repeat", "isComposing"].includes(reason)) {
+        Object.defineProperty(init, reason, { enumerable: true, value: true });
+      }
+      const key = ["Tab", "Enter", " "].includes(reason) ? reason : state.key;
+      const native = toggleKeyEvent(state.source, key, init, reason !== "untrusted");
+      if (reason === "canceled") native.preventDefault();
+      if (reason === "unfocused") state.menu.primary.focus();
+      state.prevent.mockClear();
+      state.focus.mockClear();
+      dispatchPublicKey(state.source, native, state.boundary, {
+        capture: (fixture, deliver) => {
+          if (reason === "stopped") fixture.values.isPropagationStopped = () => true;
+          deliver(fixture.event);
+        },
+      });
+      expect(state.prevent).not.toHaveBeenCalled();
+      expect(state.focus).not.toHaveBeenCalled();
+      expect(state.fetch).not.toHaveBeenCalled();
+      expect(state.open).not.toHaveBeenCalled();
+      expect(state.click).not.toHaveBeenCalled();
+      expect(state.menu.toggle).toHaveAttribute("aria-expanded", route === "toggle" ? "false" : "true");
+      state.source.focus();
+      state.focus.mockClear();
+      expect(dispatchPublicKey(state.source, state.key, state.boundary).nativeEvent.defaultPrevented).toBe(true);
+      expect(state.prevent).toHaveBeenCalledOnce();
+      expect(state.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
 });
 
 describe("DownloadMenu Strict Mode replay", () => {
