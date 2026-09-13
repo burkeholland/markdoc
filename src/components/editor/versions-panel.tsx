@@ -7154,6 +7154,9 @@ function readVersionDiffActionDelivery(
   expectedPhase: number,
 ): VersionDiffActionDelivery | null {
   if (!event || typeof event !== "object") return null;
+  const reactEvent = event as KeyboardEvent<HTMLElement> & {
+    readonly isComposing?: boolean;
+  };
   const keyboard = publication.keyboard;
   const keyListener = publication.keyListener;
   const nativeEvent = event.nativeEvent;
@@ -7224,8 +7227,8 @@ function readVersionDiffActionDelivery(
     event.metaKey !== snapshot.metaKey ||
     event.shiftKey !== snapshot.shiftKey ||
     event.repeat !== snapshot.repeat ||
-    (event.isComposing !== undefined &&
-      event.isComposing !== snapshot.isComposing) ||
+    (reactEvent.isComposing !== undefined &&
+      reactEvent.isComposing !== snapshot.isComposing) ||
     !Object.is(event.view, snapshot.view)
   ) {
     return null;
@@ -8200,6 +8203,7 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
   const onNext = useCallback(() => {
     goTo(active + 1);
   }, [active, goTo]);
+  /* eslint-disable react-hooks/refs -- Publication members are retained callbacks used only by refs, effects, and events. */
   const actionFacts: readonly VersionDiffActionFact[] = Object.freeze([
     ...(base
       ? [
@@ -8432,4 +8436,5 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
       </div>
     </div>
   );
+  /* eslint-enable react-hooks/refs */
 }

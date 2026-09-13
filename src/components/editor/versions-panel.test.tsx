@@ -517,7 +517,9 @@ function dispatchVersionDiffActionKey(
   return { event, allowed };
 }
 
-type DeliveredVersionDiffActionKey = ReactKeyboardEvent<HTMLElement>;
+type DeliveredVersionDiffActionKey = ReactKeyboardEvent<HTMLElement> & {
+  readonly isComposing?: boolean;
+};
 
 function versionDiffReactHandler<T>(
   element: HTMLElement,
@@ -1606,11 +1608,12 @@ describe("VersionDiffView · header action keyboard navigation", () => {
       "defaultView",
     )?.get;
     if (!defaultView) throw new Error("Missing defaultView getter");
-    const backingWindow = Reflect.apply(defaultView, document, []) as Window;
+    const backingWindow = Reflect.apply(defaultView, document, []) as Window &
+      typeof globalThis;
     const originalAdd = backingWindow.addEventListener.bind(backingWindow);
     const originalRemove = backingWindow.removeEventListener.bind(backingWindow);
     const bridges = new WeakMap<EventListener, EventListener>();
-    let bridgeReceiver: EventTarget | null = null;
+    const bridgeReceivers: EventTarget[] = [];
     const facadeAdd: Window["addEventListener"] = function (
       this: Window,
       type: string,
@@ -1619,14 +1622,14 @@ describe("VersionDiffView · header action keyboard navigation", () => {
     ) {
       if (type === "keydown" && typeof listener === "function") {
         const bridge: EventListener = function (this: Window, event) {
-          bridgeReceiver = this;
+          bridgeReceivers.push(this);
           Reflect.apply(listener, this, [event]);
         };
         bridges.set(listener, bridge);
         originalAdd(type, bridge, options);
         return;
       }
-      originalAdd(type, listener, options);
+      if (listener) originalAdd(type, listener, options);
     } as Window["addEventListener"];
     const facadeRemove: Window["removeEventListener"] = function (
       this: Window,
@@ -1638,10 +1641,9 @@ describe("VersionDiffView · header action keyboard navigation", () => {
         type === "keydown" && typeof listener === "function"
           ? bridges.get(listener)
           : undefined;
-      originalRemove(type, bridge ?? listener, options);
+      if (listener) originalRemove(type, bridge ?? listener, options);
     } as Window["removeEventListener"];
-    let facade!: Window & typeof globalThis;
-    facade = new Proxy(backingWindow as Window & typeof globalThis, {
+    const facade = new Proxy(backingWindow as Window & typeof globalThis, {
       get(target, property) {
         if (property === "addEventListener") return facadeAdd;
         if (property === "removeEventListener") return facadeRemove;
@@ -1680,8 +1682,8 @@ describe("VersionDiffView · header action keyboard navigation", () => {
 
     expect(allowed).toBe(false);
     expect(accepted.view).toBe(backingWindow);
-    expect(bridgeReceiver).toBe(backingWindow);
-    expect(bridgeReceiver).toBe(accepted.view);
+    expect(bridgeReceivers).toEqual([backingWindow]);
+    expect(bridgeReceivers[0]).toBe(accepted.view);
     expect(accepted.defaultPrevented).toBe(true);
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
