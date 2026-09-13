@@ -7,6 +7,32 @@ import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
 
+type ControlledStateSetter = (next: never) => unknown;
+
+const mentionHighlightReentry = vi.hoisted(() => ({
+  callback: null as (() => void) | null,
+  setters: new WeakMap<ControlledStateSetter, ControlledStateSetter>(),
+}));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  const useState = ((initialState: unknown) => {
+    const [value, setValue] = actual.useState(initialState);
+    const setter = setValue as ControlledStateSetter;
+    let wrapped = mentionHighlightReentry.setters.get(setter);
+    if (!wrapped) {
+      wrapped = (next: never) => {
+        const result = setValue(next as never);
+        mentionHighlightReentry.callback?.();
+        return result;
+      };
+      mentionHighlightReentry.setters.set(setter, wrapped);
+    }
+    return [value, wrapped] as const;
+  }) as typeof actual.useState;
+  return { ...actual, useState };
+});
+
 // A provider that only supplies the awareness instance; tests drive presence by applying a remote client's
 // awareness state to it and firing `onAwarenessChange`, as Hocuspocus does when the server relays one.
 vi.mock("@hocuspocus/provider", async () => {
@@ -8450,6 +8476,7 @@ describe("CommentsPanel", () => {
     };
 
     afterEach(() => {
+      mentionHighlightReentry.callback = null;
       for (const view of directRequestModeViews.splice(0)) {
         act(() => view.root.unmount());
         view.host.remove();
@@ -8485,6 +8512,562 @@ describe("CommentsPanel", () => {
     });
 
     describe("mention-suggestion keyboard authority", () => {
+      const replaceMentionPhaseWrappers = (
+        root: HTMLElement,
+        box: HTMLTextAreaElement,
+        options: {
+          onDefaultQuery?: (
+            phase: "root-capture" | "textarea-capture" | "textarea-bubble" | "root-bubble",
+            driftPropagation: () => void,
+            wrapper: Record<string, unknown>,
+          ) => void;
+          replaceTextareaDefaultQuery?: boolean;
+          driftTextareaPostDefaultQuery?: boolean;
+          poisonPrivateMembers?: boolean;
+        } = {},
+      ) => {
+        type Phase =
+          | "root-capture"
+          | "textarea-capture"
+          | "textarea-bubble"
+          | "root-bubble";
+        const preventions = new Map<Phase, ReturnType<typeof vi.fn>>();
+        const wrap = (
+          event: ReactKeyboardEvent<HTMLElement>,
+          phase: Phase,
+        ) => {
+          const wrapper = Object.create({ phase }) as Record<string, unknown>;
+          const names = [
+            "nativeEvent",
+            "type",
+            "target",
+            "currentTarget",
+            "eventPhase",
+            "bubbles",
+            "cancelable",
+            "defaultPrevented",
+            "isTrusted",
+            "key",
+            "code",
+            "location",
+            "charCode",
+            "keyCode",
+            "which",
+            "locale",
+            "detail",
+            "view",
+            "repeat",
+            "isComposing",
+            "altKey",
+            "ctrlKey",
+            "metaKey",
+            "shiftKey",
+          ] as const;
+          const scalars = Object.fromEntries(
+            names.map((name) => [
+              name,
+              (event as unknown as Record<string, unknown>)[name],
+            ]),
+          );
+          for (const name of names) {
+            Object.defineProperty(wrapper, name, {
+              configurable: true,
+              enumerable: true,
+              get: () =>
+                name === "defaultPrevented"
+                  ? event.defaultPrevented
+                  : scalars[name],
+            });
+          }
+          const preventDefault = vi.fn(() => {
+            event.preventDefault();
+            if (
+              phase === "textarea-bubble" &&
+              options.replaceTextareaDefaultQuery
+            ) {
+              const replacement = () => {
+                if (options.driftTextareaPostDefaultQuery) {
+                  Object.defineProperty(wrapper, "isDefaultPrevented", {
+                    configurable: true,
+                    value: () => true,
+                  });
+                }
+                return true;
+              };
+              Object.defineProperty(wrapper, "isDefaultPrevented", {
+                configurable: true,
+                value: replacement,
+              });
+            }
+          });
+          preventions.set(phase, preventDefault);
+          const isPropagationStopped = () => event.isPropagationStopped();
+          Object.assign(wrapper, {
+            preventDefault,
+            isDefaultPrevented: () => {
+              options.onDefaultQuery?.(
+                phase,
+                () => {
+                  Object.defineProperty(wrapper, "isPropagationStopped", {
+                    configurable: true,
+                    value: () => false,
+                  });
+                },
+                wrapper,
+              );
+              return event.isDefaultPrevented();
+            },
+            isPropagationStopped,
+          });
+          if (options.poisonPrivateMembers) {
+            for (const name of [
+              "_reactName",
+              "persist",
+              "isPersistent",
+              "stopPropagation",
+            ]) {
+              Object.defineProperty(wrapper, name, {
+                configurable: true,
+                get: () => {
+                  throw new Error(`private ${name} was read`);
+                },
+              });
+            }
+          }
+          return wrapper as unknown as ReactKeyboardEvent<HTMLElement>;
+        };
+        const rootCapture = reactProperty<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDownCapture");
+        const rootBubble = reactProperty<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDown");
+        const textareaCapture = reactProperty<
+          (event: ReactKeyboardEvent<HTMLTextAreaElement>) => void
+        >(box, "onKeyDownCapture");
+        const textareaBubble = reactProperty<
+          (event: ReactKeyboardEvent<HTMLTextAreaElement>) => void
+        >(box, "onKeyDown");
+        const restoreRoot = replaceReactProperties(root, {
+          onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) =>
+            rootCapture(wrap(event, "root-capture") as ReactKeyboardEvent<HTMLDivElement>),
+          onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) =>
+            rootBubble(wrap(event, "root-bubble") as ReactKeyboardEvent<HTMLDivElement>),
+        });
+        const restoreTextarea = replaceReactProperties(box, {
+          onKeyDownCapture: (event: ReactKeyboardEvent<HTMLTextAreaElement>) =>
+            textareaCapture(wrap(event, "textarea-capture") as ReactKeyboardEvent<HTMLTextAreaElement>),
+          onKeyDown: (event: ReactKeyboardEvent<HTMLTextAreaElement>) =>
+            textareaBubble(wrap(event, "textarea-bubble") as ReactKeyboardEvent<HTMLTextAreaElement>),
+        });
+        return {
+          preventions,
+          restore: () => {
+            restoreTextarea();
+            restoreRoot();
+          },
+        };
+      };
+
+      it("accepts four independent public phase wrappers and React 19's post-prevention query replacement", async () => {
+        const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+        const { box, options } = await mountDirectMentions();
+        const root = box.parentElement;
+        if (!root) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const wrappers = replaceMentionPhaseWrappers(root, box, {
+          replaceTextareaDefaultQuery: true,
+        });
+        const changes: MutationRecord[] = [];
+        const observer = new MutationObserver((records) => changes.push(...records));
+        observer.observe(box, {
+          attributes: true,
+          attributeFilter: ["aria-activedescendant"],
+        });
+        preventDefault.mockClear();
+
+        try {
+          const accepted = mentionKey(box, "End");
+          changes.push(...observer.takeRecords());
+          expect(accepted.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(wrappers.preventions.get("textarea-bubble")).toHaveBeenCalledOnce();
+          expect(wrappers.preventions.get("root-capture")).not.toHaveBeenCalled();
+          expect(wrappers.preventions.get("textarea-capture")).not.toHaveBeenCalled();
+          expect(wrappers.preventions.get("root-bubble")).not.toHaveBeenCalled();
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+          expect(changes).toHaveLength(1);
+          expect(box).toHaveFocus();
+          expect(box).toHaveValue("@");
+          expect(api.documents.comment).not.toHaveBeenCalled();
+          expect(api.documents.createRequest).not.toHaveBeenCalled();
+        } finally {
+          observer.disconnect();
+          wrappers.restore();
+        }
+      });
+
+      it.each(["throwing", "drifting", "reentrant"] as const)(
+        "rejects %s public phase queries without spending a clean successor",
+        async (kind) => {
+          const { box, options } = await mountDirectMentions();
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          let reentered = false;
+          const wrappers = replaceMentionPhaseWrappers(root, box, {
+            onDefaultQuery: (phase, driftPropagation) => {
+              if (phase !== "root-capture") return;
+              if (kind === "throwing") throw new Error("query failure");
+              if (kind === "drifting") {
+                driftPropagation();
+                return;
+              }
+              if (kind === "reentrant" && !reentered) {
+                reentered = true;
+                mentionKey(box, "End");
+              }
+            },
+          });
+
+          try {
+            const rejected = mentionKey(box, "End");
+            expect(rejected.defaultPrevented).toBe(false);
+            expect(options()[1]).toHaveAttribute("aria-selected", "true");
+          } finally {
+            wrappers.restore();
+          }
+
+          const clean = mentionKey(box, "End");
+          expect(clean.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+        },
+      );
+
+      it("revalidates complete scalar accessors after queries while ignoring private members", async () => {
+        const accepted = await mountDirectMentions();
+        const acceptedRoot = accepted.box.parentElement;
+        if (!acceptedRoot) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(accepted.options()[1]);
+        await waitFor(() =>
+          expect(accepted.options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const privateMembers = replaceMentionPhaseWrappers(
+          acceptedRoot,
+          accepted.box,
+          {
+            poisonPrivateMembers: true,
+            replaceTextareaDefaultQuery: true,
+          },
+        );
+        try {
+          const event = mentionKey(accepted.box, "End");
+          expect(event.defaultPrevented).toBe(true);
+          expect(accepted.options()[2]).toHaveAttribute("aria-selected", "true");
+        } finally {
+          privateMembers.restore();
+        }
+
+        const drifted = await mountDirectMentions();
+        const driftedRoot = drifted.box.parentElement;
+        if (!driftedRoot) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(drifted.options()[1]);
+        await waitFor(() =>
+          expect(drifted.options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const scalarDrift = replaceMentionPhaseWrappers(
+          driftedRoot,
+          drifted.box,
+          {
+            onDefaultQuery: (phase, _driftPropagation, wrapper) => {
+              if (phase === "root-capture") {
+                Object.defineProperty(wrapper, "key", {
+                  configurable: true,
+                  value: "Home",
+                });
+              }
+            },
+          },
+        );
+        try {
+          const rejected = mentionKey(drifted.box, "End");
+          expect(rejected.defaultPrevented).toBe(false);
+          expect(drifted.options()[1]).toHaveAttribute("aria-selected", "true");
+        } finally {
+          scalarDrift.restore();
+        }
+        const clean = mentionKey(drifted.box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(drifted.options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("retains exactly one post-prevention default-query replacement", async () => {
+        const { box, options } = await mountDirectMentions();
+        const root = box.parentElement;
+        if (!root) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const wrappers = replaceMentionPhaseWrappers(root, box, {
+          replaceTextareaDefaultQuery: true,
+          driftTextareaPostDefaultQuery: true,
+        });
+        try {
+          const rejectedAfterPrevention = mentionKey(box, "End");
+          expect(rejectedAfterPrevention.defaultPrevented).toBe(true);
+          expect(options()[1]).toHaveAttribute("aria-selected", "true");
+        } finally {
+          wrappers.restore();
+        }
+
+        const clean = mentionKey(box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("keeps the rightful native pair through crossed and nested genuine keys", async () => {
+        const preventDefault = vi.spyOn(
+          window.Event.prototype,
+          "preventDefault",
+        );
+        const { box, options } = await mountDirectMentions();
+        const root = box.parentElement;
+        if (!root) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const rootCapture = reactProperty<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDownCapture");
+        const rootBubble = reactProperty<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDown");
+        const outer = mentionKeyboardEvent(box, "ArrowUp");
+        const nested = mentionKeyboardEvent(box, "End");
+        const ownerWindow = box.ownerDocument.defaultView;
+        if (!ownerWindow) throw new Error("The mention composer had no owner window");
+        const crossBeforeReact = (event: Event) => {
+          if (event !== outer) return;
+          rootCapture({
+            nativeEvent: mentionKeyboardEvent(box, "End"),
+          } as ReactKeyboardEvent<HTMLDivElement>);
+          rootBubble({
+            nativeEvent: outer,
+          } as ReactKeyboardEvent<HTMLDivElement>);
+          box.dispatchEvent(nested);
+        };
+        ownerWindow.addEventListener("keydown", crossBeforeReact, true);
+        preventDefault.mockClear();
+        try {
+          act(() => {
+            box.dispatchEvent(outer);
+          });
+        } finally {
+          ownerWindow.removeEventListener("keydown", crossBeforeReact, true);
+        }
+
+        expect(nested.defaultPrevented).toBe(false);
+        expect(outer.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(options()[0]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("does not let an ended stopped delivery fence a rightful successor", async () => {
+        const { box, options } = await mountDirectMentions();
+        const ownerWindow = box.ownerDocument.defaultView;
+        if (!ownerWindow) throw new Error("The mention composer had no owner window");
+        const stopped = mentionKeyboardEvent(box, "End");
+        const haltAfterPairing = (event: Event) => {
+          if (event === stopped) event.stopPropagation();
+        };
+        ownerWindow.addEventListener("keydown", haltAfterPairing, true);
+        try {
+          act(() => {
+            box.dispatchEvent(stopped);
+          });
+        } finally {
+          ownerWindow.removeEventListener("keydown", haltAfterPairing, true);
+        }
+        expect(stopped.defaultPrevented).toBe(false);
+        expect(options()[0]).toHaveAttribute("aria-selected", "true");
+
+        const rightful = mentionKey(box, "End");
+        expect(rightful.defaultPrevented).toBe(true);
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("survives nested microtask checkpoints before the genuine delivery", async () => {
+        const { box, options } = await mountDirectMentions();
+        await new Promise<void>((resolve) => {
+          queueMicrotask(() => queueMicrotask(resolve));
+        });
+        const event = mentionKey(box, "End");
+        expect(event.defaultPrevented).toBe(true);
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("excludes reentry from the actual highlight state callback", async () => {
+        const preventDefault = vi.spyOn(
+          window.Event.prototype,
+          "preventDefault",
+        );
+        const { box, options } = await mountDirectMentions();
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const outer = mentionKeyboardEvent(box, "End");
+        const nested = mentionKeyboardEvent(box, "Home");
+        preventDefault.mockClear();
+        mentionHighlightReentry.callback = () => {
+          mentionHighlightReentry.callback = null;
+          box.dispatchEvent(nested);
+        };
+        try {
+          act(() => {
+            box.dispatchEvent(outer);
+          });
+        } finally {
+          mentionHighlightReentry.callback = null;
+        }
+
+        expect(outer.defaultPrevented).toBe(true);
+        expect(nested.defaultPrevented).toBe(false);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+
+        const clean = mentionKey(box, "Home");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(options()[0]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("uses the exact Window receiver through a public proxy and removes exact listeners on cleanup", async () => {
+        const add = vi.spyOn(window, "addEventListener");
+        const remove = vi.spyOn(window, "removeEventListener");
+        try {
+          const mounted = await mountDirectMentions();
+          const { box, options } = mounted;
+          const ownerWindow = box.ownerDocument.defaultView as
+            | (Window & typeof globalThis)
+            | null;
+          if (!ownerWindow) throw new Error("The mention composer had no owner window");
+          const proxyEvent = mentionKeyboardEvent(box, "End");
+          Object.defineProperty(proxyEvent, "view", {
+            configurable: true,
+            value: new Proxy(ownerWindow, {}),
+          });
+          act(() => {
+            box.dispatchEvent(proxyEvent);
+          });
+          expect(proxyEvent.defaultPrevented).toBe(false);
+          expect(options()[0]).toHaveAttribute("aria-selected", "true");
+          const clean = mentionKey(box, "End");
+          expect(clean.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+
+          const listeners = add.mock.calls
+            .filter(
+              ([type, listener]) =>
+                type === "keydown" &&
+                typeof listener === "function" &&
+                (listener.name === "onWindowCapture" ||
+                  listener.name === "onWindowBubble"),
+            )
+            .slice(-2);
+          expect(listeners).toHaveLength(2);
+          remove.mockClear();
+          act(() => mounted.root.unmount());
+          for (const [type, listener, listenerOptions] of listeners) {
+            if (listenerOptions === undefined) {
+              expect(remove).toHaveBeenCalledWith(type, listener);
+            } else {
+              expect(remove).toHaveBeenCalledWith(
+                type,
+                listener,
+                listenerOptions,
+              );
+            }
+          }
+          const retired = mentionKeyboardEvent(box, "End");
+          act(() => {
+            box.dispatchEvent(retired);
+          });
+          expect(retired.defaultPrevented).toBe(false);
+        } finally {
+          remove.mockRestore();
+          add.mockRestore();
+        }
+      });
+
+      it("accepts the exact backing Window listener receiver", async () => {
+        const ownerWindow = window as Window & typeof globalThis;
+        const backingWindow = suggestionEventView(document, ownerWindow);
+        const originalAdd = ownerWindow.addEventListener;
+        const originalRemove = ownerWindow.removeEventListener;
+        const add = vi.fn((...args: Parameters<typeof originalAdd>) =>
+          Reflect.apply(originalAdd, backingWindow, args),
+        );
+        const remove = vi.fn((...args: Parameters<typeof originalRemove>) =>
+          Reflect.apply(originalRemove, backingWindow, args),
+        );
+        const addDescriptor = Object.getOwnPropertyDescriptor(
+          ownerWindow,
+          "addEventListener",
+        );
+        const removeDescriptor = Object.getOwnPropertyDescriptor(
+          ownerWindow,
+          "removeEventListener",
+        );
+        Object.defineProperty(ownerWindow, "addEventListener", {
+          configurable: true,
+          value: add,
+        });
+        Object.defineProperty(ownerWindow, "removeEventListener", {
+          configurable: true,
+          value: remove,
+        });
+        try {
+          const { box, options } = await mountDirectMentions();
+          const event = mentionKeyboardEvent(box, "End", {
+            view: backingWindow,
+          });
+          act(() => {
+            box.dispatchEvent(event);
+          });
+          expect(event.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+        } finally {
+          if (addDescriptor) {
+            Object.defineProperty(
+              ownerWindow,
+              "addEventListener",
+              addDescriptor,
+            );
+          } else {
+            delete (ownerWindow as { addEventListener?: unknown })
+              .addEventListener;
+          }
+          if (removeDescriptor) {
+            Object.defineProperty(
+              ownerWindow,
+              "removeEventListener",
+              removeDescriptor,
+            );
+          } else {
+            delete (ownerWindow as { removeEventListener?: unknown })
+              .removeEventListener;
+          }
+        }
+      });
+
       it.each([
         ["Home", 0],
         ["End", 2],
