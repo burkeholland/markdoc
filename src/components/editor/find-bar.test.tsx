@@ -208,6 +208,35 @@ type BarKeyHandler = (event: {
 }) => void;
 type ElementRef<T extends HTMLElement> = (element: T | null) => void;
 type NativeBarKeyHandler = (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+type ReactProps = Record<string, unknown>;
+
+function reactPropsEntry(element: HTMLElement) {
+  const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"));
+  if (!key) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const record = element as unknown as Record<string, ReactProps>;
+  const props = record[key];
+  if (!props) throw new Error("React props were empty");
+  return { key, record, props };
+}
+
+/** Replaces the whole published props object so a frozen development props record stays intact. */
+function interceptReactProp<T extends (...args: never[]) => unknown>(
+  element: HTMLElement,
+  property: string,
+  invoke: (current: T, ...args: Parameters<T>) => unknown,
+) {
+  const { key, record, props } = reactPropsEntry(element);
+  const current = props[property];
+  if (typeof current !== "function") throw new Error(`${property} was not published`);
+  const intercepted: ReactProps = {
+    ...props,
+    [property]: (...args: Parameters<T>) => invoke(current as T, ...args),
+  };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
 
 function reactRef<T extends HTMLElement>(element: T): ElementRef<T> {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
@@ -274,6 +303,26 @@ function invokeChange(handler: ChangeHandler, currentTarget: HTMLInputElement, v
   currentTarget.value = value;
   handler({ currentTarget });
   currentTarget.value = previous;
+}
+
+function trackActionFocus() {
+  const calls: { element: HTMLElement; options: FocusOptions | undefined }[] = [];
+  const focus = HTMLElement.prototype.focus;
+  vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+    this: HTMLElement,
+    options?: FocusOptions,
+  ) {
+    calls.push({ element: this, options });
+    focus.call(this, options);
+  });
+  return {
+    calls,
+    reset: () => {
+      calls.length = 0;
+    },
+    /** Only the navigation focus asks for `{ preventScroll: true }`; plain test focus does not. */
+    moves: () => calls.filter(({ options }) => options !== undefined),
+  };
 }
 
 describe("FindBar session ownership", () => {
@@ -1993,6 +2042,862 @@ describe("FindBar F3 navigation", () => {
     expect(stepFind).toHaveBeenCalledOnce();
     expect(staleReveal).not.toHaveBeenCalled();
     expect(currentReveal).toHaveBeenCalledOnce();
+  });
+});
+
+describe("FindBar first-row action navigation", () => {
+  type ActionCallbacks = {
+    onReplaceVisible: FindBarProps["onReplaceVisible"];
+    onReveal: FindBarProps["onReveal"];
+    onClose: FindBarProps["onClose"];
+  };
+
+  function renderActionBar(
+    s: CollabSession,
+    callbacks: ActionCallbacks,
+    { replaceVisible = true, key = "current" }: { replaceVisible?: boolean; key?: string } = {},
+  ) {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <FindBar
+              key={key}
+              session={s}
+              replaceVisible={replaceVisible}
+              focusNonce={0}
+              {...callbacks}
+            />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    const element = <T extends HTMLElement>(testId: string) => {
+      const match = host.querySelector(`[data-testid="${testId}"]`);
+      if (!(match instanceof HTMLElement)) throw new Error(`Missing ${testId}`);
+      return match as T;
+    };
+    const action = (testId: string) => element<HTMLButtonElement>(testId);
+    return { host, root, element, action };
+  }
+
+  function silentCallbacks(): ActionCallbacks {
+    return { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+  }
+
+  function actionKey(target: HTMLElement, key: string, init: KeyboardEventInit = {}) {
+    return findKey(target, { key, code: key, ...init });
+  }
+
+  function dispatchActionKey(
+    target: HTMLElement,
+    key: string,
+    init: KeyboardEventInit = {},
+  ) {
+    const event = actionKey(target, key, init);
+    act(() => {
+      target.focus();
+      target.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  function dispatchExactKey(target: HTMLElement, event: KeyboardEvent, focus = true) {
+    act(() => {
+      if (focus) target.focus();
+      target.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  const NAVIGATION_CASES = [
+    ["find-prev", "ArrowRight", "find-next"],
+    ["find-prev", "ArrowDown", "find-next"],
+    ["find-prev", "End", "find-close"],
+    ["find-prev", "ArrowLeft", null],
+    ["find-prev", "ArrowUp", null],
+    ["find-prev", "Home", null],
+    ["find-next", "ArrowLeft", "find-prev"],
+    ["find-next", "ArrowUp", "find-prev"],
+    ["find-next", "ArrowRight", "find-toggle-replace"],
+    ["find-next", "ArrowDown", "find-toggle-replace"],
+    ["find-next", "Home", "find-prev"],
+    ["find-next", "End", "find-close"],
+    ["find-toggle-replace", "ArrowLeft", "find-next"],
+    ["find-toggle-replace", "ArrowUp", "find-next"],
+    ["find-toggle-replace", "ArrowRight", "find-close"],
+    ["find-toggle-replace", "ArrowDown", "find-close"],
+    ["find-toggle-replace", "Home", "find-prev"],
+    ["find-toggle-replace", "End", "find-close"],
+    ["find-close", "ArrowLeft", "find-toggle-replace"],
+    ["find-close", "ArrowUp", "find-toggle-replace"],
+    ["find-close", "ArrowRight", null],
+    ["find-close", "ArrowDown", null],
+    ["find-close", "Home", "find-prev"],
+    ["find-close", "End", null],
+  ] as const;
+
+  const NUMPAD_CASES = [
+    ["ArrowLeft", "Numpad4", "find-next", "find-prev"],
+    ["ArrowUp", "Numpad8", "find-next", "find-prev"],
+    ["ArrowRight", "Numpad6", "find-prev", "find-next"],
+    ["ArrowDown", "Numpad2", "find-prev", "find-next"],
+    ["Home", "Numpad7", "find-close", "find-prev"],
+    ["End", "Numpad1", "find-prev", "find-close"],
+  ] as const;
+
+  it("moves focus to the exact bounded destination for every accepted key from every current enabled action", async () => {
+    const s = session("owner", "actions-matrix");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const counter = view.element("find-count").textContent;
+
+    for (const [sourceId, key, destinationId] of NAVIGATION_CASES) {
+      const source = view.action(sourceId);
+      focus.reset();
+      const event = dispatchActionKey(source, key);
+      const moves = focus.moves();
+      expect([sourceId, key, event.defaultPrevented]).toEqual([
+        sourceId,
+        key,
+        destinationId !== null,
+      ]);
+      expect([sourceId, key, moves.length]).toEqual([
+        sourceId,
+        key,
+        destinationId === null ? 0 : 1,
+      ]);
+      if (destinationId) {
+        expect(moves[0]?.element).toBe(view.action(destinationId));
+        expect(moves[0]?.options).toEqual({ preventScroll: true });
+        expect(document.activeElement).toBe(view.action(destinationId));
+      } else {
+        expect(document.activeElement).toBe(source);
+      }
+      await act(async () => {});
+    }
+
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(view.element("find-count").textContent).toBe(counter);
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each(NUMPAD_CASES)(
+    "accepts semantic %s with an unrestricted %s code and numpad location",
+    async (key, code, sourceId, destinationId) => {
+      const s = session("owner", `actions-${code}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const source = view.action(sourceId);
+      focus.reset();
+
+      const event = dispatchActionKey(source, key, { code, location: 3 });
+
+      expect(event.code).toBe(code);
+      expect(event.location).toBe(3);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action(destinationId));
+    },
+  );
+
+  it("prevents once through the public bubble wrapper and focuses once with prevent scroll", async () => {
+    const s = session("owner", "actions-single-effect");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-next");
+    const prevented: { receiver: unknown; args: unknown[] }[] = [];
+    const restore = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        const original = event.preventDefault as (...args: unknown[]) => unknown;
+        Object.defineProperty(event, "preventDefault", {
+          configurable: true,
+          writable: true,
+          value: function (this: unknown, ...args: unknown[]) {
+            prevented.push({ receiver: this, args });
+            return original.apply(this, args);
+          },
+        });
+        current(event);
+        expect(event.isDefaultPrevented()).toBe(true);
+        expect(event.isPropagationStopped()).toBe(false);
+        expect(event.defaultPrevented).toBe(true);
+        expect(event.nativeEvent.defaultPrevented).toBe(true);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(prevented).toHaveLength(1);
+      expect(prevented[0]?.args).toEqual([]);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("performs no search, replacement, storage, timer, network, or scroll work before activation", async () => {
+    const s = session("owner", "actions-zero-work");
+    const frames = frameEnvironment();
+    const focus = trackActionFocus();
+    const fetchStub = vi.fn();
+    const scrollTo = vi.fn();
+    vi.stubGlobal("fetch", fetchStub);
+    vi.stubGlobal("scrollTo", scrollTo);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const row = view.element<HTMLDivElement>("find-actions");
+    const search = view.element<HTMLInputElement>("find-input");
+    const replacement = view.element<HTMLInputElement>("replace-input");
+    fireEvent.change(replacement, { target: { value: "kept replacement" } });
+    await act(async () => {});
+    const pressed = ["find-match-case", "find-whole-word", "find-regex"].map((testId) =>
+      view.action(testId).getAttribute("aria-pressed"));
+    frames.reset();
+    focus.reset();
+
+    const event = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(frames.request).not.toHaveBeenCalled();
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+    expect(search).toHaveValue("cat");
+    expect(replacement).toHaveValue("kept replacement");
+    expect(["find-match-case", "find-whole-word", "find-regex"].map((testId) =>
+      view.action(testId).getAttribute("aria-pressed"))).toEqual(pressed);
+    expect(bar.scrollTop).toBe(0);
+    expect(bar.scrollLeft).toBe(0);
+    expect(row.scrollTop).toBe(0);
+    expect(row.scrollLeft).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(0);
+    expect(window.scrollX).toBe(0);
+    expect(window.scrollY).toBe(0);
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("skips disabled Previous and Next and never wraps past the shortened group", async () => {
+    const s = session("owner", "actions-disabled-steps");
+    s.setFind("missing");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    expect(view.action("find-prev")).toBeDisabled();
+    expect(view.action("find-next")).toBeDisabled();
+
+    focus.reset();
+    const fromDisabled = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fromDisabled.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    focus.reset();
+    const forward = dispatchActionKey(view.action("find-toggle-replace"), "ArrowRight");
+    expect(forward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    await act(async () => {});
+
+    focus.reset();
+    const backward = dispatchActionKey(view.action("find-close"), "Home");
+    expect(backward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    await act(async () => {});
+
+    focus.reset();
+    const bounded = dispatchActionKey(view.action("find-toggle-replace"), "ArrowLeft");
+    expect(bounded.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+  });
+
+  it("steps across an absent Replace toggle for a viewer", async () => {
+    const s = session("viewer", "actions-absent-toggle");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    expect(view.host.querySelector('[data-testid="find-toggle-replace"]')).toBeNull();
+
+    focus.reset();
+    const forward = dispatchActionKey(view.action("find-next"), "ArrowRight");
+    expect(forward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    await act(async () => {});
+
+    focus.reset();
+    const backward = dispatchActionKey(view.action("find-close"), "ArrowLeft");
+    expect(backward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("accepts no movement when only one current enabled action remains", async () => {
+    const s = session("viewer", "actions-single");
+    s.setFind("missing");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const close = view.action("find-close");
+
+    for (const key of ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"]) {
+      focus.reset();
+      const event = dispatchActionKey(close, key);
+      expect([key, event.defaultPrevented]).toEqual([key, false]);
+      expect([key, focus.moves().length]).toEqual([key, 0]);
+      expect(document.activeElement).toBe(close);
+    }
+  });
+
+  it.each([
+    "find-input",
+    "find-match-case",
+    "find-whole-word",
+    "find-regex",
+    "replace-input",
+    "replace-one",
+    "replace-all",
+  ])("ignores navigation keys from %s", async (testId) => {
+    const s = session("owner", `actions-isolated-${testId}`);
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.element(testId);
+
+    focus.reset();
+    const right = dispatchActionKey(source, "ArrowRight");
+    const home = dispatchActionKey(source, "Home");
+
+    expect(right.defaultPrevented).toBe(false);
+    expect(home.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+  });
+
+  it("rejects modified, repeated, composing, untrusted, uncancelable, nonbubbling, unfocused, and foreign deliveries", async () => {
+    const s = session("owner", "actions-provenance");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow;
+    if (!foreignWindow) throw new Error("The foreign realm was not created");
+    const ownerWindow = source.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Find bar has no owner window");
+
+    const rejected = [
+      actionKey(source, "ArrowRight", { ctrlKey: true }),
+      actionKey(source, "ArrowRight", { altKey: true }),
+      actionKey(source, "ArrowRight", { metaKey: true }),
+      actionKey(source, "ArrowRight", { shiftKey: true }),
+      actionKey(source, "ArrowRight", { repeat: true }),
+      actionKey(source, "ArrowRight", { isComposing: true }),
+      actionKey(source, "ArrowRight", { cancelable: false }),
+      actionKey(source, "ArrowRight", { bubbles: false }),
+      actionKey(source, "ArrowRight", {
+        view: foreignWindow as Window & typeof globalThis,
+      }),
+      new ownerWindow.KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowRight",
+        code: "ArrowRight",
+        view: keyboardEventView(ownerWindow),
+      }),
+    ];
+    focus.reset();
+    for (const event of rejected) {
+      dispatchExactKey(source, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(source);
+    }
+
+    const grafted = new (foreignWindow as Window & typeof globalThis).KeyboardEvent(
+      "keydown",
+      { bubbles: true, cancelable: true, key: "ArrowRight", code: "ArrowRight" },
+    );
+    Object.setPrototypeOf(grafted, ownerWindow.KeyboardEvent.prototype);
+    dispatchExactKey(source, grafted);
+    expect(grafted.defaultPrevented).toBe(false);
+
+    const prevented = actionKey(source, "ArrowRight");
+    prevented.preventDefault();
+    dispatchExactKey(source, prevented);
+    expect(document.activeElement).toBe(source);
+
+    const stopped = actionKey(source, "ArrowRight");
+    stopped.stopPropagation();
+    dispatchExactKey(source, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(source);
+
+    view.action("find-close").focus();
+    const unfocused = actionKey(source, "ArrowRight");
+    dispatchExactKey(source, unfocused, false);
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    expect(focus.moves()).toHaveLength(0);
+
+    await act(async () => {});
+    const accepted = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+    frame.remove();
+  });
+
+  it("rejects a fabricated wrapper, a foreign row, and a structural Window lookalike", async () => {
+    const s = session("owner", "actions-fabricated");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const capture = reactHandler<NativeBarKeyHandler>(row, "onKeyDownCapture");
+    const bubble = reactHandler<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+    );
+    const native = actionKey(source, "ArrowRight");
+    const preventDefault = vi.fn();
+    const fabricated = {
+      type: "keydown",
+      key: "ArrowRight",
+      code: "ArrowRight",
+      location: 0,
+      repeat: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      eventPhase: 1,
+      isTrusted: true,
+      view: null,
+      currentTarget: row,
+      target: source,
+      nativeEvent: native,
+      preventDefault,
+      stopPropagation: vi.fn(),
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+    } as unknown as ReactKeyboardEvent<HTMLDivElement>;
+    focus.reset();
+
+    act(() => {
+      source.focus();
+      capture(fabricated);
+      bubble(fabricated as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(native.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+
+    const lookalike = { document, window: {}, self: {} };
+    const structural = actionKey(source, "ArrowRight");
+    Object.defineProperty(structural, "view", { configurable: true, value: lookalike });
+    dispatchExactKey(source, structural);
+    expect(structural.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    await act(async () => {});
+    const recovered = dispatchActionKey(source, "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("accepts a distinct bubble wrapper with an unrelated prototype and absent persist and stopPropagation", async () => {
+    const s = session("owner", "actions-unrelated-wrapper");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-next");
+    const wrappers: unknown[] = [];
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        wrappers.push(event);
+        Object.defineProperty(event, "persist", { configurable: true, value: undefined });
+        current(event);
+      },
+    );
+    const restoreBubble = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        wrappers.push(event);
+        const clone = Object.create(Object.create(null)) as Record<string, unknown>;
+        for (const property of [
+          "nativeEvent",
+          "type",
+          "target",
+          "currentTarget",
+          "eventPhase",
+          "bubbles",
+          "cancelable",
+          "defaultPrevented",
+          "isTrusted",
+          "key",
+          "code",
+          "location",
+          "altKey",
+          "ctrlKey",
+          "metaKey",
+          "shiftKey",
+          "repeat",
+          "view",
+        ]) {
+          clone[property] = (event as unknown as Record<string, unknown>)[property];
+        }
+        clone.preventDefault = function (this: Record<string, unknown>) {
+          event.preventDefault();
+          this.defaultPrevented = true;
+          this.isDefaultPrevented = () => true;
+        };
+        clone.isDefaultPrevented = () => false;
+        clone.isPropagationStopped = () => false;
+        current(clone as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(wrappers).toHaveLength(2);
+      expect(wrappers[0]).not.toBe(wrappers[1]);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it.each([
+    ["replaced", (): unknown => vi.fn()],
+    ["non-function", (): unknown => 7],
+    ["absent", (): unknown => undefined],
+  ] as const)("accepts %s persist and stopPropagation on both wrappers", async (label, make) => {
+    const s = session("owner", `actions-optional-${label}`);
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-next");
+    const shadow = (event: object) => {
+      for (const property of ["persist", "stopPropagation", "isPersistent"]) {
+        Object.defineProperty(event, property, { configurable: true, value: make() });
+      }
+    };
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        shadow(event);
+        current(event);
+      },
+    );
+    const restoreBubble = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        shadow(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowLeft");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-prev"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it.each([1, 3])(
+    "retains the exact native pair through %i nested microtask checkpoint(s) between capture and bubble",
+    async (checkpoints) => {
+      const s = session("owner", `actions-microtask-${checkpoints}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const source = view.action("find-next");
+      let observed = 0;
+      source.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+      focus.reset();
+
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      try {
+        const event = dispatchActionKey(source, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(1);
+        expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("claims one delivery once across replay and reentrancy, then accepts a fresh successor event", async () => {
+    const s = session("owner", "actions-replay");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const reentered: unknown[] = [];
+    const restore = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        current(event);
+        reentered.push(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const replayed = actionKey(source, "ArrowRight");
+      act(() => {
+        source.focus();
+        source.dispatchEvent(replayed);
+        source.dispatchEvent(replayed);
+      });
+
+      expect(reentered).toHaveLength(2);
+      expect(replayed.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
+
+    await act(async () => {});
+    focus.reset();
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+  });
+
+  it("rejects facts changed between capture and bubble, then admits a fresh publication", async () => {
+    const s = session("owner", "actions-stale-facts");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    source.addEventListener("keydown", () => {
+      s.setFind("mat");
+    }, { capture: true, once: true });
+    focus.reset();
+
+    const stale = dispatchActionKey(source, "ArrowRight");
+
+    expect(stale.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    await waitFor(() => expect(view.element("find-input")).toHaveValue("mat"));
+    focus.reset();
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it.each(["attribute restore", "detach and restore"] as const)(
+    "rejects %s DOM history and admits a fresh successor",
+    async (scenario) => {
+      const s = session("owner", `actions-${scenario.replaceAll(" ", "-")}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const bar = view.element<HTMLDivElement>("find-bar");
+      const source = view.action("find-prev");
+      const staleHandler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+
+      if (scenario === "attribute restore") {
+        bar.setAttribute("data-history", "changed");
+        bar.removeAttribute("data-history");
+      } else {
+        const parent = bar.parentNode;
+        const next = bar.nextSibling;
+        if (!parent) throw new Error("FindBar has no committed parent");
+        bar.remove();
+        focus.reset();
+        const detached = actionKey(source, "ArrowRight");
+        act(() => source.dispatchEvent(detached));
+        expect(detached.defaultPrevented).toBe(false);
+        parent.insertBefore(bar, next);
+      }
+      focus.reset();
+      const restored = actionKey(source, "ArrowRight");
+      act(() => {
+        source.focus();
+        source.dispatchEvent(restored);
+      });
+      expect(restored.defaultPrevented).toBe(false);
+      expect(focus.moves()).toHaveLength(0);
+
+      await waitFor(() => {
+        expect(reactHandler<NativeBarKeyHandler>(bar, "onKeyDown")).not.toBe(staleHandler);
+      });
+      focus.reset();
+      const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+      expect(fresh.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    },
+  );
+
+  it("rejects a partial Strict Mode ref replay before a clean keyed successor recovers", async () => {
+    const s = session("owner", "actions-partial-replay");
+    const focus = trackActionFocus();
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "stale" });
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const barRef = reactRef(bar);
+    act(() => {
+      barRef(null);
+      barRef(bar);
+    });
+    focus.reset();
+
+    const replayed = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(replayed.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <FindBar
+              key="current"
+              session={s}
+              replaceVisible
+              focusNonce={0}
+              {...callbacks}
+            />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    await act(async () => {});
+    focus.reset();
+
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("stops navigating after cleanup", async () => {
+    const s = session("owner", "actions-cleanup");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    act(() => view.root.unmount());
+    directRoots.delete(view.root);
+    document.body.append(source, destination);
+    focus.reset();
+
+    const event = actionKey(source, "ArrowRight");
+    act(() => {
+      source.focus();
+      source.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+    source.remove();
+    destination.remove();
+    view.host.remove();
+  });
+
+  it("keeps Escape, native Tab order, click, Enter, and Space behavior", async () => {
+    const s = session("owner", "actions-retained-behavior");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const next = view.action("find-next");
+    const order = [...row.querySelectorAll<HTMLButtonElement>("button")]
+      .map((button) => button.dataset.testid)
+      .filter((testId) => testId?.startsWith("find-prev") || testId?.startsWith("find-next") ||
+        testId?.startsWith("find-toggle-replace") || testId?.startsWith("find-close"));
+    expect(order).toEqual(["find-prev", "find-next", "find-toggle-replace", "find-close"]);
+    for (const testId of order) {
+      expect(view.action(testId!)).not.toHaveAttribute("tabindex");
+    }
+
+    fireEvent.keyDown(next, { key: "Enter" });
+    fireEvent.keyDown(next, { key: " ", code: "Space" });
+    expect(stepFind).not.toHaveBeenCalled();
+
+    fireEvent.click(next);
+    expect(stepFind).toHaveBeenCalledOnce();
+    await act(async () => {});
+
+    fireEvent.keyDown(view.action("find-close"), { key: "Escape" });
+    expect(callbacks.onClose).toHaveBeenCalledOnce();
   });
 });
 

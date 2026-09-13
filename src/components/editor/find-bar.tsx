@@ -159,6 +159,7 @@ interface FindControlPublication {
   readonly capture: (element: HTMLButtonElement | null) => void;
   readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   readonly onMouseDown?: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
 }
 
 interface FindBarPublication {
@@ -172,10 +173,12 @@ interface FindBarPublication {
 
 interface FindBarPublicationSet {
   readonly captureBar: (element: HTMLDivElement | null) => void;
+  readonly captureFirstRow: (element: HTMLDivElement | null) => void;
   readonly inputs: Readonly<Record<FindInput, FindInputPublication>>;
   readonly controls: Readonly<Record<FindControl, FindControlPublication>>;
   readonly establish: () => void | (() => void);
   readonly onBarKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly onFirstRowKeyDownCapture: (event: KeyboardEvent<HTMLDivElement>) => void;
 }
 
 interface ReplaceFocusIntent {
@@ -198,6 +201,12 @@ interface PublicationCells {
   readonly claimedActivations: WeakSet<object>;
   readonly claimedMouseDowns: WeakSet<object>;
   readonly keyboardDeliveries: WeakMap<object, FindKeyboardDelivery>;
+  readonly actionPairs: WeakMap<object, FindActionKeyPair>;
+  readonly attemptedActionReactEvents: WeakSet<object>;
+  readonly attemptedActionNativeEvents: WeakSet<object>;
+  readonly claimedActionDeliveries: WeakSet<object>;
+  readonly claimedActionTokens: WeakSet<object>;
+  readonly activeActionDelivery: CurrentCell<FindActionKeyDelivery | null>;
 }
 
 interface PublicationLifecycle {
@@ -252,6 +261,7 @@ interface FindKeyboardDelivery {
 
 interface FindBarPublicationRuntime {
   readonly publication: FindBarPublication;
+  readonly nav: FindActionRuntimeView | null;
   readonly publish: (snapshot: FindBarDomSnapshot, owners: readonly ElementOwnerView[]) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
@@ -388,6 +398,760 @@ function isExactReplaceSuccessor(source: FindBarPublication, candidate: FindBarP
   return authoritiesMatch(previous, current, "opened");
 }
 
+const FIND_ACTION_PREVENT_SCROLL: FocusOptions = Object.freeze({ preventScroll: true });
+const FIND_ACTION_APPLY = Reflect.apply;
+const FIND_ACTION_FREEZE = Object.freeze;
+const FIND_ACTION_OWN_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const FIND_ACTION_PROTOTYPE_OF = Object.getPrototypeOf;
+const FIND_ACTION_CAPTURING_PHASE = 1;
+const FIND_ACTION_BUBBLING_PHASE = 3;
+
+type FindActionKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+type AnyFunction = (...args: never[]) => unknown;
+
+interface FindActionMember<T> {
+  readonly value: T;
+  readonly isCurrent: () => boolean;
+}
+
+interface FindActionIntrinsics {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly nodeConstructor: typeof Node;
+  readonly addEventListener: FindActionMember<Window["addEventListener"]>;
+  readonly removeEventListener: FindActionMember<Window["removeEventListener"]>;
+  readonly isCurrent: () => boolean;
+  readonly methodMatches: (
+    value: object,
+    property: PropertyKey,
+    method: unknown,
+  ) => boolean;
+  readonly read: (method: AnyFunction, receiver: object) => unknown;
+  readonly invoke: (method: AnyFunction, receiver: object) => boolean;
+  readonly propagationStopped: (event: object) => boolean;
+  readonly focusWithoutScroll: (element: HTMLElement) => boolean;
+}
+
+interface FindActionWindowProof {
+  readonly registration: FindActionKeyListener;
+  readonly publication: FindBarPublication;
+  readonly nativeEvent: object;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface FindActionKeyListener {
+  readonly proofFor: (
+    event: object,
+    publication: FindBarPublication,
+  ) => FindActionWindowProof | null;
+  readonly claim: (
+    proof: FindActionWindowProof,
+    publication: FindBarPublication,
+  ) => boolean;
+  readonly retains: (
+    proof: FindActionWindowProof,
+    publication: FindBarPublication,
+  ) => boolean;
+  readonly activate: (publication: FindBarPublication) => boolean;
+  readonly release: (publication: FindBarPublication | null) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface FindActionRuntimeView {
+  readonly intrinsics: FindActionIntrinsics;
+  readonly listener: FindActionKeyListener;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly ownerDocument: Document;
+  readonly root: HTMLDivElement;
+  readonly facts: (event: object) => FindNativeKeyboardFacts | null;
+  readonly isCurrent: () => boolean;
+}
+
+interface FindActionReactMethods {
+  readonly preventDefault: AnyFunction;
+  readonly isDefaultPrevented: AnyFunction;
+  readonly isPropagationStopped: AnyFunction;
+}
+
+interface FindActionReactSnapshot {
+  readonly event: KeyboardEvent<HTMLElement>;
+  readonly nativeEvent: object;
+  readonly target: EventTarget;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly view: unknown;
+  readonly methods: FindActionReactMethods;
+}
+
+interface FindActionMovement {
+  readonly identity: symbol;
+  readonly key: FindActionKey;
+  readonly sourceControl: FindControlPublication;
+  readonly destinationControl: FindControlPublication;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+}
+
+interface FindActionKeyPair {
+  readonly publication: FindBarPublication;
+  readonly nativeEvent: object;
+  readonly facts: FindNativeKeyboardFacts;
+  readonly capture: FindActionReactSnapshot;
+  readonly proof: FindActionWindowProof;
+  readonly movement: FindActionMovement;
+  readonly publicationToken: object;
+  readonly sourceToken: object;
+  readonly destinationToken: object;
+  readonly captureToken: object;
+  readonly nativeToken: object;
+  readonly windowToken: object;
+}
+
+interface FindActionKeyDelivery {
+  readonly pair: FindActionKeyPair;
+  readonly bubble: FindActionReactSnapshot;
+}
+
+function isFindActionKey(key: string): key is FindActionKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+/** Bounded and never wrapping: an unreachable neighbour or a same-destination Home/End stays inert. */
+function findActionDestinationIndex(
+  key: FindActionKey,
+  index: number,
+  length: number,
+) {
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return index > 0 ? index - 1 : null;
+  }
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    return index + 1 < length ? index + 1 : null;
+  }
+  if (key === "Home") return index === 0 ? null : 0;
+  return index === length - 1 ? null : length - 1;
+}
+
+function findActionIsEnabled(element: HTMLButtonElement) {
+  try {
+    if (element.disabled || element.matches(":disabled")) return false;
+    for (
+      let node: HTMLElement | null = element;
+      node;
+      node = node.parentElement
+    ) {
+      if (
+        node.hasAttribute("inert") ||
+        node.getAttribute("aria-disabled")?.toLowerCase() === "true"
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findActionDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable,
+  );
+}
+
+function captureFindActionPrototypeMember<T>(
+  prototype: object | null | undefined,
+  property: PropertyKey,
+  kind: "method" | "getter",
+): FindActionMember<T> | null {
+  if (!prototype) return null;
+  try {
+    const descriptor = FIND_ACTION_OWN_DESCRIPTOR(prototype, property);
+    if (!descriptor) return null;
+    const value = kind === "method"
+      ? ("value" in descriptor ? descriptor.value : undefined)
+      : descriptor.get;
+    if (typeof value !== "function") return null;
+    const expected = FIND_ACTION_FREEZE({ ...descriptor });
+    return FIND_ACTION_FREEZE({
+      value: value as T,
+      isCurrent: () =>
+        findActionDescriptorsMatch(
+          FIND_ACTION_OWN_DESCRIPTOR(prototype, property),
+          expected,
+        ),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function captureFindActionWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): FindActionMember<Window[Property]> | null {
+  try {
+    const chain: {
+      readonly owner: object;
+      readonly descriptor: PropertyDescriptor | null;
+      readonly prototype: object | null;
+    }[] = [];
+    let owner: object | null = ownerWindow;
+    let holder: object | null = null;
+    while (owner) {
+      const descriptor = FIND_ACTION_OWN_DESCRIPTOR(owner, property) ?? null;
+      const prototype = FIND_ACTION_PROTOTYPE_OF(owner) as object | null;
+      chain.push(
+        FIND_ACTION_FREEZE({
+          owner,
+          descriptor: descriptor ? FIND_ACTION_FREEZE({ ...descriptor }) : null,
+          prototype,
+        }),
+      );
+      if (descriptor) {
+        holder = owner;
+        break;
+      }
+      owner = prototype;
+    }
+    if (!holder) return null;
+    const holdingOwner = holder;
+    // The unit realm publishes the Window's registration methods as own accessors, not data slots.
+    const readValue = () => {
+      const descriptor = FIND_ACTION_OWN_DESCRIPTOR(holdingOwner, property);
+      if (!descriptor) return undefined;
+      if ("value" in descriptor) return descriptor.value as unknown;
+      return typeof descriptor.get === "function"
+        ? FIND_ACTION_APPLY(
+            descriptor.get as (...args: unknown[]) => unknown,
+            ownerWindow,
+            [],
+          )
+        : undefined;
+    };
+    const value = readValue();
+    if (typeof value !== "function") return null;
+    const isCurrent = () => {
+      try {
+        return chain.every(({ owner: entry, descriptor, prototype }) =>
+          FIND_ACTION_PROTOTYPE_OF(entry) === prototype &&
+          (descriptor
+            ? findActionDescriptorsMatch(
+                FIND_ACTION_OWN_DESCRIPTOR(entry, property),
+                descriptor,
+              )
+            : FIND_ACTION_OWN_DESCRIPTOR(entry, property) === undefined)) &&
+          readValue() === value;
+      } catch {
+        return false;
+      }
+    };
+    return isCurrent()
+      ? FIND_ACTION_FREEZE({ value: value as Window[Property], isCurrent })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureFindActionIntrinsics(view: Window): FindActionIntrinsics | null {
+  try {
+    const ownerWindow = view as Window & typeof globalThis;
+    const htmlElement = ownerWindow.HTMLElement;
+    const eventConstructor = ownerWindow.Event;
+    const nodeConstructor = ownerWindow.Node;
+    if (
+      typeof htmlElement !== "function" ||
+      typeof eventConstructor !== "function" ||
+      typeof nodeConstructor !== "function"
+    ) {
+      return null;
+    }
+    const htmlElementPrototype = htmlElement.prototype;
+    const eventPrototype = eventConstructor.prototype;
+    const focus = captureFindActionPrototypeMember<AnyFunction>(
+      htmlElementPrototype,
+      "focus",
+      "method",
+    );
+    const cancelBubble = captureFindActionPrototypeMember<AnyFunction>(
+      eventPrototype,
+      "cancelBubble",
+      "getter",
+    );
+    const addEventListener = captureFindActionWindowMethod(
+      ownerWindow,
+      "addEventListener",
+    );
+    const removeEventListener = captureFindActionWindowMethod(
+      ownerWindow,
+      "removeEventListener",
+    );
+    if (!focus || !cancelBubble || !addEventListener || !removeEventListener) {
+      return null;
+    }
+    const isCurrent = () => {
+      try {
+        return (
+          ownerWindow.HTMLElement === htmlElement &&
+          ownerWindow.Event === eventConstructor &&
+          ownerWindow.Node === nodeConstructor &&
+          htmlElement.prototype === htmlElementPrototype &&
+          eventConstructor.prototype === eventPrototype &&
+          focus.isCurrent() &&
+          cancelBubble.isCurrent() &&
+          addEventListener.isCurrent() &&
+          removeEventListener.isCurrent()
+        );
+      } catch {
+        return false;
+      }
+    };
+    return FIND_ACTION_FREEZE({
+      ownerWindow,
+      nodeConstructor,
+      addEventListener,
+      removeEventListener,
+      isCurrent,
+      methodMatches: (value: object, property: PropertyKey, method: unknown) => {
+        if (!isCurrent() || typeof method !== "function") return false;
+        try {
+          let owner: object | null = value;
+          while (owner) {
+            const descriptor = FIND_ACTION_OWN_DESCRIPTOR(owner, property);
+            if (descriptor) {
+              return "value" in descriptor && descriptor.value === method;
+            }
+            owner = FIND_ACTION_PROTOTYPE_OF(owner) as object | null;
+          }
+          return false;
+        } catch {
+          return false;
+        }
+      },
+      read: (method: AnyFunction, receiver: object) => {
+        if (!isCurrent()) return undefined;
+        try {
+          return FIND_ACTION_APPLY(
+            method as (...args: unknown[]) => unknown,
+            receiver,
+            [],
+          );
+        } catch {
+          return undefined;
+        }
+      },
+      invoke: (method: AnyFunction, receiver: object) => {
+        if (!isCurrent()) return false;
+        try {
+          FIND_ACTION_APPLY(
+            method as (...args: unknown[]) => unknown,
+            receiver,
+            [],
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      propagationStopped: (event: object) => {
+        if (!isCurrent()) return true;
+        try {
+          return FIND_ACTION_APPLY(
+            cancelBubble.value as (...args: unknown[]) => unknown,
+            event,
+            [],
+          ) === true;
+        } catch {
+          return true;
+        }
+      },
+      focusWithoutScroll: (element: HTMLElement) => {
+        if (!isCurrent()) return false;
+        try {
+          FIND_ACTION_APPLY(
+            focus.value as (...args: unknown[]) => unknown,
+            element,
+            [FIND_ACTION_PREVENT_SCROLL],
+          );
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An ordinary function keeps the Window's own event-local receiver (`this`), which every delivery
+ * compares with the intrinsic current target and the original composed-path terminal.
+ */
+function createFindActionKeyListener(
+  intrinsics: FindActionIntrinsics,
+  ownerDocument: Document,
+  readFacts: (event: object) => FindNativeKeyboardFacts | null,
+): FindActionKeyListener {
+  const proofs = new WeakMap<object, FindActionWindowProof>();
+  const invalidEvents = new WeakSet<object>();
+  const claimedEvents = new WeakSet<object>();
+  let publication: FindBarPublication | null = null;
+  let active = false;
+  let released = false;
+
+  const listener = function (this: EventTarget, event: Event) {
+    const current = publication;
+    if (
+      !current ||
+      !active ||
+      released ||
+      !intrinsics.isCurrent() ||
+      invalidEvents.has(event)
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    const facts = readFacts(event);
+    const terminal = facts ? facts.path[facts.path.length - 1] : null;
+    const currentTarget = facts ? facts.currentTarget : null;
+    if (
+      !facts ||
+      !terminal ||
+      !currentTarget ||
+      facts.type !== "keydown" ||
+      currentTarget !== this ||
+      terminal !== this ||
+      facts.eventPhase !== FIND_ACTION_CAPTURING_PHASE ||
+      facts.path[facts.path.length - 2] !== ownerDocument
+    ) {
+      invalidEvents.add(event);
+      return;
+    }
+    proofs.set(
+      event,
+      FIND_ACTION_FREEZE({
+        registration,
+        publication: current,
+        nativeEvent: event,
+        receiver: this,
+        currentTarget,
+        terminal,
+        path: facts.path,
+      }),
+    );
+  };
+
+  const proofFor = (event: object, current: FindBarPublication) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      publication !== current ||
+      proof.registration !== registration ||
+      proof.publication !== current ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      claimedEvents.has(event) ||
+      invalidEvents.has(event) ||
+      !intrinsics.isCurrent()
+    ) {
+      return null;
+    }
+    const facts = readFacts(event);
+    return facts &&
+      facts.path.length === proof.path.length &&
+      facts.path.every((entry, index) => entry === proof.path[index]) &&
+      facts.path[facts.path.length - 2] === ownerDocument &&
+      facts.path[facts.path.length - 1] === proof.receiver
+      ? proof
+      : null;
+  };
+
+  const registration: FindActionKeyListener = FIND_ACTION_FREEZE({
+    proofFor,
+    claim: (proof: FindActionWindowProof, current: FindBarPublication) => {
+      if (
+        claimedEvents.has(proof.nativeEvent) ||
+        proofFor(proof.nativeEvent, current) !== proof
+      ) {
+        return false;
+      }
+      claimedEvents.add(proof.nativeEvent);
+      return true;
+    },
+    retains: (proof: FindActionWindowProof, current: FindBarPublication) =>
+      publication === current &&
+      proof.publication === current &&
+      proofs.get(proof.nativeEvent) === proof &&
+      claimedEvents.has(proof.nativeEvent) &&
+      !invalidEvents.has(proof.nativeEvent) &&
+      proof.receiver === proof.currentTarget &&
+      proof.receiver === proof.terminal &&
+      active &&
+      !released &&
+      intrinsics.isCurrent(),
+    activate: (current: FindBarPublication) => {
+      if (publication || active || released || !intrinsics.isCurrent()) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        FIND_ACTION_APPLY(
+          intrinsics.addEventListener.value as (...args: unknown[]) => unknown,
+          intrinsics.ownerWindow,
+          ["keydown", listener, true],
+        );
+      } catch {
+        publication = null;
+        active = false;
+        return false;
+      }
+      if (registration.isCurrent()) return true;
+      publication = null;
+      active = false;
+      try {
+        FIND_ACTION_APPLY(
+          intrinsics.removeEventListener.value as (...args: unknown[]) => unknown,
+          intrinsics.ownerWindow,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return false;
+      }
+      return false;
+    },
+    release: (current: FindBarPublication | null) => {
+      if (!current || publication !== current || released) return;
+      released = true;
+      const wasActive = active;
+      active = false;
+      if (!wasActive) return;
+      try {
+        FIND_ACTION_APPLY(
+          intrinsics.removeEventListener.value as (...args: unknown[]) => unknown,
+          intrinsics.ownerWindow,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return;
+      }
+    },
+    isCurrent: () =>
+      active && !released && publication !== null && intrinsics.isCurrent(),
+  });
+  return registration;
+}
+
+function findActionViewIsOwned(
+  view: unknown,
+  nav: FindActionRuntimeView,
+  proof: FindActionWindowProof,
+) {
+  return (
+    view === null ||
+    view === undefined ||
+    Object.is(view, nav.ownerWindow) ||
+    Object.is(view, proof.receiver)
+  );
+}
+
+function captureFindActionReactKey(
+  event: KeyboardEvent<HTMLElement>,
+  nav: FindActionRuntimeView,
+  facts: FindNativeKeyboardFacts,
+  nativeEvent: object,
+  currentTarget: HTMLElement,
+  proof: FindActionWindowProof,
+): FindActionReactSnapshot | null {
+  const intrinsics = nav.intrinsics;
+  try {
+    const preventDefault = event.preventDefault as unknown;
+    const isDefaultPrevented = event.isDefaultPrevented as unknown;
+    const isPropagationStopped = event.isPropagationStopped as unknown;
+    const view = event.view as unknown;
+    if (
+      typeof preventDefault !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      !intrinsics.methodMatches(event, "preventDefault", preventDefault) ||
+      !intrinsics.methodMatches(event, "isDefaultPrevented", isDefaultPrevented) ||
+      !intrinsics.methodMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) ||
+      intrinsics.read(isDefaultPrevented as AnyFunction, event) !== false ||
+      intrinsics.read(isPropagationStopped as AnyFunction, event) !== false ||
+      (event as unknown) === nativeEvent ||
+      (event.nativeEvent as unknown) !== nativeEvent ||
+      event.type !== facts.type ||
+      (event.target as unknown) !== facts.target ||
+      (event.currentTarget as unknown) !== currentTarget ||
+      event.eventPhase !== facts.eventPhase ||
+      event.bubbles !== facts.bubbles ||
+      event.cancelable !== facts.cancelable ||
+      event.defaultPrevented !== facts.defaultPrevented ||
+      event.key !== facts.key ||
+      event.code !== facts.code ||
+      event.location !== facts.location ||
+      event.altKey !== facts.altKey ||
+      event.ctrlKey !== facts.ctrlKey ||
+      event.metaKey !== facts.metaKey ||
+      event.shiftKey !== facts.shiftKey ||
+      event.repeat !== facts.repeat ||
+      !findActionViewIsOwned(view, nav, proof)
+    ) {
+      return null;
+    }
+    return FIND_ACTION_FREEZE({
+      event,
+      nativeEvent,
+      target: facts.target as EventTarget,
+      currentTarget,
+      phase: facts.eventPhase,
+      view,
+      methods: FIND_ACTION_FREEZE({
+        preventDefault: preventDefault as AnyFunction,
+        isDefaultPrevented: isDefaultPrevented as AnyFunction,
+        isPropagationStopped: isPropagationStopped as AnyFunction,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function findActionReactRemainsExact(
+  snapshot: FindActionReactSnapshot,
+  nav: FindActionRuntimeView,
+  facts: FindNativeKeyboardFacts,
+  proof: FindActionWindowProof,
+  currentTarget: HTMLElement | null,
+  defaultPrevented = false,
+) {
+  const intrinsics = nav.intrinsics;
+  try {
+    const event = snapshot.event;
+    const methods = snapshot.methods;
+    const currentIsDefaultPrevented = event.isDefaultPrevented as unknown;
+    return (
+      (event.nativeEvent as unknown) === snapshot.nativeEvent &&
+      event.type === facts.type &&
+      (event.target as unknown) === snapshot.target &&
+      (event.target as unknown) === facts.target &&
+      (event.currentTarget as unknown) === currentTarget &&
+      event.eventPhase === snapshot.phase &&
+      event.eventPhase === facts.eventPhase &&
+      event.bubbles === facts.bubbles &&
+      event.cancelable === facts.cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.key === facts.key &&
+      event.code === facts.code &&
+      event.location === facts.location &&
+      event.altKey === facts.altKey &&
+      event.ctrlKey === facts.ctrlKey &&
+      event.metaKey === facts.metaKey &&
+      event.shiftKey === facts.shiftKey &&
+      event.repeat === facts.repeat &&
+      Object.is(event.view as unknown, snapshot.view) &&
+      findActionViewIsOwned(event.view as unknown, nav, proof) &&
+      (event.preventDefault as unknown) === methods.preventDefault &&
+      (event.isPropagationStopped as unknown) === methods.isPropagationStopped &&
+      intrinsics.methodMatches(event, "preventDefault", methods.preventDefault) &&
+      intrinsics.methodMatches(
+        event,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+      ) &&
+      typeof currentIsDefaultPrevented === "function" &&
+      intrinsics.methodMatches(
+        event,
+        "isDefaultPrevented",
+        currentIsDefaultPrevented,
+      ) &&
+      (defaultPrevented
+        ? intrinsics.read(currentIsDefaultPrevented as AnyFunction, event) === true
+        : currentIsDefaultPrevented === methods.isDefaultPrevented &&
+          intrinsics.read(methods.isDefaultPrevented, event) === false) &&
+      intrinsics.read(methods.isPropagationStopped, event) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sameFindActionFacts(
+  captured: FindNativeKeyboardFacts,
+  current: FindNativeKeyboardFacts,
+  defaultPrevented = false,
+) {
+  if (
+    current.event !== captured.event ||
+    current.type !== captured.type ||
+    current.key !== captured.key ||
+    current.code !== captured.code ||
+    current.location !== captured.location ||
+    current.repeat !== captured.repeat ||
+    current.isComposing !== captured.isComposing ||
+    current.altKey !== captured.altKey ||
+    current.ctrlKey !== captured.ctrlKey ||
+    current.metaKey !== captured.metaKey ||
+    current.shiftKey !== captured.shiftKey ||
+    current.bubbles !== captured.bubbles ||
+    current.cancelable !== captured.cancelable ||
+    current.isTrusted !== captured.isTrusted ||
+    current.timeStamp !== captured.timeStamp ||
+    current.view !== captured.view ||
+    current.ownerView !== captured.ownerView ||
+    current.target !== captured.target ||
+    current.activeElement !== captured.target ||
+    captured.defaultPrevented ||
+    current.defaultPrevented !== defaultPrevented ||
+    current.path.length !== captured.path.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < current.path.length; index += 1) {
+    if (current.path[index] !== captured.path[index]) return false;
+  }
+  return true;
+}
+
 function createFindBarPublication({
   authority,
   cells,
@@ -477,6 +1241,7 @@ function createFindBarPublication({
     }
   };
   const bar = new ElementOwner<HTMLDivElement>(onElementChange);
+  const firstRow = new ElementOwner<HTMLDivElement>(onElementChange);
   const searchOwner = new ElementOwner<HTMLInputElement>(onElementChange);
   const replaceOwner = new ElementOwner<HTMLInputElement>(onElementChange);
 
@@ -589,11 +1354,13 @@ function createFindBarPublication({
     id,
     enabled = true,
     keepInputFocus = false,
+    navigable = false,
     run,
   }: {
     id: FindControl;
     enabled?: boolean;
     keepInputFocus?: boolean;
+    navigable?: boolean;
     run: (publication: FindBarPublication) => void;
   }): FindControlPublication => {
     // Radix's asChild trigger may detach and reattach its composed ref to the same button.
@@ -614,6 +1381,13 @@ function createFindBarPublication({
         }
         run(publication);
       },
+      ...(navigable
+        ? {
+            onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
+              completeFirstRowNavigation(control, event);
+            },
+          }
+        : {}),
       ...(keepInputFocus
         ? {
             onMouseDown: (event: MouseEvent<HTMLButtonElement>) => {
@@ -652,18 +1426,21 @@ function createFindBarPublication({
       id: "previous",
       enabled: !authority.actionsDisabled,
       keepInputFocus: true,
+      navigable: true,
       run: (publication) => step(publication, -1),
     }),
     next: makeControl({
       id: "next",
       enabled: !authority.actionsDisabled,
       keepInputFocus: true,
+      navigable: true,
       run: (publication) => step(publication, 1),
     }),
     toggleReplace: makeControl({
       id: "toggleReplace",
       enabled: authority.canEdit,
       keepInputFocus: true,
+      navigable: true,
       run: (publication) => {
         if (authority.replaceVisible) {
           cancelReplaceFocus(publication);
@@ -675,7 +1452,7 @@ function createFindBarPublication({
         authority.onReplaceVisible(true);
       },
     }),
-    close: makeControl({ id: "close", run: close }),
+    close: makeControl({ id: "close", navigable: true, run: close }),
     replaceOne: makeControl({
       id: "replaceOne",
       enabled: authority.showReplace && !authority.actionsDisabled,
@@ -773,6 +1550,7 @@ function createFindBarPublication({
   };
   const expectedOwners = (): readonly ElementOwnerView[] => [
     bar,
+    firstRow,
     searchOwner,
     ...expectedControls().map((control) => controlOwners.get(control.id)!),
     ...(authority.showReplace ? [replaceOwner] : []),
@@ -784,6 +1562,7 @@ function createFindBarPublication({
       target === controlOwners.get(control.id)?.element());
   const exactDomIsCurrent = () => {
     const root = bar.element();
+    const rowElement = firstRow.element();
     const searchElement = searchOwner.element();
     const replaceElement = replaceOwner.element();
     const controlElements = expectedControls().map((control) =>
@@ -807,6 +1586,12 @@ function createFindBarPublication({
       root.getAttribute("role") === "search" &&
       root.getAttribute("aria-label") === "Find and replace" &&
       root.dataset.testid === "find-bar" &&
+      !!rowElement &&
+      rowElement.isConnected &&
+      rowElement.ownerDocument === root.ownerDocument &&
+      rowElement.tagName === "DIV" &&
+      rowElement.dataset.testid === "find-actions" &&
+      rowElement.parentNode === root &&
       !!searchElement &&
       searchElement.isConnected &&
       searchElement.ownerDocument === root.ownerDocument &&
@@ -859,6 +1644,443 @@ function createFindBarPublication({
     return true;
   };
 
+  const firstRowActionControls = (): readonly FindControlPublication[] => [
+    controls.previous,
+    controls.next,
+    ...(authority.canEdit ? [controls.toggleReplace] : []),
+    controls.close,
+  ];
+
+  /**
+   * The bounded group: the current enabled first-row actions in exact committed DOM order. Anything
+   * missing, detached, reordered, or outside the published row collapses the whole group.
+   */
+  const currentFirstRowActions = (publication: FindBarPublication) => {
+    const root = bar.element();
+    const row = firstRow.element();
+    if (!root || !row || !row.isConnected || row.parentNode !== root) return null;
+    if (!ownsAuthority(publication)) return null;
+    const expected: { control: FindControlPublication; element: HTMLButtonElement }[] = [];
+    for (const control of firstRowActionControls()) {
+      const owner = controlOwners.get(control.id);
+      const element = owner?.element() ?? null;
+      if (
+        !owner ||
+        !element ||
+        !element.isConnected ||
+        element.ownerDocument !== root.ownerDocument ||
+        !row.contains(element)
+      ) {
+        return null;
+      }
+      expected.push({ control, element });
+    }
+    const committed = [...row.querySelectorAll<HTMLButtonElement>("button")]
+      .filter((element) => expected.some((entry) => entry.element === element));
+    if (
+      committed.length !== expected.length ||
+      expected.some((entry, index) => committed[index] !== entry.element)
+    ) {
+      return null;
+    }
+    return Object.freeze(
+      expected.filter(({ control, element }) =>
+        control.enabled && !element.disabled && findActionIsEnabled(element)),
+    );
+  };
+
+  const resolveFirstRowMovement = (
+    publication: FindBarPublication,
+    source: EventTarget,
+    key: string,
+  ) => {
+    if (!isFindActionKey(key)) return null;
+    const actions = currentFirstRowActions(publication);
+    if (!actions || actions.length < 2) return null;
+    const index = actions.findIndex((entry) => entry.element === source);
+    if (index < 0) return null;
+    const destinationIndex = findActionDestinationIndex(key, index, actions.length);
+    if (destinationIndex === null || destinationIndex === index) return null;
+    const sourceEntry = actions[index];
+    const destinationEntry = actions[destinationIndex];
+    if (
+      !sourceEntry ||
+      !destinationEntry ||
+      sourceEntry.element === destinationEntry.element
+    ) {
+      return null;
+    }
+    return {
+      key,
+      sourceControl: sourceEntry.control,
+      destinationControl: destinationEntry.control,
+      source: sourceEntry.element,
+      destination: destinationEntry.element,
+    };
+  };
+
+  const firstRowMovementIsCurrent = (
+    runtime: FindBarPublicationRuntime,
+    publication: FindBarPublication,
+    facts: FindNativeKeyboardFacts,
+    movement: FindActionMovement,
+  ) => {
+    const resolved = resolveFirstRowMovement(publication, movement.source, movement.key);
+    const sourceOwner = controlOwners.get(movement.sourceControl.id);
+    const destinationOwner = controlOwners.get(movement.destinationControl.id);
+    return Boolean(
+      currentRuntime === runtime &&
+        !runtime.isRetired() &&
+        runtime.publication === publication &&
+        cells.active.current === publication &&
+        runtime.nav?.isCurrent() === true &&
+        resolved &&
+        resolved.key === movement.key &&
+        resolved.sourceControl === movement.sourceControl &&
+        resolved.destinationControl === movement.destinationControl &&
+        resolved.source === movement.source &&
+        resolved.destination === movement.destination &&
+        !!sourceOwner &&
+        !!destinationOwner &&
+        ownsControl(publication, movement.sourceControl, sourceOwner, movement.source) &&
+        ownsControl(
+          publication,
+          movement.destinationControl,
+          destinationOwner,
+          movement.destination,
+        ) &&
+        facts.activeElement === movement.source &&
+        factsAreCurrent() &&
+        exactDomIsCurrent() &&
+        runtime.publishedDomMatches(),
+    );
+  };
+
+  const prepareFirstRowCapture = (event: object, nativeEvent: object) => {
+    if (
+      cells.activeActionDelivery.current ||
+      cells.attemptedActionReactEvents.has(event) ||
+      cells.attemptedActionNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    cells.attemptedActionReactEvents.add(event);
+    cells.attemptedActionNativeEvents.add(nativeEvent);
+    return true;
+  };
+
+  const prepareFirstRowBubble = (event: object, nativeEvent: object) => {
+    if (
+      cells.activeActionDelivery.current ||
+      cells.attemptedActionReactEvents.has(event) ||
+      !cells.attemptedActionNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    cells.attemptedActionReactEvents.add(event);
+    return true;
+  };
+
+  const firstRowTokens = (pair: FindActionKeyPair): readonly object[] => [
+    pair.publicationToken,
+    pair.sourceToken,
+    pair.destinationToken,
+    pair.captureToken,
+    pair.nativeToken,
+    pair.windowToken,
+  ];
+
+  const claimFirstRowMovement = (
+    delivery: FindActionKeyDelivery,
+    publication: FindBarPublication,
+    listener: FindActionKeyListener,
+  ) => {
+    const { pair, bubble } = delivery;
+    if (
+      cells.activeActionDelivery.current ||
+      cells.active.current !== publication ||
+      pair.publication !== publication ||
+      cells.claimedActionDeliveries.has(delivery) ||
+      cells.claimedActionDeliveries.has(pair) ||
+      cells.claimedActionDeliveries.has(pair.movement) ||
+      firstRowTokens(pair).some((token) => cells.claimedActionTokens.has(token)) ||
+      cells.claimedActionTokens.has(pair.capture.event) ||
+      cells.claimedActionTokens.has(bubble.event) ||
+      cells.claimedActionTokens.has(pair.nativeEvent) ||
+      !cells.attemptedActionReactEvents.has(pair.capture.event) ||
+      !cells.attemptedActionReactEvents.has(bubble.event) ||
+      !cells.attemptedActionNativeEvents.has(pair.nativeEvent) ||
+      !listener.claim(pair.proof, publication)
+    ) {
+      return false;
+    }
+    cells.claimedActionDeliveries.add(delivery);
+    cells.claimedActionDeliveries.add(pair);
+    cells.claimedActionDeliveries.add(pair.movement);
+    for (const token of firstRowTokens(pair)) cells.claimedActionTokens.add(token);
+    cells.claimedActionTokens.add(pair.capture.event);
+    cells.claimedActionTokens.add(bubble.event);
+    cells.claimedActionTokens.add(pair.nativeEvent);
+    cells.activeActionDelivery.current = delivery;
+    return true;
+  };
+
+  const firstRowMovementIsDelivering = (
+    delivery: FindActionKeyDelivery,
+    publication: FindBarPublication,
+  ) =>
+    cells.activeActionDelivery.current === delivery &&
+    cells.claimedActionDeliveries.has(delivery) &&
+    cells.claimedActionDeliveries.has(delivery.pair) &&
+    cells.claimedActionDeliveries.has(delivery.pair.movement) &&
+    firstRowTokens(delivery.pair).every((token) =>
+      cells.claimedActionTokens.has(token)) &&
+    cells.claimedActionTokens.has(delivery.pair.capture.event) &&
+    cells.claimedActionTokens.has(delivery.bubble.event) &&
+    cells.claimedActionTokens.has(delivery.pair.nativeEvent) &&
+    cells.active.current === publication &&
+    delivery.pair.publication === publication;
+
+  const finishFirstRowMovement = (delivery: FindActionKeyDelivery) => {
+    if (cells.activeActionDelivery.current === delivery) {
+      cells.activeActionDelivery.current = null;
+    }
+  };
+
+  const captureFirstRowNavigation = (event: KeyboardEvent<HTMLDivElement>) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object") return;
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const nav = runtime?.nav ?? null;
+    const root = bar.element();
+    const row = firstRow.element();
+    if (
+      !runtime ||
+      !publication ||
+      !nav ||
+      !root ||
+      !row ||
+      runtime.isRetired() ||
+      !nav.isCurrent() ||
+      nav.root !== root ||
+      event.currentTarget !== row ||
+      cells.actionPairs.has(nativeEvent)
+    ) {
+      return;
+    }
+    const facts = nav.facts(nativeEvent);
+    if (!facts || facts.type !== "keydown" || !isFindActionKey(facts.key)) return;
+    if (!prepareFirstRowCapture(event, nativeEvent)) return;
+    const proof = nav.listener.proofFor(nativeEvent, publication);
+    const resolved = proof
+      ? resolveFirstRowMovement(publication, facts.target, facts.key)
+      : null;
+    const capture = proof
+      ? captureFindActionReactKey(event, nav, facts, nativeEvent, row, proof)
+      : null;
+    const terminal = facts.path[facts.path.length - 1];
+    const nativeCurrentTarget = facts.currentTarget;
+    if (
+      !proof ||
+      !resolved ||
+      !capture ||
+      facts.eventPhase !== FIND_ACTION_CAPTURING_PHASE ||
+      !facts.bubbles ||
+      !facts.cancelable ||
+      facts.defaultPrevented ||
+      nav.intrinsics.propagationStopped(nativeEvent) ||
+      !facts.isTrusted ||
+      facts.altKey ||
+      facts.ctrlKey ||
+      facts.metaKey ||
+      facts.shiftKey ||
+      facts.repeat ||
+      facts.isComposing ||
+      facts.target !== resolved.source ||
+      facts.activeElement !== resolved.source ||
+      facts.path[0] !== facts.target ||
+      !findKeyboardPathIncludes(facts, row) ||
+      !findKeyboardPathIncludes(facts, root) ||
+      !findKeyboardPathIncludes(facts, nav.ownerDocument) ||
+      !nativeCurrentTarget ||
+      !findKeyboardPathIncludes(facts, nativeCurrentTarget) ||
+      !(nativeCurrentTarget instanceof nav.intrinsics.nodeConstructor) ||
+      !nativeCurrentTarget.contains(row) ||
+      proof.publication !== publication ||
+      proof.nativeEvent !== nativeEvent ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      terminal !== proof.receiver ||
+      !findActionViewIsOwned(facts.view, nav, proof)
+    ) {
+      return;
+    }
+    const movement: FindActionMovement = FIND_ACTION_FREEZE({
+      identity: Symbol("find first-row action movement"),
+      key: resolved.key,
+      sourceControl: resolved.sourceControl,
+      destinationControl: resolved.destinationControl,
+      source: resolved.source,
+      destination: resolved.destination,
+    });
+    if (!firstRowMovementIsCurrent(runtime, publication, facts, movement)) return;
+    cells.actionPairs.set(
+      nativeEvent,
+      FIND_ACTION_FREEZE({
+        publication,
+        nativeEvent,
+        facts,
+        capture,
+        proof,
+        movement,
+        publicationToken: FIND_ACTION_FREEZE({ publication }),
+        sourceToken: FIND_ACTION_FREEZE({
+          control: resolved.sourceControl,
+          element: resolved.source,
+        }),
+        destinationToken: FIND_ACTION_FREEZE({
+          control: resolved.destinationControl,
+          element: resolved.destination,
+        }),
+        captureToken: FIND_ACTION_FREEZE({ capture }),
+        nativeToken: FIND_ACTION_FREEZE({ nativeEvent }),
+        windowToken: FIND_ACTION_FREEZE({
+          listener: nav.listener,
+          proof,
+          receiver: proof.receiver,
+        }),
+      }),
+    );
+  };
+
+  const completeFirstRowNavigation = (
+    control: FindControlPublication,
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    const pair = nativeEvent && typeof nativeEvent === "object"
+      ? cells.actionPairs.get(nativeEvent)
+      : undefined;
+    if (
+      !pair ||
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pair.nativeEvent !== nativeEvent ||
+      !prepareFirstRowBubble(event, nativeEvent)
+    ) {
+      return;
+    }
+    cells.actionPairs.delete(nativeEvent);
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const nav = runtime?.nav ?? null;
+    if (
+      !runtime ||
+      !publication ||
+      !nav ||
+      runtime.isRetired() ||
+      !nav.isCurrent() ||
+      pair.publication !== publication ||
+      pair.movement.sourceControl !== control ||
+      event.currentTarget !== pair.movement.source
+    ) {
+      return;
+    }
+    const facts = nav.facts(nativeEvent);
+    const proof = facts ? nav.listener.proofFor(nativeEvent, publication) : null;
+    const bubble = facts && proof
+      ? captureFindActionReactKey(
+          event,
+          nav,
+          facts,
+          nativeEvent,
+          pair.movement.source,
+          proof,
+        )
+      : null;
+    if (
+      !facts ||
+      !proof ||
+      !bubble ||
+      bubble.event === pair.capture.event ||
+      proof !== pair.proof ||
+      facts.eventPhase !== FIND_ACTION_BUBBLING_PHASE ||
+      pair.facts.eventPhase !== FIND_ACTION_CAPTURING_PHASE ||
+      facts.currentTarget !== pair.facts.currentTarget ||
+      facts.path[facts.path.length - 1] !== proof.receiver ||
+      nav.intrinsics.propagationStopped(nativeEvent) ||
+      !sameFindActionFacts(pair.facts, facts) ||
+      !findActionReactRemainsExact(pair.capture, nav, pair.facts, proof, null) ||
+      !findActionReactRemainsExact(
+        bubble,
+        nav,
+        facts,
+        proof,
+        pair.movement.source,
+      ) ||
+      !firstRowMovementIsCurrent(runtime, publication, facts, pair.movement)
+    ) {
+      return;
+    }
+    const delivery: FindActionKeyDelivery = FIND_ACTION_FREEZE({ pair, bubble });
+    if (!claimFirstRowMovement(delivery, publication, nav.listener)) return;
+    try {
+      if (
+        !firstRowMovementIsDelivering(delivery, publication) ||
+        !nav.listener.retains(pair.proof, publication) ||
+        !findActionReactRemainsExact(pair.capture, nav, pair.facts, proof, null) ||
+        !findActionReactRemainsExact(
+          bubble,
+          nav,
+          facts,
+          proof,
+          pair.movement.source,
+        ) ||
+        !firstRowMovementIsCurrent(runtime, publication, facts, pair.movement) ||
+        !nav.intrinsics.invoke(bubble.methods.preventDefault, bubble.event)
+      ) {
+        return;
+      }
+      const prevented = nav.facts(nativeEvent);
+      if (
+        !prevented ||
+        !prevented.defaultPrevented ||
+        !sameFindActionFacts(pair.facts, prevented, true) ||
+        prevented.currentTarget !== facts.currentTarget ||
+        prevented.eventPhase !== facts.eventPhase ||
+        nav.intrinsics.propagationStopped(nativeEvent) ||
+        !nav.listener.retains(pair.proof, publication) ||
+        !firstRowMovementIsDelivering(delivery, publication) ||
+        !findActionReactRemainsExact(pair.capture, nav, pair.facts, proof, null) ||
+        !findActionReactRemainsExact(
+          bubble,
+          nav,
+          prevented,
+          proof,
+          pair.movement.source,
+          true,
+        ) ||
+        !firstRowMovementIsCurrent(runtime, publication, prevented, pair.movement)
+      ) {
+        return;
+      }
+      nav.intrinsics.focusWithoutScroll(pair.movement.destination);
+    } finally {
+      finishFirstRowMovement(delivery);
+    }
+  };
+
   const createRuntime = (): FindBarPublicationRuntime => {
     type Retirement = "element" | "layout" | "other";
     let retired = false;
@@ -884,7 +2106,33 @@ function createFindBarPublication({
     const keyboardIntrinsicsAreCurrent = () =>
       !!ownerWindow &&
       trustedFindKeyboardIntrinsics(ownerWindow) === keyboardIntrinsics;
+    const readActionFacts = (event: object) =>
+      keyboardIntrinsics && keyboardIntrinsicsAreCurrent()
+        ? readFindKeyboardFacts(keyboardIntrinsics, event, ownerDocument)
+        : null;
+    const actionIntrinsics = ownerWindow
+      ? captureFindActionIntrinsics(ownerWindow)
+      : null;
+    const actionListener = actionIntrinsics
+      ? createFindActionKeyListener(actionIntrinsics, ownerDocument, readActionFacts)
+      : null;
+    const nav: FindActionRuntimeView | null =
+      actionIntrinsics && actionListener && keyboardIntrinsics
+        ? FIND_ACTION_FREEZE({
+            intrinsics: actionIntrinsics,
+            listener: actionListener,
+            ownerWindow: actionIntrinsics.ownerWindow,
+            ownerDocument,
+            root: publishedRoot,
+            facts: readActionFacts,
+            isCurrent: () =>
+              keyboardIntrinsicsAreCurrent() &&
+              actionIntrinsics.isCurrent() &&
+              actionListener.isCurrent(),
+          })
+        : null;
     const uninstallKeyboard = () => {
+      actionListener?.release(publication);
       if (!keyboardListening) return;
       keyboardListening = false;
       root.removeEventListener("keydown", rememberKeyboard, true);
@@ -1103,6 +2351,7 @@ function createFindBarPublication({
     }
     const runtime: FindBarPublicationRuntime = Object.freeze({
       publication,
+      nav,
       publish: (
         snapshot: FindBarDomSnapshot,
         owners: readonly ElementOwnerView[],
@@ -1140,6 +2389,7 @@ function createFindBarPublication({
           root.addEventListener("keydown", rememberKeyboard, true);
           ownerDocument.addEventListener("keydown", deliverKeyboard);
         }
+        nav?.listener.activate(publication);
       },
       retireForElement: () => {
         retire("element");
@@ -1297,10 +2547,12 @@ function createFindBarPublication({
 
   return Object.freeze({
     captureBar: bar.capture,
+    captureFirstRow: firstRow.capture,
     inputs: Object.freeze({ search, replace: replacement }),
     controls: Object.freeze(controls),
     establish,
     onBarKeyDown,
+    onFirstRowKeyDownCapture: captureFirstRowNavigation,
   });
 }
 
@@ -1378,6 +2630,12 @@ export function FindBar({
     claimedActivations: new WeakSet<object>(),
     claimedMouseDowns: new WeakSet<object>(),
     keyboardDeliveries: new WeakMap<object, FindKeyboardDelivery>(),
+    actionPairs: new WeakMap<object, FindActionKeyPair>(),
+    attemptedActionReactEvents: new WeakSet<object>(),
+    attemptedActionNativeEvents: new WeakSet<object>(),
+    claimedActionDeliveries: new WeakSet<object>(),
+    claimedActionTokens: new WeakSet<object>(),
+    activeActionDelivery: new CurrentCell<FindActionKeyDelivery | null>(null),
   }));
   const replacement = replacementDraft.visit === visit ? replacementDraft.value : "";
   const options = find?.options;
@@ -1437,9 +2695,11 @@ export function FindBar({
 
   const {
     captureBar,
+    captureFirstRow,
     inputs,
     controls,
     onBarKeyDown,
+    onFirstRowKeyDownCapture,
   } = publicationSet;
   const { search: searchInput, replace: replaceInput } = inputs;
   const {
@@ -1463,14 +2723,15 @@ export function FindBar({
     onChange: onReplaceChange,
     onKeyDown: onReplaceKeyDown,
   } = replaceInput;
-  const { capture: capturePrevious, onMouseDown: onPreviousMouseDown, onClick: onPreviousClick } = previous;
-  const { capture: captureNext, onMouseDown: onNextMouseDown, onClick: onNextClick } = next;
+  const { capture: capturePrevious, onMouseDown: onPreviousMouseDown, onClick: onPreviousClick, onKeyDown: onPreviousKeyDown } = previous;
+  const { capture: captureNext, onMouseDown: onNextMouseDown, onClick: onNextClick, onKeyDown: onNextKeyDown } = next;
   const {
     capture: captureToggleReplace,
     onMouseDown: onToggleReplaceMouseDown,
     onClick: onToggleReplaceClick,
+    onKeyDown: onToggleReplaceKeyDown,
   } = toggleReplace;
-  const { capture: captureClose, onClick: onCloseClick } = close;
+  const { capture: captureClose, onClick: onCloseClick, onKeyDown: onCloseKeyDown } = close;
   const { capture: captureReplaceOne, onClick: onReplaceOneClick } = replaceOne;
   const { capture: captureReplaceAll, onClick: onReplaceAllClick } = replaceAll;
   const counter = query ? `${total === 0 ? 0 : active + 1} of ${total}` : "";
@@ -1483,7 +2744,12 @@ export function FindBar({
       data-testid="find-bar"
       onKeyDown={onBarKeyDown}
     >
-      <div className="flex items-start gap-1.5">
+      <div
+        className="flex items-start gap-1.5"
+        ref={captureFirstRow}
+        data-testid="find-actions"
+        onKeyDownCapture={onFirstRowKeyDownCapture}
+      >
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5" data-testid="find-row">
         <div className="flex h-8 min-w-[9rem] flex-1 items-center gap-0.5 rounded-lg md:w-[min(420px,40vw)] md:flex-none border border-line-2 bg-surface pl-2.5 pr-1 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20">
           <input
@@ -1527,6 +2793,7 @@ export function FindBar({
             disabled={actionsDisabled}
             onMouseDown={onPreviousMouseDown}
             onClick={onPreviousClick}
+            onKeyDown={onPreviousKeyDown}
             aria-label="Previous match"
             data-testid="find-prev"
           >
@@ -1541,6 +2808,7 @@ export function FindBar({
             disabled={actionsDisabled}
             onMouseDown={onNextMouseDown}
             onClick={onNextClick}
+            onKeyDown={onNextKeyDown}
             aria-label="Next match"
             data-testid="find-next"
           >
@@ -1555,6 +2823,7 @@ export function FindBar({
               className={cn("btn btn-ghost h-8 shrink-0 gap-1.5 px-2 text-[13px]", replaceVisible && "bg-surface-3 text-ink")}
               onMouseDown={onToggleReplaceMouseDown}
               onClick={onToggleReplaceClick}
+              onKeyDown={onToggleReplaceKeyDown}
               aria-expanded={replaceVisible}
               aria-controls="find-replace-row"
               data-testid="find-toggle-replace"
@@ -1574,6 +2843,7 @@ export function FindBar({
             type="button"
             className="icon-btn mt-0.5 h-7 w-7 shrink-0 rounded-md"
             onClick={onCloseClick}
+            onKeyDown={onCloseKeyDown}
             aria-label="Close find"
             data-testid="find-close"
           >
