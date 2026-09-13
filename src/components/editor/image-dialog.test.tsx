@@ -10,6 +10,7 @@ import {
   type ChangeEventHandler,
   type FormEvent,
   type FormEventHandler,
+  type MouseEventHandler,
   type ReactNode,
   type RefCallback,
   type SyntheticEvent,
@@ -1568,9 +1569,11 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     const upload = deferred<UploadResult>();
     const onUpload = vi.fn(() => upload.promise);
     const never = new Promise<never>(() => {});
+    const pendingRender = vi.fn();
     let begin = () => {};
 
     function PendingRender(): ReactNode {
+      pendingRender();
       throw never;
     }
 
@@ -1597,7 +1600,25 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await renderStrictRoot(<ConcurrentHarness />);
     choose(new File(["current"], "current.png", { type: "image/png" }));
     expect(onUpload).toHaveBeenCalledOnce();
-    act(() => begin());
+    const committedCancel = screen.getByRole("button", {
+      name: "Cancel",
+    }) as HTMLButtonElement;
+    const committedCancelClick =
+      reactProp<MouseEventHandler<HTMLButtonElement>>(
+        committedCancel,
+        "onClick",
+      );
+    await act(async () => begin());
+    expect(pendingRender).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+      committedCancel,
+    );
+    expect(
+      reactProp<MouseEventHandler<HTMLButtonElement>>(
+        committedCancel,
+        "onClick",
+      ),
+    ).toBe(committedCancelClick);
     await act(async () => {
       upload.resolve({ url: "/api/assets/concurrent", alt: "Concurrent Alt" });
       await upload.promise;
@@ -1606,7 +1627,10 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       "/api/assets/concurrent",
     );
     expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+      committedCancel,
+    );
+    fireEvent.click(committedCancel);
 
     expect(committedClose).toHaveBeenCalledOnce();
     expect(committedClose).toHaveBeenCalledWith(false);
