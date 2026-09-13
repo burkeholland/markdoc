@@ -3374,6 +3374,145 @@ describe("ShareDialog collaborator Remove navigation", () => {
     expect(removeButton("charlie")).toHaveFocus();
   });
 
+  it("excludes same-wrapper and distinct-native reentry from every public callback", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    await openDialog();
+    const bob = removeButton("bob");
+    const list = bob.closest("ul");
+    if (!(list instanceof HTMLUListElement)) {
+      throw new Error("The Remove control has no list boundary");
+    }
+    const captureHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLElement>) => void
+    >(list, "onKeyDownCapture");
+    const bubbleHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLElement>) => void
+    >(bob, "onKeyDown");
+    const reentered = new Set<string>();
+    const nested: KeyboardEvent[] = [];
+    bob.focus();
+
+    const pair = dispatchRemoveKeyWithBoundaryProbe(
+      bob,
+      "ArrowRight",
+      {},
+      (phase, event) => {
+        const handler = phase === "capture" ? captureHandler : bubbleHandler;
+        const originals = {
+          preventDefault: event.preventDefault,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+        };
+        const reenter = (method: string) => {
+          const key = `${phase}-${method}`;
+          if (reentered.has(key)) return;
+          reentered.add(key);
+          handler(event);
+          nested.push(dispatchRemoveKey(bob, "ArrowRight"));
+        };
+        Object.defineProperties(event, {
+          preventDefault: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              reenter("preventDefault");
+              return Reflect.apply(originals.preventDefault, this, []);
+            },
+          },
+          isDefaultPrevented: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(
+                originals.isDefaultPrevented,
+                this,
+                [],
+              );
+              reenter("isDefaultPrevented");
+              return result;
+            },
+          },
+          isPropagationStopped: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(
+                originals.isPropagationStopped,
+                this,
+                [],
+              );
+              reenter("isPropagationStopped");
+              return result;
+            },
+          },
+        });
+      },
+    );
+
+    expect(reentered).toEqual(new Set([
+      "capture-isDefaultPrevented",
+      "capture-isPropagationStopped",
+      "bubble-isDefaultPrevented",
+      "bubble-isPropagationStopped",
+      "bubble-preventDefault",
+    ]));
+    expect(nested).toHaveLength(5);
+    expect(nested.every((event) => !event.defaultPrevented)).toBe(true);
+    expect(pair.nativeEvent.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
+  ] as const)(
+    "rejects late method replacement after %s %s and admits a clean event",
+    async (targetPhase, targetMethod) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const rejected = dispatchRemoveKeyWithBoundaryProbe(
+        bob,
+        "ArrowRight",
+        {},
+        (phase, event) => {
+          if (phase !== targetPhase) return;
+          const original = event[targetMethod];
+          let called = false;
+          Object.defineProperty(event, targetMethod, {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(original, this, []);
+              if (!called) {
+                called = true;
+                Object.defineProperty(this, "preventDefault", {
+                  configurable: true,
+                  writable: true,
+                  value: vi.fn(),
+                });
+              }
+              return result;
+            },
+          });
+        },
+      );
+
+      expect(rejected.nativeEvent.defaultPrevented).toBe(
+        targetMethod === "preventDefault",
+      );
+      expect(bob).toHaveFocus();
+      const accepted = dispatchRemoveKey(bob, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
   it.each([
     "preventDefault",
     "isDefaultPrevented",
@@ -4009,6 +4148,153 @@ describe("ShareDialog agent disclosure directional keys", () => {
       vi.useRealTimers();
     }
   });
+
+  it("excludes same-wrapper and distinct-native reentry from every public callback", async () => {
+    render(
+      <StrictMode>
+        <AgentCollaborateCard
+          origin="https://markdoc.test"
+          open
+          docId={DOC_ID}
+        />
+      </StrictMode>,
+    );
+    const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+    const captureHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(toggle, "onKeyDownCapture");
+    const bubbleHandler = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(toggle, "onKeyDown");
+    const reentered = new Set<string>();
+    const nested: KeyboardEvent[] = [];
+    toggle.focus();
+
+    const pair = dispatchAgentKeyWithBoundaryProbe(
+      toggle,
+      "ArrowRight",
+      (phase, event) => {
+        const handler = phase === "capture" ? captureHandler : bubbleHandler;
+        const originals = {
+          preventDefault: event.preventDefault,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+        };
+        const reenter = (method: string) => {
+          const key = `${phase}-${method}`;
+          if (reentered.has(key)) return;
+          reentered.add(key);
+          handler(event);
+          nested.push(dispatchAgentKey(toggle, "ArrowRight"));
+        };
+        Object.defineProperties(event, {
+          preventDefault: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              reenter("preventDefault");
+              return Reflect.apply(originals.preventDefault, this, []);
+            },
+          },
+          isDefaultPrevented: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(
+                originals.isDefaultPrevented,
+                this,
+                [],
+              );
+              reenter("isDefaultPrevented");
+              return result;
+            },
+          },
+          isPropagationStopped: {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(
+                originals.isPropagationStopped,
+                this,
+                [],
+              );
+              reenter("isPropagationStopped");
+              return result;
+            },
+          },
+        });
+      },
+    );
+
+    expect(reentered).toEqual(new Set([
+      "capture-isDefaultPrevented",
+      "capture-isPropagationStopped",
+      "bubble-isDefaultPrevented",
+      "bubble-isPropagationStopped",
+      "bubble-preventDefault",
+    ]));
+    expect(nested).toHaveLength(5);
+    expect(nested.every((event) => !event.defaultPrevented)).toBe(true);
+    expect(pair.nativeEvent.defaultPrevented).toBe(true);
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
+  ] as const)(
+    "rejects late disclosure replacement after %s %s and recovers",
+    async (targetPhase, targetMethod) => {
+      render(
+        <StrictMode>
+          <AgentCollaborateCard
+            origin="https://markdoc.test"
+            open
+            docId={DOC_ID}
+          />
+        </StrictMode>,
+      );
+      const toggle = screen.getByTestId("share-agent-toggle") as HTMLButtonElement;
+      toggle.focus();
+
+      const rejected = dispatchAgentKeyWithBoundaryProbe(
+        toggle,
+        "ArrowRight",
+        (phase, event) => {
+          if (phase !== targetPhase) return;
+          const original = event[targetMethod];
+          let called = false;
+          Object.defineProperty(event, targetMethod, {
+            configurable: true,
+            writable: true,
+            value: function (this: typeof event) {
+              const result = Reflect.apply(original, this, []);
+              if (!called) {
+                called = true;
+                Object.defineProperty(this, "preventDefault", {
+                  configurable: true,
+                  writable: true,
+                  value: vi.fn(),
+                });
+              }
+              return result;
+            },
+          });
+        },
+      );
+
+      expect(rejected.nativeEvent.defaultPrevented).toBe(
+        targetMethod === "preventDefault",
+      );
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      const accepted = dispatchAgentKey(toggle, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "true"));
+    },
+  );
 
   it("rejects fabricated proxied wrappers across replaced and restored handlers", async () => {
     render(
