@@ -256,6 +256,130 @@ function dispatchAgentKey(
   return event;
 }
 
+function removeButton(login: string) {
+  return within(collaboratorRow(login)).getByRole("button", {
+    name: `Remove ${login}`,
+  }) as HTMLButtonElement;
+}
+
+function removeKeyEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const Constructor = element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!Constructor) {
+    throw new Error("The Remove control has no owner-realm KeyboardEvent");
+  }
+  const event = new Constructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchRemoveKey(
+  element: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event = typeof keyOrEvent === "string"
+    ? removeKeyEvent(element, keyOrEvent, init)
+    : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchRemoveKeyWithBoundaryProbe(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  alter?: (
+    phase: "capture" | "bubble",
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void,
+  handlers?: {
+    capture: (event: ReactKeyboardEvent<HTMLElement>) => void;
+    bubble: (event: ReactKeyboardEvent<HTMLElement>) => void;
+  },
+) {
+  const list = element.closest("ul");
+  if (!(list instanceof HTMLUListElement)) {
+    throw new Error("The Remove control is not inside its collaborator list");
+  }
+  const listPropsKey = Object.keys(list).find((entry) =>
+    entry.startsWith("__reactProps$"));
+  const buttonPropsKey = Object.keys(element).find((entry) =>
+    entry.startsWith("__reactProps$"));
+  if (!listPropsKey || !buttonPropsKey) {
+    throw new Error("React props were not attached to both Remove boundaries");
+  }
+  const listProperties = list as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const buttonProperties = element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const listProps = listProperties[listPropsKey];
+  const buttonProps = buttonProperties[buttonPropsKey];
+  const captureHandler = listProps?.onKeyDownCapture;
+  const bubbleHandler = buttonProps?.onKeyDown;
+  if (typeof captureHandler !== "function" || typeof bubbleHandler !== "function") {
+    throw new Error("The collaborator list and Remove control need key boundaries");
+  }
+  const wrappers: {
+    capture?: ReactKeyboardEvent<HTMLElement>;
+    bubble?: ReactKeyboardEvent<HTMLElement>;
+  } = {};
+  const listReplacement = {
+    ...listProps,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLElement>) => {
+      wrappers.capture = event;
+      alter?.("capture", event);
+      (handlers?.capture ?? captureHandler)(event);
+    },
+  };
+  const buttonReplacement = {
+    ...buttonProps,
+    onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+      wrappers.bubble = event;
+      alter?.("bubble", event);
+      (handlers?.bubble ?? bubbleHandler)(event);
+    },
+  };
+  listProperties[listPropsKey] = listReplacement;
+  buttonProperties[buttonPropsKey] = buttonReplacement;
+  const nativeEvent = removeKeyEvent(element, key, init);
+  try {
+    act(() => {
+      element.dispatchEvent(nativeEvent);
+    });
+  } finally {
+    if (listProperties[listPropsKey] === listReplacement) {
+      listProperties[listPropsKey] = listProps;
+    }
+    if (buttonProperties[buttonPropsKey] === buttonReplacement) {
+      buttonProperties[buttonPropsKey] = buttonProps;
+    }
+  }
+  if (!wrappers.capture || !wrappers.bubble) {
+    throw new Error("The Remove key did not cross both React boundaries");
+  }
+  return {
+    nativeEvent,
+    capture: wrappers.capture,
+    bubble: wrappers.bubble,
+  };
+}
+
 function dispatchAgentKeyWithBoundaryProbe(
   element: HTMLButtonElement,
   key: string,
@@ -1619,7 +1743,7 @@ describe("ShareDialog exact control publications", () => {
   it("rejects wrong-row, cross-action, foreign-realm and fabricated events without poisoning current controls", async () => {
     const roleRequest = deferred<unknown>();
     const removeRequest = deferred<unknown>();
-    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
     addCollaborator.mockReset().mockReturnValueOnce(roleRequest.promise);
     removeCollaborator.mockReset().mockReturnValueOnce(removeRequest.promise);
     await openDialog();
@@ -2145,7 +2269,7 @@ describe("ShareDialog authority layout boundaries", () => {
     const pendingRole = deferred<unknown>();
     const pendingRemove = deferred<unknown>();
     const pendingLink = deferred<unknown>();
-    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
     addCollaborator.mockReset().mockReturnValueOnce(pendingAdd.promise).mockReturnValueOnce(pendingRole.promise);
     removeCollaborator.mockReset().mockReturnValueOnce(pendingRemove.promise);
     patchDocument.mockReset().mockReturnValueOnce(pendingLink.promise);
@@ -2279,7 +2403,7 @@ describe("ShareDialog authority layout boundaries", () => {
     const pendingRole = deferred<unknown>();
     const pendingRemove = deferred<unknown>();
     const pendingLink = deferred<unknown>();
-    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
     addCollaborator.mockReset().mockReturnValueOnce(pendingAdd.promise).mockReturnValueOnce(pendingRole.promise);
     removeCollaborator.mockReset().mockReturnValueOnce(pendingRemove.promise);
     patchDocument.mockReset().mockReturnValueOnce(pendingLink.promise);
@@ -2560,7 +2684,7 @@ describe("ShareDialog · permission actions", () => {
   it("owns role and Remove synchronously per login while other collaborator rows remain independent", async () => {
     const bobRole = deferred<unknown>();
     const charlieRole = deferred<unknown>();
-    collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
     addCollaborator.mockReset().mockReturnValueOnce(bobRole.promise).mockReturnValueOnce(charlieRole.promise);
     await openDialog();
     const bobRow = collaboratorRow("bob");
@@ -2851,6 +2975,781 @@ describe("ShareDialog · permission actions", () => {
       expect(onDocChange).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
+
+describe("ShareDialog collaborator Remove navigation", () => {
+  it.each([
+    ["ArrowUp", "Numpad8", 3, "charlie", "bob"],
+    ["ArrowLeft", "Numpad4", 3, "charlie", "bob"],
+    ["ArrowDown", "Numpad2", 3, "charlie", "dana"],
+    ["ArrowRight", "Numpad6", 3, "charlie", "dana"],
+    ["Home", "Numpad7", 3, "dana", "bob"],
+    ["End", "Numpad1", 3, "bob", "dana"],
+  ] as const)(
+    "moves %s with unrestricted %s/%i from %s to %s",
+    async (key, code, location, sourceLogin, destinationLogin) => {
+      collaborators.mockResolvedValue(
+        collaboratorRows("bob", "charlie", "dana"),
+      );
+      render(
+        <StrictMode>
+          <ShareDialog
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      await screen.findByText("@dana");
+      const source = removeButton(sourceLogin);
+      const destination = removeButton(destinationLogin);
+      source.focus();
+
+      const event = dispatchRemoveKey(source, key, { code, location });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(removeCollaborator).not.toHaveBeenCalled();
+      expect(addCollaborator).not.toHaveBeenCalled();
+      expect(patchDocument).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["ArrowUp", "bob"],
+    ["ArrowLeft", "bob"],
+    ["Home", "bob"],
+    ["ArrowDown", "dana"],
+    ["ArrowRight", "dana"],
+    ["End", "dana"],
+  ] as const)(
+    "leaves the bounded %s edge on %s without wrapping or prevention",
+    async (key, login) => {
+      collaborators.mockResolvedValue(
+        collaboratorRows("bob", "charlie", "dana"),
+      );
+      await openDialog();
+      const source = removeButton(login);
+      source.focus();
+
+      const event = dispatchRemoveKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(removeCollaborator).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps one Remove control and a no-Remove list inert with native list semantics", async () => {
+    collaborators.mockResolvedValueOnce(collaboratorRows("bob"));
+    const view = render(
+      <StrictMode>
+        <ShareDialog
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    expect(screen.getByRole("list", { name: "People with access" }))
+      .toBeInTheDocument();
+    const only = removeButton("bob");
+    expect(only.tabIndex).toBe(0);
+    only.focus();
+    for (const key of [
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "Home",
+      "End",
+    ]) {
+      const event = dispatchRemoveKey(only, key);
+      expect(event.defaultPrevented).toBe(false);
+      expect(only).toHaveFocus();
+    }
+
+    view.rerender(
+      <StrictMode>
+        <ShareDialog
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner={false}
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Remove bob" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("list", { name: "People with access" }))
+      .toBeInTheDocument();
+  });
+
+  it("skips a pending row and remains focus-only while the add form is globally busy", async () => {
+    const roleRequest = deferred<unknown>();
+    const addRequest = deferred<unknown>();
+    collaborators.mockResolvedValue(
+      collaboratorRows("bob", "charlie", "dana"),
+    );
+    addCollaborator
+      .mockReset()
+      .mockReturnValueOnce(roleRequest.promise)
+      .mockReturnValueOnce(addRequest.promise);
+    await openDialog();
+    fireEvent.change(
+      within(collaboratorRow("charlie")).getByRole("combobox"),
+      { target: { value: "viewer" } },
+    );
+    expect(removeButton("charlie")).toBeDisabled();
+    const bob = removeButton("bob");
+    bob.focus();
+
+    const skipped = dispatchRemoveKey(bob, "ArrowDown");
+
+    expect(skipped.defaultPrevented).toBe(true);
+    expect(removeButton("dana")).toHaveFocus();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    await act(async () => {
+      roleRequest.resolve({});
+      await roleRequest.promise;
+    });
+
+    fireEvent.change(screen.getByTestId("share-login"), {
+      target: { value: "new-user" },
+    });
+    fireEvent.click(screen.getByTestId("share-add"));
+    expect(screen.getByTestId("share-add")).toBeDisabled();
+    const currentBob = removeButton("bob");
+    currentBob.focus();
+    const whileBusy = dispatchRemoveKey(currentBob, "ArrowRight");
+    expect(whileBusy.defaultPrevented).toBe(false);
+    expect(currentBob).toHaveFocus();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+
+    await act(async () => {
+      addRequest.reject(new ApiError(503, "Add still isolated"));
+      await addRequest.promise.catch(() => undefined);
+    });
+  });
+
+  it("uses the bubble React wrapper once and owner-realm prevent-scroll focus once", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    const nativeFocus = HTMLElement.prototype.focus;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    try {
+      render(
+        <StrictMode>
+          <ShareDialog
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      await screen.findByText("@charlie");
+      const bob = removeButton("bob");
+      Reflect.apply(nativeFocus, bob, []);
+      focus.mockClear();
+      preventDefault.mockClear();
+      const scroll = { x: window.scrollX, y: window.scrollY };
+
+      const pair = dispatchRemoveKeyWithBoundaryProbe(bob, "ArrowRight");
+
+      expect(pair.capture).not.toBe(pair.bubble);
+      expect(pair.capture.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.bubble.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.bubble.isDefaultPrevented()).toBe(true);
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(preventionCallCount(preventDefault, pair.nativeEvent)).toBe(1);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(focus.mock.instances[0]).toBe(removeButton("charlie"));
+      expect(removeButton("charlie")).toHaveFocus();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(removeCollaborator).not.toHaveBeenCalled();
+      expect(addCollaborator).not.toHaveBeenCalled();
+      expect(patchDocument).not.toHaveBeenCalled();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it.each(["absent", "replaced", "non-function"] as const)(
+    "ignores %s React persistence compatibility on both wrappers",
+    async (kind) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const pair = dispatchRemoveKeyWithBoundaryProbe(
+        bob,
+        "ArrowRight",
+        {},
+        (_phase, event) => {
+          if (kind === "absent") {
+            const methods = {
+              preventDefault: event.preventDefault,
+              stopPropagation: event.stopPropagation,
+              isDefaultPrevented: event.isDefaultPrevented,
+              isPropagationStopped: event.isPropagationStopped,
+            };
+            Object.defineProperties(event, Object.fromEntries(
+              Object.entries(methods).map(([name, value]) => [
+                name,
+                { configurable: true, writable: true, value },
+              ]),
+            ));
+            Object.setPrototypeOf(event, null);
+            expect("persist" in event).toBe(false);
+          } else {
+            Object.defineProperty(event, "persist", {
+              configurable: true,
+              writable: true,
+              value: kind === "replaced" ? vi.fn() : 17,
+            });
+          }
+        },
+      );
+
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
+  it("accepts unrelated phase-local prototypes and prototype drift with exact public methods", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    await openDialog();
+    const bob = removeButton("bob");
+    bob.focus();
+    const methods: Array<Record<
+      "preventDefault" | "stopPropagation" | "isDefaultPrevented" |
+        "isPropagationStopped",
+      ReactKeyboardEvent<HTMLElement>["preventDefault"]
+    >> = [];
+    const finalPrototypes: object[] = [];
+
+    const pair = dispatchRemoveKeyWithBoundaryProbe(
+      bob,
+      "ArrowRight",
+      {},
+      (phase, event) => {
+        const initialPrototype = Object.freeze({ phase, state: "initial" });
+        const finalPrototype = Object.freeze({ phase, state: "queried" });
+        const original = {
+          preventDefault: event.preventDefault,
+          stopPropagation: event.stopPropagation,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+        };
+        let firstDefaultQuery = true;
+        const local = {
+          preventDefault: function (this: typeof event) {
+            return Reflect.apply(original.preventDefault, this, []);
+          },
+          stopPropagation: function (this: typeof event) {
+            return Reflect.apply(original.stopPropagation, this, []);
+          },
+          isDefaultPrevented: function (this: typeof event) {
+            const prevented = Reflect.apply(
+              original.isDefaultPrevented,
+              this,
+              [],
+            );
+            if (firstDefaultQuery) {
+              firstDefaultQuery = false;
+              Object.setPrototypeOf(this, finalPrototype);
+            }
+            return prevented;
+          },
+          isPropagationStopped: function (this: typeof event) {
+            return Reflect.apply(
+              original.isPropagationStopped,
+              this,
+              [],
+            );
+          },
+        };
+        Object.setPrototypeOf(event, initialPrototype);
+        Object.defineProperties(event, Object.fromEntries(
+          Object.entries(local).map(([name, value]) => [
+            name,
+            { configurable: true, writable: true, value },
+          ]),
+        ));
+        methods.push(local);
+        finalPrototypes.push(finalPrototype);
+      },
+    );
+
+    expect(pair.capture).not.toBe(pair.bubble);
+    expect(Object.getPrototypeOf(pair.capture)).toBe(finalPrototypes[0]);
+    expect(Object.getPrototypeOf(pair.bubble)).toBe(finalPrototypes[1]);
+    for (const name of [
+      "preventDefault",
+      "stopPropagation",
+      "isDefaultPrevented",
+      "isPropagationStopped",
+    ] as const) {
+      expect(methods[0]?.[name]).not.toBe(methods[1]?.[name]);
+    }
+    expect(pair.nativeEvent.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "isDefaultPrevented",
+    "isPropagationStopped",
+  ] as const)(
+    "rejects capture-wrapper %s drift and admits a distinct clean event",
+    async (method) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const rejected = dispatchRemoveKeyWithBoundaryProbe(
+        bob,
+        "ArrowRight",
+        {},
+        (phase, event) => {
+          if (phase !== "capture") return;
+          const original = event.isDefaultPrevented;
+          let queried = false;
+          Object.defineProperty(event, "isDefaultPrevented", {
+            configurable: true,
+            writable: true,
+            value: function (this: ReactKeyboardEvent<HTMLElement>) {
+              const prevented = Reflect.apply(original, this, []);
+              if (!queried) {
+                queried = true;
+                Object.defineProperty(this, method, {
+                  configurable: true,
+                  writable: true,
+                  value: vi.fn(),
+                });
+              }
+              return prevented;
+            },
+          });
+        },
+      );
+
+      expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+      expect(bob).toHaveFocus();
+      const recovered = dispatchRemoveKey(bob, "ArrowRight");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
+  it.each([1, 3])(
+    "retains the exact native pair through %i capture microtask checkpoint(s)",
+    async (checkpoints) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      let observed = 0;
+      bob.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+
+      try {
+        const event = dispatchRemoveKey(bob, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(removeButton("charlie")).toHaveFocus();
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("rejects malformed, modified, replayed, untrusted, unfocused, and activation keys without poisoning recovery", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    await openDialog();
+    const bob = removeButton("bob");
+    const role = within(collaboratorRow("bob")).getByRole("combobox");
+    const done = screen.getByRole("button", { name: "Done" });
+    bob.focus();
+    const rejected = [
+      removeKeyEvent(bob, "ArrowRight", { ctrlKey: true }),
+      removeKeyEvent(bob, "ArrowRight", { altKey: true }),
+      removeKeyEvent(bob, "ArrowRight", { metaKey: true }),
+      removeKeyEvent(bob, "ArrowRight", { shiftKey: true }),
+      removeKeyEvent(bob, "ArrowRight", { repeat: true }),
+      removeKeyEvent(bob, "ArrowRight", { isComposing: true }),
+      removeKeyEvent(bob, "ArrowRight", { bubbles: false }),
+      removeKeyEvent(bob, "ArrowRight", { cancelable: false }),
+      removeKeyEvent(bob, "PageDown"),
+      removeKeyEvent(bob, "ArrowRight", {}, false),
+    ];
+    const prevented = removeKeyEvent(bob, "ArrowRight");
+    prevented.preventDefault();
+    const stopped = removeKeyEvent(bob, "ArrowRight");
+    stopped.stopPropagation();
+    rejected.push(prevented, stopped);
+    for (const event of rejected) {
+      dispatchRemoveKey(bob, event);
+      expect(event.defaultPrevented).toBe(event === prevented);
+      expect(bob).toHaveFocus();
+    }
+
+    done.focus();
+    const unfocused = dispatchRemoveKey(bob, "ArrowRight");
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(done).toHaveFocus();
+    role.focus();
+    const roleKey = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(role, roleKey);
+    expect(roleKey.defaultPrevented).toBe(false);
+    bob.focus();
+    for (const key of ["Tab", "Enter", " "]) {
+      const event = dispatchRemoveKey(bob, key);
+      expect(event.defaultPrevented).toBe(false);
+      expect(removeCollaborator).not.toHaveBeenCalled();
+    }
+
+    const recovered = dispatchRemoveKey(bob, "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it.each(["Enter", " "] as const)(
+    "preserves one native %s-generated Remove activation",
+    async (key) => {
+      const request = deferred<unknown>();
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      removeCollaborator.mockReturnValueOnce(request.promise);
+      render(
+        <StrictMode>
+          <ShareDialog
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      await screen.findByText("@charlie");
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const keyEvent = dispatchRemoveKey(bob, key);
+      expect(keyEvent.defaultPrevented).toBe(false);
+      expect(removeCollaborator).not.toHaveBeenCalled();
+      fireEvent.click(bob);
+      fireEvent.click(bob);
+      expect(removeCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob");
+
+      await act(async () => {
+        request.resolve({});
+        await request.promise;
+      });
+    },
+  );
+
+  it("rejects stale visit handlers on current wrappers and admits the current callbacks", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    const view = render(
+      <StrictMode>
+        <ShareDialog
+          key="stale"
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>,
+    );
+    await screen.findByText("@charlie");
+    const stale = removeButton("bob");
+    const staleList = stale.closest("ul");
+    if (!(staleList instanceof HTMLUListElement)) {
+      throw new Error("The stale Remove control has no list boundary");
+    }
+    const staleCapture = reactProp<
+      (event: ReactKeyboardEvent<HTMLElement>) => void
+    >(staleList, "onKeyDownCapture");
+    const staleBubble = reactProp<
+      (event: ReactKeyboardEvent<HTMLElement>) => void
+    >(stale, "onKeyDown");
+
+    view.rerender(
+      <StrictMode>
+        <ShareDialog
+          key="current"
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>,
+    );
+    await screen.findByText("@charlie");
+    const current = removeButton("bob");
+    current.focus();
+    const crossed = dispatchRemoveKeyWithBoundaryProbe(
+      current,
+      "ArrowRight",
+      {},
+      undefined,
+      { capture: staleCapture, bubble: staleBubble },
+    );
+    expect(crossed.nativeEvent.defaultPrevented).toBe(false);
+    expect(current).toHaveFocus();
+
+    const accepted = dispatchRemoveKey(current, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it("rejects partial Strict replay and recovers through a complete clean successor", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    let generation = 0;
+    const current = () => (
+      <StrictMode>
+        <ShareDialog
+          key={generation}
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>
+    );
+    const view = render(current());
+    await screen.findByText("@charlie");
+    const partial = removeButton("bob");
+    const replayControl = screen.getByTestId("copy-link") as HTMLButtonElement;
+    const replayRef = reactAlternateRef(replayControl);
+    act(() => {
+      replayRef(null);
+      replayRef(replayControl);
+    });
+    await act(async () => Promise.resolve());
+    partial.focus();
+
+    const rejected = dispatchRemoveKey(partial, "ArrowRight");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(partial).toHaveFocus();
+
+    generation += 1;
+    view.rerender(current());
+    await screen.findByText("@charlie");
+    const recovered = removeButton("bob");
+    recovered.focus();
+    const accepted = dispatchRemoveKey(recovered, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it.each(["structural", "same-prototype"] as const)(
+    "rejects a %s owner-Window terminal lookalike and accepts a clean successor",
+    async (kind) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Event.prototype,
+        "composedPath",
+      );
+      if (!descriptor || typeof descriptor.value !== "function") {
+        throw new Error("Event.prototype.composedPath is unavailable");
+      }
+      const nativeComposedPath = descriptor.value as Event["composedPath"];
+      const lookalike = kind === "same-prototype"
+        ? Object.create(Object.getPrototypeOf(window)) as Record<string, unknown>
+        : {};
+      Object.defineProperty(lookalike, "document", {
+        configurable: true,
+        value: document,
+      });
+      Object.defineProperty(Event.prototype, "composedPath", {
+        ...descriptor,
+        value: function (this: Event) {
+          const path = Reflect.apply(nativeComposedPath, this, []);
+          return path.length > 0
+            ? [...path.slice(0, -1), lookalike as unknown as EventTarget]
+            : path;
+        },
+      });
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      const view = render(
+        <StrictMode>
+          <ShareDialog
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      try {
+        await screen.findByText("@charlie");
+        const bob = removeButton("bob");
+        bob.focus();
+        const rejected = dispatchRemoveKey(bob, "ArrowRight");
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(bob).toHaveFocus();
+      } finally {
+        view.unmount();
+        Object.defineProperty(Event.prototype, "composedPath", descriptor);
+      }
+
+      collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const recovered = removeButton("bob");
+      recovered.focus();
+      const accepted = dispatchRemoveKey(recovered, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
+  it("retires restored DOM mutation history and admits a clean keyed successor", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    let generation = 0;
+    const current = () => (
+      <StrictMode>
+        <ShareDialog
+          key={generation}
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>
+    );
+    const view = render(current());
+    await screen.findByText("@charlie");
+    const stale = removeButton("bob");
+    stale.setAttribute("aria-label", "mutated");
+    stale.setAttribute("aria-label", "Remove bob");
+    await act(async () => Promise.resolve());
+    stale.focus();
+    const rejected = dispatchRemoveKey(stale, "ArrowRight");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(stale).toHaveFocus();
+
+    generation += 1;
+    view.rerender(current());
+    await act(async () => Promise.resolve());
+    const recovered = removeButton("bob");
+    recovered.focus();
+    const accepted = dispatchRemoveKey(recovered, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(removeButton("charlie")).toHaveFocus();
+  });
+
+  it("claims before effects, rejects reentrancy and replay, and cleans up before recovery", async () => {
+    collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+    const nativePreventDefault = Event.prototype.preventDefault;
+    let bob: HTMLButtonElement | null = null;
+    let nested: KeyboardEvent | null = null;
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        if (bob && !nested) nested = dispatchRemoveKey(bob, "ArrowRight");
+        Reflect.apply(nativePreventDefault, this, []);
+      });
+    const additions = vi.spyOn(window, "addEventListener");
+    const removals = vi.spyOn(window, "removeEventListener");
+    const view = render(
+      <StrictMode>
+        <ShareDialog
+          key="initial"
+          open
+          onOpenChange={vi.fn()}
+          doc={doc}
+          isOwner
+          onDocChange={vi.fn()}
+        />
+      </StrictMode>,
+    );
+    try {
+      await screen.findByText("@charlie");
+      bob = removeButton("bob");
+      bob.focus();
+      preventDefault.mockClear();
+      const accepted = removeKeyEvent(bob, "ArrowRight");
+      dispatchRemoveKey(bob, accepted);
+      dispatchRemoveKey(bob, accepted);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect((nested as KeyboardEvent | null)?.defaultPrevented).toBe(false);
+      expect(preventionCallCount(preventDefault, accepted)).toBe(1);
+      expect(removeButton("charlie")).toHaveFocus();
+
+      const staleListener = findAddedListener(
+        additions.mock.calls,
+        "keydown",
+        true,
+        "rememberShareRemoveNative",
+      );
+      view.unmount();
+      const detached = removeKeyEvent(bob, "ArrowRight");
+      Reflect.apply(staleListener, window, [detached]);
+      expect(detached.defaultPrevented).toBe(false);
+
+      collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+      render(
+        <StrictMode>
+          <ShareDialog
+            key="recovered"
+            open
+            onOpenChange={vi.fn()}
+            doc={doc}
+            isOwner
+            onDocChange={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      await screen.findByText("@charlie");
+      const recovered = removeButton("bob");
+      recovered.focus();
+      const next = dispatchRemoveKey(recovered, "ArrowRight");
+      expect(next.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    } finally {
+      view.unmount();
+      removals.mockRestore();
+      additions.mockRestore();
+      preventDefault.mockRestore();
     }
   });
 });
