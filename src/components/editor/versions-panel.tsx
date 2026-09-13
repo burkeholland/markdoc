@@ -5492,6 +5492,14 @@ function compactRange(numbers: number[]): string {
 }
 
 type VersionDiffNavigationKey = "Home" | "End";
+type VersionDiffActionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+type VersionDiffActionKind = "swap" | "previous" | "next";
 
 interface VersionDiffVersionFact {
   readonly source: VersionSummary;
@@ -5541,7 +5549,16 @@ interface VersionDiffAuthority {
   readonly hunks: readonly VersionDiffHunkFact[];
   readonly active: number;
   readonly setActive: (index: number) => void;
+  readonly actions: readonly VersionDiffActionFact[];
   readonly requestSuccessor: () => void;
+}
+
+interface VersionDiffActionFact {
+  readonly identity: symbol;
+  readonly kind: VersionDiffActionKind;
+  readonly order: number;
+  readonly callback: () => void;
+  readonly eligible: boolean;
 }
 
 interface VersionDiffDomSnapshot {
@@ -5577,10 +5594,13 @@ interface VersionDiffNativeKeyboardFacts {
   readonly defaultPrevented: boolean;
   readonly cancelBubble: boolean;
   readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
   readonly path: readonly EventTarget[];
   readonly isTrusted: boolean;
   readonly view: Window | null;
   readonly key: string;
+  readonly code: string;
+  readonly location: number;
   readonly ctrlKey: boolean;
   readonly altKey: boolean;
   readonly metaKey: boolean;
@@ -5589,12 +5609,100 @@ interface VersionDiffNativeKeyboardFacts {
   readonly isComposing: boolean;
 }
 
+interface VersionDiffWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
 interface VersionDiffKeyboardIntrinsics {
+  readonly keyboardPrototype: object;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
   readonly read: (event: object) => VersionDiffNativeKeyboardFacts | null;
   readonly defaultWasPrevented: (event: globalThis.Event) => boolean;
   readonly activeElement: () => Element | null | undefined;
   readonly preventDefault: (event: globalThis.Event) => boolean;
   readonly reveal: (element: Element) => boolean;
+  readonly focus: (element: HTMLElement) => boolean;
+  readonly addEventListener: VersionDiffWindowMethod<Window["addEventListener"]>;
+  readonly removeEventListener: VersionDiffWindowMethod<
+    Window["removeEventListener"]
+  >;
+  readonly isCurrent: () => boolean;
+  readonly methodMatches: (
+    event: object,
+    property: PropertyKey,
+    method: unknown,
+  ) => boolean;
+}
+
+interface VersionDiffWindowProof {
+  readonly identity: symbol;
+  readonly publication: VersionDiffPublication;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly source: HTMLButtonElement;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly snapshot: VersionDiffNativeKeyboardFacts;
+}
+
+interface VersionDiffKeyListener {
+  readonly listener: EventListener;
+  readonly activate: (publication: VersionDiffPublication) => boolean;
+  readonly proofFor: (
+    event: globalThis.KeyboardEvent,
+    publication: VersionDiffPublication,
+  ) => VersionDiffWindowProof | null;
+  readonly claim: (
+    proof: VersionDiffWindowProof,
+    publication: VersionDiffPublication,
+  ) => boolean;
+  readonly retains: (
+    proof: VersionDiffWindowProof,
+    publication: VersionDiffPublication,
+  ) => boolean;
+  readonly release: (publication: VersionDiffPublication) => void;
+}
+
+interface VersionDiffPublishedAction {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly fact: VersionDiffActionFact;
+  readonly element: HTMLButtonElement;
+  readonly order: number;
+}
+
+interface VersionDiffActionMovement {
+  readonly identity: symbol;
+  readonly key: VersionDiffActionNavigationKey;
+  readonly source: VersionDiffPublishedAction;
+  readonly destination: VersionDiffPublishedAction | null;
+}
+
+interface VersionDiffReactMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly stopPropagation: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+  readonly persist: (...args: never[]) => unknown;
+}
+
+interface VersionDiffActionDelivery {
+  readonly publication: VersionDiffPublication;
+  readonly wrapper: KeyboardEvent<HTMLElement>;
+  readonly methods: VersionDiffReactMethods;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly listener: VersionDiffWindowProof;
+  readonly currentTarget: HTMLElement;
+  readonly dispatchTarget: EventTarget;
+  readonly source: HTMLButtonElement;
+  readonly action: VersionDiffPublishedAction;
+  readonly key: VersionDiffActionNavigationKey;
+  readonly snapshot: VersionDiffNativeKeyboardFacts;
 }
 
 interface VersionDiffPublication {
@@ -5602,14 +5710,21 @@ interface VersionDiffPublication {
   readonly authority: VersionDiffAuthority;
   readonly root: HTMLDivElement;
   readonly rootParent: Node;
+  readonly header: HTMLDivElement;
   readonly body: HTMLDivElement;
   readonly hunks: readonly HTMLElement[];
+  readonly actionElements: Readonly<
+    Record<VersionDiffActionKind, HTMLButtonElement | null>
+  >;
+  readonly actions: readonly VersionDiffPublishedAction[];
+  readonly movements: readonly VersionDiffActionMovement[];
   readonly rootPath: readonly EventTarget[];
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
   readonly dom: VersionDiffDomSnapshot;
   readonly placement: VersionDiffPlacement;
   readonly keyboard: VersionDiffKeyboardIntrinsics | null;
+  readonly keyListener: VersionDiffKeyListener | null;
 }
 
 interface VersionDiffElementOwnerView {
@@ -5652,11 +5767,28 @@ interface VersionDiffPublicationRuntime {
 
 interface VersionDiffPublicationSet {
   readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly captureHeader: (element: HTMLDivElement | null) => void;
   readonly captureBody: (element: HTMLDivElement | null) => void;
+  readonly captureSwap: (element: HTMLButtonElement | null) => void;
+  readonly capturePrevious: (element: HTMLButtonElement | null) => void;
+  readonly captureNext: (element: HTMLButtonElement | null) => void;
   readonly captureHunks: readonly ((element: HTMLElement | null) => void)[];
   readonly root: () => HTMLDivElement | null;
   readonly establish: () => (() => void) | undefined;
   readonly onBoundaryKey: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly onActionGroupKeyDownCapture: (
+    event: KeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly onActionGroupKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly actionHandlers: Readonly<
+    Record<
+      VersionDiffActionKind,
+      Readonly<{
+        onKeyDownCapture: (event: KeyboardEvent<HTMLButtonElement>) => void;
+        onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+      }>
+    >
+  >;
 }
 
 class VersionDiffCoordinator {
@@ -5667,6 +5799,9 @@ class VersionDiffCoordinator {
   #retired = new WeakSet<VersionDiffPublication>();
   #claimedPublications = new WeakSet<VersionDiffPublication>();
   #claimedEvents = new WeakSet<object>();
+  #claimedMovements = new WeakSet<VersionDiffActionMovement>();
+  #claimedProofs = new WeakSet<VersionDiffWindowProof>();
+  #claimedActions = new WeakSet<VersionDiffPublishedAction>();
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -5745,6 +5880,41 @@ class VersionDiffCoordinator {
     this.#claimedPublications.add(publication);
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
+    return true;
+  }
+
+  claimActionKeyboard(
+    publication: VersionDiffPublication,
+    movement: VersionDiffActionMovement,
+    capture: object,
+    bubble: object,
+    nativeEvent: globalThis.KeyboardEvent,
+    proof: VersionDiffWindowProof,
+    source: VersionDiffPublishedAction,
+    destination: VersionDiffPublishedAction,
+  ) {
+    if (
+      !this.isCurrent(publication) ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedMovements.has(movement) ||
+      this.#claimedEvents.has(capture) ||
+      this.#claimedEvents.has(bubble) ||
+      this.#claimedEvents.has(nativeEvent) ||
+      this.#claimedProofs.has(proof) ||
+      this.#claimedActions.has(source) ||
+      this.#claimedActions.has(destination) ||
+      publication.keyListener?.claim(proof, publication) !== true
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedMovements.add(movement);
+    this.#claimedEvents.add(capture);
+    this.#claimedEvents.add(bubble);
+    this.#claimedEvents.add(nativeEvent);
+    this.#claimedProofs.add(proof);
+    this.#claimedActions.add(source);
+    this.#claimedActions.add(destination);
     return true;
   }
 }
@@ -5828,6 +5998,31 @@ function versionDiffSegmentsMatch(
   );
 }
 
+function versionDiffActionFactsAreCurrent(authority: VersionDiffAuthority) {
+  const expectedKinds: VersionDiffActionKind[] = authority.base
+    ? ["swap", "previous", "next"]
+    : ["previous", "next"];
+  return (
+    authority.actions.length === expectedKinds.length &&
+    authority.actions.length <= 3 &&
+    authority.actions.every((action, index) => {
+      const kind = expectedKinds[index];
+      return (
+        kind !== undefined &&
+        action.kind === kind &&
+        action.order === index &&
+        typeof action.callback === "function" &&
+        action.eligible ===
+          (kind === "swap"
+            ? authority.base !== null
+            : kind === "previous"
+              ? authority.active > 0
+              : authority.active < authority.hunks.length - 1)
+      );
+    })
+  );
+}
+
 function versionDiffAuthorityIsCurrent(authority: VersionDiffAuthority) {
   const {
     session,
@@ -5863,7 +6058,8 @@ function versionDiffAuthorityIsCurrent(authority: VersionDiffAuthority) {
     authority.hunkList !== hunkList ||
     authority.hunks.length !== hunkList.length ||
     authority.active < 0 ||
-    authority.active >= hunkList.length
+    authority.active >= hunkList.length ||
+    !versionDiffActionFactsAreCurrent(authority)
   ) {
     return false;
   }
@@ -5956,6 +6152,17 @@ function versionDiffAuthoritiesMatch(
     }) &&
     previous.active === current.active &&
     previous.setActive === current.setActive &&
+    previous.actions.length === current.actions.length &&
+    previous.actions.every((action, index) => {
+      const candidate = current.actions[index];
+      return (
+        candidate !== undefined &&
+        action.kind === candidate.kind &&
+        action.order === candidate.order &&
+        action.callback === candidate.callback &&
+        action.eligible === candidate.eligible
+      );
+    }) &&
     versionDiffAuthorityIsCurrent(previous) &&
     versionDiffAuthorityIsCurrent(current)
   );
@@ -6214,6 +6421,27 @@ function captureVersionDiffUnforgeableGetter<T>(
   });
 }
 
+function captureVersionDiffWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): VersionDiffWindowMethod<Window[Property]> | null {
+  const value = ownerWindow[property];
+  if (typeof value !== "function") return null;
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    try {
+      historyIsClean = ownerWindow[property] === value;
+    } catch {
+      historyIsClean = false;
+    }
+    return historyIsClean;
+  };
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
 function captureVersionDiffKeyboardIntrinsics(
   ownerDocument: Document,
   ownerWindow: Window & typeof globalThis,
@@ -6225,6 +6453,7 @@ function captureVersionDiffKeyboardIntrinsics(
   const keyboardEventPrototype = KeyboardEventConstructor.prototype;
   const documentPrototype = ownerWindow.Document.prototype;
   const elementPrototype = ownerWindow.Element.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
   let keyboardProbe: globalThis.KeyboardEvent;
   try {
     keyboardProbe = new KeyboardEventConstructor(
@@ -6259,6 +6488,10 @@ function captureVersionDiffKeyboardIntrinsics(
     eventPrototype,
     "target",
   );
+  const eventCurrentTarget = captureVersionDiffGetter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
   const eventTrusted = captureVersionDiffUnforgeableGetter<boolean>(
     keyboardProbe,
     "isTrusted",
@@ -6276,6 +6509,14 @@ function captureVersionDiffKeyboardIntrinsics(
   const key = captureVersionDiffGetter<string>(
     keyboardEventPrototype,
     "key",
+  );
+  const code = captureVersionDiffGetter<string>(
+    keyboardEventPrototype,
+    "code",
+  );
+  const location = captureVersionDiffGetter<number>(
+    keyboardEventPrototype,
+    "location",
   );
   const ctrlKey = captureVersionDiffGetter<boolean>(
     keyboardEventPrototype,
@@ -6308,6 +6549,17 @@ function captureVersionDiffKeyboardIntrinsics(
   const scrollIntoView = captureVersionDiffMethod<
     (element: Element, options: ScrollIntoViewOptions) => void
   >(elementPrototype, "scrollIntoView");
+  const focus = captureVersionDiffMethod<
+    (element: HTMLElement, options: FocusOptions) => void
+  >(htmlElementPrototype, "focus");
+  const addEventListener = captureVersionDiffWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureVersionDiffWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
   const getters = [
     eventType,
     eventPhase,
@@ -6316,8 +6568,11 @@ function captureVersionDiffKeyboardIntrinsics(
     eventDefaultPrevented,
     eventCancelBubble,
     eventTarget,
+    eventCurrentTarget,
     uiView,
     key,
+    code,
+    location,
     ctrlKey,
     altKey,
     metaKey,
@@ -6326,11 +6581,13 @@ function captureVersionDiffKeyboardIntrinsics(
     isComposing,
     activeElement,
   ];
-  const methods = [eventComposedPath, preventDefault, scrollIntoView];
+  const methods = [eventComposedPath, preventDefault, scrollIntoView, focus];
   if (
     getters.some((intrinsic) => !intrinsic) ||
     methods.some((intrinsic) => !intrinsic) ||
-    !eventTrusted
+    !eventTrusted ||
+    !addEventListener ||
+    !removeEventListener
   ) {
     return null;
   }
@@ -6342,7 +6599,8 @@ function captureVersionDiffKeyboardIntrinsics(
     ownerWindow.UIEvent.prototype === uiEventPrototype &&
     ownerWindow.KeyboardEvent.prototype === keyboardEventPrototype &&
     ownerWindow.Document.prototype === documentPrototype &&
-    ownerWindow.Element.prototype === elementPrototype;
+    ownerWindow.Element.prototype === elementPrototype &&
+    ownerWindow.HTMLElement.prototype === htmlElementPrototype;
   let historyIsClean = true;
   const descriptorsAreCurrent = () => {
     if (!historyIsClean) return false;
@@ -6350,6 +6608,8 @@ function captureVersionDiffKeyboardIntrinsics(
       ownerRealmIsCurrent() &&
       getters.every((intrinsic) => intrinsic?.isCurrent() === true) &&
       methods.every((intrinsic) => intrinsic?.isCurrent() === true) &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent() &&
       eventTrusted.isCurrent();
     return historyIsClean;
   };
@@ -6366,7 +6626,7 @@ function captureVersionDiffKeyboardIntrinsics(
         }
         const isTrustedValue = eventTrusted.read(event);
         const view = uiView!.read(event);
-        if (isTrustedValue !== true || view !== ownerWindow) return null;
+        if (isTrustedValue !== true) return null;
         return Object.freeze({
           type: eventType!.read(event),
           phase: eventPhase!.read(event),
@@ -6375,12 +6635,15 @@ function captureVersionDiffKeyboardIntrinsics(
           defaultPrevented: eventDefaultPrevented!.read(event),
           cancelBubble: eventCancelBubble!.read(event),
           target: eventTarget!.read(event),
+          currentTarget: eventCurrentTarget!.read(event),
           path: Object.freeze([
             ...eventComposedPath!.invoke(event as globalThis.Event),
           ]),
           isTrusted: isTrustedValue,
           view,
           key: key!.read(event),
+          code: code!.read(event),
+          location: location!.read(event),
           ctrlKey: ctrlKey!.read(event),
           altKey: altKey!.read(event),
           metaKey: metaKey!.read(event),
@@ -6426,6 +6689,43 @@ function captureVersionDiffKeyboardIntrinsics(
         return false;
       }
     },
+    focus: (element: HTMLElement) => {
+      if (!descriptorsAreCurrent()) return false;
+      try {
+        focus!.invoke(element, { preventScroll: true });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    keyboardPrototype: keyboardEventPrototype,
+    capturingPhase: EventConstructor.CAPTURING_PHASE,
+    bubblingPhase: EventConstructor.BUBBLING_PHASE,
+    apply: VERSION_DIFF_REFLECT_APPLY,
+    getPrototypeOf: VERSION_DIFF_GET_PROTOTYPE,
+    addEventListener,
+    removeEventListener,
+    isCurrent: descriptorsAreCurrent,
+    methodMatches: (
+      event: object,
+      property: PropertyKey,
+      method: unknown,
+    ) => {
+      if (!descriptorsAreCurrent() || typeof method !== "function") return false;
+      try {
+        let owner: object | null = event;
+        while (owner) {
+          const descriptor = VERSION_DIFF_GET_DESCRIPTOR(owner, property);
+          if (descriptor) {
+            return "value" in descriptor && descriptor.value === method;
+          }
+          owner = VERSION_DIFF_GET_PROTOTYPE(owner) as object | null;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
   });
 }
 
@@ -6461,6 +6761,490 @@ function versionDiffPathEndsAtOwnerWindow(
   );
 }
 
+function isVersionDiffActionNavigationKey(
+  key: string,
+): key is VersionDiffActionNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function versionDiffNativeStableFactsMatch(
+  left: VersionDiffNativeKeyboardFacts,
+  right: VersionDiffNativeKeyboardFacts,
+) {
+  return (
+    left.type === right.type &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.defaultPrevented === right.defaultPrevented &&
+    left.cancelBubble === right.cancelBubble &&
+    left.target === right.target &&
+    left.currentTarget === right.currentTarget &&
+    left.path.length === right.path.length &&
+    left.path.every((entry, index) => entry === right.path[index]) &&
+    left.isTrusted === right.isTrusted &&
+    left.view === right.view &&
+    left.key === right.key &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.ctrlKey === right.ctrlKey &&
+    left.altKey === right.altKey &&
+    left.metaKey === right.metaKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.isComposing === right.isComposing
+  );
+}
+
+function versionDiffNativeCrossPhaseFactsMatch(
+  left: VersionDiffNativeKeyboardFacts,
+  right: VersionDiffNativeKeyboardFacts,
+) {
+  return (
+    left.type === right.type &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.defaultPrevented === right.defaultPrevented &&
+    left.cancelBubble === right.cancelBubble &&
+    left.target === right.target &&
+    left.path.length === right.path.length &&
+    left.path.every((entry, index) => entry === right.path[index]) &&
+    left.isTrusted === right.isTrusted &&
+    left.view === right.view &&
+    left.key === right.key &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.ctrlKey === right.ctrlKey &&
+    left.altKey === right.altKey &&
+    left.metaKey === right.metaKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.isComposing === right.isComposing
+  );
+}
+
+function versionDiffActionPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal
+  );
+}
+
+function createVersionDiffKeyListener(
+  keyboard: VersionDiffKeyboardIntrinsics,
+): VersionDiffKeyListener {
+  const proofs = new WeakMap<globalThis.KeyboardEvent, VersionDiffWindowProof>();
+  const invalidEvents = new WeakSet<Event>();
+  const claimedProofs = new WeakSet<VersionDiffWindowProof>();
+  let publication: VersionDiffPublication | null = null;
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (this: EventTarget, event: Event) {
+    const current = publication;
+    if (
+      !current ||
+      !active ||
+      released ||
+      current.keyListener !== registration ||
+      invalidEvents.has(event) ||
+      keyboard.getPrototypeOf(event) !== keyboard.keyboardPrototype ||
+      !keyboard.isCurrent()
+    ) {
+      return;
+    }
+    const nativeEvent = event as globalThis.KeyboardEvent;
+    if (proofs.has(nativeEvent)) {
+      invalidEvents.add(nativeEvent);
+      return;
+    }
+    const snapshot = keyboard.read(nativeEvent);
+    const action = current.actions.find(
+      (candidate) => candidate.element === snapshot?.target,
+    );
+    const terminal = snapshot?.path.at(-1);
+    if (
+      !snapshot ||
+      !action ||
+      !terminal ||
+      snapshot.currentTarget !== this ||
+      terminal !== this ||
+      snapshot.phase !== keyboard.capturingPhase ||
+      snapshot.type !== "keydown" ||
+      !versionDiffActionPathMatches(
+        snapshot.path,
+        action.element,
+        current.ownerDocument,
+        this,
+      )
+    ) {
+      return;
+    }
+    proofs.set(
+      nativeEvent,
+      Object.freeze({
+        identity: Symbol("version-diff-window-proof"),
+        publication: current,
+        nativeEvent,
+        source: action.element,
+        receiver: this,
+        currentTarget: this,
+        terminal,
+        path: Object.freeze([...snapshot.path]),
+        snapshot,
+      }),
+    );
+  };
+
+  const proofFor = (
+    event: globalThis.KeyboardEvent,
+    current: VersionDiffPublication,
+  ) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      publication !== current ||
+      current.keyListener !== registration ||
+      proof.publication !== current ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      invalidEvents.has(event) ||
+      !keyboard.isCurrent()
+    ) {
+      return null;
+    }
+    const snapshot = keyboard.read(event);
+    return snapshot &&
+      versionDiffNativeCrossPhaseFactsMatch(proof.snapshot, snapshot) &&
+      versionDiffActionPathMatches(
+        snapshot.path,
+        proof.source,
+        current.ownerDocument,
+        proof.receiver,
+      )
+      ? proof
+      : null;
+  };
+
+  const registration: VersionDiffKeyListener = Object.freeze({
+    listener,
+    activate: (current: VersionDiffPublication) => {
+      if (
+        publication ||
+        active ||
+        released ||
+        current.keyListener !== registration ||
+        current.keyboard !== keyboard ||
+        current.ownerDocument.defaultView !== current.ownerWindow ||
+        !keyboard.isCurrent()
+      ) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        keyboard.apply(keyboard.addEventListener.value, current.ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      } catch {
+        active = false;
+        publication = null;
+        return false;
+      }
+      if (keyboard.isCurrent()) return true;
+      active = false;
+      publication = null;
+      keyboard.apply(keyboard.removeEventListener.value, current.ownerWindow, [
+        "keydown",
+        listener,
+        true,
+      ]);
+      return false;
+    },
+    proofFor,
+    claim: (proof: VersionDiffWindowProof, current: VersionDiffPublication) => {
+      if (
+        claimedProofs.has(proof) ||
+        proofFor(proof.nativeEvent, current) !== proof
+      ) {
+        return false;
+      }
+      claimedProofs.add(proof);
+      return true;
+    },
+    retains: (
+      proof: VersionDiffWindowProof,
+      current: VersionDiffPublication,
+    ) =>
+      publication === current &&
+      current.keyListener === registration &&
+      claimedProofs.has(proof) &&
+      proofs.get(proof.nativeEvent) === proof &&
+      proof.publication === current &&
+      proof.receiver === proof.currentTarget &&
+      proof.receiver === proof.terminal &&
+      !invalidEvents.has(proof.nativeEvent) &&
+      active &&
+      !released &&
+      keyboard.isCurrent(),
+    release: (current: VersionDiffPublication) => {
+      if (publication !== current || released) return;
+      released = true;
+      const wasActive = active;
+      active = false;
+      if (wasActive) {
+        keyboard.apply(keyboard.removeEventListener.value, current.ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      }
+    },
+  });
+  return registration;
+}
+
+function versionDiffActionDestination(
+  actions: readonly VersionDiffPublishedAction[],
+  source: VersionDiffPublishedAction,
+  key: VersionDiffActionNavigationKey,
+) {
+  const sourceIndex = actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number | null = null;
+  if (
+    (key === "ArrowLeft" || key === "ArrowUp") &&
+    sourceIndex > 0
+  ) {
+    destinationIndex = sourceIndex - 1;
+  } else if (
+    (key === "ArrowRight" || key === "ArrowDown") &&
+    sourceIndex + 1 < actions.length
+  ) {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home" && sourceIndex !== 0) {
+    destinationIndex = 0;
+  } else if (key === "End" && sourceIndex !== actions.length - 1) {
+    destinationIndex = actions.length - 1;
+  }
+  const destination =
+    destinationIndex === null ? null : actions[destinationIndex];
+  return destination && destination !== source ? destination : null;
+}
+
+function readVersionDiffReactMethods(
+  event: KeyboardEvent<HTMLElement>,
+  keyboard: VersionDiffKeyboardIntrinsics,
+): VersionDiffReactMethods | null {
+  try {
+    const methods: VersionDiffReactMethods = Object.freeze({
+      preventDefault: event.preventDefault,
+      stopPropagation: event.stopPropagation,
+      isDefaultPrevented: event.isDefaultPrevented,
+      isPropagationStopped: event.isPropagationStopped,
+      persist: event.persist,
+    });
+    return (
+        Object.entries(methods).every(([property, method]) =>
+          keyboard.methodMatches(event, property, method),
+        ) &&
+        keyboard.apply(methods.isDefaultPrevented, event, []) === false &&
+        keyboard.apply(methods.isPropagationStopped, event, []) === false
+      )
+      ? methods
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function versionDiffReactMethodsRemainFalse(
+  delivery: VersionDiffActionDelivery,
+) {
+  const { wrapper, methods, publication } = delivery;
+  const { keyboard } = publication;
+  if (!keyboard) return false;
+  try {
+    return (
+      wrapper.preventDefault === methods.preventDefault &&
+      wrapper.stopPropagation === methods.stopPropagation &&
+      wrapper.isDefaultPrevented === methods.isDefaultPrevented &&
+      wrapper.isPropagationStopped === methods.isPropagationStopped &&
+      wrapper.persist === methods.persist &&
+      Object.entries(methods).every(([property, method]) =>
+        keyboard.methodMatches(wrapper, property, method),
+      ) &&
+      keyboard.apply(methods.isDefaultPrevented, wrapper, []) === false &&
+      keyboard.apply(methods.isPropagationStopped, wrapper, []) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function versionDiffDeliveriesMatchWithinPhase(
+  left: VersionDiffActionDelivery,
+  right: VersionDiffActionDelivery,
+) {
+  return (
+    left.publication === right.publication &&
+    left.wrapper === right.wrapper &&
+    left.methods.preventDefault === right.methods.preventDefault &&
+    left.methods.stopPropagation === right.methods.stopPropagation &&
+    left.methods.isDefaultPrevented === right.methods.isDefaultPrevented &&
+    left.methods.isPropagationStopped ===
+      right.methods.isPropagationStopped &&
+    left.methods.persist === right.methods.persist &&
+    left.nativeEvent === right.nativeEvent &&
+    left.listener === right.listener &&
+    left.dispatchTarget === right.dispatchTarget &&
+    left.source === right.source &&
+    left.action === right.action &&
+    left.key === right.key &&
+    left.snapshot.phase === right.snapshot.phase &&
+    versionDiffNativeStableFactsMatch(left.snapshot, right.snapshot)
+  );
+}
+
+function versionDiffDeliveriesMatchAcrossPhases(
+  capture: VersionDiffActionDelivery,
+  bubble: VersionDiffActionDelivery,
+) {
+  return (
+    capture.publication === bubble.publication &&
+    capture.wrapper !== bubble.wrapper &&
+    capture.nativeEvent === bubble.nativeEvent &&
+    capture.listener === bubble.listener &&
+    capture.dispatchTarget === bubble.dispatchTarget &&
+    capture.source === bubble.source &&
+    capture.action === bubble.action &&
+    capture.key === bubble.key &&
+    versionDiffNativeCrossPhaseFactsMatch(capture.snapshot, bubble.snapshot)
+  );
+}
+
+function readVersionDiffActionDelivery(
+  event: KeyboardEvent<HTMLElement>,
+  publication: VersionDiffPublication,
+  currentTarget: HTMLElement,
+  expectedPhase: number,
+): VersionDiffActionDelivery | null {
+  if (!event || typeof event !== "object") return null;
+  const keyboard = publication.keyboard;
+  const keyListener = publication.keyListener;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !keyboard ||
+    !keyListener ||
+    !nativeEvent ||
+    keyboard.getPrototypeOf(nativeEvent) !== keyboard.keyboardPrototype
+  ) {
+    return null;
+  }
+  const listener = keyListener.proofFor(nativeEvent, publication);
+  const snapshot = listener ? keyboard.read(nativeEvent) : null;
+  const methods = snapshot ? readVersionDiffReactMethods(event, keyboard) : null;
+  const action = publication.actions.find(
+    (candidate) => candidate.element === snapshot?.target,
+  );
+  const dispatchTarget = snapshot?.currentTarget ?? null;
+  if (
+    !listener ||
+    !snapshot ||
+    !methods ||
+    !action ||
+    !dispatchTarget ||
+    !isVersionDiffActionNavigationKey(snapshot.key) ||
+    snapshot.type !== "keydown" ||
+    snapshot.phase !== expectedPhase ||
+    !snapshot.bubbles ||
+    !snapshot.cancelable ||
+    snapshot.defaultPrevented ||
+    snapshot.cancelBubble ||
+    !snapshot.isTrusted ||
+    snapshot.ctrlKey ||
+    snapshot.altKey ||
+    snapshot.metaKey ||
+    snapshot.shiftKey ||
+    snapshot.repeat ||
+    snapshot.isComposing ||
+    (snapshot.view !== null &&
+      snapshot.view !== publication.ownerWindow &&
+      snapshot.view !== listener.receiver) ||
+    snapshot.target !== action.element ||
+    listener.source !== action.element ||
+    !versionDiffActionPathMatches(
+      snapshot.path,
+      action.element,
+      publication.ownerDocument,
+      listener.receiver,
+    ) ||
+    !snapshot.path.includes(dispatchTarget) ||
+    snapshot.path.filter((entry) => entry === dispatchTarget).length !== 1 ||
+    keyboard.activeElement() !== action.element ||
+    event === (nativeEvent as unknown) ||
+    event.type !== snapshot.type ||
+    event.nativeEvent !== nativeEvent ||
+    event.currentTarget !== currentTarget ||
+    event.target !== action.element ||
+    event.eventPhase !== snapshot.phase ||
+    event.bubbles !== snapshot.bubbles ||
+    event.cancelable !== snapshot.cancelable ||
+    event.defaultPrevented !== snapshot.defaultPrevented ||
+    event.isTrusted !== snapshot.isTrusted ||
+    event.key !== snapshot.key ||
+    event.code !== snapshot.code ||
+    event.location !== snapshot.location ||
+    event.ctrlKey !== snapshot.ctrlKey ||
+    event.altKey !== snapshot.altKey ||
+    event.metaKey !== snapshot.metaKey ||
+    event.shiftKey !== snapshot.shiftKey ||
+    event.repeat !== snapshot.repeat ||
+    event.isComposing !== snapshot.isComposing ||
+    !Object.is(event.view, snapshot.view)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    publication,
+    wrapper: event,
+    methods,
+    nativeEvent,
+    listener,
+    currentTarget,
+    dispatchTarget,
+    source: action.element,
+    action,
+    key: snapshot.key,
+    snapshot,
+  });
+}
+
 function createVersionDiffPublication(
   authority: VersionDiffAuthority,
   coordinator: VersionDiffCoordinator,
@@ -6489,18 +7273,49 @@ function createVersionDiffPublication(
   const rootOwner = new VersionDiffElementOwner<HTMLDivElement>(
     onElementChange,
   );
+  const headerOwner = new VersionDiffElementOwner<HTMLDivElement>(
+    onElementChange,
+  );
   const bodyOwner = new VersionDiffElementOwner<HTMLDivElement>(
     onElementChange,
   );
+  const swapOwner = new VersionDiffElementOwner<HTMLButtonElement>(
+    onElementChange,
+  );
+  const previousOwner = new VersionDiffElementOwner<HTMLButtonElement>(
+    onElementChange,
+  );
+  const nextOwner = new VersionDiffElementOwner<HTMLButtonElement>(
+    onElementChange,
+  );
+  const actionOwners: Readonly<
+    Record<VersionDiffActionKind, VersionDiffElementOwner<HTMLButtonElement>>
+  > = Object.freeze({
+    swap: swapOwner,
+    previous: previousOwner,
+    next: nextOwner,
+  });
   const hunkOwners = authority.hunks.map(
     () => new VersionDiffElementOwner<HTMLElement>(onElementChange),
   );
   const expectedOwners = () =>
-    Object.freeze([rootOwner, bodyOwner, ...hunkOwners]);
+    Object.freeze([
+      rootOwner,
+      headerOwner,
+      bodyOwner,
+      ...(authority.base ? [swapOwner] : []),
+      previousOwner,
+      nextOwner,
+      ...hunkOwners,
+    ]);
 
   const exactDomIsCurrent = () => {
     const root = rootOwner.element();
+    const ownedHeader = headerOwner.element();
     const body = bodyOwner.element();
+    const swap = swapOwner.element();
+    const previous = previousOwner.element();
+    const next = nextOwner.element();
     const ownerDocument = root?.ownerDocument;
     const ownerWindow = ownerDocument?.defaultView;
     if (
@@ -6519,6 +7334,7 @@ function createVersionDiffPublication(
       body.parentElement !== root ||
       root.children.length !== 2 ||
       root.children.item(1) !== body ||
+      !ownedHeader ||
       hunkOwners.length !== authority.hunks.length
     ) {
       return false;
@@ -6527,9 +7343,46 @@ function createVersionDiffPublication(
     const pre = body.firstElementChild;
     if (
       !(header instanceof ownerWindow.HTMLDivElement) ||
+      header !== ownedHeader ||
+      header.ownerDocument !== ownerDocument ||
+      header.parentElement !== root ||
       !(pre instanceof ownerWindow.HTMLPreElement) ||
       body.children.length !== 1 ||
       pre.parentElement !== body
+    ) {
+      return false;
+    }
+    const expectedButtons = authority.base
+      ? [swap, previous, next]
+      : [previous, next];
+    const renderedButtons = header.querySelectorAll<HTMLButtonElement>("button");
+    if (
+      (authority.base === null ? swap !== null : swap === null) ||
+      !previous ||
+      !next ||
+      expectedButtons.some((button) => !button) ||
+      renderedButtons.length !== expectedButtons.length ||
+      expectedButtons.some(
+        (button, index) =>
+          button !== renderedButtons.item(index) ||
+          !button?.isConnected ||
+          button.ownerDocument !== ownerDocument ||
+          !header.contains(button),
+      ) ||
+      (swap !== null && swap.dataset.testid !== "diff-swap") ||
+      previous.dataset.testid !== "diff-prev" ||
+      next.dataset.testid !== "diff-next" ||
+      swap?.disabled === true ||
+      previous.disabled !== (authority.active <= 0) ||
+      next.disabled !== (authority.active >= authority.hunks.length - 1) ||
+      authority.actions.some((fact) => {
+        const button = actionOwners[fact.kind].element();
+        return (
+          !button ||
+          fact.callback !== authority.actions[fact.order]?.callback ||
+          fact.eligible === button.disabled
+        );
+      })
     ) {
       return false;
     }
@@ -6573,7 +7426,11 @@ function createVersionDiffPublication(
 
   const createRuntime = (
     root: HTMLDivElement,
+    header: HTMLDivElement,
     body: HTMLDivElement,
+    actionElements: Readonly<
+      Record<VersionDiffActionKind, HTMLButtonElement | null>
+    >,
     hunkElements: readonly HTMLElement[],
     dom: VersionDiffDomSnapshot,
   ): VersionDiffPublicationRuntime | null => {
@@ -6587,21 +7444,75 @@ function createVersionDiffPublication(
       ownerDocument,
       ownerWindow,
     );
+    const keyListener = keyboard
+      ? createVersionDiffKeyListener(keyboard)
+      : null;
     const domGuard = createVersionDiffDomGuard(root, placement);
     if (!domGuard) return null;
+    const identity = Symbol("version-diff-publication");
+    const publishedActions: readonly VersionDiffPublishedAction[] =
+      Object.freeze(
+        authority.actions
+          .filter(({ eligible }) => eligible)
+          .map((fact) => {
+            const element = actionElements[fact.kind];
+            if (!element) {
+              throw new Error(
+                "Cannot publish an eligible version diff action without its element",
+              );
+            }
+            return Object.freeze({
+              identity: Symbol(`version-diff-${fact.kind}-action`),
+              publicationIdentity: identity,
+              fact,
+              element,
+              order: fact.order,
+            });
+          }),
+      );
+    const movements: readonly VersionDiffActionMovement[] = Object.freeze(
+      publishedActions.flatMap((source) =>
+        (
+          [
+            "ArrowLeft",
+            "ArrowUp",
+            "ArrowRight",
+            "ArrowDown",
+            "Home",
+            "End",
+          ] as const
+        ).map((key) =>
+          Object.freeze({
+            identity: Symbol(`version-diff-${source.fact.kind}-${key}`),
+            key,
+            source,
+            destination: versionDiffActionDestination(
+              publishedActions,
+              source,
+              key,
+            ),
+          }),
+        ),
+      ),
+    );
     const publication: VersionDiffPublication = Object.freeze({
-      identity: Symbol("version-diff-publication"),
+      identity,
       authority,
       root,
       rootParent: root.parentNode!,
+      header,
       body,
       hunks: Object.freeze([...hunkElements]),
+      actionElements,
+      actions: publishedActions,
+      movements,
       rootPath,
       ownerDocument,
       ownerWindow,
       dom,
       placement,
       keyboard,
+      keyListener,
     });
     let retired = false;
     let retirement: Retirement | null = null;
@@ -6613,6 +7524,7 @@ function createVersionDiffPublication(
       if (retired) return false;
       retired = true;
       retirement = reason;
+      publication.keyListener?.release(publication);
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
       queueMicrotask(() => {
@@ -6630,7 +7542,21 @@ function createVersionDiffPublication(
         (element, index) =>
           element === hunkElements[index] &&
           element.dataset.hunk === String(index),
-      );
+      ) &&
+      publication.header === headerOwner.element() &&
+      publication.actions.length ===
+        authority.actions.filter(({ eligible }) => eligible).length &&
+      publication.actions.every((published, index) => {
+        const fact = authority.actions.filter(({ eligible }) => eligible)[index];
+        return (
+          fact !== undefined &&
+          published.publicationIdentity === publication.identity &&
+          published.fact === fact &&
+          published.order === fact.order &&
+          published.element === actionOwners[fact.kind].element() &&
+          !published.element.disabled
+        );
+      });
     const refsHaveNoReplay = () =>
       !invalidReplay &&
       replayRefs.every(
@@ -6661,7 +7587,11 @@ function createVersionDiffPublication(
           }
           return { owner, element, detached: false, reattached: false };
         });
-        if (!coordinator.publish(publication)) {
+        if (
+          !publication.keyListener ||
+          !coordinator.publish(publication) ||
+          !publication.keyListener.activate(publication)
+        ) {
           domGuard.release();
           return false;
         }
@@ -6835,6 +7765,260 @@ function createVersionDiffPublication(
     });
   };
 
+  let capturedActionGroup: VersionDiffActionDelivery | null = null;
+  let capturedAction: VersionDiffActionDelivery | null = null;
+  let bubbledAction: VersionDiffActionDelivery | null = null;
+  const clearActionBoundaryProof = () => {
+    capturedActionGroup = null;
+    capturedAction = null;
+    bubbledAction = null;
+  };
+  const currentActionPublication = () => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    if (
+      !runtime ||
+      !publication ||
+      runtime.isRetired() ||
+      publication.authority !== authority ||
+      !coordinator.isCurrent(publication) ||
+      !versionDiffAuthorityIsCurrent(authority) ||
+      !exactDomIsCurrent() ||
+      !runtime.historyIsClean() ||
+      !runtime.publishedDomMatches()
+    ) {
+      return null;
+    }
+    return publication;
+  };
+  const onActionGroupKeyDownCapture = (
+    event: KeyboardEvent<HTMLDivElement>,
+  ) => {
+    clearActionBoundaryProof();
+    const publication = currentActionPublication();
+    if (!publication) return;
+    const delivery = readVersionDiffActionDelivery(
+      event,
+      publication,
+      publication.header,
+      publication.keyboard?.capturingPhase ?? -1,
+    );
+    if (!delivery || delivery.currentTarget !== publication.header) return;
+    capturedActionGroup = delivery;
+    queueMicrotask(() => {
+      if (capturedActionGroup === delivery) clearActionBoundaryProof();
+    });
+  };
+  const actionHandlers = Object.freeze(
+    Object.fromEntries(
+      (["swap", "previous", "next"] as const).map((kind) => {
+        const onKeyDownCapture = (
+          event: KeyboardEvent<HTMLButtonElement>,
+        ) => {
+          const publication = currentActionPublication();
+          const source = actionOwners[kind].element();
+          const delivery =
+            publication && source
+              ? readVersionDiffActionDelivery(
+                  event,
+                  publication,
+                  source,
+                  publication.keyboard?.capturingPhase ?? -1,
+                )
+              : null;
+          if (
+            !capturedActionGroup ||
+            capturedAction ||
+            bubbledAction ||
+            !delivery ||
+            !source ||
+            delivery.source !== source ||
+            delivery.action.fact.kind !== kind ||
+            !versionDiffDeliveriesMatchWithinPhase(
+              capturedActionGroup,
+              delivery,
+            )
+          ) {
+            clearActionBoundaryProof();
+            return;
+          }
+          capturedAction = delivery;
+        };
+        const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+          const publication = currentActionPublication();
+          const source = actionOwners[kind].element();
+          const delivery =
+            publication && source
+              ? readVersionDiffActionDelivery(
+                  event,
+                  publication,
+                  source,
+                  publication.keyboard?.bubblingPhase ?? -1,
+                )
+              : null;
+          if (
+            !capturedActionGroup ||
+            !capturedAction ||
+            bubbledAction ||
+            !delivery ||
+            !source ||
+            delivery.source !== source ||
+            delivery.action.fact.kind !== kind ||
+            !versionDiffDeliveriesMatchWithinPhase(
+              capturedActionGroup,
+              capturedAction,
+            ) ||
+            !versionDiffDeliveriesMatchAcrossPhases(
+              capturedAction,
+              delivery,
+            )
+          ) {
+            clearActionBoundaryProof();
+            return;
+          }
+          bubbledAction = delivery;
+        };
+        return [kind, Object.freeze({ onKeyDownCapture, onKeyDown })];
+      }),
+    ) as Record<
+      VersionDiffActionKind,
+      Readonly<{
+        onKeyDownCapture: (event: KeyboardEvent<HTMLButtonElement>) => void;
+        onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+      }>
+    >,
+  );
+  const onActionGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const groupCapture = capturedActionGroup;
+    const actionCapture = capturedAction;
+    const actionBubble = bubbledAction;
+    const publication = currentActionPublication();
+    const groupBubble = publication
+      ? readVersionDiffActionDelivery(
+          event,
+          publication,
+          publication.header,
+          publication.keyboard?.bubblingPhase ?? -1,
+        )
+      : null;
+    clearActionBoundaryProof();
+    if (
+      !publication ||
+      !publication.keyboard ||
+      !publication.keyListener ||
+      !groupCapture ||
+      !actionCapture ||
+      !actionBubble ||
+      !groupBubble ||
+      !versionDiffDeliveriesMatchWithinPhase(groupCapture, actionCapture) ||
+      !versionDiffDeliveriesMatchWithinPhase(actionBubble, groupBubble) ||
+      !versionDiffDeliveriesMatchAcrossPhases(actionCapture, actionBubble) ||
+      groupCapture.currentTarget !== publication.header ||
+      actionCapture.currentTarget !== actionCapture.source ||
+      actionBubble.currentTarget !== actionBubble.source ||
+      groupBubble.currentTarget !== publication.header ||
+      !versionDiffReactMethodsRemainFalse(groupCapture) ||
+      !versionDiffReactMethodsRemainFalse(actionCapture) ||
+      !versionDiffReactMethodsRemainFalse(actionBubble) ||
+      !versionDiffReactMethodsRemainFalse(groupBubble)
+    ) {
+      return;
+    }
+    const movement = publication.movements.find(
+      (candidate) =>
+        candidate.source === groupBubble.action &&
+        candidate.key === groupBubble.key,
+    );
+    const destination = movement?.destination ?? null;
+    if (!movement || !destination) return;
+    const source = movement.source;
+    const keyboard = publication.keyboard;
+    const runtime = currentRuntime;
+    if (
+      !runtime ||
+      runtime.publication !== publication ||
+      source !== groupBubble.action ||
+      source.fact !== authority.actions[source.fact.order] ||
+      source.fact.callback !== authority.actions[source.fact.order]?.callback ||
+      !source.fact.eligible ||
+      destination.fact !== authority.actions[destination.fact.order] ||
+      destination.fact.callback !==
+        authority.actions[destination.fact.order]?.callback ||
+      !destination.fact.eligible ||
+      source.element !== actionOwners[source.fact.kind].element() ||
+      destination.element !==
+        actionOwners[destination.fact.kind].element() ||
+      source.element.disabled ||
+      destination.element.disabled ||
+      keyboard.activeElement() !== source.element ||
+      !coordinator.claimActionKeyboard(
+        publication,
+        movement,
+        groupCapture.wrapper,
+        groupBubble.wrapper,
+        groupBubble.nativeEvent,
+        groupBubble.listener,
+        source,
+        destination,
+      )
+    ) {
+      return;
+    }
+    if (
+      !publication.keyListener.retains(groupBubble.listener, publication) ||
+      !versionDiffReactMethodsRemainFalse(groupCapture) ||
+      !versionDiffReactMethodsRemainFalse(actionCapture) ||
+      !versionDiffReactMethodsRemainFalse(actionBubble) ||
+      !versionDiffReactMethodsRemainFalse(groupBubble) ||
+      currentActionPublication() !== publication ||
+      keyboard.activeElement() !== source.element
+    ) {
+      return;
+    }
+    try {
+      keyboard.apply(
+        groupBubble.methods.preventDefault,
+        groupBubble.wrapper,
+        [],
+      );
+    } catch {
+      return;
+    }
+    let publicDefaultWasPrevented = false;
+    try {
+      const currentDefaultQuery = groupBubble.wrapper.isDefaultPrevented;
+      publicDefaultWasPrevented =
+        keyboard.methodMatches(
+          groupBubble.wrapper,
+          "isDefaultPrevented",
+          currentDefaultQuery,
+        ) &&
+        keyboard.apply(
+            currentDefaultQuery as (...args: never[]) => unknown,
+            groupBubble.wrapper,
+            [],
+          ) === true;
+    } catch {
+      return;
+    }
+    if (
+      !keyboard.defaultWasPrevented(groupBubble.nativeEvent) ||
+      !groupBubble.wrapper.defaultPrevented ||
+      !publicDefaultWasPrevented ||
+      !publication.keyListener.retains(groupBubble.listener, publication)
+    ) {
+      return;
+    }
+    if (
+      !keyboard.focus(destination.element) ||
+      keyboard.activeElement() !== destination.element ||
+      !publication.keyListener.retains(groupBubble.listener, publication)
+    ) {
+      return;
+    }
+    authority.requestSuccessor();
+  };
+
   const establish = () => {
     if (lastRuntime) {
       if (
@@ -6853,9 +8037,23 @@ function createVersionDiffPublication(
       return undefined;
     }
     const root = rootOwner.element();
+    const header = headerOwner.element();
     const body = bodyOwner.element();
+    const actionElements = Object.freeze({
+      swap: swapOwner.element(),
+      previous: previousOwner.element(),
+      next: nextOwner.element(),
+    });
     const hunkElements = hunkOwners.map((owner) => owner.element());
-    if (!root || !body || hunkElements.some((element) => !element)) {
+    if (
+      !root ||
+      !header ||
+      !body ||
+      !actionElements.previous ||
+      !actionElements.next ||
+      (authority.base !== null && !actionElements.swap) ||
+      hunkElements.some((element) => !element)
+    ) {
       return undefined;
     }
     const replay = coordinator.replay();
@@ -6877,7 +8075,9 @@ function createVersionDiffPublication(
     }
     const runtime = createRuntime(
       root,
+      header,
       body,
+      actionElements,
       hunkElements as HTMLElement[],
       snapshotVersionDiffDom(root),
     );
@@ -6941,11 +8141,18 @@ function createVersionDiffPublication(
 
   return Object.freeze({
     captureRoot: rootOwner.capture,
+    captureHeader: headerOwner.capture,
     captureBody: bodyOwner.capture,
+    captureSwap: swapOwner.capture,
+    capturePrevious: previousOwner.capture,
+    captureNext: nextOwner.capture,
     captureHunks: Object.freeze(hunkOwners.map((owner) => owner.capture)),
     root: rootOwner.element as () => HTMLDivElement | null,
     establish,
     onBoundaryKey,
+    onActionGroupKeyDownCapture,
+    onActionGroupKeyDown,
+    actionHandlers,
   });
 }
 
@@ -6974,6 +8181,51 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
   const requestPublicationSuccessor = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
   }, []);
+  const goTo = useCallback(
+    (n: number) => {
+      if (hunkList.length === 0) return;
+      const next = Math.min(Math.max(n, 0), hunkList.length - 1);
+      setActive(next);
+      bodyRef.current?.querySelector<HTMLElement>(`[data-hunk="${next}"]`)?.scrollIntoView({ block: "center" });
+    },
+    [hunkList.length],
+  );
+  const onSwap = useCallback(() => {
+    setSwapped((currentSwapped) => !currentSwapped);
+  }, []);
+  const onPrevious = useCallback(() => {
+    goTo(active - 1);
+  }, [active, goTo]);
+  const onNext = useCallback(() => {
+    goTo(active + 1);
+  }, [active, goTo]);
+  const actionFacts: readonly VersionDiffActionFact[] = Object.freeze([
+    ...(base
+      ? [
+          Object.freeze({
+            identity: Symbol("version-diff-swap-fact"),
+            kind: "swap" as const,
+            order: 0,
+            callback: onSwap,
+            eligible: true,
+          }),
+        ]
+      : []),
+    Object.freeze({
+      identity: Symbol("version-diff-previous-fact"),
+      kind: "previous" as const,
+      order: base ? 1 : 0,
+      callback: onPrevious,
+      eligible: active > 0,
+    }),
+    Object.freeze({
+      identity: Symbol("version-diff-next-fact"),
+      kind: "next" as const,
+      order: base ? 2 : 1,
+      callback: onNext,
+      eligible: active < hunkList.length - 1,
+    }),
+  ]);
   const authority: VersionDiffAuthority = Object.freeze({
     mount,
     session,
@@ -7011,6 +8263,7 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
     ),
     active,
     setActive,
+    actions: actionFacts,
     requestSuccessor: requestPublicationSuccessor,
   });
   const diffPublication = createVersionDiffPublication(
@@ -7033,16 +8286,6 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
     rootRef.current?.focus({ preventScroll: true });
   }, []);
   useLayoutEffect(() => diffPublication.establish(), [diffPublication]);
-
-  const goTo = useCallback(
-    (n: number) => {
-      if (hunkList.length === 0) return;
-      const next = Math.min(Math.max(n, 0), hunkList.length - 1);
-      setActive(next);
-      bodyRef.current?.querySelector<HTMLElement>(`[data-hunk="${next}"]`)?.scrollIntoView({ block: "center" });
-    },
-    [hunkList.length],
-  );
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Home" || e.key === "End") {
@@ -7070,7 +8313,12 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
 
   return (
     <div className="flex h-full min-h-0 flex-col outline-none" data-testid="version-diff" ref={captureRoot} tabIndex={0} onKeyDown={onKeyDown}>
-      <div className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2">
+      <div
+        ref={diffPublication.captureHeader}
+        className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2"
+        onKeyDownCapture={diffPublication.onActionGroupKeyDownCapture}
+        onKeyDown={diffPublication.onActionGroupKeyDown}
+      >
         <span className="pane-label">Comparing</span>
         <span className="min-w-0 break-words text-sm text-ink-2" data-testid="diff-header">
           {newSide ? (
@@ -7087,7 +8335,18 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
           )}
         </span>
         {base && (
-          <button type="button" className="btn btn-sm btn-ghost gap-1" onClick={() => setSwapped((s) => !s)} title="Swap old and new" data-testid="diff-swap">
+          <button
+            ref={diffPublication.captureSwap}
+            type="button"
+            className="btn btn-sm btn-ghost gap-1"
+            onClick={onSwap}
+            onKeyDownCapture={
+              diffPublication.actionHandlers.swap.onKeyDownCapture
+            }
+            onKeyDown={diffPublication.actionHandlers.swap.onKeyDown}
+            title="Swap old and new"
+            data-testid="diff-swap"
+          >
             <ArrowLeftRight size={13} /> Swap
           </button>
         )}
@@ -7098,7 +8357,20 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
             {movedCount > 0 && <span className="text-ink-3">↕ {movedCount} moved</span>}
           </span>
           <span className="ml-2 flex items-center gap-1 rounded-md border border-line bg-surface text-xs text-ink-2">
-            <button type="button" className="icon-btn h-7 w-7" onClick={() => goTo(active - 1)} disabled={active <= 0} aria-label="Previous change ([)" title="Previous change ([)" data-testid="diff-prev">
+            <button
+              ref={diffPublication.capturePrevious}
+              type="button"
+              className="icon-btn h-7 w-7"
+              onClick={onPrevious}
+              onKeyDownCapture={
+                diffPublication.actionHandlers.previous.onKeyDownCapture
+              }
+              onKeyDown={diffPublication.actionHandlers.previous.onKeyDown}
+              disabled={active <= 0}
+              aria-label="Previous change ([)"
+              title="Previous change ([)"
+              data-testid="diff-prev"
+            >
               <ChevronUp size={14} />
             </button>
             <span className="min-w-[7ch] text-center tabular-nums" data-testid="diff-counter">
@@ -7106,8 +8378,13 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
             </span>
             <button
               type="button"
+              ref={diffPublication.captureNext}
               className="icon-btn h-7 w-7"
-              onClick={() => goTo(active + 1)}
+              onClick={onNext}
+              onKeyDownCapture={
+                diffPublication.actionHandlers.next.onKeyDownCapture
+              }
+              onKeyDown={diffPublication.actionHandlers.next.onKeyDown}
               disabled={active >= hunkList.length - 1}
               aria-label="Next change (])"
               title="Next change (])"
