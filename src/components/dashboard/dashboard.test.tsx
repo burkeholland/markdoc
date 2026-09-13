@@ -20,12 +20,16 @@ const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => P
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
 const takePendingNotice = vi.fn<() => PendingNotice | null>();
+const signOutSafely = vi.fn<() => Promise<boolean>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/components/dashboard/notifications-strip", () => ({ NotificationsStrip: () => null }));
 vi.mock("@/components/ui/theme-toggle", () => ({ ThemeToggle: () => null }));
 vi.mock("@/lib/notice", () => ({ takePendingNotice: () => takePendingNotice() }));
+vi.mock("@/lib/sign-out", () => ({
+  signOutSafely: () => signOutSafely(),
+}));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -432,6 +436,20 @@ function interceptReactHandler(
   };
 }
 
+function cloneReactEventWithView(event: unknown, view: unknown) {
+  if (!event || typeof event !== "object") {
+    throw new Error("The React keyboard event was not an object");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(event);
+  descriptors.view = {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: view,
+  };
+  return Object.create(Object.getPrototypeOf(event), descriptors);
+}
+
 function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
   const onClick = reactProps(element).onClick;
   if (!onClick) throw new Error("The button did not have an onClick handler");
@@ -582,6 +600,35 @@ function markFilterEventTrusted(event: Event) {
   });
   if (!event.isTrusted) {
     throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function markSearchResultEventTrusted(
+  event: KeyboardEvent,
+  ownerWindow: Window,
+) {
+  markFilterEventTrusted(event);
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean; view: unknown } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === true &&
+        "view" in candidate,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "view")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event view slot");
+  }
+  implementation.view = ownerWindow;
+  if (event.view !== ownerWindow) {
+    throw new Error("The jsdom event view slot did not update");
   }
 }
 
@@ -869,6 +916,125 @@ function searchRefBindings(
   }));
 }
 
+function searchResultLinks(host: ParentNode = document) {
+  return Array.from(
+    host.querySelectorAll<HTMLAnchorElement>(
+      '[data-testid="search-result"] > a[data-testid="document-card"]',
+    ),
+  );
+}
+
+function searchResultRefBindings(input: HTMLInputElement) {
+  const list = input.ownerDocument.querySelector<HTMLUListElement>(
+    '[data-testid="document-list"]',
+  );
+  const links = searchResultLinks(input.ownerDocument);
+  if (!list || links.length === 0) {
+    throw new Error("Search result refs were incomplete");
+  }
+  return [list, ...links].map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
+}
+
+async function dispatchSearchResultKey(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const event = searchResultKeyEvent(source, key, init);
+  await act(async () => {
+    source.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function searchResultKeyEvent(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const ownerWindow = source.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The search key source has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markSearchResultEventTrusted(event, ownerWindow);
+  return event;
+}
+
+function accountTrigger(host: ParentNode = document): HTMLButtonElement {
+  const trigger = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="Account"]',
+  );
+  if (!trigger) throw new Error("The Account trigger was not rendered");
+  return trigger;
+}
+
+function accountMenuItem(name: "Agents & API tokens" | "Sign out") {
+  const item = screen.getByRole("menuitem", { name });
+  if (!(item instanceof HTMLDivElement)) {
+    throw new Error(`The ${name} Account item was not a div`);
+  }
+  return item;
+}
+
+function accountKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = trigger.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    location: 0,
+    ...init,
+  });
+  if (trusted) markFilterEventTrusted(event);
+  return event;
+}
+
+function accountViewedKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  view: Window,
+) {
+  try {
+    const event = accountKeyEvent(trigger, key, { view });
+    return event.view === view ? event : null;
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
+}
+
+async function dispatchAccountKey(
+  trigger: HTMLButtonElement,
+  keyOrEvent: "ArrowDown" | "ArrowUp" | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event =
+    typeof keyOrEvent === "string"
+      ? accountKeyEvent(trigger, keyOrEvent, init)
+      : keyOrEvent;
+  await act(async () => {
+    trigger.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
 type KeydownCallback = (event: KeyboardEvent) => void;
 
 function eventCapture(options?: boolean | AddEventListenerOptions | EventListenerOptions): boolean {
@@ -916,6 +1082,8 @@ beforeEach(() => {
   unstarDocument.mockResolvedValue({ starred: false });
   takePendingNotice.mockReset();
   takePendingNotice.mockReturnValue(null);
+  signOutSafely.mockReset();
+  signOutSafely.mockResolvedValue(true);
   router.push.mockReset();
   router.replace.mockReset();
   router.refresh.mockReset();
@@ -929,6 +1097,833 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("dashboard Account menu directional publication", () => {
+  it("re-establishes exactly one zero-ref Strict layout replay with distinct listener ownership", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    const addedTo = (trigger: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          addEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+    const removedFrom = (trigger: HTMLButtonElement) =>
+      removeEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          removeEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const added = addedTo(trigger);
+      const removed = removedFrom(trigger);
+
+      expect(added).toHaveLength(4);
+      expect(new Set(added.map(({ listener }) => listener)).size).toBe(4);
+      expect(added.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+        true,
+        false,
+      ]);
+      expect(removed).toEqual(added.slice(0, 2));
+
+      trigger.focus();
+      const event = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(event.view).toBeNull();
+      expect(event.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+
+      await act(async () => root.unmount());
+      expect(removedFrom(trigger)).toEqual(added);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts an exact non-null owner view when jsdom can construct one", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const ownerWindow = trigger.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+      trigger.focus();
+      const event = accountViewedKeyEvent(trigger, "ArrowUp", ownerWindow);
+      if (event) {
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(true);
+        expect(accountMenuItem("Sign out")).toHaveFocus();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a non-null foreign native view when jsdom can construct one", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const event = accountViewedKeyEvent(trigger, "ArrowDown", foreignWindow);
+      if (event) {
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it.each(["foreign owner realm", "window lookalike"] as const)(
+    "rejects a null-view native event paired with a non-null %s React view",
+    async (viewKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      const iframe = document.createElement("iframe");
+      document.body.append(host, iframe);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        const foreignWindow = iframe.contentWindow;
+        if (!foreignWindow) throw new Error("The iframe has no content window");
+        const rejectedView =
+          viewKind === "foreign owner realm"
+            ? foreignWindow
+            : Object.freeze({ document: trigger.ownerDocument });
+        const restore = interceptReactHandler(
+          trigger,
+          "onKeyDown",
+          (original, event) => {
+            original(cloneReactEventWithView(event, rejectedView));
+          },
+        );
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = accountKeyEvent(trigger, "ArrowDown");
+        expect(event.view).toBeNull();
+        try {
+          await dispatchAccountKey(trigger, event);
+        } finally {
+          restore();
+        }
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        iframe.remove();
+      }
+    },
+  );
+
+  it("rejects partial ref replay after the zero-ref Strict replay and permits a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      const content = screen.getByRole("menu");
+      const contentRef = captureReactRef(content);
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      preventDefault.mockClear();
+
+      act(() => {
+        contentRef(null);
+        contentRef(content);
+      });
+      await act(async () => {});
+      const staleNative = accountKeyEvent(trigger, "ArrowDown");
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: staleNative,
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(staleNative.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+
+      const settings = accountMenuItem("Agents & API tokens");
+      settings.focus();
+      fireEvent.keyDown(settings, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["ArrowDown", "Agents & API tokens"],
+    ["ArrowUp", "Sign out"],
+  ] as const)(
+    "opens with %s and focuses only %s through direct-root Strict Mode replay",
+    async (key, destinationName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const scrollIntoView = vi.spyOn(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = await dispatchAccountKey(trigger, key);
+        const destination = accountMenuItem(destinationName);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(destination).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter((receiver) => receiver === event),
+        ).toHaveLength(1);
+        expect(
+          preventDefault.mock.contexts.filter(
+            (receiver) =>
+              receiver instanceof Event &&
+              receiver.type === "focusScope.autoFocusOnMount",
+          ),
+        ).toHaveLength(1);
+        const destinationFocuses = focus.mock.calls.filter(
+          (_, index) => focus.mock.contexts[index] === destination,
+        );
+        expect(destinationFocuses).toEqual([[{ preventScroll: true }]]);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(searchDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retains pointer, Enter, Space, activation, Escape, and outside dismissal", async () => {
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside Account menu";
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    const closeWithEscape = async () => {
+      const item = accountMenuItem("Agents & API tokens");
+      item.focus();
+      fireEvent.keyDown(item, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(accountTrigger(host)).toHaveFocus();
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(screen.getByRole("menu")).toHaveFocus();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: " ", code: "Space" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      fireEvent.click(accountMenuItem("Agents & API tokens"));
+      expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      fireEvent.click(accountMenuItem("Sign out"));
+      expect(signOutSafely).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+      });
+      fireEvent.pointerDown(outside, { button: 0, ctrlKey: false });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects modified, repeated, composing, canceled, untrusted, wrong-code, wrong-target, and wrong-focus keys", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const rejected: KeyboardEvent[] = [
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { ctrlKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { metaKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { altKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { shiftKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { repeat: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          isComposing: true,
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          code: "ArrowUp",
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {}, false),
+      ];
+      for (const event of rejected) {
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+      }
+
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      const canceled = accountKeyEvent(trigger, "ArrowDown");
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      await dispatchAccountKey(trigger, canceled);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      const avatar = trigger.firstElementChild;
+      if (!(avatar instanceof HTMLElement)) {
+        throw new Error("The Account avatar was not rendered");
+      }
+      const wrongTarget = accountKeyEvent(trigger, "ArrowDown");
+      await act(async () => {
+        avatar.dispatchEvent(wrongTarget);
+        await Promise.resolve();
+      });
+      expect(wrongTarget.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, mismatched React/native, replayed, and cleanup delivery before a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const fabricatedNative = accountKeyEvent(trigger, "ArrowDown");
+      captureReactHandler(trigger, "onKeyDown")({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: fabricatedNative,
+        currentTarget: trigger,
+        target: trigger,
+        key: "ArrowDown",
+        code: "ArrowDown",
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      await act(async () => {
+        trigger.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const restore = interceptReactHandler(
+        trigger,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") {
+            throw new Error("The React keyboard event was not an object");
+          }
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              Object.getOwnPropertyDescriptors(event),
+            ),
+          );
+        },
+      );
+      const mismatched = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, mismatched);
+      } finally {
+        restore();
+      }
+      expect(mismatched.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = accountKeyEvent(trigger, "ArrowDown");
+      await dispatchAccountKey(trigger, accepted);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      fireEvent.keyDown(accountMenuItem("Agents & API tokens"), {
+        key: "Escape",
+        code: "Escape",
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      focus.mockClear();
+      preventDefault.mockClear();
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      await dispatchAccountKey(trigger, accepted);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      await act(async () => root.unmount());
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it("retains descriptor, DOM, callback, and ref history while a complete clean successor recovers", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const activeKeydownListeners = (element: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) => {
+          if (
+            addEventListener.mock.contexts[index] !== element ||
+            type !== "keydown" ||
+            typeof listener !== "function"
+          ) {
+            return [];
+          }
+          const capture = eventCapture(options);
+          const removed = removeEventListener.mock.calls.some(
+            ([removedType, removedListener, removedOptions], removedIndex) =>
+              removeEventListener.mock.contexts[removedIndex] === element &&
+              removedType === type &&
+              removedListener === listener &&
+              eventCapture(removedOptions) === capture,
+          );
+          return removed ? [] : [{ listener, capture }];
+        },
+      );
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const originalClass = trigger.className;
+      trigger.className = `${originalClass} changed`;
+      trigger.className = originalClass;
+      const restoredDom = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(restoredDom.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) {
+        throw new Error("KeyboardEvent.key has no getter");
+      }
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...keyDescriptor,
+        get() {
+          return keyDescriptor.get!.call(this);
+        },
+      });
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const replacedDescriptor = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, replacedDescriptor);
+      } finally {
+        Object.defineProperty(
+          KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+      }
+      expect(replacedDescriptor.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const originalPush = router.push;
+      router.push = vi.fn();
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      let staleCallback: KeyboardEvent | null = null;
+      try {
+        staleCallback = await dispatchAccountKey(trigger, "ArrowDown");
+      } finally {
+        router.push = originalPush;
+      }
+      if (!staleCallback) throw new Error("The stale callback key was not dispatched");
+      expect(staleCallback.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const retiredHandler = captureReactHandler(trigger, "onKeyDown");
+      const triggerRef = captureReactRef(trigger);
+      const retiredListeners = activeKeydownListeners(trigger);
+      expect(retiredListeners).toHaveLength(2);
+      act(() => triggerRef(null));
+      expect(activeKeydownListeners(trigger)).toHaveLength(0);
+      retiredHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => triggerRef(trigger));
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      expect(captureReactHandler(trigger, "onKeyDown")).not.toBe(
+        retiredHandler,
+      );
+      const replayedListeners = activeKeydownListeners(trigger);
+      expect(replayedListeners).toHaveLength(2);
+      expect(replayedListeners.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+      ]);
+      expect(
+        new Set(replayedListeners.map(({ listener }) => listener)).size,
+      ).toBe(2);
+      expect(
+        replayedListeners.every(
+          ({ listener }) =>
+            !retiredListeners.some(
+              ({ listener: retired }) => listener === retired,
+            ),
+        ),
+      ).toBe(true);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("TemplateGrid publication ownership", () => {
@@ -3427,7 +4422,7 @@ describe("dashboard search controls", () => {
     }
   });
 
-  it("requires complete current refs for full and partial replay successors", async () => {
+  it("requires complete current refs for replay and recovers from a partial replay on a clean render", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -3457,6 +4452,18 @@ describe("dashboard search controls", () => {
         for (const binding of partial.toReversed()) binding.ref(binding.element);
       });
 
+      await dispatchSearchAction(() => {
+        fireEvent.click(screen.getByTestId("search-clear"));
+      });
+      expect(search).toHaveValue("alpha");
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
       await dispatchSearchAction(() => {
         fireEvent.click(screen.getByTestId("search-clear"));
       });
@@ -3868,6 +4875,912 @@ describe("dashboard search controls", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("dashboard search result keyboard focus", () => {
+  it.each([
+    ["ArrowDown", 0],
+    ["ArrowUp", 1],
+  ] as const)(
+    "focuses the exact %s result once without navigation, scrolling, or search work",
+    async (key, destination) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        const links = searchResultLinks(host);
+        expect(links).toHaveLength(2);
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const requestCount = searchDocuments.mock.calls.length;
+
+        const event = await dispatchSearchResultKey(search, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(preventDefault.mock.instances[0]).toBe(event);
+        expect(links[destination]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(links[destination]);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(search).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(listDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["empty", "loading", "error"] as const)(
+    "leaves an %s-only search native",
+    async (state) => {
+      if (state === "error") {
+        searchDocuments.mockRejectedValueOnce(
+          new ApiError(503, "Search unavailable"),
+        );
+      }
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={state === "empty" ? DOCUMENTS : []}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, {
+            target: { value: state === "empty" ? "q" : "zz" },
+          });
+        });
+        if (state === "error") await settleSearch();
+        const requestCount = searchDocuments.mock.calls.length;
+        expect(searchResultLinks(host)).toHaveLength(0);
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const event = await dispatchSearchResultKey(search, "ArrowDown");
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects untrusted, modified, repeated, composing, canceled, and wrong-source keys", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside result focus";
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const links = searchResultLinks(host);
+      const rejected: KeyboardEventInit[] = [
+        { ctrlKey: true },
+        { metaKey: true },
+        { altKey: true },
+        { shiftKey: true },
+        { repeat: true },
+        { isComposing: true },
+        { bubbles: false },
+        { cancelable: false },
+      ];
+      for (const init of rejected) {
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = await dispatchSearchResultKey(search, "ArrowDown", init);
+        expect(event.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+      }
+
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        search.dispatchEvent(untrusted);
+        await Promise.resolve();
+      });
+      expect(untrusted.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const canceled = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(canceled, window);
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      await act(async () => {
+        search.dispatchEvent(canceled);
+        await Promise.resolve();
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchSearchResultKey(search, "ArrowDown");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      links[0]!.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const wrongSource = await dispatchSearchResultKey(
+        links[0]!,
+        "ArrowDown",
+      );
+      expect(wrongSource.defaultPrevented).toBe(false);
+      expect(links[0]).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, crossed, and replayed delivery before a clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const handler = captureReactHandler(search, "onKeyDown");
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      handler({
+        get nativeEvent() {
+          throw new Error("fabricated native event getter must not run");
+        },
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      await act(async () => {
+        search.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const outer = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      const inner = new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(outer, window);
+      markSearchResultEventTrusted(inner, window);
+      search.addEventListener(
+        "keydown",
+        () => {
+          search.dispatchEvent(inner);
+        },
+        { capture: true, once: true },
+      );
+      await act(async () => {
+        search.dispatchEvent(outer);
+        await Promise.resolve();
+      });
+      expect(outer.defaultPrevented).toBe(false);
+      expect(inner.defaultPrevented).toBe(false);
+      expect(search).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      let wrapper: unknown = null;
+      const acceptedHandler: { current: CapturedReactClick | null } = {
+        current: null,
+      };
+      const restore = interceptReactHandler(search, "onKeyDown", (original, event) => {
+        acceptedHandler.current = original;
+        wrapper = event;
+        original(event);
+      });
+      const accepted = await dispatchSearchResultKey(search, "ArrowDown");
+      restore();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+
+      acceptedHandler.current?.(wrapper);
+      await act(async () => {
+        search.dispatchEvent(accepted);
+        await Promise.resolve();
+      });
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "stopImmediatePropagation",
+  ] as const)(
+    "rejects downstream %s before focus and accepts a distinct clean event",
+    async (method) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        search.focus();
+        focus.mockClear();
+        const stop = (event: Event) => event[method]();
+        search.addEventListener("keydown", stop, { once: true });
+
+        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+
+        search.removeEventListener("keydown", stop);
+        expect(focus).not.toHaveBeenCalled();
+        expect(search).toHaveFocus();
+        if (method === "preventDefault") {
+          expect(rejected.defaultPrevented).toBe(true);
+        }
+
+        const accepted = await dispatchSearchResultKey(search, "ArrowDown");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(searchResultLinks(host)[0]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects replaced key authority and a fabricated React trust wrapper before clean recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) {
+        throw new Error("KeyboardEvent.key getter was unavailable");
+      }
+      const replaced = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(replaced, window);
+      search.focus();
+      focus.mockClear();
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...keyDescriptor,
+        get: () => "ArrowDown",
+      });
+      try {
+        await act(async () => {
+          search.dispatchEvent(replaced);
+          await Promise.resolve();
+        });
+      } finally {
+        Object.defineProperty(
+          KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+      }
+      expect(replaced.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentSearch = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      const restore = interceptReactHandler(
+        currentSearch,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") return;
+          const descriptors = Object.getOwnPropertyDescriptors(event);
+          descriptors.isTrusted = {
+            configurable: true,
+            enumerable: true,
+            value: false,
+            writable: true,
+          };
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              descriptors,
+            ) as object,
+          );
+        },
+      );
+      currentSearch.focus();
+      focus.mockClear();
+      const fabricatedWrapper = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      restore();
+      expect(fabricatedWrapper.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      currentSearch.focus();
+      focus.mockClear();
+      const accepted = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a request settlement during delivery and focuses the clean current result", async () => {
+    const request = controlledSearch<SearchResponse>();
+    searchDocuments.mockReturnValueOnce(request.promise);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
+      await settleSearch();
+      expect(searchDocuments).toHaveBeenCalledOnce();
+      expect(searchResultLinks(host)).toHaveLength(1);
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      search.addEventListener(
+        "keydown",
+        () => {
+          flushSync(() => {
+            request.resolve({
+              query: "alpha",
+              documents: [
+                result(
+                  "settled-result",
+                  "Settled alpha result",
+                  "Current alpha content",
+                ),
+              ],
+            });
+            request.finalize();
+          });
+        },
+        { capture: true, once: true },
+      );
+
+      const stale = await dispatchSearchResultKey(search, "ArrowDown");
+
+      expect(stale.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toBeInTheDocument();
+      expect(searchDocuments).toHaveBeenCalledOnce();
+
+      search.focus();
+      focus.mockClear();
+      const current = await dispatchSearchResultKey(search, "ArrowDown");
+      expect(current.defaultPrevented).toBe(true);
+      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(searchDocuments).toHaveBeenCalledOnce();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps stale query, result-order, and user handlers inert beside the exact current handler", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacement = {
+      ...USER,
+      id: "search-result-replacement",
+      login: "search-result-replacement",
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      expect(searchResultLinks(host)).toHaveLength(2);
+      const staleOrder = captureReactHandler(search, "onKeyDown");
+
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "planning" } });
+      });
+      expect(searchResultLinks(host)).toHaveLength(1);
+      const staleUser = captureReactHandler(search, "onKeyDown");
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={replacement} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentSearch = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      const restore = interceptReactHandler(
+        currentSearch,
+        "onKeyDown",
+        (original, event) => {
+          staleOrder(event);
+          staleUser(event);
+          original(event);
+        },
+      );
+      currentSearch.focus();
+      focus.mockClear();
+      const event = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      restore();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)).toHaveLength(1);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "restored result attribute",
+    "restored result order",
+    "restored result replacement",
+    "restored result root",
+  ] as const)(
+    "rejects %s history once and mints a clean successor without an external render",
+    async (scenario) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        const list = host.querySelector<HTMLUListElement>(
+          '[data-testid="document-list"]',
+        )!;
+        const links = searchResultLinks(host);
+        if (scenario === "restored result attribute") {
+          links[0]!.setAttribute("data-search-result-attack", "1");
+          links[0]!.removeAttribute("data-search-result-attack");
+        } else if (scenario === "restored result order") {
+          const items = Array.from(list.children);
+          list.append(items[0]!);
+          for (const item of items) list.append(item);
+        } else if (scenario === "restored result replacement") {
+          const clone = links[0]!.cloneNode(true) as HTMLAnchorElement;
+          links[0]!.replaceWith(clone);
+          clone.replaceWith(links[0]!);
+        } else {
+          const parent = list.parentNode!;
+          const next = list.nextSibling;
+          list.remove();
+          parent.insertBefore(list, next);
+        }
+        await act(async () => {});
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const requestCount = searchDocuments.mock.calls.length;
+        const staleHandler = captureReactHandler(search, "onKeyDown");
+
+        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(search).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+
+        const currentSearch = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        expect(captureReactHandler(currentSearch, "onKeyDown")).not.toBe(
+          staleHandler,
+        );
+        currentSearch.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const accepted = await dispatchSearchResultKey(
+          currentSearch,
+          "ArrowDown",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(searchResultLinks(host)[0]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(currentSearch).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(listDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("releases a queued DOM-barrier successor when cleanup wins", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let mounted = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const link = searchResultLinks(host)[0]!;
+      link.setAttribute("data-search-result-attack", "1");
+      link.removeAttribute("data-search-result-attack");
+      await act(async () => {});
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requestCount = searchDocuments.mock.calls.length;
+      const event = searchResultKeyEvent(search, "ArrowDown");
+
+      act(() => {
+        search.dispatchEvent(event);
+        root.unmount();
+      });
+      mounted = false;
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(host).toBeEmptyDOMElement();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.replace).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      if (mounted) await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects partial ref replay and cleanup while complete replay mints a usable successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </StrictMode>,
+      );
+    });
+    const search = screen.getByRole("textbox", {
+      name: "Search documents",
+    }) as HTMLInputElement;
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "n" } });
+    });
+    const partial = searchResultRefBindings(search)[0]!;
+    act(() => {
+      partial.ref(null);
+      partial.ref(partial.element);
+    });
+    await act(async () => {});
+    search.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </StrictMode>,
+      );
+    });
+    const recovered = screen.getByRole("textbox", {
+      name: "Search documents",
+    }) as HTMLInputElement;
+    const beforeReplay = captureReactHandler(recovered, "onKeyDown");
+    const complete = [
+      ...searchRefBindings(recovered, true),
+      ...searchResultRefBindings(recovered),
+    ];
+    act(() => {
+      for (const binding of complete) binding.ref(null);
+      for (const binding of complete) binding.ref(binding.element);
+    });
+    await act(async () => {});
+    expect(captureReactHandler(recovered, "onKeyDown")).not.toBe(beforeReplay);
+    recovered.focus();
+    focus.mockClear();
+    const accepted = await dispatchSearchResultKey(recovered, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(searchResultLinks(host).at(-1)).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+
+    const stale = captureReactHandler(recovered, "onKeyDown");
+    await act(async () => root.unmount());
+    const removedMarkup = host.innerHTML;
+    focus.mockClear();
+    preventDefault.mockClear();
+    stale({
+      _reactName: "onKeyDown",
+      type: "keydown",
+      nativeEvent: new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+      target: recovered,
+      currentTarget: recovered,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      isTrusted: true,
+      key: "ArrowDown",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      view: window,
+    });
+    expect(host.innerHTML).toBe(removedMarkup);
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    host.remove();
   });
 });
 

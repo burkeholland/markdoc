@@ -695,123 +695,222 @@ describe("collaboration pre-authentication deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("releases all ownership state after 30,000 deterministic lifecycle and boundary cases", () => {
+  describe("releases all ownership state after 30,000 deterministic lifecycle and boundary cases", () => {
+    const subjectsPerPlan = 2_500;
     const boundaryPlans = [
-      { elapsed: 2_999, timerFirst: false, accepted: true },
-      { elapsed: 2_999, timerFirst: true, accepted: true },
-      { elapsed: 3_000, timerFirst: false, accepted: false },
-      { elapsed: 3_000, timerFirst: true, accepted: false },
-      { elapsed: 3_001, timerFirst: false, accepted: false },
-      { elapsed: 3_001, timerFirst: true, accepted: false },
+      {
+        name: "2,999 ms acceptance-first boundary",
+        kind: "boundary",
+        elapsed: 2_999,
+        timerFirst: false,
+        accepted: true,
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "2,999 ms timer-first boundary",
+        kind: "boundary",
+        elapsed: 2_999,
+        timerFirst: true,
+        accepted: true,
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "3,000 ms acceptance-first boundary",
+        kind: "boundary",
+        elapsed: 3_000,
+        timerFirst: false,
+        accepted: false,
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "3,000 ms timer-first boundary",
+        kind: "boundary",
+        elapsed: 3_000,
+        timerFirst: true,
+        accepted: false,
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "3,001 ms acceptance-first boundary",
+        kind: "boundary",
+        elapsed: 3_001,
+        timerFirst: false,
+        accepted: false,
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "3,001 ms timer-first boundary",
+        kind: "boundary",
+        elapsed: 3_001,
+        timerFirst: true,
+        accepted: false,
+        expectedReportsPerSubject: 0,
+      },
     ] as const;
-    let reportInvocations = 0;
-    let cases = 0;
-    let wrongAcceptance = 0;
-    let retainedListeners = 0;
-    let wrongSettlements = 0;
-    let doubleTermination = 0;
-    let postSettlementChanges = 0;
+    const terminalPlans = [
+      {
+        name: "socket close terminal",
+        kind: "terminal",
+        terminal: "socket-close",
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "binding abort terminal",
+        kind: "terminal",
+        terminal: "binding-abort",
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "socket error with termination failure",
+        kind: "terminal",
+        terminal: "socket-error",
+        expectedReportsPerSubject: 1,
+      },
+      {
+        name: "request abort with termination failure",
+        kind: "terminal",
+        terminal: "request-abort",
+        expectedReportsPerSubject: 1,
+      },
+      {
+        name: "acknowledged rejection close",
+        kind: "terminal",
+        terminal: "acknowledged-rejection",
+        expectedReportsPerSubject: 0,
+      },
+      {
+        name: "deadline with close and termination failures",
+        kind: "terminal",
+        terminal: "deadline-errors",
+        expectedReportsPerSubject: 2,
+      },
+    ] as const;
+    const plans = [...boundaryPlans, ...terminalPlans] as const;
 
-    for (let batch = 0; batch < 12; batch++) {
-      const subjects = Array.from({ length: 2_500 }, () => {
-        const socket = new FakeSocket();
-        const request = new EventEmitter();
-        let settlements = 0;
-        let now = 0;
-        const lifecycle = createCollabPreAuthenticationDeadline(asSocket(socket), {
-          request: asRequest(request),
-          closeGraceMs: COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
-          now: () => now,
-          onSettled: () => settlements++,
-          reportError: () => {
-            reportInvocations++;
-            throw new Error("injected diagnostic failure");
-          },
+    it("defines six boundary and six terminal plans totaling exactly 30,000 cases", () => {
+      expect(boundaryPlans).toHaveLength(6);
+      expect(terminalPlans).toHaveLength(6);
+      expect(plans).toHaveLength(12);
+      expect(plans.length * subjectsPerPlan).toBe(30_000);
+      expect(
+        plans.reduce(
+          (total, plan) => total + plan.expectedReportsPerSubject * subjectsPerPlan,
+          0,
+        ),
+      ).toBe(10_000);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each(plans)(
+      "releases all ownership state for $name across 2,500 deterministic cases",
+      (plan) => {
+        let reportInvocations = 0;
+        let cases = 0;
+        let wrongAcceptance = 0;
+        let retainedListeners = 0;
+        let wrongSettlements = 0;
+        let doubleTermination = 0;
+        let postSettlementChanges = 0;
+
+        const subjects = Array.from({ length: subjectsPerPlan }, () => {
+          const socket = new FakeSocket();
+          const request = new EventEmitter();
+          let settlements = 0;
+          let now = 0;
+          const lifecycle = createCollabPreAuthenticationDeadline(asSocket(socket), {
+            request: asRequest(request),
+            closeGraceMs: COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
+            now: () => now,
+            onSettled: () => settlements++,
+            reportError: () => {
+              reportInvocations++;
+              throw new Error("injected diagnostic failure");
+            },
+          });
+          return {
+            socket,
+            request,
+            lifecycle,
+            settlements: () => settlements,
+            setNow: (value: number) => {
+              now = value;
+            },
+          };
         });
-        return {
-          socket,
-          request,
-          lifecycle,
-          settlements: () => settlements,
-          setNow: (value: number) => {
-            now = value;
-          },
-        };
-      });
 
-      const boundary = boundaryPlans[batch];
-      if (boundary) {
-        for (const subject of subjects) subject.setNow(boundary.elapsed);
-        if (boundary.timerFirst) vi.advanceTimersByTime(boundary.elapsed);
-        for (const subject of subjects) {
-          if (subject.lifecycle.accepted() !== boundary.accepted) wrongAcceptance++;
-        }
-      } else {
-        for (const subject of subjects) {
-          switch (batch) {
-            case 6:
-              subject.socket.readyState = WebSocket.CLOSED;
-              subject.socket.emit("close", 1000, Buffer.alloc(0));
-              break;
-            case 7:
-              subject.lifecycle.abort();
-              break;
-            case 8:
-              subject.socket.terminateError = new Error("injected socket-error termination");
-              subject.socket.emit("error", new Error("injected socket error"));
-              break;
-            case 9:
-              subject.socket.terminateError = new Error("injected request-abort termination");
-              subject.request.emit("aborted");
-              break;
-            case 10:
-              subject.socket.acknowledgeClose = true;
-              subject.lifecycle.rejected();
-              break;
-            case 11:
-              subject.socket.closeError = new Error("injected close error");
-              subject.socket.terminateError = new Error("injected terminate error");
-              break;
+        if (plan.kind === "boundary") {
+          for (const subject of subjects) subject.setNow(plan.elapsed);
+          if (plan.timerFirst) vi.advanceTimersByTime(plan.elapsed);
+          for (const subject of subjects) {
+            if (subject.lifecycle.accepted() !== plan.accepted) wrongAcceptance++;
+          }
+        } else {
+          for (const subject of subjects) {
+            switch (plan.terminal) {
+              case "socket-close":
+                subject.socket.readyState = WebSocket.CLOSED;
+                subject.socket.emit("close", 1000, Buffer.alloc(0));
+                break;
+              case "binding-abort":
+                subject.lifecycle.abort();
+                break;
+              case "socket-error":
+                subject.socket.terminateError = new Error("injected socket-error termination");
+                subject.socket.emit("error", new Error("injected socket error"));
+                break;
+              case "request-abort":
+                subject.socket.terminateError = new Error("injected request-abort termination");
+                subject.request.emit("aborted");
+                break;
+              case "acknowledged-rejection":
+                subject.socket.acknowledgeClose = true;
+                subject.lifecycle.rejected();
+                break;
+              case "deadline-errors":
+                subject.socket.closeError = new Error("injected close error");
+                subject.socket.terminateError = new Error("injected terminate error");
+                break;
+            }
           }
         }
-      }
-      vi.runAllTimers();
-      expect(vi.getTimerCount()).toBe(0);
-      cases += subjects.length;
+        vi.runAllTimers();
+        cases += subjects.length;
 
-      for (const subject of subjects) {
-        retainedListeners +=
-          subject.socket.listenerCount("close") +
-          subject.socket.listenerCount("error") +
-          subject.request.listenerCount("aborted");
-        if (subject.settlements() !== 1) wrongSettlements++;
-        if (subject.socket.closeAttempts > 1 || subject.socket.terminationAttempts > 1) {
-          doubleTermination++;
+        for (const subject of subjects) {
+          retainedListeners +=
+            subject.socket.listenerCount("close") +
+            subject.socket.listenerCount("error") +
+            subject.request.listenerCount("aborted");
+          if (subject.settlements() !== 1) wrongSettlements++;
+          if (subject.socket.closeAttempts > 1 || subject.socket.terminationAttempts > 1) {
+            doubleTermination++;
+          }
+          const before = [
+            subject.socket.closeAttempts,
+            subject.socket.terminationAttempts,
+            subject.settlements(),
+          ];
+          if (subject.lifecycle.accepted()) wrongAcceptance++;
+          subject.lifecycle.rejected();
+          subject.lifecycle.abort();
+          const after = [
+            subject.socket.closeAttempts,
+            subject.socket.terminationAttempts,
+            subject.settlements(),
+          ];
+          if (before.some((value, index) => value !== after[index])) postSettlementChanges++;
         }
-        const before = [
-          subject.socket.closeAttempts,
-          subject.socket.terminationAttempts,
-          subject.settlements(),
-        ];
-        if (subject.lifecycle.accepted()) wrongAcceptance++;
-        subject.lifecycle.rejected();
-        subject.lifecycle.abort();
-        const after = [
-          subject.socket.closeAttempts,
-          subject.socket.terminationAttempts,
-          subject.settlements(),
-        ];
-        if (before.some((value, index) => value !== after[index])) postSettlementChanges++;
-      }
-    }
 
-    expect(cases).toBe(30_000);
-    expect(wrongAcceptance).toBe(0);
-    expect(retainedListeners).toBe(0);
-    expect(wrongSettlements).toBe(0);
-    expect(doubleTermination).toBe(0);
-    expect(postSettlementChanges).toBe(0);
-    expect(reportInvocations).toBe(10_000);
+        expect(cases).toBe(subjectsPerPlan);
+        expect(wrongAcceptance).toBe(0);
+        expect(retainedListeners).toBe(0);
+        expect(wrongSettlements).toBe(0);
+        expect(doubleTermination).toBe(0);
+        expect(postSettlementChanges).toBe(0);
+        expect(reportInvocations).toBe(plan.expectedReportsPerSubject * subjectsPerPlan);
+        expect(vi.getTimerCount()).toBe(0);
+      },
+    );
   });
 });
 

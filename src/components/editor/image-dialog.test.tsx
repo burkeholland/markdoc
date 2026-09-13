@@ -156,20 +156,17 @@ function reactProp<T>(element: Element, name: string): T {
   return value as T;
 }
 
-async function waitForCommittedReactProp<T>(
-  element: () => Element,
-  name: string,
-  previous: T,
+async function chooseFromCommittedSuccessor(
+  file: File,
+  settledInput: HTMLInputElement,
 ) {
-  let candidate: T | undefined;
-  await waitFor(() => {
-    const current = reactProp<T>(element(), name);
-    if (current === previous || current !== candidate) {
-      candidate = current;
-      throw new Error(`Waiting for committed React ${name}`);
-    }
-  });
-  return candidate as T;
+  expect(screen.getByTestId("image-file")).toBe(settledInput);
+  expect(settledInput).toBeEnabled();
+  await act(async () => {});
+  const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
+  expect(currentInput).toBe(settledInput);
+  expect(currentInput).toBeEnabled();
+  fireEvent.change(currentInput, { target: { files: [file] } });
 }
 
 function reactAncestorHandlers<T extends (...args: never[]) => unknown>(
@@ -479,11 +476,14 @@ describe("ImageDialog upload lifecycle", () => {
       await renderStrictRoot(<Harness onUpload={onUpload} />);
 
       const input = screen.getByTestId("image-file") as HTMLInputElement;
-      const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
-        input,
-        "onChange",
-      );
-      choose(new File(["failed"], "failed.png", { type: "image/png" }));
+      const failedFile = new File(["failed"], "failed.png", {
+        type: "image/png",
+      });
+      choose(failedFile);
+      expect(onUpload).toHaveBeenCalledOnce();
+      expect(onUpload).toHaveBeenCalledWith(failedFile);
+      expect(onUpload.mock.results[0]?.value).toBe(failed.promise);
+      expect(screen.getByTestId("image-file")).toBe(input);
       setInputValue(input, "failed-selection");
 
       if (getter === "error") {
@@ -527,19 +527,17 @@ describe("ImageDialog upload lifecycle", () => {
             : "Upload failed",
       );
       expect(screen.getByTestId("image-upload")).toBeEnabled();
+      expect(screen.getByTestId("image-file")).toBe(input);
+      expect(input).toBeEnabled();
       expect(input.value).toBe("");
-      await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-        () => screen.getByTestId("image-file"),
-        "onChange",
-        oldOnChange,
-      );
 
       const retryFile = new File(["retry"], "retry.png", {
         type: "image/png",
       });
-      choose(retryFile);
+      await chooseFromCommittedSuccessor(retryFile, input);
       expect(onUpload).toHaveBeenCalledTimes(2);
       expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+      expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
       await act(async () => {
         retry.resolve({ url: "/api/assets/retry" });
         await retry.promise;
@@ -566,29 +564,31 @@ describe("ImageDialog upload lifecycle", () => {
       .mockReturnValueOnce(retry.promise);
     await renderStrictRoot(<Harness onUpload={onUpload} />);
 
-    const oldOnChange = reactProp<ChangeEventHandler<HTMLInputElement>>(
-      screen.getByTestId("image-file"),
-      "onChange",
-    );
-    choose(new File(["hostile"], "hostile.png", { type: "image/png" }));
+    const input = screen.getByTestId("image-file") as HTMLInputElement;
+    const hostileFile = new File(["hostile"], "hostile.png", {
+      type: "image/png",
+    });
+    choose(hostileFile);
+    expect(onUpload).toHaveBeenCalledOnce();
+    expect(onUpload).toHaveBeenCalledWith(hostileFile);
+    expect(onUpload.mock.results[0]?.value).toBe(hostile);
+    expect(screen.getByTestId("image-file")).toBe(input);
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent(
         "Upload then getter failed",
       ),
     );
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    await waitForCommittedReactProp<ChangeEventHandler<HTMLInputElement>>(
-      () => screen.getByTestId("image-file"),
-      "onChange",
-      oldOnChange,
-    );
+    expect(screen.getByTestId("image-file")).toBe(input);
+    expect(input).toBeEnabled();
 
     const retryFile = new File(["retry"], "retry.png", {
       type: "image/png",
     });
-    choose(retryFile);
+    await chooseFromCommittedSuccessor(retryFile, input);
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    expect(onUpload.mock.results[1]?.value).toBe(retry.promise);
     await act(async () => {
       retry.resolve({ url: "/api/assets/retry" });
       await retry.promise;
@@ -1543,9 +1543,11 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     const upload = deferred<UploadResult>();
     const onUpload = vi.fn(() => upload.promise);
     const never = new Promise<never>(() => {});
+    const pendingRender = vi.fn();
     let begin = () => {};
 
     function PendingRender(): ReactNode {
+      pendingRender();
       throw never;
     }
 
@@ -1572,7 +1574,14 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await renderStrictRoot(<ConcurrentHarness />);
     choose(new File(["current"], "current.png", { type: "image/png" }));
     expect(onUpload).toHaveBeenCalledOnce();
-    act(() => begin());
+    const committedCancel = screen.getByRole("button", {
+      name: "Cancel",
+    }) as HTMLButtonElement;
+    await act(async () => begin());
+    expect(pendingRender).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+      committedCancel,
+    );
     await act(async () => {
       upload.resolve({ url: "/api/assets/concurrent", alt: "Concurrent Alt" });
       await upload.promise;
@@ -1581,7 +1590,10 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       "/api/assets/concurrent",
     );
     expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+      committedCancel,
+    );
+    fireEvent.click(committedCancel);
 
     expect(committedClose).toHaveBeenCalledOnce();
     expect(committedClose).toHaveBeenCalledWith(false);

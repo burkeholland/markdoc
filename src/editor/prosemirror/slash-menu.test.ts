@@ -9,12 +9,53 @@ import { schema } from "../markdown/schema";
 import { SLASH_ITEMS } from "../slash-items";
 import { setHeadingLevel } from "./commands";
 import { editablePlugin, setEditable } from "./editable";
-import { applySlashCommand, applySlashItem, slashMenuPlugin, slashMenuState, type SlashKey, type SlashState } from "./slash-menu";
+import {
+  applySlashCommand,
+  applySlashItem,
+  closeSlashMenu,
+  slashMenuPlugin,
+  slashMenuState,
+  type SlashKey,
+  type SlashKeyAction,
+  type SlashState,
+} from "./slash-menu";
+
+function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  const nativeOwnerWindow = (
+    ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window & typeof globalThis }
+    >
+  )[implementationSymbol]._globalObject;
+  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: nativeOwnerWindow,
+  });
+  if (ownerDocument.defaultView !== nativeOwnerWindow) {
+    throw new Error("Unable to expose jsdom's native owner window");
+  }
+  return () => {
+    if (previous) {
+      Object.defineProperty(ownerDocument, "defaultView", previous);
+    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
+      throw new Error("Unable to restore jsdom's public owner window");
+    }
+  };
+}
 
 describe("slashMenuPlugin", () => {
   let ytext: Y.Text;
   let binding: MarkdownBinding;
   let view: EditorView;
+  let host: HTMLDivElement;
+  let restoreOwnerWindow: () => void;
   let states: (SlashState | null)[];
   let keys: SlashKey[];
   let enterReached: number;
@@ -33,9 +74,19 @@ describe("slashMenuPlugin", () => {
         editablePlugin(true),
         slashMenuPlugin({
           onState: (s) => states.push(s),
-          onKey: (k) => {
-            keys.push(k);
-            return true;
+          onKey: (publication) => {
+            keys.push(publication.key);
+            const action: SlashKeyAction = Object.freeze({
+              identity: Symbol("slash-key-test-action"),
+              publication,
+              key: publication.key,
+              isCurrent: () => true,
+              commit: () => {
+                if (publication.key === "Escape") closeSlashMenu(view);
+              },
+              cancel: () => {},
+            });
+            return publication.claim(action);
           },
         }),
         markdownBindingPlugin(binding),
@@ -47,26 +98,75 @@ describe("slashMenuPlugin", () => {
         }),
       ],
     });
-    view = new EditorView(document.createElement("div"), { state });
+    host = document.createElement("div");
+    document.body.append(host);
+    view = new EditorView(host, { state });
   };
 
   const select = (pos: number) => view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)));
   const type = (text: string) => {
     for (const ch of text) view.dispatch(view.state.tr.insertText(ch));
   };
-  const key = (k: string) => {
-    const event = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
-    return view.someProp("handleKeyDown", (f) => f(view, event)) ?? false;
+  const markJsdomEventTrusted = (event: Event) => {
+    const implementation = Object.getOwnPropertySymbols(event)
+      .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+      .find(
+        (candidate): candidate is { isTrusted: boolean } =>
+          typeof candidate === "object" &&
+          candidate !== null &&
+          "isTrusted" in candidate &&
+          candidate.isTrusted === false,
+      );
+    const descriptor = implementation
+      ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+      : undefined;
+    if (!implementation || !descriptor?.writable) {
+      throw new Error("Unable to set jsdom's internal event trust slot");
+    }
+    Object.defineProperty(implementation, "isTrusted", {
+      configurable: true,
+      enumerable: true,
+      get: () => true,
+      set: () => undefined,
+    });
+    if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+  };
+  const keyboardEvent = (k: string, init: KeyboardEventInit = {}) => {
+    const ownerDocument = view.dom.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Editor owner window was unavailable");
+    const event = new ownerWindow.KeyboardEvent("keydown", {
+      key: k,
+      code: k,
+      bubbles: true,
+      cancelable: true,
+      ...init,
+      view: ownerWindow,
+    });
+    if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
+    return event;
+  };
+  const key = async (k: string, init: KeyboardEventInit = {}) => {
+    const event = keyboardEvent(k, init);
+    markJsdomEventTrusted(event);
+    view.dom.dispatchEvent(event);
+    await Promise.resolve();
+    return event;
   };
   const tracked = () => slashMenuState(view.state);
 
   // Doc: <p>Hello</p><p>World</p>; the second paragraph starts at 8.
   const WORLD = 8;
 
-  beforeEach(() => setup("Hello\n\nWorld"));
+  beforeEach(() => {
+    restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
+    setup("Hello\n\nWorld");
+  });
   afterEach(() => {
     view.destroy();
     binding.destroy();
+    host.remove();
+    restoreOwnerWindow();
   });
 
   it("activates on / at the start of a paragraph and tracks the query", () => {
@@ -91,6 +191,7 @@ describe("slashMenuPlugin", () => {
   it("does not activate inside a code block", () => {
     view.destroy();
     binding.destroy();
+    host.remove();
     setup("```\nabc\n```");
     select(4); // end of "abc"
     type("/");
@@ -105,11 +206,13 @@ describe("slashMenuPlugin", () => {
     expect(tracked()).toBeNull();
   });
 
-  it("deactivates on Escape", () => {
+  it("deactivates on Escape", async () => {
+    view.dom.focus();
     select(WORLD);
     type("/h");
     expect(tracked()).toMatchObject({ query: "h" });
-    expect(key("Escape")).toBe(true);
+    const event = await key("Escape");
+    expect(event.defaultPrevented).toBe(true);
     expect(tracked()).toBeNull();
     expect(states.at(-1)).toBeNull();
     expect(view.state.doc.textContent).toBe("Hello/hWorld");
@@ -139,18 +242,50 @@ describe("slashMenuPlugin", () => {
     expect(tracked()).toBeNull();
   });
 
-  it("routes navigation keys to the handler and keeps them from other keymaps while open", () => {
+  it("routes exact native menu keys to the handler and keeps them from other keymaps while open", async () => {
+    view.dom.focus();
     select(WORLD);
-    key("Enter");
+    await key("Enter");
     expect(enterReached).toBe(1);
     type("/");
-    expect(key("ArrowDown")).toBe(true);
-    expect(key("ArrowUp")).toBe(true);
-    expect(key("Enter")).toBe(true);
-    expect(key("Tab")).toBe(true);
-    expect(keys).toEqual(["ArrowDown", "ArrowUp", "Enter", "Tab"]);
+    for (const handled of ["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Tab"] as const) {
+      expect((await key(handled)).defaultPrevented).toBe(true);
+    }
+    expect(keys).toEqual(["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Tab"]);
     expect(enterReached).toBe(1);
-    expect(key("a")).toBe(false);
+    expect((await key("a")).defaultPrevented).toBe(false);
+  });
+
+  it("rejects modified, repeated, composing, untrusted, and replayed menu keys", async () => {
+    view.dom.focus();
+    select(WORLD);
+    type("/");
+    const selection = view.state.selection;
+    for (const init of [
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { repeat: true },
+      { isComposing: true },
+    ]) {
+      expect((await key("End", init)).defaultPrevented).toBe(false);
+    }
+    const untrusted = keyboardEvent("End");
+    view.dom.dispatchEvent(untrusted);
+    await Promise.resolve();
+    expect(untrusted.defaultPrevented).toBe(false);
+
+    const accepted = keyboardEvent("End");
+    markJsdomEventTrusted(accepted);
+    view.dom.focus();
+    view.dom.dispatchEvent(accepted);
+    await Promise.resolve();
+    expect(accepted.defaultPrevented).toBe(true);
+    view.dom.dispatchEvent(accepted);
+    await Promise.resolve();
+    expect(view.state.selection).toBe(selection);
+    expect(keys).toEqual(["End"]);
   });
 
   it("applying a command removes the /query text and runs it in the same transaction", () => {

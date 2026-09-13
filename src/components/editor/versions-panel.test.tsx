@@ -450,6 +450,173 @@ function dispatchVersionDiffKey(
   return { event, allowed };
 }
 
+type VersionsToolbarKey =
+  | "ArrowRight"
+  | "ArrowDown"
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "Home"
+  | "End"
+  | "Enter"
+  | " ";
+
+function versionsToolbarButtons(host: ParentNode = document) {
+  const toolbar = within(host as HTMLElement).getByRole("toolbar", {
+    name: "Version history actions",
+  });
+  return {
+    toolbar,
+    refresh: within(toolbar).getByRole<HTMLButtonElement>("button", {
+      name: "Refresh versions",
+    }),
+    close: within(toolbar).getByRole<HTMLButtonElement>("button", {
+      name: "Close version history",
+    }),
+  };
+}
+
+function versionRowSelects(host: ParentNode = document) {
+  return within(host as HTMLElement)
+    .getAllByTestId("version-item")
+    .map((item) => {
+      const select = item.querySelector<HTMLButtonElement>("button");
+      if (!select) throw new Error("Version row select button was not rendered");
+      return select;
+    });
+}
+
+function createVersionsToolbarKey(
+  target: HTMLElement,
+  key: VersionsToolbarKey,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Version toolbar owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  const implementation = implementationSymbol
+    ? (
+        event as unknown as Record<
+          symbol,
+          { isTrusted: boolean; view: Window | null }
+        >
+      )[implementationSymbol]
+    : null;
+  if (!implementation) {
+    throw new Error("Keyboard event implementation slot was not available");
+  }
+  implementation.view = ownerWindow;
+  if (trusted) trustKeyboardEvent(event, ownerWindow);
+  return event;
+}
+
+async function dispatchVersionsToolbarKey(
+  target: HTMLElement,
+  key: VersionsToolbarKey,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  const event = createVersionsToolbarKey(target, key, init);
+  await dispatchVersionsToolbarEvent(target, event, focus);
+  return event;
+}
+
+async function dispatchVersionsToolbarEvent(
+  target: HTMLElement,
+  event: KeyboardEvent,
+  focus = true,
+) {
+  await act(async () => {
+    if (focus) target.focus();
+    target.dispatchEvent(event);
+    await Promise.resolve();
+  });
+}
+
+function normalizeVersionsToolbarOwnerWindowBoundary(
+  ownerWindow: Window & typeof globalThis,
+  transformPath?: (
+    event: Event,
+    path: readonly EventTarget[],
+  ) => readonly EventTarget[],
+) {
+  const eventPrototype = ownerWindow.Event.prototype;
+  const nativeComposedPath = eventPrototype.composedPath;
+  const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+    eventPrototype,
+    "currentTarget",
+  );
+  if (!currentTargetDescriptor?.get) {
+    throw new Error("Event currentTarget getter was unavailable");
+  }
+  vi.spyOn(eventPrototype, "composedPath").mockImplementation(function (
+    this: Event,
+  ) {
+    const path = nativeComposedPath.call(this);
+    const normalized =
+      path.length > 0
+        ? [...path.slice(0, -1), ownerWindow]
+        : path;
+    return [...(transformPath?.(this, normalized) ?? normalized)];
+  });
+  vi.spyOn(eventPrototype, "currentTarget", "get").mockImplementation(function (
+    this: Event,
+  ) {
+    const currentTarget = currentTargetDescriptor.get!.call(this) as
+      | EventTarget
+      | null;
+    if (typeof currentTarget !== "object" || currentTarget === null) {
+      return currentTarget;
+    }
+    const candidate = currentTarget as EventTarget & {
+      document?: Document;
+      window?: unknown;
+    };
+    return candidate.document === ownerWindow.document &&
+      candidate.window === currentTarget
+      ? ownerWindow
+      : currentTarget;
+  });
+}
+
+function replaceVersionsJsdomPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's version-row path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The jsdom version-row path terminal did not update");
+  }
+}
+
 function createVersionDiffView(
   preview = versionDiffPreview(),
   current = VERSION_DIFF_CURRENT,
@@ -2253,6 +2420,1715 @@ describe("VersionsPanel · direct-root Strict Mode authority", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
+  let pathTerminalEvent: Event | null;
+  let pathTerminalOverride: EventTarget | null;
+
+  beforeEach(() => {
+    pathTerminalEvent = null;
+    pathTerminalOverride = null;
+    normalizeVersionsToolbarOwnerWindowBoundary(window, (event, path) =>
+      event === pathTerminalEvent && pathTerminalOverride
+        ? [...path.slice(0, -1), pathTerminalOverride]
+        : path,
+    );
+  });
+
+  it("publishes a labelled, horizontal, ordered toolbar with one Refresh tab stop", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-semantics"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const { toolbar, refresh, close } = versionsToolbarButtons(host);
+
+      expect(toolbar).toHaveAttribute("aria-orientation", "horizontal");
+      expect([...toolbar.children]).toEqual([refresh, close]);
+      expect(refresh).toHaveAttribute("tabindex", "0");
+      expect(close).toHaveAttribute("tabindex", "-1");
+      expect(
+        [refresh, close].filter((button) => button.tabIndex === 0),
+      ).toHaveLength(1);
+      expect(refresh).toHaveAttribute("title", "Refresh versions");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["ArrowRight", "refresh", "close"],
+    ["ArrowDown", "refresh", "close"],
+    ["ArrowLeft", "refresh", "close"],
+    ["ArrowUp", "refresh", "close"],
+    ["Home", "close", "refresh"],
+    ["End", "refresh", "close"],
+  ] as const)(
+    "moves %s from %s to %s with one prevention and one non-scrolling focus",
+    async (key, sourceName, destinationName) => {
+      const nativePreventDefault = Event.prototype.preventDefault;
+      const nativeFocus = HTMLElement.prototype.focus;
+      const order: string[] = [];
+      const preventDefault = vi
+        .spyOn(Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          order.push("prevent");
+          nativePreventDefault.call(this);
+        });
+      const focus = vi
+        .spyOn(HTMLElement.prototype, "focus")
+        .mockImplementation(function (
+          this: HTMLElement,
+          options?: FocusOptions,
+        ) {
+          order.push("focus");
+          nativeFocus.call(this, options);
+        });
+      const scrollIntoView = vi.fn();
+      const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        writable: true,
+        value: scrollIntoView,
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`toolbar-${key}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText(named.title!);
+        let buttons = versionsToolbarButtons(host);
+        const source = buttons[sourceName];
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        order.length = 0;
+        const requests = versions.mock.calls.length;
+
+        const result = await dispatchVersionsToolbarKey(source, key, {}, false);
+
+        buttons = versionsToolbarButtons(host);
+        const destination = buttons[destinationName];
+        expect(result.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(destination);
+        expect(order).toEqual(["prevent", "focus"]);
+        expect(destination).toHaveFocus();
+        expect(destination).toHaveAttribute("tabindex", "0");
+        expect(sourceName === destinationName ? destination : buttons[sourceName])
+          .toHaveAttribute(
+            "tabindex",
+            sourceName === destinationName ? "0" : "-1",
+          );
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(versions).toHaveBeenCalledTimes(requests);
+        expect(version).not.toHaveBeenCalled();
+        expect(renameVersion).not.toHaveBeenCalled();
+        expect(restoreVersion).not.toHaveBeenCalled();
+        expect(copyVersion).not.toHaveBeenCalled();
+        expect(onClose).not.toHaveBeenCalled();
+        expect(onPreview).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        if (originalScrollIntoView) {
+          Object.defineProperty(
+            Element.prototype,
+            "scrollIntoView",
+            originalScrollIntoView,
+          );
+        } else {
+          delete (Element.prototype as { scrollIntoView?: unknown })
+            .scrollIntoView;
+        }
+      }
+    },
+  );
+
+  it.each([
+    ["Home", "refresh"],
+    ["End", "close"],
+  ] as const)("leaves boundary %s inert on %s", async (key, sourceName) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session(`toolbar-boundary-${key}`),
+        onClose,
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const source = versionsToolbarButtons(host)[sourceName];
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = versions.mock.calls.length;
+
+      const result = await dispatchVersionsToolbarKey(source, key, {}, false);
+
+      expect(result.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expect(versions).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("moves the sole tab stop to Close while Refresh is disabled", async () => {
+    const refreshRequest = deferred<{ versions: VersionSummary[] }>();
+    versions
+      .mockResolvedValueOnce({ versions: [named] })
+      .mockReturnValueOnce(refreshRequest.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-disabled-refresh"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      let buttons = versionsToolbarButtons(host);
+      act(() => buttons.refresh.click());
+      await waitFor(() => expect(buttons.refresh).toBeDisabled());
+
+      buttons = versionsToolbarButtons(host);
+      expect(buttons.refresh).toHaveAttribute("aria-busy", "true");
+      expect(buttons.refresh).toHaveAttribute("tabindex", "-1");
+      expect(buttons.close).toHaveAttribute("tabindex", "0");
+      expect(
+        [buttons.refresh, buttons.close].filter(
+          (button) => button.tabIndex === 0,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      refreshRequest.resolve({ versions: [named] });
+      await act(async () => {
+        await Promise.resolve();
+        root.unmount();
+      });
+      host.remove();
+    }
+  });
+
+  it("skips disabled Refresh while wrapping from the sole enabled Close action", async () => {
+    const refreshRequest = deferred<{ versions: VersionSummary[] }>();
+    versions
+      .mockResolvedValueOnce({ versions: [named] })
+      .mockReturnValueOnce(refreshRequest.promise);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-disabled-wrap"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      let buttons = versionsToolbarButtons(host);
+      act(() => buttons.refresh.click());
+      await waitFor(() => expect(buttons.refresh).toBeDisabled());
+      buttons = versionsToolbarButtons(host);
+      buttons.close.focus();
+      focus.mockClear();
+      const requests = versions.mock.calls.length;
+
+      const accepted = await dispatchVersionsToolbarKey(
+        buttons.close,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      buttons = versionsToolbarButtons(host);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(buttons.close).toHaveFocus();
+      expect(buttons.close).toHaveAttribute("tabindex", "0");
+      expect(buttons.refresh).toHaveAttribute("tabindex", "-1");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(focus.mock.instances[0]).toBe(buttons.close);
+      expect(versions).toHaveBeenCalledTimes(requests);
+    } finally {
+      refreshRequest.resolve({ versions: [named] });
+      await act(async () => {
+        await Promise.resolve();
+        root.unmount();
+      });
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["Control modifier", { ctrlKey: true }, true, false],
+    ["Alt modifier", { altKey: true }, true, false],
+    ["Meta modifier", { metaKey: true }, true, false],
+    ["Shift modifier", { shiftKey: true }, true, false],
+    ["repeat", { repeat: true }, true, false],
+    ["composition", { isComposing: true }, true, false],
+    ["untrusted delivery", {}, false, false],
+    ["prior prevention", {}, true, true],
+  ] as const)(
+    "rejects %s and still accepts a distinct current event",
+    async (_label, init, trusted, preventFirst) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`toolbar-invalid-${_label}`),
+          onClose: vi.fn(),
+          onPreview: vi.fn(),
+          refreshKey: 0,
+        });
+        await screen.findByText(named.title!);
+        const refresh = versionsToolbarButtons(host).refresh;
+        refresh.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const invalid = createVersionsToolbarKey(
+          refresh,
+          "ArrowRight",
+          init,
+          trusted,
+        );
+        if (preventFirst) invalid.preventDefault();
+        preventDefault.mockClear();
+
+        await dispatchVersionsToolbarEvent(refresh, invalid, false);
+
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(refresh).toHaveFocus();
+
+        const current = versionsToolbarButtons(host).refresh;
+        current.focus();
+        focus.mockClear();
+        const accepted = await dispatchVersionsToolbarKey(
+          current,
+          "ArrowRight",
+          {},
+          false,
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(versionsToolbarButtons(host).close).toHaveFocus();
+        expect(focus).toHaveBeenCalledOnce();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects an owner-document lookalike at the path terminal and accepts a clean successor", async () => {
+    const lookalike: { document: Document; window: unknown } = {
+      document,
+      window: null,
+    };
+    lookalike.window = lookalike;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-owner-window-lookalike"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      let buttons = versionsToolbarButtons(host);
+      buttons.refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = versions.mock.calls.length;
+      pathTerminalEvent = createVersionsToolbarKey(
+        buttons.refresh,
+        "ArrowRight",
+      );
+      pathTerminalOverride = lookalike as unknown as EventTarget;
+
+      await dispatchVersionsToolbarEvent(
+        buttons.refresh,
+        pathTerminalEvent as KeyboardEvent,
+        false,
+      );
+
+      buttons = versionsToolbarButtons(host);
+      expect(pathTerminalEvent.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(buttons.refresh).toHaveFocus();
+      expect(buttons.refresh).toHaveAttribute("tabindex", "0");
+      expect(buttons.close).toHaveAttribute("tabindex", "-1");
+      expect(versions).toHaveBeenCalledTimes(requests);
+      expect(version).not.toHaveBeenCalled();
+      expect(renameVersion).not.toHaveBeenCalled();
+      expect(restoreVersion).not.toHaveBeenCalled();
+      expect(copyVersion).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+
+      pathTerminalEvent = null;
+      pathTerminalOverride = null;
+      const current = versionsToolbarButtons(host).refresh;
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(versions).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects crossed deliveries and recovers with a clean event", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-crossed-events"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const refresh = versionsToolbarButtons(host).refresh;
+      refresh.focus();
+      focus.mockClear();
+      const first = createVersionsToolbarKey(refresh, "ArrowRight");
+      const second = createVersionsToolbarKey(refresh, "ArrowRight");
+
+      await act(async () => {
+        refresh.dispatchEvent(first);
+        refresh.dispatchEvent(second);
+        await Promise.resolve();
+      });
+
+      expect(first.defaultPrevented).toBe(false);
+      expect(second.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(refresh).toHaveFocus();
+
+      const current = versionsToolbarButtons(host).refresh;
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves replayed and reentrant events inert after claiming navigation", async () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const nativeFocus = HTMLElement.prototype.focus;
+    let refresh: HTMLButtonElement | null = null;
+    let reentrant: KeyboardEvent | null = null;
+    let entered = false;
+    const preventDefault = vi
+      .spyOn(Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        nativePreventDefault.call(this);
+        if (!entered && refresh && reentrant) {
+          entered = true;
+          refresh.dispatchEvent(reentrant);
+        }
+      });
+    const focus = vi
+      .spyOn(HTMLElement.prototype, "focus")
+      .mockImplementation(function (
+        this: HTMLElement,
+        options?: FocusOptions,
+      ) {
+        nativeFocus.call(this, options);
+      });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-reentrant-replay"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      refresh = versionsToolbarButtons(host).refresh;
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      reentrant = createVersionsToolbarKey(refresh, "ArrowRight");
+      const accepted = createVersionsToolbarKey(refresh, "ArrowRight");
+
+      await dispatchVersionsToolbarEvent(refresh, accepted, false);
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(reentrant.defaultPrevented).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      const close = versionsToolbarButtons(host).close;
+      expect(close).toHaveFocus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      await dispatchVersionsToolbarEvent(close, accepted, false);
+
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(close).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects invalid delivery without work and accepts a clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-rejection-recovery"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      let refresh = versionsToolbarButtons(host).refresh;
+      outside.focus();
+      focus.mockClear();
+      const rejected = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      refresh = versionsToolbarButtons(host).refresh;
+      refresh.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(version).not.toHaveBeenCalled();
+      expect(renameVersion).not.toHaveBeenCalled();
+      expect(restoreVersion).not.toHaveBeenCalled();
+      expect(copyVersion).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      outside.remove();
+      host.remove();
+    }
+  });
+
+  it("retires a malformed React delivery and recovers with distinct handlers", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-react-recovery"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const initial = versionsToolbarButtons(host).refresh;
+      const stale = capturedProps(initial).onKeyDown;
+      interceptEvent(
+        initial,
+        "onKeyDown",
+        (original, event) => {
+          Object.defineProperty(event, "isDefaultPrevented", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: () => true,
+          });
+          original(event);
+        },
+      );
+      initial.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        initial,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = versionsToolbarButtons(host).refresh;
+      expect(capturedProps(recovered).onKeyDown).not.toBe(stale);
+      recovered.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        recovered,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects restored toolbar DOM and recovers through a clean render", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session("toolbar-dom-recovery"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      await screen.findByText(named.title!);
+      let refresh = versionsToolbarButtons(host).refresh;
+      const stale = capturedProps(refresh).onKeyDown;
+      refresh.setAttribute("data-tampered", "true");
+      refresh.removeAttribute("data-tampered");
+      refresh.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      await renderStrictVersions(root, props, "B");
+      refresh = versionsToolbarButtons(host).refresh;
+      expect(capturedProps(refresh).onKeyDown).not.toBe(stale);
+      refresh.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a detached and restored panel ancestor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session("toolbar-ancestor-recovery"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      await screen.findByText(named.title!);
+      let refresh = versionsToolbarButtons(host).refresh;
+      const parent = host.parentNode;
+      const nextSibling = host.nextSibling;
+      if (!parent) throw new Error("Version panel host was not attached");
+      host.remove();
+      parent.insertBefore(host, nextSibling);
+      refresh.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(refresh).toHaveFocus();
+
+      await renderStrictVersions(root, props, "B");
+      refresh = versionsToolbarButtons(host).refresh;
+      refresh.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects partial ref replay and accepts a complete replacement", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session("toolbar-partial-replay"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      await screen.findByText(named.title!);
+      let refresh = versionsToolbarButtons(host).refresh;
+      const stale = capturedProps(refresh).onKeyDown;
+      const ref = capturedProps(refresh).ref;
+      if (!ref) throw new Error("Refresh ref was not attached");
+      act(() => {
+        ref(null);
+        ref(refresh);
+      });
+      refresh.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      await renderStrictVersions(root, props, "B");
+      refresh = versionsToolbarButtons(host).refresh;
+      expect(capturedProps(refresh).onKeyDown).not.toBe(stale);
+      refresh.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("uses the toolbar owner realm when mounted in an iframe", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerWindow = frame.contentWindow! as Window & typeof globalThis;
+    const host = ownerWindow.document.createElement("div");
+    ownerWindow.document.body.append(host);
+    const root = createRoot(host);
+    const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+    normalizeVersionsToolbarOwnerWindowBoundary(ownerWindow);
+    const focus = vi
+      .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+      .mockImplementation(function (
+        this: HTMLElement,
+        options?: FocusOptions,
+      ) {
+        nativeFocus.call(this, options);
+      });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-owner-realm"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await waitFor(() =>
+        expect(within(host).getByText(named.title!)).toBeInTheDocument(),
+      );
+      const refresh = versionsToolbarButtons(host).refresh;
+      refresh.focus();
+      focus.mockClear();
+
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      frame.remove();
+    }
+  });
+
+  it("leaves retained keyboard handlers inert after cleanup", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await renderStrictVersions(root, {
+      session: session("toolbar-cleanup"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    });
+    await screen.findByText(named.title!);
+    const refresh = versionsToolbarButtons(host).refresh;
+    const stale = capturedProps(refresh).onKeyDown;
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    const nativeEvent = createVersionsToolbarKey(refresh, "ArrowRight");
+    const preventDefault = vi.fn();
+    focus.mockClear();
+
+    stale?.({
+      _reactName: "onKeyDown",
+      type: "keydown",
+      nativeEvent,
+      currentTarget: refresh,
+      target: refresh,
+      key: "ArrowRight",
+      preventDefault,
+    } as unknown as CapturedEvent<HTMLButtonElement>);
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    host.remove();
+  });
+
+  it("keeps Enter, Space, and native click activation separate from navigation", async () => {
+    const refreshRequest = deferred<{ versions: VersionSummary[] }>();
+    versions
+      .mockResolvedValueOnce({ versions: [named] })
+      .mockReturnValueOnce(refreshRequest.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-native-activation"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const { refresh, close } = versionsToolbarButtons(host);
+      refresh.focus();
+      const calls = versions.mock.calls.length;
+
+      const enter = await dispatchVersionsToolbarKey(
+        refresh,
+        "Enter",
+        {},
+        false,
+      );
+      const space = await dispatchVersionsToolbarKey(
+        refresh,
+        " ",
+        {},
+        false,
+      );
+      expect(enter.defaultPrevented).toBe(false);
+      expect(space.defaultPrevented).toBe(false);
+      expect(versions).toHaveBeenCalledTimes(calls);
+
+      act(() => refresh.click());
+      expect(versions).toHaveBeenCalledTimes(calls + 1);
+      act(() => close.click());
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(onPreview).toHaveBeenCalledExactlyOnceWith(null);
+    } finally {
+      refreshRequest.resolve({ versions: [named] });
+      await act(async () => {
+        await Promise.resolve();
+        root.unmount();
+      });
+      host.remove();
+    }
+  });
+});
+
+describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
+  const rowVersions: VersionSummary[] = [
+    { ...named, id: "ver-4", number: 4, title: "Row four", createdAt: "2026-09-02T10:00:00.000Z" },
+    { ...named, id: "ver-3", number: 3, title: "Row three", createdAt: "2026-09-02T09:00:00.000Z" },
+    { ...named, id: "ver-2", number: 2, title: "Row two", createdAt: "2026-09-01T10:00:00.000Z" },
+    { ...named, id: "ver-1", number: 1, title: "Row one", createdAt: "2026-09-01T09:00:00.000Z" },
+  ];
+
+  function expectNoVersionRowWork(
+    onClose: ReturnType<typeof vi.fn>,
+    onPreview: ReturnType<typeof vi.fn>,
+    requests: number,
+  ) {
+    expect(versions).toHaveBeenCalledTimes(requests);
+    expect(version).not.toHaveBeenCalled();
+    expect(renameVersion).not.toHaveBeenCalled();
+    expect(restoreVersion).not.toHaveBeenCalled();
+    expect(copyVersion).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+    expect(pendingNotice).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onPreview).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("version-restore")).toBeNull();
+    expect(screen.queryByTestId("version-rename-input")).toBeNull();
+    expect(screen.queryByTestId("compare-hint")).toBeNull();
+  }
+
+  beforeEach(() => {
+    versions.mockReset().mockResolvedValue({ versions: rowVersions });
+  });
+
+  it.each([
+    ["ArrowDown", 0, 1],
+    ["ArrowDown", 1, 2],
+    ["ArrowDown", 3, 0],
+    ["ArrowUp", 1, 0],
+    ["ArrowUp", 2, 1],
+    ["ArrowUp", 0, 3],
+    ["Home", 2, 0],
+    ["End", 1, 3],
+  ] as const)(
+    "moves %s from row %i to row %i with one prevention and one non-scrolling focus",
+    async (key, sourceIndex, destinationIndex) => {
+      const nativePreventDefault = Event.prototype.preventDefault;
+      const nativeFocus = HTMLElement.prototype.focus;
+      const order: string[] = [];
+      const preventDefault = vi
+        .spyOn(Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          order.push("prevent");
+          nativePreventDefault.call(this);
+        });
+      const focus = vi
+        .spyOn(HTMLElement.prototype, "focus")
+        .mockImplementation(function (
+          this: HTMLElement,
+          options?: FocusOptions,
+        ) {
+          order.push("focus");
+          nativeFocus.call(this, options);
+        });
+      const scrollIntoView = vi.fn();
+      const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        writable: true,
+        value: scrollIntoView,
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-${key}-${sourceIndex}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[sourceIndex];
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        order.length = 0;
+        const requests = versions.mock.calls.length;
+
+        const result = await dispatchVersionsToolbarKey(source, key, {}, false);
+
+        const rows = versionRowSelects(host);
+        const destination = rows[destinationIndex];
+        expect(result.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(destination);
+        expect(order).toEqual(["prevent", "focus"]);
+        expect(destination).toHaveFocus();
+        expect(rows[sourceIndex]).toBe(source);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        if (originalScrollIntoView) {
+          Object.defineProperty(
+            Element.prototype,
+            "scrollIntoView",
+            originalScrollIntoView,
+          );
+        } else {
+          delete (Element.prototype as { scrollIntoView?: unknown })
+            .scrollIntoView;
+        }
+      }
+    },
+  );
+
+  it("keeps one display order across day groups and moves over the boundary", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-day-groups"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const lists = [...host.querySelectorAll("ul")];
+      expect(lists).toHaveLength(2);
+      const grouped = lists.flatMap((list) => versionRowSelects(list));
+      expect(grouped).toEqual(versionRowSelects(host));
+      expect(grouped).toHaveLength(4);
+      expect(
+        lists[0].querySelectorAll('[data-testid="version-item"]'),
+      ).toHaveLength(2);
+      const requests = versions.mock.calls.length;
+      grouped[1].focus();
+      focus.mockClear();
+
+      const forward = await dispatchVersionsToolbarKey(
+        grouped[1],
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(forward.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[2]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      focus.mockClear();
+
+      const backward = await dispatchVersionsToolbarKey(
+        versionRowSelects(host)[2],
+        "ArrowUp",
+        {},
+        false,
+      );
+
+      expect(backward.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves the compare checkbox, action buttons, and rename input to native keys", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-native-controls"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      await act(async () => {
+        versionRowSelects(host)[0].click();
+        await Promise.resolve();
+      });
+      const item = within(host).getAllByTestId("version-item")[0];
+      const checkbox = within(item).getByTestId("version-compare");
+      const restore = within(item).getByTestId("version-restore");
+      const reads = version.mock.calls.length;
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const onCheckbox = await dispatchVersionsToolbarKey(
+        checkbox,
+        "ArrowDown",
+        {},
+        false,
+      );
+      restore.focus();
+      focus.mockClear();
+      const onRestore = await dispatchVersionsToolbarKey(
+        restore,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(onCheckbox.defaultPrevented).toBe(false);
+      expect(onRestore.defaultPrevented).toBe(false);
+      expect(checkbox).not.toBeChecked();
+      expect(restore).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const navigation = versionRowSelects(host)[0];
+      navigation.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const moved = await dispatchVersionsToolbarKey(
+        navigation,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(moved.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(preventDefault).toHaveBeenCalledOnce();
+
+      act(() => within(item).getByTestId("version-rename").click());
+      const input = within(item).getByTestId("version-rename-input");
+      input.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const onInput = await dispatchVersionsToolbarKey(
+        input,
+        "ArrowUp",
+        {},
+        false,
+      );
+
+      expect(onInput.defaultPrevented).toBe(false);
+      expect(input).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(version).toHaveBeenCalledTimes(reads);
+      expect(renameVersion).not.toHaveBeenCalled();
+      expect(restoreVersion).not.toHaveBeenCalled();
+      expect(copyVersion).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["Control modifier", { ctrlKey: true }, true, false],
+    ["Alt modifier", { altKey: true }, true, false],
+    ["Meta modifier", { metaKey: true }, true, false],
+    ["Shift modifier", { shiftKey: true }, true, false],
+    ["repeat", { repeat: true }, true, false],
+    ["composition", { isComposing: true }, true, false],
+    ["untrusted delivery", {}, false, false],
+    ["prior prevention", {}, true, true],
+  ] as const)(
+    "rejects %s without work and still accepts a distinct current event",
+    async (_label, init, trusted, preventFirst) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-invalid-${_label}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const requests = versions.mock.calls.length;
+        const invalid = createVersionsToolbarKey(
+          source,
+          "ArrowDown",
+          init,
+          trusted,
+        );
+        if (preventFirst) invalid.preventDefault();
+        preventDefault.mockClear();
+
+        await dispatchVersionsToolbarEvent(source, invalid, false);
+
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+
+        const current = versionRowSelects(host)[0];
+        current.focus();
+        focus.mockClear();
+        const accepted = await dispatchVersionsToolbarKey(
+          current,
+          "ArrowDown",
+          {},
+          false,
+        );
+
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledOnce();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects a delivery focused outside the row and accepts a clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-wrong-focus"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const requests = versions.mock.calls.length;
+      outside.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        versionRowSelects(host)[0],
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+
+      const current = versionRowSelects(host)[0];
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
+      outside.remove();
+      host.remove();
+    }
+  });
+
+  it("binds the real Window receiver and rejects a structural path terminal before clean recovery", async () => {
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Version rows had no owner window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: document },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    const listenerObservation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      originalPathTerminal?: EventTarget;
+    } = {};
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      listenerObservation.receiver = this;
+      listenerObservation.currentTarget = event.currentTarget;
+      listenerObservation.originalPathTerminal = event.composedPath().at(-1);
+      replaceVersionsJsdomPathTerminal(event, structural);
+    });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-window-receiver"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      ownerWindow.addEventListener("keydown", stageTerminal, {
+        capture: true,
+        once: true,
+      });
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = versions.mock.calls.length;
+
+      const rejected = await dispatchVersionsToolbarKey(
+        source,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(stageTerminal).toHaveBeenCalledOnce();
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.currentTarget,
+      );
+      expect(listenerObservation.receiver).toBe(
+        listenerObservation.originalPathTerminal,
+      );
+      expect(listenerObservation.receiver).not.toBe(structural);
+      expect(rejected.composedPath()).toEqual([]);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+
+      const current = versionRowSelects(host)[0];
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["present", "absent", "mutated"] as const)(
+    "ignores %s private React names while retaining public wrapper authority",
+    async (privateName) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      let observed = false;
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-private-react-name-${privateName}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        interceptEvent(source, "onKeyDown", (original, event) => {
+          const descriptor = Object.getOwnPropertyDescriptor(
+            event,
+            "_reactName",
+          );
+          expect(descriptor?.value).toBe("onKeyDown");
+          if (privateName === "absent") {
+            expect(Reflect.deleteProperty(event, "_reactName")).toBe(true);
+            expect(
+              Object.getOwnPropertyDescriptor(event, "_reactName"),
+            ).toBeUndefined();
+          } else if (privateName === "mutated") {
+            expect(Reflect.set(event, "_reactName", "private-lookalike")).toBe(
+              true,
+            );
+            expect(
+              Object.getOwnPropertyDescriptor(event, "_reactName")?.value,
+            ).toBe("private-lookalike");
+          }
+          observed = true;
+          original(event);
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const requests = versions.mock.calls.length;
+
+        const accepted = await dispatchVersionsToolbarKey(
+          source,
+          "ArrowDown",
+          {},
+          false,
+        );
+
+        expect(observed).toBe(true);
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects crossed row deliveries and recovers with a clean event", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-crossed-events"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      source.focus();
+      focus.mockClear();
+      const first = createVersionsToolbarKey(source, "ArrowDown");
+      const second = createVersionsToolbarKey(source, "ArrowDown");
+
+      await act(async () => {
+        source.dispatchEvent(first);
+        source.dispatchEvent(second);
+        await Promise.resolve();
+      });
+
+      expect(first.defaultPrevented).toBe(false);
+      expect(second.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      const current = versionRowSelects(host)[0];
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects restored row DOM and recovers through a clean render", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const props = {
+      session: session("rows-dom-recovery"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    };
+
+    try {
+      await renderStrictVersions(root, props, "A");
+      await screen.findByText("Row four");
+      let source = versionRowSelects(host)[0];
+      const stale = capturedProps(source).onKeyDown;
+      source.setAttribute("data-tampered", "true");
+      source.removeAttribute("data-tampered");
+      source.focus();
+      focus.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        source,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      await renderStrictVersions(root, props, "B");
+      await screen.findByText("Row four");
+      source = versionRowSelects(host)[0];
+      expect(capturedProps(source).onKeyDown).not.toBe(stale);
+      source.focus();
+      focus.mockClear();
+
+      const accepted = await dispatchVersionsToolbarKey(
+        source,
+        "ArrowDown",
+        {},
+        false,
+      );
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves a replayed event inert after claiming row navigation", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-replay"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = createVersionsToolbarKey(source, "ArrowDown");
+
+      await dispatchVersionsToolbarEvent(source, accepted, false);
+
+      expect(accepted.defaultPrevented).toBe(true);
+      const destination = versionRowSelects(host)[1];
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      await dispatchVersionsToolbarEvent(destination, accepted, false);
+
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(destination).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves retained row keyboard handlers inert after cleanup", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await renderStrictVersions(root, {
+      session: session("rows-cleanup"),
+      onClose: vi.fn(),
+      onPreview: vi.fn(),
+      refreshKey: 0,
+    });
+    await screen.findByText("Row four");
+    const source = versionRowSelects(host)[0];
+    const stale = capturedProps(source).onKeyDown;
+    await act(async () => {
+      root.unmount();
+      await Promise.resolve();
+    });
+    const nativeEvent = createVersionsToolbarKey(source, "ArrowDown");
+    const preventDefault = vi.fn();
+    focus.mockClear();
+
+    stale?.({
+      _reactName: "onKeyDown",
+      type: "keydown",
+      nativeEvent,
+      currentTarget: source,
+      target: source,
+      key: "ArrowDown",
+      preventDefault,
+    } as unknown as CapturedEvent<HTMLButtonElement>);
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    host.remove();
   });
 });
 

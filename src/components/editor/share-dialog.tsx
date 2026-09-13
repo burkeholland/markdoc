@@ -11,6 +11,7 @@ import {
   useState,
   type ChangeEvent as ReactChangeEvent,
   type FormEvent as ReactFormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
@@ -213,6 +214,10 @@ interface SharePresentationRuntime {
   agentCard: HTMLElement | null;
   agentToggle: HTMLButtonElement | null;
   agentPanel: HTMLDivElement | null;
+  agentDirectionalIntrinsics: ShareDirectionalEventIntrinsics | null;
+  agentDirectionalStage: ShareDirectionalNativeStage | null;
+  agentDirectionalPair: ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction> | null;
+  removeAgentDirectionalCapture: (() => void) | null;
   controlBindings: Set<ShareControlElementRole>;
   footer: HTMLDivElement | null;
   done: HTMLButtonElement | null;
@@ -236,6 +241,182 @@ interface SharePresentationLineage {
 type ShareCloseProvenance =
   | { readonly kind: "escape"; readonly event: KeyboardEvent }
   | { readonly kind: "outside" | "close-button"; readonly event: MouseEvent };
+
+interface ShareDirectionalTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface ShareDirectionalEventIntrinsics {
+  readonly keyboardPrototype: object;
+  readonly objectPrototype: object;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly trusted: ShareDirectionalTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: KeyboardEvent) => string;
+    code: (this: KeyboardEvent) => string;
+    location: (this: KeyboardEvent) => number;
+    altKey: (this: KeyboardEvent) => boolean;
+    ctrlKey: (this: KeyboardEvent) => boolean;
+    metaKey: (this: KeyboardEvent) => boolean;
+    shiftKey: (this: KeyboardEvent) => boolean;
+    repeat: (this: KeyboardEvent) => boolean;
+    isComposing: (this: KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+}
+
+interface ShareDirectionalNativeSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+type ShareDirectionalReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
+  readonly isComposing?: unknown;
+  readonly isPersistent?: unknown;
+};
+
+type ShareDirectionalReactMethodName =
+  | "preventDefault"
+  | "stopPropagation"
+  | "isDefaultPrevented"
+  | "isPropagationStopped"
+  | "persist"
+  | "isPersistent";
+
+const SHARE_DIRECTIONAL_REACT_METHOD_NAMES = Object.freeze([
+  "preventDefault",
+  "stopPropagation",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+  "persist",
+  "isPersistent",
+] satisfies ShareDirectionalReactMethodName[]);
+
+interface ShareDirectionalReactMethodSnapshot {
+  readonly owner: object;
+  readonly descriptor: Readonly<PropertyDescriptor>;
+  readonly method: (...args: never[]) => unknown;
+}
+
+interface ShareDirectionalReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLButtonElement>;
+  readonly prototype: object;
+  readonly nativeEvent: Event;
+  readonly target: EventTarget;
+  readonly currentTarget: HTMLButtonElement;
+  readonly eventPhase: number;
+  readonly methods: Readonly<Record<
+    ShareDirectionalReactMethodName,
+    ShareDirectionalReactMethodSnapshot
+  >>;
+}
+
+interface ShareDirectionalNativeStage {
+  readonly nativeEvent: Event;
+  readonly receiver: EventTarget;
+  readonly snapshot: ShareDirectionalNativeSnapshot;
+}
+
+interface ShareDirectionalPair<Publication extends object, Action extends object> {
+  readonly publication: Publication;
+  readonly action: Action;
+  readonly nativeEvent: Event;
+  readonly stage: ShareDirectionalNativeStage;
+  readonly capture: ShareDirectionalReactSnapshot;
+}
+
+interface ShareAgentDirectionalAction {
+  readonly presentation: SharePresentation;
+  readonly visit: ShareVisit;
+  readonly documentId: string;
+  readonly origin: string;
+  readonly expanded: boolean;
+  readonly nextExpanded: boolean;
+  readonly card: HTMLElement;
+  readonly control: HTMLButtonElement;
+  readonly panel: HTMLDivElement;
+}
+
+interface LocalAgentDirectionalAction {
+  readonly publication: LocalAgentCardPublication;
+  readonly render: LocalAgentCardRender;
+  readonly expanded: boolean;
+  readonly nextExpanded: boolean;
+  readonly card: HTMLElement;
+  readonly control: HTMLButtonElement;
+  readonly panel: HTMLDivElement;
+}
+
+interface LocalAgentCardRender {
+  readonly mount: symbol;
+  readonly origin: string;
+  readonly open: boolean;
+  readonly docId: string;
+  readonly onClose: (() => void) | undefined;
+  readonly expanded: boolean;
+  readonly panelId: string;
+}
+
+interface LocalAgentCardPublication {
+  readonly render: LocalAgentCardRender;
+  readonly card: HTMLElement;
+  readonly control: HTMLButtonElement;
+  readonly panel: HTMLDivElement;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly placement: SharePlacementChain;
+  readonly intrinsics: ShareDirectionalEventIntrinsics;
+  directionalStage: ShareDirectionalNativeStage | null;
+  directionalPair: ShareDirectionalPair<
+    LocalAgentCardPublication,
+    LocalAgentDirectionalAction
+  > | null;
+  removeDirectionalCapture: (() => void) | null;
+  observer: MutationObserver | null;
+  placementObserver: MutationObserver | null;
+  active: boolean;
+  claimed: boolean;
+  mutated: boolean;
+  placementMutated: boolean;
+}
 
 interface ShareLiveFacts {
   open: boolean;
@@ -619,6 +800,596 @@ function isExactTraversedNativeClick(
   }
 }
 
+function shareDirectionalGetter<This extends object, Value>(
+  prototype: object,
+  property: string,
+): ((this: This) => Value) | null {
+  const getter = Object.getOwnPropertyDescriptor(prototype, property)?.get;
+  return typeof getter === "function" ? getter as (this: This) => Value : null;
+}
+
+function shareDirectionalDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+): boolean {
+  return Boolean(
+    current &&
+    current.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.get === expected.get &&
+    current.set === expected.set &&
+    current.value === expected.value &&
+    current.writable === expected.writable
+  );
+}
+
+function captureShareDirectionalTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): ShareDirectionalTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("share-agent-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    shareDirectionalDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureShareDirectionalIntrinsics(
+  ownerWindow: Window & typeof globalThis,
+): ShareDirectionalEventIntrinsics | null {
+  const objectConstructor = ownerWindow.Object;
+  const objectPrototype = objectConstructor.prototype;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const getPrototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiEventPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const trusted = captureShareDirectionalTrustedAuthority(ownerWindow);
+  const type = shareDirectionalGetter<Event, string>(eventPrototype, "type");
+  const target = shareDirectionalGetter<Event, EventTarget | null>(eventPrototype, "target");
+  const currentTarget = shareDirectionalGetter<Event, EventTarget | null>(eventPrototype, "currentTarget");
+  const eventPhase = shareDirectionalGetter<Event, number>(eventPrototype, "eventPhase");
+  const bubbles = shareDirectionalGetter<Event, boolean>(eventPrototype, "bubbles");
+  const cancelable = shareDirectionalGetter<Event, boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = shareDirectionalGetter<Event, boolean>(eventPrototype, "defaultPrevented");
+  const cancelBubble = shareDirectionalGetter<Event, boolean>(eventPrototype, "cancelBubble");
+  const key = shareDirectionalGetter<KeyboardEvent, string>(keyboardPrototype, "key");
+  const code = shareDirectionalGetter<KeyboardEvent, string>(keyboardPrototype, "code");
+  const location = shareDirectionalGetter<KeyboardEvent, number>(keyboardPrototype, "location");
+  const altKey = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "shiftKey");
+  const repeat = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "repeat");
+  const isComposing = shareDirectionalGetter<KeyboardEvent, boolean>(keyboardPrototype, "isComposing");
+  const view = shareDirectionalGetter<UIEvent, Window | null>(uiEventPrototype, "view");
+  const activeElement = shareDirectionalGetter<Document, Element | null>(documentPrototype, "activeElement");
+  const composedPath = eventPrototype.composedPath;
+  const preventDefault = eventPrototype.preventDefault;
+  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    typeof composedPath !== "function" ||
+    typeof preventDefault !== "function" ||
+    typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    keyboardPrototype,
+    objectPrototype,
+    capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    isPrototypeOf,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+  });
+}
+
+function readShareDirectionalNativeEvent(
+  event: Event,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): ShareDirectionalNativeSnapshot | null {
+  try {
+    if (
+      !intrinsics.apply(
+        intrinsics.isPrototypeOf,
+        intrinsics.keyboardPrototype,
+        [event],
+      ) ||
+      !intrinsics.trusted.isCurrent() ||
+      !intrinsics.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: intrinsics.apply(intrinsics.event.type, event, []),
+      target: intrinsics.apply(intrinsics.event.target, event, []),
+      currentTarget: intrinsics.apply(intrinsics.event.currentTarget, event, []),
+      eventPhase: intrinsics.apply(intrinsics.event.eventPhase, event, []),
+      bubbles: intrinsics.apply(intrinsics.event.bubbles, event, []),
+      cancelable: intrinsics.apply(intrinsics.event.cancelable, event, []),
+      defaultPrevented: intrinsics.apply(intrinsics.event.defaultPrevented, event, []),
+      cancelBubble: intrinsics.apply(intrinsics.event.cancelBubble, event, []),
+      path: Object.freeze(intrinsics.apply(intrinsics.event.composedPath, event, [])),
+      key: intrinsics.apply(intrinsics.keyboard.key, event, []),
+      code: intrinsics.apply(intrinsics.keyboard.code, event, []),
+      location: intrinsics.apply(intrinsics.keyboard.location, event, []),
+      altKey: intrinsics.apply(intrinsics.keyboard.altKey, event, []),
+      ctrlKey: intrinsics.apply(intrinsics.keyboard.ctrlKey, event, []),
+      metaKey: intrinsics.apply(intrinsics.keyboard.metaKey, event, []),
+      shiftKey: intrinsics.apply(intrinsics.keyboard.shiftKey, event, []),
+      repeat: intrinsics.apply(intrinsics.keyboard.repeat, event, []),
+      isComposing: intrinsics.apply(intrinsics.keyboard.isComposing, event, []),
+      isTrusted: intrinsics.trusted.read(event),
+      view: intrinsics.apply(intrinsics.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function shareDirectionalPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+): boolean {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal
+  );
+}
+
+function shareDirectionalDestination(key: string, expanded: boolean): boolean | null {
+  if (key === "ArrowRight" && !expanded) return true;
+  if (key === "ArrowLeft" && expanded) return false;
+  return null;
+}
+
+function captureShareDirectionalReactMethod(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  name: ShareDirectionalReactMethodName,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): ShareDirectionalReactMethodSnapshot | null {
+  let owner: object | null = event;
+  for (let depth = 0; owner && depth < 16; depth++) {
+    const descriptor = intrinsics.getOwnPropertyDescriptor(owner, name);
+    if (descriptor) {
+      if (
+        typeof descriptor.value !== "function" ||
+        descriptor.get !== undefined ||
+        descriptor.set !== undefined
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        owner,
+        descriptor: Object.freeze({ ...descriptor }),
+        method: descriptor.value as (...args: never[]) => unknown,
+      });
+    }
+    owner = intrinsics.getPrototypeOf(owner);
+  }
+  return null;
+}
+
+function shareDirectionalReactMethodsAreCurrent(
+  snapshot: ShareDirectionalReactSnapshot,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): boolean {
+  return SHARE_DIRECTIONAL_REACT_METHOD_NAMES
+    .every((name) =>
+      shareDirectionalDescriptorsMatch(
+        intrinsics.getOwnPropertyDescriptor(snapshot.methods[name].owner, name),
+        snapshot.methods[name].descriptor,
+      )
+    );
+}
+
+function shareDirectionalReactMethodsMatch(
+  capture: ShareDirectionalReactSnapshot,
+  bubble: ShareDirectionalReactSnapshot,
+): boolean {
+  return SHARE_DIRECTIONAL_REACT_METHOD_NAMES
+    .every((name) => {
+      const captureMethod = capture.methods[name];
+      const bubbleMethod = bubble.methods[name];
+      const captureIsOwn = captureMethod.owner === capture.event;
+      const bubbleIsOwn = bubbleMethod.owner === bubble.event;
+      return (
+        captureMethod.method === bubbleMethod.method &&
+        captureIsOwn === bubbleIsOwn &&
+        (captureIsOwn || captureMethod.owner === bubbleMethod.owner) &&
+        shareDirectionalDescriptorsMatch(
+          bubbleMethod.descriptor,
+          captureMethod.descriptor,
+        )
+      );
+    });
+}
+
+function captureShareDirectionalReactEvent(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  nativeEvent: Event,
+  snapshot: ShareDirectionalNativeSnapshot,
+  control: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+  intrinsics: ShareDirectionalEventIntrinsics,
+  expectedPhase: number,
+): ShareDirectionalReactSnapshot | null {
+  try {
+    const proof = event as ShareDirectionalReactEvent;
+    const reactPrototype = intrinsics.getPrototypeOf(event);
+    const preventDefault = captureShareDirectionalReactMethod(
+      event,
+      "preventDefault",
+      intrinsics,
+    );
+    const stopPropagation = captureShareDirectionalReactMethod(
+      event,
+      "stopPropagation",
+      intrinsics,
+    );
+    const isDefaultPrevented = captureShareDirectionalReactMethod(
+      event,
+      "isDefaultPrevented",
+      intrinsics,
+    );
+    const isPropagationStopped = captureShareDirectionalReactMethod(
+      event,
+      "isPropagationStopped",
+      intrinsics,
+    );
+    const persist = captureShareDirectionalReactMethod(event, "persist", intrinsics);
+    const isPersistent = captureShareDirectionalReactMethod(
+      event,
+      "isPersistent",
+      intrinsics,
+    );
+    if (
+      !reactPrototype ||
+      !preventDefault ||
+      !stopPropagation ||
+      !isDefaultPrevented ||
+      !isPropagationStopped ||
+      !persist ||
+      !isPersistent
+    ) {
+      return null;
+    }
+    const methods = Object.freeze({
+      preventDefault,
+      stopPropagation,
+      isDefaultPrevented,
+      isPropagationStopped,
+      persist,
+      isPersistent,
+    });
+    const reactSnapshot: ShareDirectionalReactSnapshot = Object.freeze({
+      event,
+      prototype: reactPrototype,
+      nativeEvent,
+      target: event.target,
+      currentTarget: event.currentTarget,
+      eventPhase: event.eventPhase,
+      methods,
+    });
+    if (
+      reactPrototype &&
+      reactPrototype !== intrinsics.objectPrototype &&
+      event.type === snapshot.type &&
+      event.type === "keydown" &&
+      event.nativeEvent === nativeEvent &&
+      event.currentTarget === control &&
+      event.target === control &&
+      event.eventPhase === snapshot.eventPhase &&
+      event.eventPhase === expectedPhase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      !event.defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      Object.is(event.view, snapshot.view) &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.altKey === snapshot.altKey &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      (proof.isComposing === undefined ||
+        proof.isComposing === snapshot.isComposing) &&
+      isDefaultPrevented.owner === event &&
+      isPropagationStopped.owner === event &&
+      preventDefault.owner !== event &&
+      stopPropagation.owner !== event &&
+      persist.owner !== event &&
+      isPersistent.owner !== event &&
+      intrinsics.apply(isDefaultPrevented.method, event, []) === false &&
+      intrinsics.apply(isPropagationStopped.method, event, []) === false &&
+      intrinsics.apply(isPersistent.method, event, []) === true &&
+      snapshot.type === "keydown" &&
+      snapshot.target === control &&
+      snapshot.currentTarget !== null &&
+      snapshot.eventPhase === expectedPhase &&
+      snapshot.bubbles &&
+      snapshot.cancelable &&
+      !snapshot.defaultPrevented &&
+      !snapshot.cancelBubble &&
+      snapshot.isTrusted &&
+      !snapshot.altKey &&
+      !snapshot.ctrlKey &&
+      !snapshot.metaKey &&
+      !snapshot.shiftKey &&
+      !snapshot.repeat &&
+      !snapshot.isComposing &&
+      (snapshot.view === null || snapshot.view === ownerWindow) &&
+      snapshot.path.includes(snapshot.currentTarget) &&
+      snapshot.path.at(-1) !== undefined &&
+      shareDirectionalPathMatches(
+        snapshot.path,
+        control,
+        ownerDocument,
+        snapshot.path.at(-1)!,
+      ) &&
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) === control &&
+      shareDirectionalReactMethodsAreCurrent(reactSnapshot, intrinsics)
+    ) {
+      return reactSnapshot;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function shareDirectionalNativeSnapshotsMatch(
+  first: ShareDirectionalNativeSnapshot,
+  second: ShareDirectionalNativeSnapshot,
+): boolean {
+  return (
+    first.type === second.type &&
+    first.target === second.target &&
+    first.bubbles === second.bubbles &&
+    first.cancelable === second.cancelable &&
+    first.defaultPrevented === second.defaultPrevented &&
+    first.cancelBubble === second.cancelBubble &&
+    first.key === second.key &&
+    first.code === second.code &&
+    first.location === second.location &&
+    first.altKey === second.altKey &&
+    first.ctrlKey === second.ctrlKey &&
+    first.metaKey === second.metaKey &&
+    first.shiftKey === second.shiftKey &&
+    first.repeat === second.repeat &&
+    first.isComposing === second.isComposing &&
+    first.isTrusted === second.isTrusted &&
+    first.view === second.view &&
+    first.path.length === second.path.length &&
+    first.path.every((entry, index) => entry === second.path[index])
+  );
+}
+
+function captureShareDirectionalNativeStage(
+  nativeEvent: Event,
+  receiver: EventTarget,
+  snapshot: ShareDirectionalNativeSnapshot,
+  control: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): ShareDirectionalNativeStage | null {
+  const terminal = snapshot.path.at(-1);
+  return (
+    terminal !== undefined &&
+    ownerDocument.defaultView === ownerWindow &&
+    receiver === snapshot.currentTarget &&
+    terminal === receiver &&
+    snapshot.eventPhase === intrinsics.capturingPhase &&
+    snapshot.target === control &&
+    shareDirectionalPathMatches(
+      snapshot.path,
+      control,
+      ownerDocument,
+      terminal,
+    )
+  )
+    ? Object.freeze({ nativeEvent, receiver, snapshot })
+    : null;
+}
+
+function shareDirectionalStageMatches(
+  stage: ShareDirectionalNativeStage,
+  nativeEvent: Event,
+  snapshot: ShareDirectionalNativeSnapshot,
+  control: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): boolean {
+  const terminal = stage.snapshot.path.at(-1);
+  return (
+    terminal !== undefined &&
+    stage.nativeEvent === nativeEvent &&
+    ownerDocument.defaultView === ownerWindow &&
+    stage.receiver === stage.snapshot.currentTarget &&
+    terminal === stage.receiver &&
+    stage.snapshot.eventPhase === intrinsics.capturingPhase &&
+    stage.snapshot.target === control &&
+    shareDirectionalPathMatches(
+      stage.snapshot.path,
+      control,
+      ownerDocument,
+      terminal,
+    ) &&
+    snapshot.path.at(-1) === terminal &&
+    shareDirectionalNativeSnapshotsMatch(stage.snapshot, snapshot)
+  );
+}
+
+function installShareDirectionalNativeCapture<
+  Publication extends object,
+  Action extends object,
+>(
+  control: HTMLButtonElement,
+  intrinsics: ShareDirectionalEventIntrinsics,
+  eligible: () => boolean,
+  getStage: () => ShareDirectionalNativeStage | null,
+  setStage: (stage: ShareDirectionalNativeStage | null) => void,
+  getPair: () => ShareDirectionalPair<Publication, Action> | null,
+  pairIsClaimed: (
+    pair: ShareDirectionalPair<Publication, Action>,
+  ) => boolean,
+): (() => void) | null {
+  const ownerDocument = control.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return null;
+  const ownerRealm = ownerWindow;
+  function rememberAgentDirectionalNative(
+    this: EventTarget,
+    nativeEvent: Event,
+  ) {
+    const existingPair = getPair();
+    if (existingPair && pairIsClaimed(existingPair)) return;
+    setStage(null);
+    if (!eligible()) return;
+    const snapshot = readShareDirectionalNativeEvent(nativeEvent, intrinsics);
+    const stage = snapshot
+      ? captureShareDirectionalNativeStage(
+          nativeEvent,
+          this,
+          snapshot,
+          control,
+          ownerDocument,
+          ownerRealm,
+          intrinsics,
+        )
+      : null;
+    if (!stage || !eligible()) return;
+    setStage(stage);
+    ownerRealm.queueMicrotask(() => {
+      if (getStage() === stage && getPair()?.stage !== stage) setStage(null);
+    });
+  }
+  try {
+    ownerRealm.addEventListener(
+      "keydown",
+      rememberAgentDirectionalNative,
+      true,
+    );
+  } catch {
+    return null;
+  }
+  return () => {
+    ownerRealm.removeEventListener(
+      "keydown",
+      rememberAgentDirectionalNative,
+      true,
+    );
+  };
+}
+
+function preventShareDirectionalEvent(
+  nativeEvent: Event,
+  intrinsics: ShareDirectionalEventIntrinsics,
+): boolean {
+  try {
+    intrinsics.apply(intrinsics.event.preventDefault, nativeEvent, []);
+    return intrinsics.apply(
+      intrinsics.event.defaultPrevented,
+      nativeEvent,
+      [],
+    );
+  } catch {
+    return false;
+  }
+}
+
 function snapshotSharePlacement(node: Node, ownerDocument: Document): SharePlacementChain | null {
   const placements: SharePlacement[] = [];
   let current: Node | null = node;
@@ -690,6 +1461,139 @@ function mutationTouchesSharePlacement(
       (changed.nodeType === 1 && (changed as Element).contains(node))
     );
   });
+}
+
+function localAgentCardDomIsExact(
+  publication: LocalAgentCardPublication,
+): boolean {
+  const {
+    render,
+    card,
+    control,
+    panel,
+    ownerDocument,
+    ownerWindow,
+  } = publication;
+  const leadingIcon = control.children.item(0);
+  const labels = control.children.item(1);
+  const chevron = control.children.item(2);
+  return (
+    card instanceof ownerWindow.HTMLElement &&
+    card.isConnected &&
+    card.ownerDocument === ownerDocument &&
+    card.getRootNode() === ownerDocument &&
+    card.localName === "section" &&
+    card.className === AGENT_CARD_CLASS &&
+    card.getAttribute("aria-label") === "Collaborate with an agent" &&
+    card.getAttribute("data-testid") === "share-agent-card" &&
+    card.children.length === 2 &&
+    control instanceof ownerWindow.HTMLButtonElement &&
+    card.firstElementChild === control &&
+    control.type === "button" &&
+    !control.disabled &&
+    control.className === AGENT_TOGGLE_CLASS &&
+    control.getAttribute("aria-expanded") === String(render.expanded) &&
+    control.getAttribute("aria-controls") === render.panelId &&
+    control.getAttribute("data-testid") === "share-agent-toggle" &&
+    control.children.length === 3 &&
+    leadingIcon?.localName === "span" &&
+    leadingIcon.className ===
+      "flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 dark:bg-violet-900/60 dark:text-violet-300" &&
+    leadingIcon.children.length === 1 &&
+    leadingIcon.firstElementChild?.getAttribute("class") === "lucide lucide-bot" &&
+    leadingIcon.firstElementChild?.getAttribute("width") === "15" &&
+    leadingIcon.firstElementChild?.getAttribute("height") === "15" &&
+    leadingIcon.firstElementChild?.getAttribute("aria-hidden") === "true" &&
+    labels?.localName === "span" &&
+    labels.className === "min-w-0 flex-1" &&
+    labels.children.length === 2 &&
+    labels.children.item(0)?.className === "block text-sm font-medium text-ink" &&
+    labels.children.item(0)?.textContent === "Collaborate with an agent" &&
+    labels.children.item(1)?.className === "block truncate text-xs text-ink-3" &&
+    labels.children.item(1)?.textContent ===
+      "Connect Copilot CLI or any MCP client as a collaborator" &&
+    chevron?.localName === "svg" &&
+    chevron.getAttribute("class") === cn(
+      "lucide lucide-chevron-down shrink-0 text-ink-3 transition-transform",
+      render.expanded && "rotate-180",
+    ) &&
+    chevron.getAttribute("width") === "16" &&
+    chevron.getAttribute("height") === "16" &&
+    chevron.getAttribute("aria-hidden") === "true" &&
+    panel instanceof ownerWindow.HTMLDivElement &&
+    card.children.item(1) === panel &&
+    panel.id === render.panelId &&
+    panel.hidden === !render.expanded &&
+    panel.className === AGENT_PANEL_CLASS &&
+    panel.children.length === (render.expanded ? 1 : 0) &&
+    (
+      !render.expanded ||
+      panel.firstElementChild?.getAttribute("data-testid") === "token-manager"
+    )
+  );
+}
+
+function mutationTouchesLocalAgentCard(
+  publication: LocalAgentCardPublication,
+  record: MutationRecord,
+): boolean {
+  const { card, control, panel } = publication;
+  const target = record.target;
+  if (
+    target === card ||
+    target === control ||
+    control.contains(target) ||
+    target === panel
+  ) {
+    return true;
+  }
+  if (record.type !== "childList") return false;
+  return [...record.addedNodes, ...record.removedNodes].some((node) =>
+    node === card ||
+    node === control ||
+    node === panel ||
+    (
+      node.nodeType === 1 &&
+      (
+        (node as Element).contains(card) ||
+        (node as Element).contains(control) ||
+        (node as Element).contains(panel)
+      )
+    )
+  );
+}
+
+function drainLocalAgentCardMutations(
+  publication: LocalAgentCardPublication,
+): boolean {
+  const records = publication.observer?.takeRecords() ?? [];
+  const placementRecords = publication.placementObserver?.takeRecords() ?? [];
+  if (
+    records.some((record) => mutationTouchesLocalAgentCard(publication, record))
+  ) {
+    publication.mutated = true;
+  }
+  if (
+    placementRecords.some((record) =>
+      mutationTouchesSharePlacement(publication.placement, record))
+  ) {
+    publication.placementMutated = true;
+  }
+  return !publication.mutated && !publication.placementMutated;
+}
+
+function retireLocalAgentCardPublication(
+  publication: LocalAgentCardPublication,
+) {
+  publication.active = false;
+  publication.directionalStage = null;
+  publication.directionalPair = null;
+  publication.removeDirectionalCapture?.();
+  publication.removeDirectionalCapture = null;
+  publication.observer?.disconnect();
+  publication.observer = null;
+  publication.placementObserver?.disconnect();
+  publication.placementObserver = null;
 }
 
 function isExactNativeChange(event: ReactChangeEvent<HTMLSelectElement>, control: HTMLSelectElement): boolean {
@@ -924,7 +1828,13 @@ function mutationTouchesPresentation(runtime: SharePresentationRuntime, record: 
     return false;
   }
   if (runtime.loginControl?.contains(target) || runtime.agent?.contains(target)) {
-    return record.type === "attributes" && (target === runtime.loginControl || target === runtime.agent);
+    return record.type === "attributes" && (
+      target === runtime.loginControl ||
+      target === runtime.agent ||
+      target === runtime.agentCard ||
+      target === runtime.agentToggle ||
+      target === runtime.agentPanel
+    );
   }
   return ownedElements.some(
     (element) =>
@@ -1056,6 +1966,7 @@ export const ShareDialog = memo(function ShareDialog({
   const claimedControlActionsRef = useRef(new WeakSet<object>());
   const claimedControlEventsRef = useRef(new WeakSet<object>());
   const claimedNativeControlEventsRef = useRef(new WeakSet<Event>());
+  const claimedDirectionalPairsRef = useRef(new WeakSet<object>());
   const claimedControlElementsRef = useRef(new WeakMap<HTMLButtonElement, object>());
   const selectedFallbacksRef = useRef(new WeakSet<ShareCopyFallback>());
   const [copyFeedback, setCopyFeedback] = useState<ShareCopyFeedback | null>(null);
@@ -1538,6 +2449,10 @@ export const ShareDialog = memo(function ShareDialog({
         agentCard: null,
         agentToggle: null,
         agentPanel: null,
+        agentDirectionalIntrinsics: null,
+        agentDirectionalStage: null,
+        agentDirectionalPair: null,
+        removeAgentDirectionalCapture: null,
         controlBindings: new Set(),
         footer: null,
         done: null,
@@ -1629,6 +2544,10 @@ export const ShareDialog = memo(function ShareDialog({
     if (runtime && !runtime.retired) {
       runtime.active = false;
       runtime.retired = true;
+      runtime.agentDirectionalStage = null;
+      runtime.agentDirectionalPair = null;
+      runtime.removeAgentDirectionalCapture?.();
+      runtime.removeAgentDirectionalCapture = null;
       clearShareCloseProvenance(runtime);
       runtime.removeCloseCapture?.();
       runtime.removeCloseCapture = null;
@@ -1682,6 +2601,7 @@ export const ShareDialog = memo(function ShareDialog({
         | "overlay"
         | "portalParent"
         | "close"
+        | "agentDirectionalIntrinsics"
         | "loginControl"
         | "login"
         | "rows"
@@ -2659,6 +3579,240 @@ export const ShareDialog = memo(function ShareDialog({
       : null;
   };
 
+  const publishAgentDirectionalKey = (
+    source: SharePresentation,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const candidate = currentPresentation(source);
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const card = runtime?.agentCard;
+    const control = runtime?.agentToggle;
+    const panel = runtime?.agentPanel;
+    const intrinsics = runtime?.agentDirectionalIntrinsics;
+    const stage = runtime?.agentDirectionalStage;
+    const visit = candidate.visit;
+    const nativeEvent = event?.nativeEvent;
+    const snapshot = intrinsics && nativeEvent
+      ? readShareDirectionalNativeEvent(nativeEvent, intrinsics)
+      : null;
+    const nextExpanded = snapshot
+      ? shareDirectionalDestination(snapshot.key, candidate.agentExpanded)
+      : null;
+    if (
+      !runtime ||
+      !card ||
+      !control ||
+      !panel ||
+      !intrinsics ||
+      !stage ||
+      !visit ||
+      !snapshot ||
+      nextExpanded === null ||
+      runtime.agentDirectionalPair !== null ||
+      runtime.claims.has("agent-directional") ||
+      control !== event.currentTarget ||
+      card.ownerDocument !== control.ownerDocument ||
+      panel.ownerDocument !== control.ownerDocument ||
+      candidate.sourceAgentExpansion !== agentExpansion
+    ) {
+      return null;
+    }
+    const ownerDocument = control.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !== control
+    ) {
+      return;
+    }
+    const action = Object.freeze<ShareAgentDirectionalAction>({
+      presentation: candidate,
+      visit,
+      documentId: candidate.document.id,
+      origin: candidate.origin,
+      expanded: candidate.agentExpanded,
+      nextExpanded,
+      card,
+      control,
+      panel,
+    });
+    const capture = captureShareDirectionalReactEvent(
+      event,
+      nativeEvent,
+      snapshot,
+      control,
+      ownerDocument,
+      ownerWindow,
+      intrinsics,
+      intrinsics.capturingPhase,
+    );
+    if (
+      !Object.isFrozen(action) ||
+      claimedControlActionsRef.current.has(action) ||
+      claimedControlEventsRef.current.has(event) ||
+      claimedNativeControlEventsRef.current.has(nativeEvent) ||
+      claimedControlElementsRef.current.get(control) === action ||
+      !capture ||
+      !shareDirectionalStageMatches(
+        stage,
+        nativeEvent,
+        snapshot,
+        control,
+        ownerDocument,
+        ownerWindow,
+        intrinsics,
+      ) ||
+      !controlPlacementIsCurrent(candidate) ||
+      !presentationIsCurrent(candidate)
+    ) {
+      return;
+    }
+    const pair: ShareDirectionalPair<
+      SharePresentation,
+      ShareAgentDirectionalAction
+    > = {
+      publication: candidate,
+      action,
+      nativeEvent,
+      stage,
+      capture,
+    };
+    Object.freeze(pair);
+    runtime.agentDirectionalStage = null;
+    runtime.agentDirectionalPair = pair;
+    ownerWindow.queueMicrotask(() => {
+      if (
+        runtime.agentDirectionalPair === pair &&
+        !claimedDirectionalPairsRef.current.has(pair)
+      ) {
+        runtime.agentDirectionalPair = null;
+      }
+    });
+  };
+
+  const claimAgentDirectionalKey = (
+    source: SharePresentation,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const candidate = currentPresentation(source);
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const pair = runtime?.agentDirectionalPair;
+    const action = pair?.action;
+    const intrinsics = runtime?.agentDirectionalIntrinsics;
+    const nativeEvent = event?.nativeEvent;
+    const snapshot = intrinsics && nativeEvent
+      ? readShareDirectionalNativeEvent(nativeEvent, intrinsics)
+      : null;
+    if (
+      !runtime ||
+      !pair ||
+      !action ||
+      !intrinsics ||
+      !snapshot ||
+      pair.publication !== candidate ||
+      pair.action !== action ||
+      pair.nativeEvent !== nativeEvent ||
+      pair.capture.nativeEvent !== nativeEvent ||
+      pair.capture.event === event ||
+      claimedDirectionalPairsRef.current.has(pair) ||
+      runtime.claims.has("agent-directional") ||
+      action.presentation !== candidate ||
+      action.visit !== candidate.visit ||
+      action.documentId !== candidate.document.id ||
+      action.origin !== candidate.origin ||
+      action.expanded !== candidate.agentExpanded ||
+      action.nextExpanded !==
+        shareDirectionalDestination(snapshot.key, candidate.agentExpanded) ||
+      action.card !== runtime.agentCard ||
+      action.control !== runtime.agentToggle ||
+      action.panel !== runtime.agentPanel ||
+      claimedDirectionalPairsRef.current.has(pair) ||
+      claimedControlActionsRef.current.has(action) ||
+      claimedControlEventsRef.current.has(pair.capture.event) ||
+      claimedControlEventsRef.current.has(event) ||
+      claimedNativeControlEventsRef.current.has(nativeEvent) ||
+      claimedControlElementsRef.current.get(action.control) === action
+    ) {
+      return null;
+    }
+    const ownerDocument = action.control.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const bubble = ownerWindow
+      ? captureShareDirectionalReactEvent(
+          event,
+          nativeEvent,
+          snapshot,
+          action.control,
+          ownerDocument,
+          ownerWindow,
+          intrinsics,
+          intrinsics.bubblingPhase,
+        )
+      : null;
+    if (
+      !ownerWindow ||
+      !bubble ||
+      pair.capture.prototype !== bubble.prototype ||
+      pair.capture.target !== bubble.target ||
+      pair.capture.currentTarget !== bubble.currentTarget ||
+      pair.capture.eventPhase !== intrinsics.capturingPhase ||
+      bubble.eventPhase !== intrinsics.bubblingPhase ||
+      !shareDirectionalReactMethodsAreCurrent(pair.capture, intrinsics) ||
+      !shareDirectionalReactMethodsAreCurrent(bubble, intrinsics) ||
+      !shareDirectionalReactMethodsMatch(pair.capture, bubble) ||
+      !shareDirectionalStageMatches(
+        pair.stage,
+        nativeEvent,
+        snapshot,
+        action.control,
+        ownerDocument,
+        ownerWindow,
+        intrinsics,
+      ) ||
+      !shareDirectionalNativeSnapshotsMatch(
+        pair.stage.snapshot,
+        snapshot,
+      ) ||
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !==
+        action.control ||
+      !controlPlacementIsCurrent(candidate) ||
+      !presentationIsCurrent(candidate)
+    ) {
+      return null;
+    }
+    if (!claim(source, "agent-directional")) return null;
+    claimedDirectionalPairsRef.current.add(pair);
+    claimedControlActionsRef.current.add(action);
+    claimedControlEventsRef.current.add(pair.capture.event);
+    claimedControlEventsRef.current.add(event);
+    claimedNativeControlEventsRef.current.add(nativeEvent);
+    claimedControlElementsRef.current.set(action.control, action);
+    if (
+      runtime.agentDirectionalPair !== pair ||
+      !claimedDirectionalPairsRef.current.has(pair) ||
+      !claimedControlActionsRef.current.has(action) ||
+      !claimedControlEventsRef.current.has(pair.capture.event) ||
+      !claimedControlEventsRef.current.has(event) ||
+      !claimedNativeControlEventsRef.current.has(nativeEvent) ||
+      claimedControlElementsRef.current.get(action.control) !== action ||
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !==
+        action.control ||
+      !presentationIsCurrent(candidate)
+    ) {
+      return null;
+    }
+    if (
+      !preventShareDirectionalEvent(nativeEvent, intrinsics) ||
+      runtime.agentDirectionalPair !== pair ||
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !==
+        action.control ||
+      !presentationIsCurrent(candidate)
+    ) {
+      return null;
+    }
+    return action;
+  };
+
   const startPresentationObservation = useCallback((runtime: SharePresentationRuntime) => {
     const ownerWindow = runtime.root?.ownerDocument.defaultView;
     if (!ownerWindow || !runtime.dialog || !runtime.overlay || !runtime.portalParent) return false;
@@ -2747,6 +3901,37 @@ export const ShareDialog = memo(function ShareDialog({
     return true;
   }, []);
 
+  const startAgentDirectionalCapture = useCallback((
+    candidate: SharePresentation,
+    runtime: SharePresentationRuntime,
+  ) => {
+    const control = runtime.agentToggle;
+    const intrinsics = runtime.agentDirectionalIntrinsics;
+    if (!control || !intrinsics || runtime.removeAgentDirectionalCapture) {
+      return false;
+    }
+    const remove = installShareDirectionalNativeCapture(
+      control,
+      intrinsics,
+      () =>
+        runtime.active &&
+        runtime.published &&
+        !runtime.retired &&
+        runtime.agentDirectionalPair === null &&
+        activePresentationRef.current === candidate &&
+        presentationIsCurrent(candidate),
+      () => runtime.agentDirectionalStage,
+      (stage) => {
+        runtime.agentDirectionalStage = stage;
+      },
+      () => runtime.agentDirectionalPair,
+      (pair) => claimedDirectionalPairsRef.current.has(pair),
+    );
+    if (!remove) return false;
+    runtime.removeAgentDirectionalCapture = remove;
+    return true;
+  }, [presentationIsCurrent]);
+
   const publishPresentation = useCallback(
     (source: SharePresentation, expected?: SharePresentation) => {
       const candidate = currentPresentation(source);
@@ -2810,6 +3995,16 @@ export const ShareDialog = memo(function ShareDialog({
         retirePresentationLineage(candidate);
         return null;
       }
+      const ownerWindow = runtime.agentToggle?.ownerDocument.defaultView;
+      const directionalIntrinsics = ownerWindow
+        ? captureShareDirectionalIntrinsics(ownerWindow)
+        : null;
+      if (!directionalIntrinsics) {
+        retireCopyHandoff(candidate);
+        retirePresentationLineage(candidate);
+        return null;
+      }
+      runtime.agentDirectionalIntrinsics = directionalIntrinsics;
       runtime.placement = placement;
       if (!startPresentationObservation(runtime)) {
         retireCopyHandoff(candidate);
@@ -2824,6 +4019,11 @@ export const ShareDialog = memo(function ShareDialog({
         retirePresentationLineage(candidate);
         return null;
       }
+      if (!startAgentDirectionalCapture(candidate, runtime)) {
+        retireCopyHandoff(candidate);
+        retirePresentationLineage(candidate);
+        return null;
+      }
       transferPendingCopyOperation(candidate, runtime, placement);
       return candidate;
     },
@@ -2833,6 +4033,7 @@ export const ShareDialog = memo(function ShareDialog({
       presentationFactsAreCurrent,
       retireCopyHandoff,
       retirePresentationLineage,
+      startAgentDirectionalCapture,
       startCloseCapture,
       startPresentationObservation,
       transferPendingCopyOperation,
@@ -3471,6 +4672,17 @@ export const ShareDialog = memo(function ShareDialog({
                 expanded: action.nextExpanded,
               }));
             }}
+            onDirectionalKeyCapture={(event) => {
+              publishAgentDirectionalKey(presentation, event);
+            }}
+            onDirectionalKey={(event) => {
+              const action = claimAgentDirectionalKey(presentation, event);
+              if (!action) return;
+              setAgentExpansion(Object.freeze({
+                visit: action.visit,
+                expanded: action.nextExpanded,
+              }));
+            }}
           />
         </div>
 
@@ -3525,6 +4737,8 @@ export function AgentCollaborateCard({
   toggleRef,
   panelRef,
   onToggle,
+  onDirectionalKeyCapture,
+  onDirectionalKey,
 }: {
   origin: string;
   open: boolean;
@@ -3536,21 +4750,415 @@ export function AgentCollaborateCard({
   toggleRef?: (element: HTMLButtonElement | null) => void;
   panelRef?: (element: HTMLDivElement | null) => void;
   onToggle?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onDirectionalKeyCapture?: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  onDirectionalKey?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }) {
+  const [mount] = useState(() => Symbol("share-agent-card"));
   const [localExpanded, setLocalExpanded] = useState(false);
   const id = useId();
   const expanded = controlledExpanded ?? localExpanded;
   const panelId = controlledPanelId ?? `${id}-panel`;
+  const localCardRef = useRef<HTMLElement | null>(null);
+  const localToggleRef = useRef<HTMLButtonElement | null>(null);
+  const localPanelRef = useRef<HTMLDivElement | null>(null);
+  const localPublicationRef = useRef<LocalAgentCardPublication | null>(null);
+  const localClaimedActionsRef = useRef(new WeakSet<object>());
+  const localClaimedPairsRef = useRef(new WeakSet<object>());
+  const localClaimedReactEventsRef = useRef(new WeakSet<object>());
+  const localClaimedNativeEventsRef = useRef(new WeakSet<Event>());
+  const localRender: LocalAgentCardRender = Object.freeze({
+    mount,
+    origin,
+    open,
+    docId,
+    onClose,
+    expanded,
+    panelId,
+  });
+
+  useLayoutEffect(() => {
+    const previous = localPublicationRef.current;
+    if (previous) {
+      localPublicationRef.current = null;
+      retireLocalAgentCardPublication(previous);
+    }
+    if (
+      controlledExpanded !== undefined ||
+      onDirectionalKeyCapture ||
+      onDirectionalKey
+    ) {
+      return;
+    }
+    const card = localCardRef.current;
+    const control = localToggleRef.current;
+    const panel = localPanelRef.current;
+    const ownerDocument = control?.ownerDocument;
+    const ownerWindow = ownerDocument?.defaultView;
+    if (
+      !card ||
+      !control ||
+      !panel ||
+      !ownerDocument ||
+      !ownerWindow ||
+      card.ownerDocument !== ownerDocument ||
+      panel.ownerDocument !== ownerDocument
+    ) {
+      return;
+    }
+    const placement = snapshotSharePlacement(card, ownerDocument);
+    const intrinsics = captureShareDirectionalIntrinsics(ownerWindow);
+    if (!placement || !intrinsics) return;
+    const publication: LocalAgentCardPublication = {
+      render: localRender,
+      card,
+      control,
+      panel,
+      ownerDocument,
+      ownerWindow,
+      placement,
+      intrinsics,
+      directionalStage: null,
+      directionalPair: null,
+      removeDirectionalCapture: null,
+      observer: null,
+      placementObserver: null,
+      active: false,
+      claimed: false,
+      mutated: false,
+      placementMutated: false,
+    };
+    if (
+      !localAgentCardDomIsExact(publication) ||
+      !sharePlacementMatches(ownerDocument, placement)
+    ) {
+      return;
+    }
+    const Observer = ownerWindow.MutationObserver;
+    if (typeof Observer !== "function") return;
+    const observer = new Observer((records) => {
+      if (
+        records.some((record) =>
+          mutationTouchesLocalAgentCard(publication, record))
+      ) {
+        publication.mutated = true;
+      }
+    });
+    observer.observe(card, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    const placementObserver = new Observer((records) => {
+      if (
+        records.some((record) =>
+          mutationTouchesSharePlacement(publication.placement, record))
+      ) {
+        publication.placementMutated = true;
+      }
+    });
+    for (const parent of new Set(
+      placement.map(({ parent }) => parent),
+    )) {
+      placementObserver.observe(parent, { childList: true });
+    }
+    publication.observer = observer;
+    publication.placementObserver = placementObserver;
+    publication.active = true;
+    localPublicationRef.current = publication;
+    const removeDirectionalCapture = installShareDirectionalNativeCapture(
+      control,
+      intrinsics,
+      () =>
+        localPublicationRef.current === publication &&
+        publication.active &&
+        !publication.claimed &&
+        publication.directionalPair === null &&
+        drainLocalAgentCardMutations(publication) &&
+        sharePlacementMatches(ownerDocument, placement) &&
+        localAgentCardDomIsExact(publication),
+      () => publication.directionalStage,
+      (stage) => {
+        publication.directionalStage = stage;
+      },
+      () => publication.directionalPair,
+      (pair) => localClaimedPairsRef.current.has(pair),
+    );
+    if (!removeDirectionalCapture) {
+      localPublicationRef.current = null;
+      retireLocalAgentCardPublication(publication);
+      return;
+    }
+    publication.removeDirectionalCapture = removeDirectionalCapture;
+    return () => {
+      if (localPublicationRef.current === publication) {
+        localPublicationRef.current = null;
+      }
+      retireLocalAgentCardPublication(publication);
+    };
+  }, [
+    controlledExpanded,
+    localRender,
+    onDirectionalKey,
+    onDirectionalKeyCapture,
+  ]);
+
+  const publishLocalDirectionalKey = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = localPublicationRef.current;
+    const stage = publication?.directionalStage;
+    const nativeEvent = event?.nativeEvent;
+    const snapshot = publication && nativeEvent
+      ? readShareDirectionalNativeEvent(nativeEvent, publication.intrinsics)
+      : null;
+    const nextExpanded = snapshot
+      ? shareDirectionalDestination(snapshot.key, localRender.expanded)
+      : null;
+    if (
+      !publication ||
+      !stage ||
+      !snapshot ||
+      nextExpanded === null ||
+      publication.directionalPair !== null ||
+      publication.render !== localRender ||
+      publication.render.mount !== mount ||
+      publication.render.origin !== origin ||
+      publication.render.open !== open ||
+      publication.render.docId !== docId ||
+      publication.render.onClose !== onClose ||
+      publication.render.expanded !== expanded ||
+      publication.render.panelId !== panelId
+    ) {
+      return;
+    }
+    const action = Object.freeze<LocalAgentDirectionalAction>({
+      publication,
+      render: localRender,
+      expanded,
+      nextExpanded,
+      card: publication.card,
+      control: publication.control,
+      panel: publication.panel,
+    });
+    const capture = captureShareDirectionalReactEvent(
+      event,
+      nativeEvent,
+      snapshot,
+      publication.control,
+      publication.ownerDocument,
+      publication.ownerWindow,
+      publication.intrinsics,
+      publication.intrinsics.capturingPhase,
+    );
+    if (
+      !Object.isFrozen(action) ||
+      !publication.active ||
+      publication.claimed ||
+      localClaimedActionsRef.current.has(action) ||
+      localClaimedReactEventsRef.current.has(event) ||
+      localClaimedNativeEventsRef.current.has(nativeEvent) ||
+      !drainLocalAgentCardMutations(publication) ||
+      !sharePlacementMatches(
+        publication.ownerDocument,
+        publication.placement,
+      ) ||
+      !localAgentCardDomIsExact(publication) ||
+      !capture ||
+      !shareDirectionalStageMatches(
+        stage,
+        nativeEvent,
+        snapshot,
+        publication.control,
+        publication.ownerDocument,
+        publication.ownerWindow,
+        publication.intrinsics,
+      ) ||
+      publication.intrinsics.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control
+    ) {
+      return;
+    }
+    const pair: ShareDirectionalPair<
+      LocalAgentCardPublication,
+      LocalAgentDirectionalAction
+    > = {
+      publication,
+      action,
+      nativeEvent,
+      stage,
+      capture,
+    };
+    Object.freeze(pair);
+    publication.directionalStage = null;
+    publication.directionalPair = pair;
+    publication.ownerWindow.queueMicrotask(() => {
+      if (
+        publication.directionalPair === pair &&
+        !localClaimedPairsRef.current.has(pair)
+      ) {
+        publication.directionalPair = null;
+      }
+    });
+  };
+
+  const handleLocalDirectionalKey = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = localPublicationRef.current;
+    const pair = publication?.directionalPair;
+    const action = pair?.action;
+    const nativeEvent = event?.nativeEvent;
+    const snapshot = publication && nativeEvent
+      ? readShareDirectionalNativeEvent(nativeEvent, publication.intrinsics)
+      : null;
+    if (
+      !publication ||
+      !pair ||
+      !action ||
+      !snapshot ||
+      pair.publication !== publication ||
+      pair.action !== action ||
+      pair.nativeEvent !== nativeEvent ||
+      pair.capture.nativeEvent !== nativeEvent ||
+      pair.capture.event === event ||
+      localClaimedPairsRef.current.has(pair) ||
+      action.publication !== publication ||
+      action.render !== localRender ||
+      action.expanded !== expanded ||
+      action.nextExpanded !==
+        shareDirectionalDestination(snapshot.key, localRender.expanded) ||
+      action.card !== publication.card ||
+      action.control !== publication.control ||
+      action.panel !== publication.panel ||
+      publication.render !== localRender ||
+      publication.render.mount !== mount ||
+      publication.render.origin !== origin ||
+      publication.render.open !== open ||
+      publication.render.docId !== docId ||
+      publication.render.onClose !== onClose ||
+      publication.render.expanded !== expanded ||
+      publication.render.panelId !== panelId ||
+      publication.claimed ||
+      localClaimedActionsRef.current.has(action) ||
+      localClaimedPairsRef.current.has(pair) ||
+      localClaimedReactEventsRef.current.has(pair.capture.event) ||
+      localClaimedReactEventsRef.current.has(event) ||
+      localClaimedNativeEventsRef.current.has(nativeEvent)
+    ) {
+      return;
+    }
+    const bubble = captureShareDirectionalReactEvent(
+      event,
+      nativeEvent,
+      snapshot,
+      publication.control,
+      publication.ownerDocument,
+      publication.ownerWindow,
+      publication.intrinsics,
+      publication.intrinsics.bubblingPhase,
+    );
+    if (
+      !bubble ||
+      pair.capture.prototype !== bubble.prototype ||
+      pair.capture.target !== bubble.target ||
+      pair.capture.currentTarget !== bubble.currentTarget ||
+      pair.capture.eventPhase !== publication.intrinsics.capturingPhase ||
+      bubble.eventPhase !== publication.intrinsics.bubblingPhase ||
+      !shareDirectionalReactMethodsAreCurrent(
+        pair.capture,
+        publication.intrinsics,
+      ) ||
+      !shareDirectionalReactMethodsAreCurrent(
+        bubble,
+        publication.intrinsics,
+      ) ||
+      !shareDirectionalReactMethodsMatch(pair.capture, bubble) ||
+      !shareDirectionalStageMatches(
+        pair.stage,
+        nativeEvent,
+        snapshot,
+        publication.control,
+        publication.ownerDocument,
+        publication.ownerWindow,
+        publication.intrinsics,
+      ) ||
+      !publication.active ||
+      !drainLocalAgentCardMutations(publication) ||
+      !sharePlacementMatches(
+        publication.ownerDocument,
+        publication.placement,
+      ) ||
+      !localAgentCardDomIsExact(publication) ||
+      publication.intrinsics.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control
+    ) {
+      return;
+    }
+    publication.claimed = true;
+    localClaimedActionsRef.current.add(action);
+    localClaimedPairsRef.current.add(pair);
+    localClaimedReactEventsRef.current.add(pair.capture.event);
+    localClaimedReactEventsRef.current.add(event);
+    localClaimedNativeEventsRef.current.add(nativeEvent);
+    if (
+      localPublicationRef.current !== publication ||
+      publication.directionalPair !== pair ||
+      !localClaimedPairsRef.current.has(pair) ||
+      !localClaimedActionsRef.current.has(action) ||
+      !localClaimedReactEventsRef.current.has(pair.capture.event) ||
+      !localClaimedReactEventsRef.current.has(event) ||
+      !localClaimedNativeEventsRef.current.has(nativeEvent) ||
+      publication.intrinsics.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control ||
+      !drainLocalAgentCardMutations(publication) ||
+      !localAgentCardDomIsExact(publication)
+    ) {
+      return;
+    }
+    if (
+      !preventShareDirectionalEvent(nativeEvent, publication.intrinsics) ||
+      localPublicationRef.current !== publication ||
+      publication.directionalPair !== pair ||
+      publication.intrinsics.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== publication.control ||
+      !drainLocalAgentCardMutations(publication) ||
+      !localAgentCardDomIsExact(publication)
+    ) {
+      return;
+    }
+    setLocalExpanded(action.nextExpanded);
+  };
 
   return (
     <section
-      ref={cardRef}
+      ref={(element) => {
+        localCardRef.current = element;
+        cardRef?.(element);
+      }}
       className={AGENT_CARD_CLASS}
       aria-label="Collaborate with an agent"
       data-testid="share-agent-card"
     >
       <button
-        ref={toggleRef}
+        ref={(element) => {
+          localToggleRef.current = element;
+          toggleRef?.(element);
+        }}
         type="button"
         className={AGENT_TOGGLE_CLASS}
         aria-expanded={expanded}
@@ -3564,6 +5172,20 @@ export function AgentCollaborateCard({
             setLocalExpanded((value) => !value);
           }
         }}
+        onKeyDownCapture={(event) => {
+          if (onDirectionalKeyCapture) {
+            onDirectionalKeyCapture(event);
+            return;
+          }
+          publishLocalDirectionalKey(event);
+        }}
+        onKeyDown={(event) => {
+          if (onDirectionalKey) {
+            onDirectionalKey(event);
+            return;
+          }
+          handleLocalDirectionalKey(event);
+        }}
         data-testid="share-agent-toggle"
       >
         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-100 text-violet-700 dark:bg-violet-900/60 dark:text-violet-300">
@@ -3575,7 +5197,15 @@ export function AgentCollaborateCard({
         </span>
         <ChevronDown size={16} className={cn("shrink-0 text-ink-3 transition-transform", expanded && "rotate-180")} aria-hidden="true" />
       </button>
-      <div ref={panelRef} id={panelId} hidden={!expanded} className={AGENT_PANEL_CLASS}>
+      <div
+        ref={(element) => {
+          localPanelRef.current = element;
+          panelRef?.(element);
+        }}
+        id={panelId}
+        hidden={!expanded}
+        className={AGENT_PANEL_CLASS}
+      >
         <TokensPanel origin={origin} userLogin="you" documentId={docId} embedded open={open && expanded} onClose={onClose} />
       </div>
     </section>

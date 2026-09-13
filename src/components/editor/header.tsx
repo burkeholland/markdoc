@@ -2774,10 +2774,170 @@ interface ModeSwitcherPlacementSnapshot {
   readonly nextSibling: Node | null;
 }
 
+type ModeSwitcherArrowKey = "ArrowDown" | "ArrowUp";
+type ModeSwitcherNativeGetter = (this: object) => unknown;
+type ModeSwitcherNativeMethod = (this: object, ...args: unknown[]) => unknown;
+
+interface ModeSwitcherCapturedDescriptor {
+  readonly owner: object;
+  readonly property: PropertyKey;
+  readonly descriptor: PropertyDescriptor;
+  readonly isCurrent: () => boolean;
+}
+
+interface ModeSwitcherTrustedAuthority {
+  readonly descriptor: PropertyDescriptor;
+  readonly getter: ModeSwitcherNativeGetter;
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface ModeSwitcherKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboardPrototype: object;
+  readonly atTargetPhase: number;
+  readonly bubblingPhase: number;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly set: typeof Reflect.set;
+  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
+  readonly trusted: ModeSwitcherTrustedAuthority;
+  readonly event: Readonly<{
+    type: ModeSwitcherNativeGetter;
+    target: ModeSwitcherNativeGetter;
+    currentTarget: ModeSwitcherNativeGetter;
+    eventPhase: ModeSwitcherNativeGetter;
+    bubbles: ModeSwitcherNativeGetter;
+    cancelable: ModeSwitcherNativeGetter;
+    defaultPrevented: ModeSwitcherNativeGetter;
+    cancelBubble: ModeSwitcherNativeGetter;
+    composed: ModeSwitcherNativeGetter;
+    timeStamp: ModeSwitcherNativeGetter;
+    composedPath: ModeSwitcherNativeMethod;
+    preventDefault: ModeSwitcherNativeMethod;
+  }>;
+  readonly keyboard: Readonly<{
+    key: ModeSwitcherNativeGetter;
+    code: ModeSwitcherNativeGetter;
+    location: ModeSwitcherNativeGetter;
+    altKey: ModeSwitcherNativeGetter;
+    ctrlKey: ModeSwitcherNativeGetter;
+    metaKey: ModeSwitcherNativeGetter;
+    shiftKey: ModeSwitcherNativeGetter;
+    repeat: ModeSwitcherNativeGetter;
+    isComposing: ModeSwitcherNativeGetter;
+  }>;
+  readonly ui: Readonly<{
+    detail: ModeSwitcherNativeGetter;
+    view: ModeSwitcherNativeGetter;
+  }>;
+  readonly document: Readonly<{
+    activeElement: ModeSwitcherNativeGetter;
+  }>;
+  readonly focus: ModeSwitcherNativeMethod;
+  readonly addEventListener: ModeSwitcherNativeMethod;
+  readonly removeEventListener: ModeSwitcherNativeMethod;
+  readonly historyIsClean: () => boolean;
+}
+
+interface ModeSwitcherArrowAction {
+  readonly identity: symbol;
+  readonly render: ModeSwitcherRender;
+  readonly trigger: HTMLButtonElement;
+  readonly document: Document;
+  readonly key: ModeSwitcherArrowKey;
+  readonly destination: "first" | "last";
+}
+
+interface ModeSwitcherNativeKeyboardSnapshot {
+  readonly event: KeyboardEvent;
+  readonly publication: ModeSwitcherPublication;
+  readonly action: ModeSwitcherArrowAction;
+  readonly source: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly key: ModeSwitcherArrowKey;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly detail: number;
+  readonly view: Window | null;
+  readonly isTrusted: true;
+}
+
+interface ModeSwitcherReactKeyboardProof {
+  readonly prototype: object;
+  readonly descriptors: readonly ModeSwitcherCapturedDescriptor[];
+  readonly preventDefault: ModeSwitcherNativeMethod;
+  readonly stopPropagation: ModeSwitcherNativeMethod;
+  readonly isDefaultPrevented: ModeSwitcherNativeMethod;
+  readonly isPropagationStopped: ModeSwitcherNativeMethod;
+  readonly persist: ModeSwitcherNativeMethod;
+  readonly isPersistent: ModeSwitcherNativeMethod;
+}
+
+interface ModeSwitcherKeyboardDelivery {
+  readonly snapshot: ModeSwitcherNativeKeyboardSnapshot;
+  reactEvent: React.KeyboardEvent<HTMLButtonElement> | null;
+  reactProof: ModeSwitcherReactKeyboardProof | null;
+  bubbleCurrentTarget: EventTarget | null;
+  reactCount: number;
+  invalid: boolean;
+}
+
+interface ModeSwitcherClaimedArrow {
+  readonly publication: ModeSwitcherPublication;
+  readonly action: ModeSwitcherArrowAction;
+  readonly authority: ModeSwitcherKeyboardAuthority;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly reactProof: ModeSwitcherReactKeyboardProof;
+  readonly key: ModeSwitcherArrowKey;
+}
+
+interface ModeSwitcherOpenFocusGuard {
+  readonly isExact: (publication: ModeSwitcherPublication) => boolean;
+  readonly dispose: () => void;
+}
+
+interface ModeSwitcherOpenFocusIntent {
+  readonly source: ModeSwitcherPublication;
+  readonly action: ModeSwitcherArrowAction;
+  readonly authority: ModeSwitcherKeyboardAuthority;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly guard: ModeSwitcherOpenFocusGuard;
+}
+
+interface ModeSwitcherReadyOpenFocus extends ModeSwitcherOpenFocusIntent {
+  readonly publication: ModeSwitcherPublication;
+  readonly target: HTMLElement;
+}
+
 interface ModeSwitcherPublication {
   readonly render: ModeSwitcherRender;
   readonly document: Document;
   readonly dom: ModeSwitcherDom;
+  readonly keyboardAuthority: ModeSwitcherKeyboardAuthority | null;
+  readonly keyboardEvents: Set<KeyboardEvent>;
+  readonly arrowActions: Readonly<Record<ModeSwitcherArrowKey, ModeSwitcherArrowAction>>;
   readonly triggerParent: Node;
   readonly contentParent: Node | null;
   readonly triggerSnapshot: ModeSwitcherDomSnapshot;
@@ -2812,6 +2972,7 @@ interface ModeSwitcherDisclosureIntent {
   readonly open: boolean;
   readonly returnFocus: boolean;
   readonly events: readonly Event[];
+  readonly arrow: ModeSwitcherClaimedArrow | null;
 }
 
 interface ModeSwitcherSelectionIntent {
@@ -2852,7 +3013,9 @@ interface ModeSwitcherPresentation {
   readonly establish: () => (() => void) | undefined;
   readonly onTriggerPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
   readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
+  readonly onOpenAutoFocus: (event: Event) => void;
   readonly onModeChange: (value: string) => void;
   readonly onReaderSelect: (event: Event) => void;
   readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
@@ -2864,9 +3027,15 @@ class ModeSwitcherPublicationCoordinator {
   #active: ModeSwitcherPublication | null = null;
   #successorOf: ModeSwitcherPublication | null = null;
   #claimedEvents = new WeakSet<Event>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedPublications = new WeakSet<ModeSwitcherPublication>();
+  #claimedDisclosures = new WeakSet<ModeSwitcherArrowAction>();
+  #keyboardDeliveries = new WeakMap<KeyboardEvent, ModeSwitcherKeyboardDelivery>();
   #disclosureIntent: ModeSwitcherDisclosureIntent | null = null;
   #selectionIntent: ModeSwitcherSelectionIntent | null = null;
   #focusIntent: ModeSwitcherFocusIntent | null = null;
+  #openFocusIntent: ModeSwitcherOpenFocusIntent | null = null;
+  #readyOpenFocus: ModeSwitcherReadyOpenFocus | null = null;
   #requestedSuccessors = new WeakSet<ModeSwitcherPublication>();
   #unpublishedChangeRequested = false;
 
@@ -2891,6 +3060,19 @@ class ModeSwitcherPublicationCoordinator {
     );
     const focusTarget = returnFocus ? focus?.target : null;
     if (focus) this.#clearFocus(focus);
+    const openFocus = this.#openFocusIntent;
+    if (openFocus) {
+      const target = modeSwitcherOpenFocusSuccessorTarget(openFocus, publication);
+      if (target) {
+        this.#readyOpenFocus = Object.freeze({
+          ...openFocus,
+          publication,
+          target,
+        });
+      } else {
+        this.#clearOpenFocus(openFocus);
+      }
+    }
     if (previous && previous !== publication) previous.dispose();
     focusTarget?.focus();
   }
@@ -2908,6 +3090,9 @@ class ModeSwitcherPublicationCoordinator {
     queueMicrotask(() => {
       if (this.#active !== null || this.#successorOf !== publication) return;
       this.#successorOf = null;
+      if (this.#openFocusIntent?.source === publication) {
+        this.#clearOpenFocus(this.#openFocusIntent);
+      }
       publication.dispose();
     });
     return true;
@@ -2955,17 +3140,159 @@ class ModeSwitcherPublicationCoordinator {
     return true;
   }
 
+  clearKeyboardEvents(publication: ModeSwitcherPublication) {
+    for (const event of publication.keyboardEvents) {
+      this.#keyboardDeliveries.delete(event);
+    }
+    publication.keyboardEvents.clear();
+  }
+
+  #clearKeyboardEvent(
+    publication: ModeSwitcherPublication,
+    event: KeyboardEvent,
+    delivery?: ModeSwitcherKeyboardDelivery,
+  ) {
+    const current = this.#keyboardDeliveries.get(event);
+    if (!delivery || current === delivery) this.#keyboardDeliveries.delete(event);
+    publication.keyboardEvents.delete(event);
+  }
+
+  stageNativeArrow(publication: ModeSwitcherPublication, event: Event) {
+    const authority = publication.keyboardAuthority;
+    if (
+      this.#active === publication
+      && (
+        !publication.isExact()
+        || (authority !== null && !authority.historyIsClean())
+      )
+    ) {
+      publication.retire();
+      return;
+    }
+    if (
+      !authority
+      || !(event instanceof authority.ownerWindow.KeyboardEvent)
+      || this.#keyboardDeliveries.has(event)
+      || this.#claimedEvents.has(event)
+      || this.#claimedPublications.has(publication)
+      || this.#active !== publication
+    ) {
+      return;
+    }
+    const snapshot = readModeSwitcherNativeKeyboardEvent(publication, authority, event);
+    if (
+      !snapshot
+      || snapshot.eventPhase !== authority.atTargetPhase
+      || snapshot.currentTarget !== publication.dom.trigger
+      || !modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
+    ) {
+      return;
+    }
+    const delivery: ModeSwitcherKeyboardDelivery = {
+      snapshot,
+      reactEvent: null,
+      reactProof: null,
+      bubbleCurrentTarget: null,
+      reactCount: 0,
+      invalid: false,
+    };
+    this.#keyboardDeliveries.set(event, delivery);
+    publication.keyboardEvents.add(event);
+    queueMicrotask(() => this.#clearKeyboardEvent(publication, event, delivery));
+  }
+
+  stageReactArrow(
+    publication: ModeSwitcherPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return;
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#keyboardDeliveries.get(nativeEvent);
+    const proof = captureModeSwitcherReactKeyboardProof(event, publication.keyboardAuthority);
+    if (
+      !delivery
+      || delivery.invalid
+      || !proof
+      || delivery.snapshot.publication !== publication
+      || !modeSwitcherReactKeyboardEventMatches(delivery, event, proof)
+    ) {
+      return;
+    }
+    delivery.reactCount += 1;
+    if (
+      delivery.reactCount !== 1
+      || (delivery.reactEvent !== null && delivery.reactEvent !== event)
+    ) {
+      delivery.invalid = true;
+      return;
+    }
+    delivery.reactEvent = event;
+    delivery.reactProof = proof;
+    delivery.bubbleCurrentTarget = modeSwitcherNativeValue<EventTarget | null>(
+      delivery.snapshot.publication.keyboardAuthority!.event.currentTarget,
+      nativeEvent,
+      delivery.snapshot.publication.keyboardAuthority!,
+    );
+  }
+
+  claimReactArrow(
+    publication: ModeSwitcherPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ): ModeSwitcherClaimedArrow | null {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#keyboardDeliveries.get(nativeEvent);
+    const snapshot = delivery?.snapshot;
+    const proof = delivery?.reactProof;
+    const authority = publication.keyboardAuthority;
+    if (
+      !delivery
+      || !snapshot
+      || !proof
+      || !authority
+      || delivery.invalid
+      || delivery.reactCount !== 1
+      || delivery.reactEvent !== event
+      || snapshot.publication !== publication
+      || this.#claimedPublications.has(publication)
+      || this.#claimedDisclosures.has(snapshot.action)
+      || this.#claimedEvents.has(nativeEvent)
+      || this.#active !== publication
+      || !modeSwitcherReactKeyboardEventMatches(delivery, event, proof)
+      || !modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
+      || !publication.isExact()
+    ) {
+      return null;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedDisclosures.add(snapshot.action);
+    this.#claimedReactEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    this.#clearKeyboardEvent(publication, nativeEvent, delivery);
+    return Object.freeze({
+      publication,
+      action: snapshot.action,
+      authority,
+      nativeEvent,
+      reactEvent: event,
+      reactProof: proof,
+      key: snapshot.key,
+    });
+  }
+
   publishDisclosure(
     publication: ModeSwitcherPublication,
     open: boolean,
     events: readonly Event[],
     returnFocus = true,
+    arrow: ModeSwitcherClaimedArrow | null = null,
   ) {
     const intent = Object.freeze({
       publication,
       open,
       returnFocus,
       events: Object.freeze([...events]),
+      arrow,
     });
     this.#disclosureIntent = intent;
     queueMicrotask(() => {
@@ -2981,6 +3308,17 @@ class ModeSwitcherPublicationCoordinator {
       || this.#active !== publication
       || !publication.isExact()
       || !intent.events.some((event) => isLiveNativeEvent(event, publication.document))
+      || (
+        intent.arrow !== null
+        && (
+          intent.arrow.publication !== publication
+          || !this.#claimedPublications.has(publication)
+          || !this.#claimedDisclosures.has(intent.arrow.action)
+          || !this.#claimedReactEvents.has(intent.arrow.reactEvent)
+          || !this.#claimedEvents.has(intent.arrow.nativeEvent)
+          || !modeSwitcherArrowActionIsCurrent(publication, intent.arrow.action)
+        )
+      )
     ) {
       return null;
     }
@@ -3051,6 +3389,1426 @@ class ModeSwitcherPublicationCoordinator {
     this.#focusIntent = null;
     intent.guard.dispose();
   }
+
+  prepareOpenFocus(arrow: ModeSwitcherClaimedArrow) {
+    if (
+      arrow.key !== "ArrowUp"
+      || arrow.publication.render.open
+      || this.#active !== arrow.publication
+      || !this.#claimedPublications.has(arrow.publication)
+      || !this.#claimedDisclosures.has(arrow.action)
+      || !modeSwitcherArrowActionIsCurrent(arrow.publication, arrow.action)
+      || !arrow.publication.isExact()
+    ) {
+      return false;
+    }
+    const guard = createModeSwitcherOpenFocusGuard(arrow.publication);
+    if (!guard) return false;
+    const previous = this.#openFocusIntent;
+    if (previous) this.#clearOpenFocus(previous);
+    this.#openFocusIntent = Object.freeze({
+      source: arrow.publication,
+      action: arrow.action,
+      authority: arrow.authority,
+      nativeEvent: arrow.nativeEvent,
+      reactEvent: arrow.reactEvent,
+      guard,
+    });
+    return true;
+  }
+
+  cancelOpenFocus(publication: ModeSwitcherPublication) {
+    const intent = this.#openFocusIntent;
+    if (intent?.source === publication) this.#clearOpenFocus(intent);
+  }
+
+  consumeOpenFocus(
+    publication: ModeSwitcherPublication,
+    event: Event,
+  ): Readonly<{
+    authority: ModeSwitcherKeyboardAuthority;
+    target: HTMLElement;
+  }> | null {
+    const ready = this.#readyOpenFocus;
+    const authority = ready?.authority;
+    const content = publication.dom.content;
+    const ownerWindow = publication.document.defaultView;
+    if (
+      !ready
+      || ready.publication !== publication
+      || !authority
+      || !content
+      || !ownerWindow
+      || this.#active !== publication
+      || !(event instanceof ownerWindow.CustomEvent)
+      || event.type !== "focusScope.autoFocusOnMount"
+      || event.target !== content
+      || event.currentTarget !== content
+      || event.eventPhase !== ownerWindow.Event.AT_TARGET
+      || !event.cancelable
+      || event.defaultPrevented
+      || !event.composedPath().includes(content)
+      || modeSwitcherActiveElement(authority) !== publication.dom.trigger
+      || !modeSwitcherOpenFocusSuccessorTarget(ready, publication)
+      || !this.claim([event])
+    ) {
+      return null;
+    }
+    const result = Object.freeze({ authority, target: ready.target });
+    this.#clearOpenFocus(ready);
+    return result;
+  }
+
+  #clearOpenFocus(intent: ModeSwitcherOpenFocusIntent) {
+    if (this.#openFocusIntent === intent) this.#openFocusIntent = null;
+    if (
+      this.#readyOpenFocus === intent
+      || this.#readyOpenFocus?.source === intent.source
+    ) {
+      this.#readyOpenFocus = null;
+    }
+    intent.guard.dispose();
+  }
+}
+
+function modeSwitcherDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current
+    || current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+    || ("value" in current) !== ("value" in expected)
+    || ("writable" in current) !== ("writable" in expected)
+    || ("get" in current) !== ("get" in expected)
+    || ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureModeSwitcherDescriptor(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+): ModeSwitcherCapturedDescriptor | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    owner,
+    property,
+    descriptor: expected,
+    isCurrent: () =>
+      modeSwitcherDescriptorsMatch(
+        getOwnPropertyDescriptor(owner, property),
+        expected,
+      ),
+  });
+}
+
+function captureModeSwitcherGetter(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = captureModeSwitcherDescriptor(owner, property, getOwnPropertyDescriptor);
+  const getter = capture?.descriptor.get;
+  return capture && typeof getter === "function" && !("value" in capture.descriptor)
+    ? Object.freeze({ capture, getter: getter as ModeSwitcherNativeGetter })
+    : null;
+}
+
+function captureModeSwitcherMethod(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = captureModeSwitcherDescriptor(owner, property, getOwnPropertyDescriptor);
+  const method = capture?.descriptor.value;
+  return capture && typeof method === "function"
+    ? Object.freeze({ capture, method: method as ModeSwitcherNativeMethod })
+    : null;
+}
+
+function captureModeSwitcherTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
+): ModeSwitcherTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("mode-switcher-keyboard-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    getPrototypeOf(probe) !== ownerWindow.KeyboardEvent.prototype
+    || !descriptor
+    || descriptor.configurable !== false
+    || descriptor.enumerable !== true
+    || typeof descriptor.get !== "function"
+    || descriptor.set !== undefined
+    || "value" in descriptor
+    || "writable" in descriptor
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get as ModeSwitcherNativeGetter;
+  const matches = (event: object) =>
+    modeSwitcherDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  const read = (event: object) => apply(getter, event, []) as boolean;
+  try {
+    if (read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({
+    descriptor: expected,
+    getter,
+    read,
+    matches,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function captureModeSwitcherKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): ModeSwitcherKeyboardAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const set = ownerWindow.Reflect.set;
+  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  if (
+    typeof getOwnPropertyDescriptor !== "function"
+    || typeof getPrototypeOf !== "function"
+    || typeof apply !== "function"
+    || typeof set !== "function"
+    || typeof isPrototypeOf !== "function"
+  ) {
+    return null;
+  }
+  const trusted = captureModeSwitcherTrustedAuthority(
+    ownerWindow,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+  );
+  const type = captureModeSwitcherGetter(eventPrototype, "type", getOwnPropertyDescriptor);
+  const target = captureModeSwitcherGetter(eventPrototype, "target", getOwnPropertyDescriptor);
+  const currentTarget = captureModeSwitcherGetter(eventPrototype, "currentTarget", getOwnPropertyDescriptor);
+  const eventPhase = captureModeSwitcherGetter(eventPrototype, "eventPhase", getOwnPropertyDescriptor);
+  const bubbles = captureModeSwitcherGetter(eventPrototype, "bubbles", getOwnPropertyDescriptor);
+  const cancelable = captureModeSwitcherGetter(eventPrototype, "cancelable", getOwnPropertyDescriptor);
+  const defaultPrevented = captureModeSwitcherGetter(eventPrototype, "defaultPrevented", getOwnPropertyDescriptor);
+  const cancelBubble = captureModeSwitcherGetter(eventPrototype, "cancelBubble", getOwnPropertyDescriptor);
+  const composed = captureModeSwitcherGetter(eventPrototype, "composed", getOwnPropertyDescriptor);
+  const timeStamp = captureModeSwitcherGetter(eventPrototype, "timeStamp", getOwnPropertyDescriptor);
+  const composedPath = captureModeSwitcherMethod(eventPrototype, "composedPath", getOwnPropertyDescriptor);
+  const preventDefault = captureModeSwitcherMethod(eventPrototype, "preventDefault", getOwnPropertyDescriptor);
+  const key = captureModeSwitcherGetter(keyboardPrototype, "key", getOwnPropertyDescriptor);
+  const code = captureModeSwitcherGetter(keyboardPrototype, "code", getOwnPropertyDescriptor);
+  const location = captureModeSwitcherGetter(keyboardPrototype, "location", getOwnPropertyDescriptor);
+  const altKey = captureModeSwitcherGetter(keyboardPrototype, "altKey", getOwnPropertyDescriptor);
+  const ctrlKey = captureModeSwitcherGetter(keyboardPrototype, "ctrlKey", getOwnPropertyDescriptor);
+  const metaKey = captureModeSwitcherGetter(keyboardPrototype, "metaKey", getOwnPropertyDescriptor);
+  const shiftKey = captureModeSwitcherGetter(keyboardPrototype, "shiftKey", getOwnPropertyDescriptor);
+  const repeat = captureModeSwitcherGetter(keyboardPrototype, "repeat", getOwnPropertyDescriptor);
+  const isComposing = captureModeSwitcherGetter(keyboardPrototype, "isComposing", getOwnPropertyDescriptor);
+  const detail = captureModeSwitcherGetter(uiPrototype, "detail", getOwnPropertyDescriptor);
+  const view = captureModeSwitcherGetter(uiPrototype, "view", getOwnPropertyDescriptor);
+  const activeElement = captureModeSwitcherGetter(documentPrototype, "activeElement", getOwnPropertyDescriptor);
+  const focus = captureModeSwitcherMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor);
+  const addEventListener = captureModeSwitcherMethod(
+    eventTargetPrototype,
+    "addEventListener",
+    getOwnPropertyDescriptor,
+  );
+  const removeEventListener = captureModeSwitcherMethod(
+    eventTargetPrototype,
+    "removeEventListener",
+    getOwnPropertyDescriptor,
+  );
+  const captures = [
+    type,
+    target,
+    currentTarget,
+    eventPhase,
+    bubbles,
+    cancelable,
+    defaultPrevented,
+    cancelBubble,
+    composed,
+    timeStamp,
+    composedPath,
+    preventDefault,
+    key,
+    code,
+    location,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    repeat,
+    isComposing,
+    detail,
+    view,
+    activeElement,
+    focus,
+    addEventListener,
+    removeEventListener,
+  ];
+  if (
+    !trusted
+    || captures.some((capture) => capture === null)
+    || getPrototypeOf(keyboardPrototype) !== uiPrototype
+    || getPrototypeOf(uiPrototype) !== eventPrototype
+    || getPrototypeOf(eventPrototype) !== ownerWindow.Object.prototype
+  ) {
+    return null;
+  }
+  const descriptors = Object.freeze(
+    captures.map((capture) => capture!.capture),
+  );
+  let historyIsClean = true;
+  const checkHistory = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = Boolean(
+      ownerDocument.defaultView === ownerWindow
+      && ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+      && ownerWindow.Reflect.apply === apply
+      && ownerWindow.Reflect.set === set
+      && ownerWindow.Object.prototype.isPrototypeOf === isPrototypeOf
+      && ownerWindow.Event.prototype === eventPrototype
+      && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
+      && ownerWindow.UIEvent.prototype === uiPrototype
+      && ownerWindow.Document.prototype === documentPrototype
+      && ownerWindow.HTMLElement.prototype === htmlElementPrototype
+      && ownerWindow.EventTarget.prototype === eventTargetPrototype
+      && getPrototypeOf(keyboardPrototype) === uiPrototype
+      && getPrototypeOf(uiPrototype) === eventPrototype
+      && getPrototypeOf(eventPrototype) === ownerWindow.Object.prototype
+      && trusted.isCurrent()
+      && descriptors.every((descriptor) => descriptor.isCurrent())
+    );
+    return historyIsClean;
+  };
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    keyboardPrototype,
+    atTargetPhase: ownerWindow.Event.AT_TARGET,
+    bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+    set,
+    isPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type: type!.getter,
+      target: target!.getter,
+      currentTarget: currentTarget!.getter,
+      eventPhase: eventPhase!.getter,
+      bubbles: bubbles!.getter,
+      cancelable: cancelable!.getter,
+      defaultPrevented: defaultPrevented!.getter,
+      cancelBubble: cancelBubble!.getter,
+      composed: composed!.getter,
+      timeStamp: timeStamp!.getter,
+      composedPath: composedPath!.method,
+      preventDefault: preventDefault!.method,
+    }),
+    keyboard: Object.freeze({
+      key: key!.getter,
+      code: code!.getter,
+      location: location!.getter,
+      altKey: altKey!.getter,
+      ctrlKey: ctrlKey!.getter,
+      metaKey: metaKey!.getter,
+      shiftKey: shiftKey!.getter,
+      repeat: repeat!.getter,
+      isComposing: isComposing!.getter,
+    }),
+    ui: Object.freeze({
+      detail: detail!.getter,
+      view: view!.getter,
+    }),
+    document: Object.freeze({
+      activeElement: activeElement!.getter,
+    }),
+    focus: focus!.method,
+    addEventListener: addEventListener!.method,
+    removeEventListener: removeEventListener!.method,
+    historyIsClean: checkHistory,
+  });
+}
+
+function modeSwitcherNativeValue<Value>(
+  getter: ModeSwitcherNativeGetter,
+  value: object,
+  authority: ModeSwitcherKeyboardAuthority,
+): Value {
+  return authority.apply(getter, value, []) as Value;
+}
+
+function modeSwitcherNativeCall<Value>(
+  method: ModeSwitcherNativeMethod,
+  value: object,
+  args: readonly unknown[],
+  authority: ModeSwitcherKeyboardAuthority,
+): Value {
+  return authority.apply(method, value, args) as Value;
+}
+
+function modeSwitcherActiveElement(authority: ModeSwitcherKeyboardAuthority) {
+  return modeSwitcherNativeValue<Element | null>(
+    authority.document.activeElement,
+    authority.ownerDocument,
+    authority,
+  );
+}
+
+function modeSwitcherTriggerPathMatches(
+  path: readonly EventTarget[],
+  trigger: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+) {
+  const expected: EventTarget[] = [];
+  let current: Node | null = trigger;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  const terminal = path.at(-1);
+  return (
+    expected.at(-1) === ownerDocument
+    && path.length === expected.length + 1
+    && expected.every((entry, index) => path[index] === entry)
+    && (
+      terminal === ownerWindow
+      || (
+        typeof terminal === "object"
+        && terminal !== null
+        && "document" in terminal
+        && terminal.document === ownerDocument
+        && "window" in terminal
+        && terminal.window === terminal
+      )
+    )
+  );
+}
+
+function modeSwitcherArrowActionIsCurrent(
+  publication: ModeSwitcherPublication,
+  action: ModeSwitcherArrowAction,
+) {
+  const expected = publication.arrowActions[action.key];
+  const firstEligible = publication.render.rows.find((row) => row.eligible);
+  return Boolean(
+    expected === action
+    && Object.isFrozen(action)
+    && action.render === publication.render
+    && action.trigger === publication.dom.trigger
+    && action.document === publication.document
+    && action.destination === (action.key === "ArrowDown" ? "first" : "last")
+    && firstEligible
+  );
+}
+
+function readModeSwitcherNativeKeyboardEvent(
+  publication: ModeSwitcherPublication,
+  authority: ModeSwitcherKeyboardAuthority,
+  event: KeyboardEvent,
+): ModeSwitcherNativeKeyboardSnapshot | null {
+  if (
+    publication.keyboardAuthority !== authority
+    || !authority.historyIsClean()
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    const type = modeSwitcherNativeValue<string>(authority.event.type, event, authority);
+    const target = modeSwitcherNativeValue<EventTarget | null>(authority.event.target, event, authority);
+    const currentTarget = modeSwitcherNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      event,
+      authority,
+    );
+    const eventPhase = modeSwitcherNativeValue<number>(
+      authority.event.eventPhase,
+      event,
+      authority,
+    );
+    const bubbles = modeSwitcherNativeValue<boolean>(authority.event.bubbles, event, authority);
+    const cancelable = modeSwitcherNativeValue<boolean>(
+      authority.event.cancelable,
+      event,
+      authority,
+    );
+    const defaultPrevented = modeSwitcherNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      event,
+      authority,
+    );
+    const cancelBubble = modeSwitcherNativeValue<boolean>(
+      authority.event.cancelBubble,
+      event,
+      authority,
+    );
+    const key = modeSwitcherNativeValue<string>(authority.keyboard.key, event, authority);
+    const path = Object.freeze(
+      [...modeSwitcherNativeCall<EventTarget[]>(
+        authority.event.composedPath,
+        event,
+        [],
+        authority,
+      )],
+    );
+    const view = modeSwitcherNativeValue<Window | null>(authority.ui.view, event, authority);
+    const isTrusted = authority.trusted.read(event);
+    const trigger = publication.dom.trigger;
+    const action = key === "ArrowDown" || key === "ArrowUp"
+      ? publication.arrowActions[key]
+      : null;
+    if (
+      !action
+      || type !== "keydown"
+      || eventPhase !== authority.atTargetPhase
+      || target !== trigger
+      || currentTarget !== trigger
+      || !bubbles
+      || !cancelable
+      || defaultPrevented
+      || cancelBubble
+      || !isTrusted
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.altKey, event, authority)
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.ctrlKey, event, authority)
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.metaKey, event, authority)
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.repeat, event, authority)
+      || modeSwitcherNativeValue<boolean>(authority.keyboard.isComposing, event, authority)
+      || (view !== null && view !== authority.ownerWindow)
+      || modeSwitcherActiveElement(authority) !== trigger
+      || !modeSwitcherTriggerPathMatches(
+        path,
+        trigger,
+        authority.ownerDocument,
+        authority.ownerWindow,
+      )
+      || !modeSwitcherArrowActionIsCurrent(publication, action)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      publication,
+      action,
+      source: trigger,
+      path,
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed: modeSwitcherNativeValue<boolean>(authority.event.composed, event, authority),
+      timeStamp: modeSwitcherNativeValue<number>(authority.event.timeStamp, event, authority),
+      key: action.key,
+      code: modeSwitcherNativeValue<string>(authority.keyboard.code, event, authority),
+      location: modeSwitcherNativeValue<number>(authority.keyboard.location, event, authority),
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      detail: modeSwitcherNativeValue<number>(authority.ui.detail, event, authority),
+      view,
+      isTrusted: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function captureModeSwitcherReactMethod(
+  value: object,
+  property: PropertyKey,
+  authority: ModeSwitcherKeyboardAuthority,
+) {
+  let current: object | null = value;
+  while (current && current !== authority.ownerWindow.Object.prototype) {
+    const capture = captureModeSwitcherDescriptor(
+      current,
+      property,
+      authority.getOwnPropertyDescriptor,
+    );
+    if (capture) {
+      const method = capture.descriptor.value;
+      return typeof method === "function"
+        ? Object.freeze({ capture, method: method as ModeSwitcherNativeMethod })
+        : null;
+    }
+    current = authority.getPrototypeOf(current);
+  }
+  return null;
+}
+
+function captureModeSwitcherReactKeyboardProof(
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  authority: ModeSwitcherKeyboardAuthority | null,
+): ModeSwitcherReactKeyboardProof | null {
+  if (!authority || !event || typeof event !== "object") return null;
+  const prototype = authority.getPrototypeOf(event);
+  if (!prototype || prototype === authority.ownerWindow.Object.prototype) return null;
+  const preventDefault = captureModeSwitcherReactMethod(event, "preventDefault", authority);
+  const stopPropagation = captureModeSwitcherReactMethod(event, "stopPropagation", authority);
+  const isDefaultPrevented = captureModeSwitcherReactMethod(event, "isDefaultPrevented", authority);
+  const isPropagationStopped = captureModeSwitcherReactMethod(
+    event,
+    "isPropagationStopped",
+    authority,
+  );
+  const persist = captureModeSwitcherReactMethod(event, "persist", authority);
+  const isPersistent = captureModeSwitcherReactMethod(event, "isPersistent", authority);
+  const methods = [
+    preventDefault,
+    stopPropagation,
+    isDefaultPrevented,
+    isPropagationStopped,
+    persist,
+    isPersistent,
+  ];
+  if (methods.some((method) => method === null)) return null;
+  return Object.freeze({
+    prototype,
+    descriptors: Object.freeze(methods.map((method) => method!.capture)),
+    preventDefault: preventDefault!.method,
+    stopPropagation: stopPropagation!.method,
+    isDefaultPrevented: isDefaultPrevented!.method,
+    isPropagationStopped: isPropagationStopped!.method,
+    persist: persist!.method,
+    isPersistent: isPersistent!.method,
+  });
+}
+
+function modeSwitcherNativeKeyboardEventMatches(
+  delivery: ModeSwitcherKeyboardDelivery,
+) {
+  const { snapshot } = delivery;
+  const { publication, event } = snapshot;
+  const authority = publication.keyboardAuthority;
+  if (
+    !authority
+    || !authority.historyIsClean()
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+    || authority.trusted.read(event) !== true
+    || modeSwitcherActiveElement(authority) !== snapshot.source
+  ) {
+    return false;
+  }
+  try {
+    const path = modeSwitcherNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    );
+    const currentTarget = modeSwitcherNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      event,
+      authority,
+    );
+    return (
+      modeSwitcherNativeValue<string>(authority.event.type, event, authority) === snapshot.type
+      && modeSwitcherNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+        authority,
+      ) === snapshot.target
+      && modeSwitcherNativeValue<number>(
+        authority.event.eventPhase,
+        event,
+        authority,
+      ) === authority.bubblingPhase
+      && currentTarget !== null
+      && path.includes(currentTarget)
+      && (
+        delivery.bubbleCurrentTarget === null
+        || currentTarget === delivery.bubbleCurrentTarget
+      )
+      && modeSwitcherNativeValue<boolean>(
+        authority.event.bubbles,
+        event,
+        authority,
+      ) === snapshot.bubbles
+      && modeSwitcherNativeValue<boolean>(
+        authority.event.cancelable,
+        event,
+        authority,
+      ) === snapshot.cancelable
+      && !modeSwitcherNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        event,
+        authority,
+      )
+      && !modeSwitcherNativeValue<boolean>(
+        authority.event.cancelBubble,
+        event,
+        authority,
+      )
+      && modeSwitcherNativeValue<boolean>(
+        authority.event.composed,
+        event,
+        authority,
+      ) === snapshot.composed
+      && modeSwitcherNativeValue<number>(
+        authority.event.timeStamp,
+        event,
+        authority,
+      ) === snapshot.timeStamp
+      && modeSwitcherNativeValue<string>(
+        authority.keyboard.key,
+        event,
+        authority,
+      ) === snapshot.key
+      && modeSwitcherNativeValue<string>(
+        authority.keyboard.code,
+        event,
+        authority,
+      ) === snapshot.code
+      && modeSwitcherNativeValue<number>(
+        authority.keyboard.location,
+        event,
+        authority,
+      ) === snapshot.location
+      && !modeSwitcherNativeValue<boolean>(authority.keyboard.altKey, event, authority)
+      && !modeSwitcherNativeValue<boolean>(authority.keyboard.ctrlKey, event, authority)
+      && !modeSwitcherNativeValue<boolean>(authority.keyboard.metaKey, event, authority)
+      && !modeSwitcherNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
+      && !modeSwitcherNativeValue<boolean>(authority.keyboard.repeat, event, authority)
+      && !modeSwitcherNativeValue<boolean>(
+        authority.keyboard.isComposing,
+        event,
+        authority,
+      )
+      && modeSwitcherNativeValue<number>(authority.ui.detail, event, authority) ===
+        snapshot.detail
+      && modeSwitcherNativeValue<Window | null>(authority.ui.view, event, authority) ===
+        snapshot.view
+      && path.length === snapshot.path.length
+      && path.every((entry, index) => entry === snapshot.path[index])
+      && modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
+      && publication.isExact()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function modeSwitcherReactKeyboardEventMatches(
+  delivery: ModeSwitcherKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: ModeSwitcherReactKeyboardProof,
+) {
+  const { snapshot } = delivery;
+  const reactEvent = event as React.KeyboardEvent<HTMLButtonElement> & {
+    readonly _reactName?: unknown;
+    readonly isPersistent?: unknown;
+  };
+  const authority = snapshot.publication.keyboardAuthority;
+  if (!authority) return false;
+  try {
+    return Boolean(
+      authority.getPrototypeOf(event) === proof.prototype
+      && proof.descriptors.every((descriptor) => descriptor.isCurrent())
+      && event.nativeEvent === snapshot.event
+      && event.type === snapshot.type
+      && event.currentTarget === snapshot.source
+      && event.target === snapshot.source
+      && event.eventPhase === authority.bubblingPhase
+      && event.bubbles === snapshot.bubbles
+      && event.cancelable === snapshot.cancelable
+      && !event.defaultPrevented
+      && event.isTrusted === snapshot.isTrusted
+      && event.timeStamp === snapshot.timeStamp
+      && event.key === snapshot.key
+      && event.code === snapshot.code
+      && event.location === snapshot.location
+      && event.altKey === snapshot.altKey
+      && event.ctrlKey === snapshot.ctrlKey
+      && event.metaKey === snapshot.metaKey
+      && event.shiftKey === snapshot.shiftKey
+      && event.repeat === snapshot.repeat
+      && event.detail === snapshot.detail
+      && Object.is(event.view, snapshot.view)
+      && reactEvent._reactName === "onKeyDown"
+      && modeSwitcherNativeCall<boolean>(
+        proof.isDefaultPrevented,
+        event,
+        [],
+        authority,
+      ) === false
+      && modeSwitcherNativeCall<boolean>(
+        proof.isPropagationStopped,
+        event,
+        [],
+        authority,
+      ) === false
+      && modeSwitcherNativeCall<boolean>(
+        proof.isPersistent,
+        event,
+        [],
+        authority,
+      ) === true
+      && modeSwitcherNativeKeyboardEventMatches(delivery)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function preventModeSwitcherArrow(claim: ModeSwitcherClaimedArrow) {
+  const { authority, nativeEvent, reactEvent, reactProof } = claim;
+  if (
+    !authority.historyIsClean()
+    || !reactProof.descriptors.every((descriptor) => descriptor.isCurrent())
+    || modeSwitcherNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+  ) {
+    return false;
+  }
+  const syntheticDefault = authority.getOwnPropertyDescriptor(
+    reactEvent,
+    "defaultPrevented",
+  );
+  if (
+    !syntheticDefault
+    || !("value" in syntheticDefault)
+    || syntheticDefault.value !== false
+    || syntheticDefault.writable !== true
+  ) {
+    return false;
+  }
+  modeSwitcherNativeCall<void>(
+    authority.event.preventDefault,
+    nativeEvent,
+    [],
+    authority,
+  );
+  if (
+    !modeSwitcherNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    || !authority.set(reactEvent, "defaultPrevented", true, reactEvent)
+  ) {
+    return false;
+  }
+  return authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented")?.value === true;
+}
+
+function suppressModeSwitcherRadixArrowDown(
+  publication: ModeSwitcherPublication,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+) {
+  const authority = publication.keyboardAuthority;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !authority
+    || !(nativeEvent instanceof authority.ownerWindow.KeyboardEvent)
+    || authority.getPrototypeOf(nativeEvent) !== authority.keyboardPrototype
+    || event.type !== "keydown"
+    || event.currentTarget !== publication.dom.trigger
+  ) {
+    return false;
+  }
+  try {
+    const syntheticDefault = authority.getOwnPropertyDescriptor(event, "defaultPrevented");
+    if (
+      modeSwitcherNativeValue<string>(authority.event.type, nativeEvent, authority) !== "keydown"
+      || modeSwitcherNativeValue<string>(
+        authority.keyboard.key,
+        nativeEvent,
+        authority,
+      ) !== "ArrowDown"
+      || !syntheticDefault
+      || !("value" in syntheticDefault)
+      || syntheticDefault.value !== false
+      || syntheticDefault.writable !== true
+    ) {
+      return false;
+    }
+    return (
+      authority.set(event, "defaultPrevented", true, event)
+      && authority.getOwnPropertyDescriptor(event, "defaultPrevented")?.value === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function modeSwitcherOpenFocusTarget(
+  publication: ModeSwitcherPublication,
+  action: ModeSwitcherArrowAction,
+) {
+  if (!publication.render.open || !modeSwitcherArrowActionIsCurrent(publication, action)) {
+    return null;
+  }
+  if (action.destination === "last") return publication.dom.reader;
+  const eligible = publication.render.rows.find((row) => row.eligible);
+  return eligible ? publication.dom.rows[eligible.index] ?? null : null;
+}
+
+function modeSwitcherOpenPlacementMatches(
+  snapshot: ModeSwitcherPlacementSnapshot,
+  content: HTMLElement,
+  openingNodes: ReadonlySet<Node>,
+) {
+  let previousSibling = snapshot.node.previousSibling;
+  let nextSibling = snapshot.node.nextSibling;
+  while (
+    previousSibling
+    && (previousSibling.contains(content) || openingNodes.has(previousSibling))
+  ) {
+    previousSibling = previousSibling.previousSibling;
+  }
+  while (
+    nextSibling
+    && (nextSibling.contains(content) || openingNodes.has(nextSibling))
+  ) {
+    nextSibling = nextSibling.nextSibling;
+  }
+  return (
+    snapshot.node.parentNode === snapshot.parent
+    && previousSibling === snapshot.previousSibling
+    && nextSibling === snapshot.nextSibling
+  );
+}
+
+function modeSwitcherTriggerOpeningMutationIsExpected(
+  record: MutationRecord,
+  trigger: HTMLButtonElement,
+  content: HTMLDivElement,
+) {
+  if (record.type !== "attributes" || record.target !== trigger) return false;
+  if (record.attributeName === "aria-expanded") {
+    return record.oldValue === "false" && trigger.getAttribute("aria-expanded") === "true";
+  }
+  if (record.attributeName === "data-state") {
+    return record.oldValue === "closed" && trigger.getAttribute("data-state") === "open";
+  }
+  if (record.attributeName === "aria-controls") {
+    return record.oldValue === null && trigger.getAttribute("aria-controls") === content.id;
+  }
+  if (record.attributeName === "data-radix-popper-align") {
+    return (
+      record.oldValue === null
+      && trigger.getAttribute("data-radix-popper-align") === content.getAttribute("data-align")
+    );
+  }
+  if (record.attributeName === "data-radix-popper-side") {
+    return (
+      record.oldValue === null
+      && trigger.getAttribute("data-radix-popper-side") === content.getAttribute("data-side")
+    );
+  }
+  return false;
+}
+
+type ModeSwitcherFocusGuardEdge = "start" | "end";
+type ModeSwitcherFocusGuardDecoration =
+  | "inserted"
+  | "marker-set"
+  | "decorated"
+  | "aria-cleared"
+  | "cleared";
+type ModeSwitcherFocusGuardIdentityState =
+  | "initial-start"
+  | "initial-end"
+  | "initial-live"
+  | "initial-end-removal"
+  | "rebound-start"
+  | "rebound-end"
+  | "complete";
+
+interface ModeSwitcherFocusGuardHistory {
+  readonly node: HTMLSpanElement;
+  readonly edge: ModeSwitcherFocusGuardEdge;
+  decoration: ModeSwitcherFocusGuardDecoration;
+}
+
+function modeSwitcherFocusGuardHasAttributes(
+  guard: HTMLSpanElement,
+  decorated: boolean,
+) {
+  const expected = new Map<string, string>([
+    ["data-radix-focus-guard", ""],
+    ["style", "outline: none; opacity: 0; position: fixed; pointer-events: none;"],
+    ["tabindex", "0"],
+  ]);
+  if (decorated) {
+    expected.set("aria-hidden", "true");
+    expected.set("data-aria-hidden", "true");
+  }
+  return (
+    guard.attributes.length === expected.size
+    && Array.from(guard.attributes).every(
+      (attribute) => expected.get(attribute.name) === attribute.value,
+    )
+  );
+}
+
+function modeSwitcherFocusGuardShapeMatches(
+  node: Node,
+  document: Document,
+  decorated: boolean,
+): node is HTMLSpanElement {
+  const ownerWindow = document.defaultView;
+  return Boolean(
+    ownerWindow
+    && node instanceof ownerWindow.HTMLSpanElement
+    && node.ownerDocument === document
+    && node.tabIndex === 0
+    && node.childNodes.length === 0
+    && node.style.length === 4
+    && node.style.outline === "none"
+    && node.style.opacity === "0"
+    && node.style.position === "fixed"
+    && node.style.pointerEvents === "none"
+    && modeSwitcherFocusGuardHasAttributes(node, decorated)
+  );
+}
+
+function modeSwitcherFocusGuardEdgeForRecord(
+  record: MutationRecord,
+): ModeSwitcherFocusGuardEdge | null {
+  const atStart = record.previousSibling === null;
+  const atEnd = record.nextSibling === null;
+  if (atStart === atEnd) return null;
+  return atStart ? "start" : "end";
+}
+
+function modeSwitcherFocusGuardDecorationIsExpected(
+  record: MutationRecord,
+  guard: ModeSwitcherFocusGuardHistory,
+) {
+  if (record.type !== "attributes" || record.target !== guard.node) return false;
+  if (
+    guard.decoration === "inserted"
+    && record.attributeName === "data-aria-hidden"
+    && record.oldValue === null
+  ) {
+    guard.decoration = "marker-set";
+    return true;
+  }
+  if (
+    guard.decoration === "marker-set"
+    && record.attributeName === "aria-hidden"
+    && record.oldValue === null
+  ) {
+    guard.decoration = "decorated";
+    return true;
+  }
+  if (
+    guard.decoration === "decorated"
+    && record.attributeName === "aria-hidden"
+    && record.oldValue === "true"
+  ) {
+    guard.decoration = "aria-cleared";
+    return true;
+  }
+  if (
+    guard.decoration === "aria-cleared"
+    && record.attributeName === "data-aria-hidden"
+    && record.oldValue === "true"
+  ) {
+    guard.decoration = "cleared";
+    return true;
+  }
+  return false;
+}
+
+function modeSwitcherOpeningHistory(
+  records: readonly MutationRecord[],
+  source: ModeSwitcherPublication,
+  successor: ModeSwitcherPublication,
+): ReadonlySet<Node> | null {
+  const trigger = source.dom.trigger;
+  const content = successor.dom.content;
+  const ownerWindow = source.document.defaultView;
+  if (!content || !ownerWindow) return null;
+
+  const openingNodes = new Set<Node>();
+  const guardHistory = new Map<HTMLSpanElement, ModeSwitcherFocusGuardHistory>();
+  const generations: Array<{
+    start?: ModeSwitcherFocusGuardHistory;
+    end?: ModeSwitcherFocusGuardHistory;
+  }> = [{}, {}];
+  let identityState: ModeSwitcherFocusGuardIdentityState = "initial-start";
+  let contentInsertion: Node | null = null;
+
+  for (const record of records) {
+    if (record.type === "attributes" && record.target === trigger) {
+      if (!modeSwitcherTriggerOpeningMutationIsExpected(record, trigger, content)) return null;
+      continue;
+    }
+
+    if (record.type === "attributes") {
+      if (!(record.target instanceof ownerWindow.HTMLSpanElement)) return null;
+      const guard = guardHistory.get(record.target);
+      if (!guard || !modeSwitcherFocusGuardDecorationIsExpected(record, guard)) return null;
+      continue;
+    }
+
+    if (
+      record.type !== "childList"
+      || (record.addedNodes.length === 0) === (record.removedNodes.length === 0)
+      || record.addedNodes.length > 1
+      || record.removedNodes.length > 1
+    ) {
+      return null;
+    }
+
+    const addedNode = record.addedNodes.item(0);
+    if (addedNode?.contains(content)) {
+      if (
+        contentInsertion
+        || record.removedNodes.length !== 0
+        || addedNode.parentNode !== record.target
+      ) {
+        return null;
+      }
+      contentInsertion = addedNode;
+      openingNodes.add(addedNode);
+      continue;
+    }
+
+    const node = addedNode ?? record.removedNodes.item(0);
+    const edge = modeSwitcherFocusGuardEdgeForRecord(record);
+    if (
+      !node
+      || !edge
+      || record.target !== source.document.body
+      || !(node instanceof ownerWindow.HTMLSpanElement)
+    ) {
+      return null;
+    }
+
+    if (record.addedNodes.length === 1) {
+      let generationIndex: number;
+      let expectedEdge: ModeSwitcherFocusGuardEdge;
+      let nextState: ModeSwitcherFocusGuardIdentityState;
+      if (identityState === "initial-start") {
+        generationIndex = 0;
+        expectedEdge = "start";
+        nextState = "initial-end";
+      } else if (identityState === "initial-end") {
+        generationIndex = 0;
+        expectedEdge = "end";
+        nextState = "initial-live";
+      } else if (identityState === "rebound-start") {
+        generationIndex = 1;
+        expectedEdge = "start";
+        nextState = "rebound-end";
+      } else if (identityState === "rebound-end") {
+        generationIndex = 1;
+        expectedEdge = "end";
+        nextState = "complete";
+      } else {
+        return null;
+      }
+      const initial = generations[0]!;
+      if (
+        edge !== expectedEdge
+        || guardHistory.has(node)
+        || (
+          !modeSwitcherFocusGuardShapeMatches(node, source.document, false)
+          && !modeSwitcherFocusGuardShapeMatches(node, source.document, true)
+        )
+        || (
+          generationIndex === 1
+          && (node === initial.start?.node || node === initial.end?.node)
+        )
+      ) {
+        return null;
+      }
+      const guard: ModeSwitcherFocusGuardHistory = {
+        node,
+        edge,
+        decoration: "inserted",
+      };
+      generations[generationIndex]![edge] = guard;
+      guardHistory.set(node, guard);
+      identityState = nextState;
+      continue;
+    }
+
+    const initial = generations[0]!;
+    const expected = identityState === "initial-live"
+      ? initial.start
+      : identityState === "initial-end-removal"
+        ? initial.end
+        : null;
+    if (
+      !expected
+      || node !== expected.node
+      || edge !== expected.edge
+      || initial.start?.decoration !== "cleared"
+      || initial.end?.decoration !== "cleared"
+    ) {
+      return null;
+    }
+    identityState = identityState === "initial-live"
+      ? "initial-end-removal"
+      : "rebound-start";
+  }
+
+  if (contentInsertion && !contentInsertion.contains(content)) return null;
+  if (identityState === "initial-start") return openingNodes;
+  const finalGeneration = identityState === "initial-live"
+    ? generations[0]
+    : identityState === "complete"
+      ? generations[1]
+      : null;
+  const retiredGeneration = identityState === "complete" ? generations[0] : null;
+  const finalStart = finalGeneration?.start;
+  const finalEnd = finalGeneration?.end;
+  const retiredStart = retiredGeneration?.start;
+  const retiredEnd = retiredGeneration?.end;
+  if (
+    !finalStart
+    || !finalEnd
+    || finalStart.decoration !== "decorated"
+    || finalEnd.decoration !== "decorated"
+    || !modeSwitcherFocusGuardShapeMatches(finalStart.node, source.document, true)
+    || !modeSwitcherFocusGuardShapeMatches(finalEnd.node, source.document, true)
+    || finalStart.node.parentNode !== source.document.body
+    || finalEnd.node.parentNode !== source.document.body
+    || source.document.body.firstElementChild !== finalStart.node
+    || source.document.body.lastElementChild !== finalEnd.node
+    || (
+      retiredGeneration
+      && (
+        !retiredStart
+        || !retiredEnd
+        || retiredStart.decoration !== "cleared"
+        || retiredEnd.decoration !== "cleared"
+        || !modeSwitcherFocusGuardShapeMatches(
+          retiredStart.node,
+          source.document,
+          false,
+        )
+        || !modeSwitcherFocusGuardShapeMatches(
+          retiredEnd.node,
+          source.document,
+          false,
+        )
+        || retiredStart.node.parentNode !== null
+        || retiredEnd.node.parentNode !== null
+      )
+    )
+  ) {
+    return null;
+  }
+  openingNodes.add(finalStart.node);
+  openingNodes.add(finalEnd.node);
+  return openingNodes;
+}
+
+function modeSwitcherOpeningMutationShouldBeRecorded(
+  record: MutationRecord,
+  trigger: HTMLButtonElement,
+  document: Document,
+  potentialGuards: WeakSet<Node>,
+) {
+  const ownerWindow = document.defaultView;
+  if (!ownerWindow) return false;
+  if (record.type !== "attributes") {
+    for (const node of [...record.addedNodes, ...record.removedNodes]) {
+      if (node instanceof ownerWindow.HTMLSpanElement) potentialGuards.add(node);
+    }
+    return true;
+  }
+  return (
+    record.target === trigger
+    || trigger.contains(record.target)
+    || (
+      record.target instanceof ownerWindow.HTMLSpanElement
+      && (
+        potentialGuards.has(record.target)
+        || record.target.hasAttribute("data-radix-focus-guard")
+      )
+    )
+  );
+}
+
+function createModeSwitcherOpenFocusGuard(
+  source: ModeSwitcherPublication,
+): ModeSwitcherOpenFocusGuard | null {
+  const trigger = source.dom.trigger;
+  const MutationObserverConstructor = source.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor || !source.isExact()) return null;
+  const placements = snapshotModeSwitcherPlacement([trigger]);
+  const records: MutationRecord[] = [];
+  const potentialGuards = new WeakSet<Node>();
+  let observer: MutationObserver | null = new MutationObserverConstructor((pending) => {
+    for (const record of pending) {
+      if (
+        modeSwitcherOpeningMutationShouldBeRecorded(
+          record,
+          trigger,
+          source.document,
+          potentialGuards,
+        )
+      ) {
+        records.push(record);
+      }
+    }
+  });
+  observer.observe(trigger, {
+    attributeOldValue: true,
+    attributes: true,
+    characterDataOldValue: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (let ancestor = trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+    observer.observe(
+      ancestor,
+      ancestor === source.document.body
+        ? { attributeOldValue: true, attributes: true, childList: true, subtree: true }
+        : { childList: true },
+    );
+  }
+  let invalid = false;
+  return Object.freeze({
+    isExact: (successor: ModeSwitcherPublication) => {
+      if (observer) {
+        for (const record of observer.takeRecords()) {
+          if (
+            modeSwitcherOpeningMutationShouldBeRecorded(
+              record,
+              trigger,
+              source.document,
+              potentialGuards,
+            )
+          ) {
+            records.push(record);
+          }
+        }
+      }
+      const openingNodes = modeSwitcherOpeningHistory(records, source, successor);
+      if (
+        invalid
+        || !successor.dom.content
+        || !openingNodes
+        || !placements.every((snapshot) =>
+          modeSwitcherOpenPlacementMatches(
+            snapshot,
+            successor.dom.content!,
+            openingNodes,
+          ))
+      ) {
+        invalid = true;
+      }
+      return !invalid;
+    },
+    dispose: () => {
+      observer?.disconnect();
+      observer = null;
+    },
+  });
+}
+
+function modeSwitcherRenderSuccessorMatches(
+  before: ModeSwitcherRender,
+  after: ModeSwitcherRender,
+) {
+  return (
+    after.visit === before.visit
+    && after.session === before.session
+    && after.docId === before.docId
+    && after.role === before.role
+    && after.editable === before.editable
+    && after.mode === before.mode
+    && after.setMode === before.setMode
+    && after.triggerClassName === before.triggerClassName
+    && after.reader.url === before.reader.url
+    && after.reader.target === before.reader.target
+    && after.reader.features === before.reader.features
+    && after.rows.length === before.rows.length
+    && after.rows.every((row, index) => {
+      const previous = before.rows[index];
+      return Boolean(
+        previous
+        && row.index === previous.index
+        && row.value === previous.value
+        && row.label === previous.label
+        && row.description === previous.description
+        && row.eligible === previous.eligible
+      );
+    })
+  );
+}
+
+function modeSwitcherOpenFocusSuccessorTarget(
+  intent: ModeSwitcherOpenFocusIntent,
+  publication: ModeSwitcherPublication,
+) {
+  const { source, action, authority } = intent;
+  const target = publication.dom.reader;
+  return (
+    action.key === "ArrowUp"
+    && action.destination === "last"
+    && !source.render.open
+    && publication.render.open
+    && source.document === publication.document
+    && source.dom.trigger === publication.dom.trigger
+    && authority.ownerDocument === publication.document
+    && authority.ownerWindow === publication.document.defaultView
+    && authority.historyIsClean()
+    && modeSwitcherArrowActionIsCurrent(source, action)
+    && modeSwitcherRenderSuccessorMatches(source.render, publication.render)
+    && target?.ownerDocument === publication.document
+    && target === publication.dom.reader
+    && publication.isExact()
+    && intent.guard.isExact(publication)
+  )
+    ? target
+    : null;
 }
 
 class ModeSwitcherElementOwner<T extends HTMLElement> {
@@ -3912,10 +5670,44 @@ function createModeSwitcherPresentation({
       && reattached.size === expectedOwners.size
       && publication.isExact()
     );
+    const publicationDocument = dom.trigger.ownerDocument;
+    const ownerWindow = publicationDocument.defaultView;
+    const keyboardAuthority = ownerWindow
+      ? captureModeSwitcherKeyboardAuthority(
+          publicationDocument,
+          ownerWindow as Window & typeof globalThis,
+        )
+      : null;
+    const keyboardEvents = new Set<KeyboardEvent>();
+    const arrowActions: Readonly<Record<ModeSwitcherArrowKey, ModeSwitcherArrowAction>> =
+      Object.freeze({
+        ArrowDown: Object.freeze({
+          identity: Symbol("mode-switcher-arrow-down"),
+          render,
+          trigger: dom.trigger,
+          document: publicationDocument,
+          key: "ArrowDown",
+          destination: "first",
+        }),
+        ArrowUp: Object.freeze({
+          identity: Symbol("mode-switcher-arrow-up"),
+          render,
+          trigger: dom.trigger,
+          document: publicationDocument,
+          key: "ArrowUp",
+          destination: "last",
+        }),
+      });
+    let keyboardListenerAttached = false;
+    const keyboardListener = (event: Event) =>
+      coordinator.stageNativeArrow(publication, event);
     const publication: ModeSwitcherPublication = Object.freeze({
       render,
-      document: dom.trigger.ownerDocument,
+      document: publicationDocument,
       dom,
+      keyboardAuthority,
+      keyboardEvents,
+      arrowActions,
       triggerParent,
       contentParent,
       triggerSnapshot,
@@ -3939,6 +5731,16 @@ function createModeSwitcherPresentation({
       dispose: () => {
         observer?.disconnect();
         observer = null;
+        coordinator.clearKeyboardEvents(publication);
+        if (keyboardAuthority && keyboardListenerAttached) {
+          modeSwitcherNativeCall<void>(
+            keyboardAuthority.removeEventListener,
+            dom.trigger,
+            ["keydown", keyboardListener, true],
+            keyboardAuthority,
+          );
+          keyboardListenerAttached = false;
+        }
       },
     });
     function retire(reason: Retirement) {
@@ -3966,6 +5768,15 @@ function createModeSwitcherPresentation({
         && publication.isExact()
       ),
     });
+    if (keyboardAuthority) {
+      modeSwitcherNativeCall<void>(
+        keyboardAuthority.addEventListener,
+        dom.trigger,
+        ["keydown", keyboardListener, true],
+        keyboardAuthority,
+      );
+      keyboardListenerAttached = true;
+    }
     if (MutationObserverConstructor) {
       observer = new MutationObserverConstructor(inspectMutations);
       observer.observe(dom.trigger, { attributes: true, characterData: true, childList: true, subtree: true });
@@ -4044,8 +5855,15 @@ function createModeSwitcherPresentation({
     coordinator.publishDisclosure(publication, !render.open, [nativeEvent]);
   };
   const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (!["Enter", " ", "ArrowDown"].includes(event.key)) return;
     const publication = currentPublication();
+    if (
+      publication
+      && (event.key === "ArrowDown" || event.key === "ArrowUp")
+    ) {
+      coordinator.stageReactArrow(publication, event);
+      return;
+    }
+    if (!["Enter", " "].includes(event.key)) return;
     const trigger = publication?.dom.trigger;
     const ownerWindow = publication?.document.defaultView;
     const nativeEvent = event.nativeEvent;
@@ -4073,21 +5891,98 @@ function createModeSwitcherPresentation({
     }
     coordinator.publishDisclosure(
       publication,
-      event.key === "ArrowDown" ? true : !render.open,
+      !render.open,
       [nativeEvent],
     );
+  };
+  const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    const candidate = publication ?? runtimeState.last?.publication ?? null;
+    if (!publication) {
+      if (candidate) suppressModeSwitcherRadixArrowDown(candidate, event);
+      return;
+    }
+    const arrow = coordinator.claimReactArrow(publication, event);
+    if (!arrow) {
+      suppressModeSwitcherRadixArrowDown(publication, event);
+      return;
+    }
+    if (!preventModeSwitcherArrow(arrow)) {
+      suppressModeSwitcherRadixArrowDown(publication, event);
+      return;
+    }
+    coordinator.publishDisclosure(publication, true, [arrow.nativeEvent], true, arrow);
+    onOpenChange(true);
   };
   const onOpenChange = (open: boolean) => {
     const publication = currentPublication();
     const intent = publication && coordinator.consumeDisclosure(publication, open);
     if (!publication || !intent) return;
-    if (render.open === open) return;
+    if (render.open === open) {
+      const arrow = intent.arrow;
+      const target = arrow && open
+        ? modeSwitcherOpenFocusTarget(publication, arrow.action)
+        : null;
+      if (
+        !arrow
+        || !target
+        || arrow.authority.ownerDocument !== publication.document
+        || arrow.authority.ownerWindow !== publication.document.defaultView
+        || !arrow.authority.historyIsClean()
+        || modeSwitcherActiveElement(arrow.authority) !== publication.dom.trigger
+        || !publication.isExact()
+        || !publication.retire()
+      ) {
+        return;
+      }
+      commitOpen(Object.freeze({ visit: render.visit, open: true }));
+      modeSwitcherNativeCall<void>(
+        arrow.authority.focus,
+        target,
+        [{ preventScroll: true }],
+        arrow.authority,
+      );
+      return;
+    }
     if (open) {
-      if (!publication.retire()) return;
+      if (intent.arrow?.key === "ArrowUp" && !coordinator.prepareOpenFocus(intent.arrow)) {
+        return;
+      }
+      if (!publication.retire()) {
+        coordinator.cancelOpenFocus(publication);
+        return;
+      }
       commitOpen(Object.freeze({ visit: render.visit, open: true }));
     } else {
       close(publication, intent.returnFocus);
     }
+  };
+  const onOpenAutoFocus = (event: Event) => {
+    const publication = currentPublication();
+    if (!publication) return;
+    const focus = coordinator.consumeOpenFocus(publication, event);
+    if (!focus) return;
+    modeSwitcherNativeCall<void>(
+      focus.authority.event.preventDefault,
+      event,
+      [],
+      focus.authority,
+    );
+    if (
+      !modeSwitcherNativeValue<boolean>(
+        focus.authority.event.defaultPrevented,
+        event,
+        focus.authority,
+      )
+    ) {
+      return;
+    }
+    modeSwitcherNativeCall<void>(
+      focus.authority.focus,
+      focus.target,
+      [{ preventScroll: true }],
+      focus.authority,
+    );
   };
   const rows: readonly ModeSwitcherRowPublication[] = render.rows.map((row) => {
     const rowPublication: ModeSwitcherRowPublication = Object.freeze({
@@ -4245,7 +6140,9 @@ function createModeSwitcherPresentation({
     establish,
     onTriggerPointerDown,
     onTriggerKeyDown,
+    onTriggerArrowKeyDown,
     onOpenChange,
+    onOpenAutoFocus,
     onModeChange,
     onReaderSelect,
     onEscapeKeyDown,
@@ -4325,7 +6222,9 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     captureReader,
     onTriggerPointerDown,
     onTriggerKeyDown,
+    onTriggerArrowKeyDown,
     onOpenChange,
+    onOpenAutoFocus,
     onModeChange,
     onReaderSelect,
     onEscapeKeyDown,
@@ -4340,9 +6239,10 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     viewing: <Eye size={15} />,
   };
   const labels: Record<EditMode, string> = { editing: "Editing", suggesting: "Suggesting", viewing: "Viewing" };
+  const openAutoFocusProps = { onOpenAutoFocus };
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
-      <MenuTrigger asChild>
+      <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
         <button
           ref={captureTrigger}
           type="button"
@@ -4365,6 +6265,7 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
           onPointerDownOutside={onOutside}
           onFocusOutside={onOutside}
           onCloseAutoFocus={onCloseAutoFocus}
+          {...openAutoFocusProps}
         >
           <MenuRadioGroup ref={captureGroup} value={mode} onValueChange={onModeChange}>
             {publishedRows.map((row) => (
@@ -7054,6 +8955,2524 @@ export function PublishStatusButton({
         {label}
       </span>
     </button>
+  );
+}
+
+type PublishMenuActionName =
+  | "publish"
+  | "pull"
+  | "sync"
+  | "open"
+  | "change"
+  | "connect"
+  | "download"
+  | "share";
+type PublishMenuArrowKey = "ArrowDown" | "ArrowUp";
+type PublishMenuNativeGetter = (this: object) => unknown;
+type PublishMenuNativeMethod = (this: object, ...args: unknown[]) => unknown;
+
+interface PublishMenuVisit {
+  readonly mount: symbol;
+  readonly session: CollabSession;
+  readonly document: DocumentDto;
+}
+
+interface PublishMenuState {
+  readonly visit: PublishMenuVisit;
+  readonly open: boolean;
+}
+
+interface PublishMenuAction {
+  readonly identity: object;
+  readonly name: PublishMenuActionName;
+  readonly enabled: boolean;
+  readonly label: string;
+  readonly callback: unknown;
+}
+
+interface PublishMenuRender {
+  readonly identity: object;
+  readonly visit: PublishMenuVisit;
+  readonly props: HeaderProps;
+  readonly session: CollabSession;
+  readonly document: DocumentDto;
+  readonly documentFields: readonly (readonly [string, unknown])[];
+  readonly sync: SyncStatusDto | null;
+  readonly syncFields: string | null;
+  readonly role: CollabSession["role"];
+  readonly linked: boolean;
+  readonly canEdit: boolean;
+  readonly isOwner: boolean;
+  readonly githubConfigured: boolean;
+  readonly publishing: boolean;
+  readonly open: boolean;
+  readonly actions: readonly PublishMenuAction[];
+  readonly enabledActions: readonly PublishMenuAction[];
+}
+
+interface PublishMenuDom {
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLDivElement | null;
+  readonly actions: Readonly<Record<PublishMenuActionName, HTMLDivElement | null>>;
+}
+
+interface PublishMenuCapturedDescriptor {
+  readonly owner: object;
+  readonly property: PropertyKey;
+  readonly descriptor: PropertyDescriptor;
+  readonly isCurrent: () => boolean;
+}
+
+interface PublishMenuTrustedAuthority {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface PublishMenuKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly customEventPrototype: object;
+  readonly keyboardPrototype: object;
+  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly set: typeof Reflect.set;
+  readonly trusted: PublishMenuTrustedAuthority;
+  readonly event: Readonly<{
+    type: PublishMenuNativeGetter;
+    target: PublishMenuNativeGetter;
+    currentTarget: PublishMenuNativeGetter;
+    eventPhase: PublishMenuNativeGetter;
+    bubbles: PublishMenuNativeGetter;
+    cancelable: PublishMenuNativeGetter;
+    defaultPrevented: PublishMenuNativeGetter;
+    cancelBubble: PublishMenuNativeGetter;
+    composed: PublishMenuNativeGetter;
+    timeStamp: PublishMenuNativeGetter;
+    composedPath: PublishMenuNativeMethod;
+    preventDefault: PublishMenuNativeMethod;
+  }>;
+  readonly keyboard: Readonly<{
+    key: PublishMenuNativeGetter;
+    code: PublishMenuNativeGetter;
+    location: PublishMenuNativeGetter;
+    altKey: PublishMenuNativeGetter;
+    ctrlKey: PublishMenuNativeGetter;
+    metaKey: PublishMenuNativeGetter;
+    shiftKey: PublishMenuNativeGetter;
+    repeat: PublishMenuNativeGetter;
+    isComposing: PublishMenuNativeGetter;
+  }>;
+  readonly ui: Readonly<{
+    detail: PublishMenuNativeGetter;
+    view: PublishMenuNativeGetter;
+  }>;
+  readonly activeElement: PublishMenuNativeGetter;
+  readonly focus: PublishMenuNativeMethod;
+  readonly addEventListener: PublishMenuNativeMethod;
+  readonly removeEventListener: PublishMenuNativeMethod;
+  readonly historyIsClean: () => boolean;
+}
+
+interface PublishMenuArrowAction {
+  readonly identity: object;
+  readonly publicationIdentity: object;
+  readonly key: PublishMenuArrowKey;
+  readonly destination: "first" | "last";
+  readonly target: PublishMenuAction | null;
+}
+
+type PublishMenuKeyboardListener = (this: EventTarget, event: Event) => void;
+
+interface PublishMenuKeyboardListenerRegistration {
+  readonly identity: object;
+  readonly publicationIdentity: object;
+  readonly target: Window & typeof globalThis;
+  readonly listener: PublishMenuKeyboardListener;
+  readonly capture: true;
+  readonly isCurrent: () => boolean;
+}
+
+interface PublishMenuNativeListenerProof {
+  readonly publication: PublishMenuPublication;
+  readonly registration: PublishMenuKeyboardListenerRegistration;
+  readonly event: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly eventPhase: number;
+}
+
+interface PublishMenuNativeSnapshot {
+  readonly event: KeyboardEvent;
+  readonly publication: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly listenerProof: PublishMenuNativeListenerProof;
+  readonly path: readonly EventTarget[];
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly key: PublishMenuArrowKey;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly detail: number;
+  readonly view: Window | null;
+  readonly isTrusted: true;
+}
+
+interface PublishMenuReactProof {
+  readonly prototype: object;
+  readonly descriptors: readonly PublishMenuCapturedDescriptor[];
+  readonly preventDefault: PublishMenuNativeMethod;
+  readonly stopPropagation: PublishMenuNativeMethod;
+  readonly isDefaultPrevented: PublishMenuNativeMethod;
+  readonly isPropagationStopped: PublishMenuNativeMethod;
+  readonly persist: PublishMenuNativeMethod;
+  readonly isPersistent: PublishMenuNativeMethod;
+}
+
+interface PublishMenuKeyboardDelivery {
+  readonly snapshot: PublishMenuNativeSnapshot;
+  reactEvent: React.KeyboardEvent<HTMLButtonElement> | null;
+  reactProof: PublishMenuReactProof | null;
+  bubbleCurrentTarget: EventTarget | null;
+  reactCount: number;
+  invalid: boolean;
+}
+
+interface PublishMenuClaimedArrow {
+  readonly publication: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly authority: PublishMenuKeyboardAuthority;
+  readonly listenerProof: PublishMenuNativeListenerProof;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly reactProof: PublishMenuReactProof;
+}
+
+interface PublishMenuOpenGuard {
+  readonly isExact: (successor: PublishMenuPublication) => boolean;
+  readonly dispose: () => void;
+}
+
+interface PublishMenuOpenIntent {
+  readonly source: PublishMenuPublication;
+  readonly action: PublishMenuArrowAction;
+  readonly authority: PublishMenuKeyboardAuthority;
+  readonly listenerProof: PublishMenuNativeListenerProof;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly guard: PublishMenuOpenGuard;
+}
+
+interface PublishMenuReadyOpen extends PublishMenuOpenIntent {
+  readonly publication: PublishMenuPublication;
+  readonly target: HTMLDivElement;
+}
+
+interface PublishMenuAutoFocusProof {
+  readonly event: Event;
+  readonly publication: PublishMenuPublication;
+  readonly content: HTMLDivElement;
+  readonly path: readonly EventTarget[];
+  readonly terminal: EventTarget;
+}
+
+interface PublishMenuPublication {
+  readonly identity: object;
+  readonly render: PublishMenuRender;
+  readonly document: Document;
+  readonly dom: PublishMenuDom;
+  readonly keyboardAuthority: PublishMenuKeyboardAuthority | null;
+  readonly keyboardListener: PublishMenuKeyboardListenerRegistration | null;
+  readonly keyboardEvents: Set<KeyboardEvent>;
+  readonly arrows: Readonly<Record<PublishMenuArrowKey, PublishMenuArrowAction>>;
+  readonly triggerSnapshot: ModeSwitcherDomSnapshot;
+  readonly contentSnapshot: ModeSwitcherDomSnapshot | null;
+  readonly placements: readonly ModeSwitcherPlacementSnapshot[];
+  readonly isExact: () => boolean;
+  readonly recordElementChange: (
+    owner: PublishMenuElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly retire: () => boolean;
+  readonly dispose: () => void;
+}
+
+interface PublishMenuPublicationRuntime {
+  readonly publication: PublishMenuPublication;
+  readonly retireForLayout: () => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+}
+
+interface PublishMenuPresentation {
+  readonly captureTrigger: React.RefCallback<HTMLButtonElement>;
+  readonly captureContent: React.RefCallback<HTMLDivElement>;
+  readonly captureActions: Readonly<Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>>;
+  readonly establish: () => (() => void) | undefined;
+  readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly onOpenAutoFocus: (event: Event) => void;
+}
+
+class PublishMenuElementOwner<T extends HTMLElement> {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly accepts: (element: T) => boolean,
+    private readonly allowsReplacement: () => boolean,
+    private readonly onChange: (
+      owner: PublishMenuElementOwner<T>,
+      element: T | null,
+      previous: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+
+  readonly capture: React.RefCallback<T> = (element) => {
+    if (this.#current === element) return;
+    if (
+      element
+      && (
+        !this.accepts(element)
+        || (this.#current !== null && this.#current !== element)
+        || (
+          this.#current === null
+          && this.#last !== null
+          && this.#last !== element
+          && !this.allowsReplacement()
+        )
+      )
+    ) {
+      return;
+    }
+    const previous = this.#current;
+    if (element === null) {
+      this.onChange(this, null, previous);
+      this.#current = null;
+      return;
+    }
+    this.#current = element;
+    this.#last = element;
+    this.onChange(this, element, previous);
+  };
+}
+
+interface PublishMenuElementOwnerHandle {
+  readonly element: () => HTMLElement | null;
+}
+
+interface PublishMenuOwners {
+  readonly trigger: PublishMenuElementOwner<HTMLButtonElement>;
+  readonly content: PublishMenuElementOwner<HTMLDivElement>;
+  readonly actions: Readonly<Record<PublishMenuActionName, PublishMenuElementOwner<HTMLDivElement>>>;
+}
+
+class PublishMenuPublicationCoordinator {
+  #active: PublishMenuPublication | null = null;
+  #successorOf: PublishMenuPublication | null = null;
+  #deliveries = new WeakMap<KeyboardEvent, PublishMenuKeyboardDelivery>();
+  #claimedNativeEvents = new WeakSet<Event>();
+  #claimedReactEvents = new WeakSet<object>();
+  #claimedPublications = new WeakSet<PublishMenuPublication>();
+  #claimedDirections = new WeakSet<PublishMenuArrowAction>();
+  #openIntent: PublishMenuOpenIntent | null = null;
+  #readyOpen: PublishMenuReadyOpen | null = null;
+  #successorRequested = new WeakSet<PublishMenuPublication>();
+
+  constructor(private readonly requestSuccessor: () => void) {}
+
+  active() {
+    return this.#active;
+  }
+
+  allowsElementReplacement() {
+    return this.#active === null;
+  }
+
+  acceptsSuccessorOf(publication: PublishMenuPublication) {
+    return this.#active === null && this.#successorOf === publication;
+  }
+
+  publish(publication: PublishMenuPublication) {
+    const previous = this.#active ?? this.#successorOf;
+    this.#active = publication;
+    this.#successorOf = null;
+    const intent = this.#openIntent;
+    if (intent) {
+      const target = publishMenuOpenSuccessorTarget(intent, publication);
+      if (target) {
+        this.#readyOpen = Object.freeze({ ...intent, publication, target });
+      } else {
+        this.#clearOpenIntent(intent);
+      }
+    }
+    if (previous && previous !== publication) previous.dispose();
+  }
+
+  retire(publication: PublishMenuPublication) {
+    if (this.#active !== publication) return false;
+    this.#active = null;
+    this.#successorOf = publication;
+    queueMicrotask(() => {
+      if (this.#active !== null || this.#successorOf !== publication) return;
+      this.#successorOf = null;
+      if (this.#openIntent?.source === publication) this.#clearOpenIntent(this.#openIntent);
+      publication.dispose();
+    });
+    return true;
+  }
+
+  elementChanged(
+    owner: PublishMenuElementOwnerHandle,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) {
+    const publication = this.#active ?? this.#successorOf;
+    if (!publication) return;
+    publication.recordElementChange(owner, element, previous);
+    if (
+      !this.#successorRequested.has(publication)
+      && this.acceptsSuccessorOf(publication)
+      && publication.isExactElementReplay()
+    ) {
+      this.#successorRequested.add(publication);
+      this.requestSuccessor();
+    }
+  }
+
+  clearKeyboardEvents(publication: PublishMenuPublication) {
+    for (const event of publication.keyboardEvents) this.#deliveries.delete(event);
+    publication.keyboardEvents.clear();
+  }
+
+  #clearKeyboardEvent(
+    publication: PublishMenuPublication,
+    event: KeyboardEvent,
+    delivery?: PublishMenuKeyboardDelivery,
+  ) {
+    const current = this.#deliveries.get(event);
+    if (!delivery || current === delivery) this.#deliveries.delete(event);
+    publication.keyboardEvents.delete(event);
+  }
+
+  stageNative(
+    publication: PublishMenuPublication,
+    registration: PublishMenuKeyboardListenerRegistration,
+    receiver: EventTarget,
+    event: Event,
+  ) {
+    const authority = publication.keyboardAuthority;
+    if (
+      this.#active === publication
+      && (!publication.isExact() || (authority !== null && !authority.historyIsClean()))
+    ) {
+      publication.retire();
+      return;
+    }
+    if (
+      !authority
+      || publication.keyboardListener !== registration
+      || !registration.isCurrent()
+      || !(event instanceof authority.ownerWindow.KeyboardEvent)
+      || this.#deliveries.has(event)
+      || this.#claimedNativeEvents.has(event)
+      || this.#claimedPublications.has(publication)
+      || this.#active !== publication
+    ) {
+      return;
+    }
+    const snapshot = readPublishMenuNativeEvent(
+      publication,
+      authority,
+      registration,
+      receiver,
+      event,
+    );
+    if (!snapshot) return;
+    const delivery: PublishMenuKeyboardDelivery = {
+      snapshot,
+      reactEvent: null,
+      reactProof: null,
+      bubbleCurrentTarget: null,
+      reactCount: 0,
+      invalid: false,
+    };
+    this.#deliveries.set(event, delivery);
+    publication.keyboardEvents.add(event);
+    queueMicrotask(() => this.#clearKeyboardEvent(publication, event, delivery));
+  }
+
+  stageReact(
+    publication: PublishMenuPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return;
+    const delivery = this.#deliveries.get(event.nativeEvent);
+    const proof = capturePublishMenuReactProof(event, publication.keyboardAuthority);
+    if (
+      !delivery
+      || delivery.invalid
+      || !proof
+      || delivery.snapshot.publication !== publication
+      || !publishMenuReactEventMatches(delivery, event, proof)
+    ) {
+      return;
+    }
+    delivery.reactCount += 1;
+    if (delivery.reactCount !== 1 || (delivery.reactEvent && delivery.reactEvent !== event)) {
+      delivery.invalid = true;
+      return;
+    }
+    delivery.reactEvent = event;
+    delivery.reactProof = proof;
+    delivery.bubbleCurrentTarget = publishMenuNativeValue<EventTarget | null>(
+      publication.keyboardAuthority!.event.currentTarget,
+      event.nativeEvent,
+      publication.keyboardAuthority!,
+    );
+  }
+
+  claim(
+    publication: PublishMenuPublication,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ): PublishMenuClaimedArrow | null {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#deliveries.get(nativeEvent);
+    const snapshot = delivery?.snapshot;
+    const proof = delivery?.reactProof;
+    const authority = publication.keyboardAuthority;
+    const listenerProof = snapshot?.listenerProof;
+    if (
+      !delivery
+      || !snapshot
+      || !proof
+      || !authority
+      || !listenerProof
+      || delivery.invalid
+      || delivery.reactCount !== 1
+      || delivery.reactEvent !== event
+      || snapshot.publication !== publication
+      || this.#claimedPublications.has(publication)
+      || this.#claimedDirections.has(snapshot.action)
+      || this.#claimedNativeEvents.has(nativeEvent)
+      || this.#active !== publication
+      || !publishMenuNativeListenerProofMatches(
+        listenerProof,
+        publication,
+        nativeEvent,
+        true,
+      )
+      || !publishMenuReactEventMatches(delivery, event, proof)
+      || !publishMenuArrowIsCurrent(publication, snapshot.action)
+      || !publication.isExact()
+    ) {
+      return null;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedDirections.add(snapshot.action);
+    this.#claimedReactEvents.add(event);
+    this.#claimedNativeEvents.add(nativeEvent);
+    this.#clearKeyboardEvent(publication, nativeEvent, delivery);
+    return Object.freeze({
+      publication,
+      action: snapshot.action,
+      authority,
+      listenerProof,
+      nativeEvent,
+      reactEvent: event,
+      reactProof: proof,
+    });
+  }
+
+  prepareOpen(claim: PublishMenuClaimedArrow) {
+    const publication = claim.publication;
+    if (
+      publication.render.open
+      || this.#active !== publication
+      || !this.#claimedPublications.has(publication)
+      || !this.#claimedDirections.has(claim.action)
+      || !publishMenuNativeListenerProofMatches(
+        claim.listenerProof,
+        publication,
+        claim.nativeEvent,
+        true,
+      )
+      || !publishMenuArrowIsCurrent(publication, claim.action)
+      || !publication.isExact()
+    ) {
+      return false;
+    }
+    const guard = createPublishMenuOpenGuard(publication);
+    if (!guard) return false;
+    if (this.#openIntent) this.#clearOpenIntent(this.#openIntent);
+    this.#openIntent = Object.freeze({
+      source: publication,
+      action: claim.action,
+      authority: claim.authority,
+      listenerProof: claim.listenerProof,
+      nativeEvent: claim.nativeEvent,
+      reactEvent: claim.reactEvent,
+      guard,
+    });
+    return true;
+  }
+
+  cancelOpen(publication: PublishMenuPublication) {
+    if (this.#openIntent?.source === publication) this.#clearOpenIntent(this.#openIntent);
+  }
+
+  consumeOpen(publication: PublishMenuPublication, event: Event) {
+    const ready = this.#readyOpen;
+    const authority = ready?.authority;
+    const autoFocusProof = authority
+      ? readPublishMenuAutoFocusEvent(publication, event, authority)
+      : null;
+    if (
+      !ready
+      || ready.publication !== publication
+      || !authority
+      || this.#active !== publication
+      || !autoFocusProof
+      || publishMenuActiveElement(authority) !== publication.dom.trigger
+      || !publishMenuNativeListenerProofMatches(
+        ready.listenerProof,
+        ready.source,
+        ready.nativeEvent,
+        false,
+      )
+      || !publishMenuOpenSuccessorTarget(ready, publication)
+      || this.#claimedNativeEvents.has(event)
+    ) {
+      return null;
+    }
+    this.#claimedNativeEvents.add(event);
+    const result = Object.freeze({
+      authority,
+      autoFocusProof,
+      target: ready.target,
+      source: ready.source,
+      listenerProof: ready.listenerProof,
+      nativeEvent: ready.nativeEvent,
+    });
+    this.#clearOpenIntent(ready);
+    return result;
+  }
+
+  #clearOpenIntent(intent: PublishMenuOpenIntent) {
+    if (this.#openIntent === intent) this.#openIntent = null;
+    if (this.#readyOpen?.source === intent.source) this.#readyOpen = null;
+    intent.guard.dispose();
+  }
+}
+
+function publishMenuDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current
+    || current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+    || ("value" in current) !== ("value" in expected)
+    || ("writable" in current) !== ("writable" in expected)
+    || ("get" in current) !== ("get" in expected)
+    || ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function capturePublishMenuDescriptor(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+): PublishMenuCapturedDescriptor | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    owner,
+    property,
+    descriptor: expected,
+    isCurrent: () => publishMenuDescriptorsMatch(
+      getOwnPropertyDescriptor(owner, property),
+      expected,
+    ),
+  });
+}
+
+function capturePublishMenuGetter(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = capturePublishMenuDescriptor(owner, property, getOwnPropertyDescriptor);
+  const getter = capture?.descriptor.get;
+  return capture && typeof getter === "function" && !("value" in capture.descriptor)
+    ? Object.freeze({ capture, getter: getter as PublishMenuNativeGetter })
+    : null;
+}
+
+function capturePublishMenuMethod(
+  owner: object,
+  property: PropertyKey,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+) {
+  const capture = capturePublishMenuDescriptor(owner, property, getOwnPropertyDescriptor);
+  const method = capture?.descriptor.value;
+  return capture && typeof method === "function"
+    ? Object.freeze({ capture, method: method as PublishMenuNativeMethod })
+    : null;
+}
+
+function capturePublishMenuTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
+): PublishMenuTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("publish-menu-keyboard-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    getPrototypeOf(probe) !== ownerWindow.KeyboardEvent.prototype
+    || !descriptor
+    || descriptor.configurable !== false
+    || descriptor.enumerable !== true
+    || typeof descriptor.get !== "function"
+    || descriptor.set !== undefined
+    || "value" in descriptor
+    || "writable" in descriptor
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get as PublishMenuNativeGetter;
+  const matches = (event: object) => publishMenuDescriptorsMatch(
+    getOwnPropertyDescriptor(event, "isTrusted"),
+    expected,
+  );
+  const read = (event: object) => apply(getter, event, []) as boolean;
+  try {
+    if (read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({
+    read,
+    matches,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function capturePublishMenuKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): PublishMenuKeyboardAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const set = ownerWindow.Reflect.set;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const customEventPrototype = ownerWindow.CustomEvent.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const uiPrototype = ownerWindow.UIEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  const trusted = capturePublishMenuTrustedAuthority(
+    ownerWindow,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+  );
+  const captures = {
+    type: capturePublishMenuGetter(eventPrototype, "type", getOwnPropertyDescriptor),
+    target: capturePublishMenuGetter(eventPrototype, "target", getOwnPropertyDescriptor),
+    currentTarget: capturePublishMenuGetter(eventPrototype, "currentTarget", getOwnPropertyDescriptor),
+    eventPhase: capturePublishMenuGetter(eventPrototype, "eventPhase", getOwnPropertyDescriptor),
+    bubbles: capturePublishMenuGetter(eventPrototype, "bubbles", getOwnPropertyDescriptor),
+    cancelable: capturePublishMenuGetter(eventPrototype, "cancelable", getOwnPropertyDescriptor),
+    defaultPrevented: capturePublishMenuGetter(eventPrototype, "defaultPrevented", getOwnPropertyDescriptor),
+    cancelBubble: capturePublishMenuGetter(eventPrototype, "cancelBubble", getOwnPropertyDescriptor),
+    composed: capturePublishMenuGetter(eventPrototype, "composed", getOwnPropertyDescriptor),
+    timeStamp: capturePublishMenuGetter(eventPrototype, "timeStamp", getOwnPropertyDescriptor),
+    composedPath: capturePublishMenuMethod(eventPrototype, "composedPath", getOwnPropertyDescriptor),
+    preventDefault: capturePublishMenuMethod(eventPrototype, "preventDefault", getOwnPropertyDescriptor),
+    key: capturePublishMenuGetter(keyboardPrototype, "key", getOwnPropertyDescriptor),
+    code: capturePublishMenuGetter(keyboardPrototype, "code", getOwnPropertyDescriptor),
+    location: capturePublishMenuGetter(keyboardPrototype, "location", getOwnPropertyDescriptor),
+    altKey: capturePublishMenuGetter(keyboardPrototype, "altKey", getOwnPropertyDescriptor),
+    ctrlKey: capturePublishMenuGetter(keyboardPrototype, "ctrlKey", getOwnPropertyDescriptor),
+    metaKey: capturePublishMenuGetter(keyboardPrototype, "metaKey", getOwnPropertyDescriptor),
+    shiftKey: capturePublishMenuGetter(keyboardPrototype, "shiftKey", getOwnPropertyDescriptor),
+    repeat: capturePublishMenuGetter(keyboardPrototype, "repeat", getOwnPropertyDescriptor),
+    isComposing: capturePublishMenuGetter(keyboardPrototype, "isComposing", getOwnPropertyDescriptor),
+    detail: capturePublishMenuGetter(uiPrototype, "detail", getOwnPropertyDescriptor),
+    view: capturePublishMenuGetter(uiPrototype, "view", getOwnPropertyDescriptor),
+    activeElement: capturePublishMenuGetter(documentPrototype, "activeElement", getOwnPropertyDescriptor),
+    focus: capturePublishMenuMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor),
+    addEventListener: capturePublishMenuMethod(
+      eventTargetPrototype,
+      "addEventListener",
+      getOwnPropertyDescriptor,
+    ),
+    removeEventListener: capturePublishMenuMethod(
+      eventTargetPrototype,
+      "removeEventListener",
+      getOwnPropertyDescriptor,
+    ),
+  };
+  const values = Object.values(captures);
+  if (
+    !trusted
+    || values.some((capture) => capture === null)
+    || getPrototypeOf(customEventPrototype) !== eventPrototype
+    || getPrototypeOf(keyboardPrototype) !== uiPrototype
+    || getPrototypeOf(uiPrototype) !== eventPrototype
+    || getPrototypeOf(eventPrototype) !== ownerWindow.Object.prototype
+  ) {
+    return null;
+  }
+  const descriptors = Object.freeze(values.map((capture) => capture!.capture));
+  let historyIsClean = true;
+  const checkHistory = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = Boolean(
+      ownerDocument.defaultView === ownerWindow
+      && ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+      && ownerWindow.Reflect.apply === apply
+      && ownerWindow.Reflect.set === set
+      && ownerWindow.Event.prototype === eventPrototype
+      && ownerWindow.CustomEvent.prototype === customEventPrototype
+      && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
+      && ownerWindow.UIEvent.prototype === uiPrototype
+      && ownerWindow.Document.prototype === documentPrototype
+      && ownerWindow.HTMLElement.prototype === htmlElementPrototype
+      && ownerWindow.EventTarget.prototype === eventTargetPrototype
+      && getPrototypeOf(customEventPrototype) === eventPrototype
+      && getPrototypeOf(keyboardPrototype) === uiPrototype
+      && getPrototypeOf(uiPrototype) === eventPrototype
+      && getPrototypeOf(eventPrototype) === ownerWindow.Object.prototype
+      && trusted.isCurrent()
+      && descriptors.every((descriptor) => descriptor.isCurrent())
+    );
+    return historyIsClean;
+  };
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    customEventPrototype,
+    keyboardPrototype,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+    set,
+    trusted,
+    event: Object.freeze({
+      type: captures.type!.getter,
+      target: captures.target!.getter,
+      currentTarget: captures.currentTarget!.getter,
+      eventPhase: captures.eventPhase!.getter,
+      bubbles: captures.bubbles!.getter,
+      cancelable: captures.cancelable!.getter,
+      defaultPrevented: captures.defaultPrevented!.getter,
+      cancelBubble: captures.cancelBubble!.getter,
+      composed: captures.composed!.getter,
+      timeStamp: captures.timeStamp!.getter,
+      composedPath: captures.composedPath!.method,
+      preventDefault: captures.preventDefault!.method,
+    }),
+    keyboard: Object.freeze({
+      key: captures.key!.getter,
+      code: captures.code!.getter,
+      location: captures.location!.getter,
+      altKey: captures.altKey!.getter,
+      ctrlKey: captures.ctrlKey!.getter,
+      metaKey: captures.metaKey!.getter,
+      shiftKey: captures.shiftKey!.getter,
+      repeat: captures.repeat!.getter,
+      isComposing: captures.isComposing!.getter,
+    }),
+    ui: Object.freeze({
+      detail: captures.detail!.getter,
+      view: captures.view!.getter,
+    }),
+    activeElement: captures.activeElement!.getter,
+    focus: captures.focus!.method,
+    addEventListener: captures.addEventListener!.method,
+    removeEventListener: captures.removeEventListener!.method,
+    historyIsClean: checkHistory,
+  });
+}
+
+function publishMenuNativeValue<Value>(
+  getter: PublishMenuNativeGetter,
+  value: object,
+  authority: PublishMenuKeyboardAuthority,
+): Value {
+  return authority.apply(getter, value, []) as Value;
+}
+
+function publishMenuNativeCall<Value>(
+  method: PublishMenuNativeMethod,
+  value: object,
+  args: readonly unknown[],
+  authority: PublishMenuKeyboardAuthority,
+): Value {
+  return authority.apply(method, value, args) as Value;
+}
+
+function publishMenuActiveElement(authority: PublishMenuKeyboardAuthority) {
+  return publishMenuNativeValue<Element | null>(
+    authority.activeElement,
+    authority.ownerDocument,
+    authority,
+  );
+}
+
+function publishMenuNativeListenerProofMatches(
+  proof: PublishMenuNativeListenerProof,
+  publication: PublishMenuPublication,
+  event: KeyboardEvent,
+  requireCurrent: boolean,
+) {
+  const authority = publication.keyboardAuthority;
+  const registration = publication.keyboardListener;
+  return Boolean(
+    authority
+    && registration
+    && Object.isFrozen(proof)
+    && Object.isFrozen(registration)
+    && proof.publication === publication
+    && proof.registration === registration
+    && proof.event === event
+    && proof.receiver === proof.currentTarget
+    && proof.receiver === proof.terminal
+    && proof.eventPhase === authority.ownerWindow.Event.CAPTURING_PHASE
+    && registration.publicationIdentity === publication.identity
+    && registration.target === authority.ownerWindow
+    && registration.listener === publication.keyboardListener.listener
+    && registration.capture === true
+    && (!requireCurrent || registration.isCurrent())
+  );
+}
+
+function publishMenuTriggerPathMatches(
+  path: readonly EventTarget[],
+  trigger: HTMLButtonElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  for (let current: Node | null = trigger; current; current = current.parentNode) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+  }
+  return (
+    expected.at(-1) === ownerDocument
+    && path.length === expected.length + 1
+    && expected.every((entry, index) => path[index] === entry)
+    && path.at(-1) === terminal
+  );
+}
+
+function publishMenuContentPathMatches(
+  path: readonly EventTarget[],
+  content: HTMLDivElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  for (let current: Node | null = content; current; current = current.parentNode) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+  }
+  return (
+    expected.at(-1) === ownerDocument
+    && path.length === expected.length + 1
+    && expected.every((entry, index) => path[index] === entry)
+    && path.at(-1) === terminal
+    && !expected.includes(terminal)
+  );
+}
+
+function publishMenuAutoFocusEventMatches(
+  proof: PublishMenuAutoFocusProof,
+  publication: PublishMenuPublication,
+  event: Event,
+  authority: PublishMenuKeyboardAuthority,
+  defaultPrevented: boolean,
+) {
+  const content = publication.dom.content;
+  const ownerWindow = publication.document.defaultView;
+  if (
+    !content
+    || !ownerWindow
+    || authority.ownerDocument !== publication.document
+    || authority.ownerWindow !== ownerWindow
+    || !authority.historyIsClean()
+    || !(event instanceof ownerWindow.CustomEvent)
+    || authority.getPrototypeOf(event) !== authority.customEventPrototype
+    || !Object.isFrozen(proof)
+    || proof.event !== event
+    || proof.publication !== publication
+    || proof.content !== content
+  ) {
+    return false;
+  }
+  try {
+    const path = publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    );
+    return (
+      publishMenuNativeValue<string>(authority.event.type, event, authority)
+        === "focusScope.autoFocusOnMount"
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+        authority,
+      ) === content
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.currentTarget,
+        event,
+        authority,
+      ) === content
+      && publishMenuNativeValue<number>(authority.event.eventPhase, event, authority)
+        === ownerWindow.Event.AT_TARGET
+      && !publishMenuNativeValue<boolean>(authority.event.bubbles, event, authority)
+      && publishMenuNativeValue<boolean>(authority.event.cancelable, event, authority)
+      && publishMenuNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        event,
+        authority,
+      ) === defaultPrevented
+      && !publishMenuNativeValue<boolean>(authority.event.cancelBubble, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.event.composed, event, authority)
+      && path.length === proof.path.length
+      && path.every((entry, index) => entry === proof.path[index])
+      && publishMenuContentPathMatches(
+        path,
+        content,
+        publication.document,
+        proof.terminal,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readPublishMenuAutoFocusEvent(
+  publication: PublishMenuPublication,
+  event: Event,
+  authority: PublishMenuKeyboardAuthority,
+): PublishMenuAutoFocusProof | null {
+  const content = publication.dom.content;
+  if (!content) return null;
+  try {
+    const path = Object.freeze([...publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    )]);
+    const terminal = path.at(-1);
+    if (!terminal) return null;
+    const proof: PublishMenuAutoFocusProof = Object.freeze({
+      event,
+      publication,
+      content,
+      path,
+      terminal,
+    });
+    return publishMenuAutoFocusEventMatches(proof, publication, event, authority, false)
+      ? proof
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function publishMenuArrowIsCurrent(
+  publication: PublishMenuPublication,
+  action: PublishMenuArrowAction,
+) {
+  const target = action.key === "ArrowDown"
+    ? publication.render.enabledActions.at(0)
+    : publication.render.enabledActions.at(-1);
+  return Boolean(
+    publication.arrows[action.key] === action
+    && Object.isFrozen(action)
+    && action.publicationIdentity === publication.identity
+    && action.destination === (action.key === "ArrowDown" ? "first" : "last")
+    && action.target === (target ?? null)
+    && Boolean(target?.enabled)
+  );
+}
+
+function readPublishMenuNativeEvent(
+  publication: PublishMenuPublication,
+  authority: PublishMenuKeyboardAuthority,
+  registration: PublishMenuKeyboardListenerRegistration,
+  receiver: EventTarget,
+  event: Event,
+): PublishMenuNativeSnapshot | null {
+  if (
+    publication.keyboardAuthority !== authority
+    || publication.keyboardListener !== registration
+    || !registration.isCurrent()
+    || !(event instanceof authority.ownerWindow.KeyboardEvent)
+    || !authority.historyIsClean()
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    const keyboardEvent = event as KeyboardEvent;
+    const type = publishMenuNativeValue<string>(authority.event.type, keyboardEvent, authority);
+    const target = publishMenuNativeValue<EventTarget | null>(
+      authority.event.target,
+      keyboardEvent,
+      authority,
+    );
+    const currentTarget = publishMenuNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      keyboardEvent,
+      authority,
+    );
+    const eventPhase = publishMenuNativeValue<number>(
+      authority.event.eventPhase,
+      keyboardEvent,
+      authority,
+    );
+    const key = publishMenuNativeValue<string>(authority.keyboard.key, keyboardEvent, authority);
+    const path = Object.freeze([...publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      keyboardEvent,
+      [],
+      authority,
+    )]);
+    const terminal = path.at(-1);
+    const view = publishMenuNativeValue<Window | null>(authority.ui.view, keyboardEvent, authority);
+    const action = key === "ArrowDown" || key === "ArrowUp" ? publication.arrows[key] : null;
+    const bubbles = publishMenuNativeValue<boolean>(
+      authority.event.bubbles,
+      keyboardEvent,
+      authority,
+    );
+    const cancelable = publishMenuNativeValue<boolean>(
+      authority.event.cancelable,
+      keyboardEvent,
+      authority,
+    );
+    const defaultPrevented = publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      keyboardEvent,
+      authority,
+    );
+    const cancelBubble = publishMenuNativeValue<boolean>(
+      authority.event.cancelBubble,
+      keyboardEvent,
+      authority,
+    );
+    if (
+      !action
+      || !terminal
+      || type !== "keydown"
+      || eventPhase !== authority.ownerWindow.Event.CAPTURING_PHASE
+      || target !== publication.dom.trigger
+      || currentTarget !== receiver
+      || terminal !== receiver
+      || !bubbles
+      || !cancelable
+      || defaultPrevented
+      || cancelBubble
+      || authority.trusted.read(keyboardEvent) !== true
+      || publishMenuNativeValue<boolean>(authority.keyboard.altKey, keyboardEvent, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.ctrlKey, keyboardEvent, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.metaKey, keyboardEvent, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.shiftKey, keyboardEvent, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.repeat, keyboardEvent, authority)
+      || publishMenuNativeValue<boolean>(authority.keyboard.isComposing, keyboardEvent, authority)
+      || (view !== null && view !== authority.ownerWindow)
+      || publishMenuActiveElement(authority) !== publication.dom.trigger
+      || !publishMenuTriggerPathMatches(
+        path,
+        publication.dom.trigger,
+        authority.ownerDocument,
+        terminal,
+      )
+      || !publishMenuArrowIsCurrent(publication, action)
+    ) {
+      return null;
+    }
+    const listenerProof: PublishMenuNativeListenerProof = Object.freeze({
+      publication,
+      registration,
+      event: keyboardEvent,
+      receiver,
+      currentTarget,
+      terminal,
+      eventPhase,
+    });
+    if (!publishMenuNativeListenerProofMatches(
+      listenerProof,
+      publication,
+      keyboardEvent,
+      true,
+    )) {
+      return null;
+    }
+    return Object.freeze({
+      event: keyboardEvent,
+      publication,
+      action,
+      listenerProof,
+      path,
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed: publishMenuNativeValue<boolean>(
+        authority.event.composed,
+        keyboardEvent,
+        authority,
+      ),
+      timeStamp: publishMenuNativeValue<number>(
+        authority.event.timeStamp,
+        keyboardEvent,
+        authority,
+      ),
+      key: action.key,
+      code: publishMenuNativeValue<string>(authority.keyboard.code, keyboardEvent, authority),
+      location: publishMenuNativeValue<number>(
+        authority.keyboard.location,
+        keyboardEvent,
+        authority,
+      ),
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      detail: publishMenuNativeValue<number>(authority.ui.detail, keyboardEvent, authority),
+      view,
+      isTrusted: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function capturePublishMenuReactMethod(
+  value: object,
+  property: PropertyKey,
+  authority: PublishMenuKeyboardAuthority,
+) {
+  let current: object | null = value;
+  while (current && current !== authority.ownerWindow.Object.prototype) {
+    const capture = capturePublishMenuDescriptor(
+      current,
+      property,
+      authority.getOwnPropertyDescriptor,
+    );
+    if (capture) {
+      const method = capture.descriptor.value;
+      return typeof method === "function"
+        ? Object.freeze({ capture, method: method as PublishMenuNativeMethod })
+        : null;
+    }
+    current = authority.getPrototypeOf(current);
+  }
+  return null;
+}
+
+function capturePublishMenuReactProof(
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  authority: PublishMenuKeyboardAuthority | null,
+): PublishMenuReactProof | null {
+  if (!authority || !event || typeof event !== "object") return null;
+  const prototype = authority.getPrototypeOf(event);
+  if (!prototype || prototype === authority.ownerWindow.Object.prototype) return null;
+  const preventDefault = capturePublishMenuReactMethod(event, "preventDefault", authority);
+  const stopPropagation = capturePublishMenuReactMethod(event, "stopPropagation", authority);
+  const isDefaultPrevented = capturePublishMenuReactMethod(event, "isDefaultPrevented", authority);
+  const isPropagationStopped = capturePublishMenuReactMethod(
+    event,
+    "isPropagationStopped",
+    authority,
+  );
+  const persist = capturePublishMenuReactMethod(event, "persist", authority);
+  const isPersistent = capturePublishMenuReactMethod(event, "isPersistent", authority);
+  const methods = [
+    preventDefault,
+    stopPropagation,
+    isDefaultPrevented,
+    isPropagationStopped,
+    persist,
+    isPersistent,
+  ];
+  if (methods.some((method) => method === null)) return null;
+  return Object.freeze({
+    prototype,
+    descriptors: Object.freeze(methods.map((method) => method!.capture)),
+    preventDefault: preventDefault!.method,
+    stopPropagation: stopPropagation!.method,
+    isDefaultPrevented: isDefaultPrevented!.method,
+    isPropagationStopped: isPropagationStopped!.method,
+    persist: persist!.method,
+    isPersistent: isPersistent!.method,
+  });
+}
+
+function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
+  const { snapshot } = delivery;
+  const { event, publication } = snapshot;
+  const authority = publication.keyboardAuthority;
+  if (
+    !authority
+    || !authority.historyIsClean()
+    || !publishMenuNativeListenerProofMatches(
+      snapshot.listenerProof,
+      publication,
+      event,
+      true,
+    )
+    || authority.getPrototypeOf(event) !== authority.keyboardPrototype
+    || !authority.trusted.matches(event)
+    || authority.trusted.read(event) !== true
+    || publishMenuActiveElement(authority) !== publication.dom.trigger
+  ) {
+    return false;
+  }
+  try {
+    const path = publishMenuNativeCall<EventTarget[]>(
+      authority.event.composedPath,
+      event,
+      [],
+      authority,
+    );
+    const currentTarget = publishMenuNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      event,
+      authority,
+    );
+    return (
+      publishMenuNativeValue<string>(authority.event.type, event, authority) === snapshot.type
+      && publishMenuNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+        authority,
+      ) === snapshot.target
+      && publishMenuNativeValue<number>(
+        authority.event.eventPhase,
+        event,
+        authority,
+      ) === authority.ownerWindow.Event.BUBBLING_PHASE
+      && currentTarget !== null
+      && path.includes(currentTarget)
+      && (!delivery.bubbleCurrentTarget || delivery.bubbleCurrentTarget === currentTarget)
+      && publishMenuNativeValue<boolean>(
+        authority.event.bubbles,
+        event,
+        authority,
+      ) === snapshot.bubbles
+      && publishMenuNativeValue<boolean>(
+        authority.event.cancelable,
+        event,
+        authority,
+      ) === snapshot.cancelable
+      && !publishMenuNativeValue<boolean>(authority.event.defaultPrevented, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.event.cancelBubble, event, authority)
+      && publishMenuNativeValue<boolean>(
+        authority.event.composed,
+        event,
+        authority,
+      ) === snapshot.composed
+      && publishMenuNativeValue<number>(
+        authority.event.timeStamp,
+        event,
+        authority,
+      ) === snapshot.timeStamp
+      && publishMenuNativeValue<string>(authority.keyboard.key, event, authority) === snapshot.key
+      && publishMenuNativeValue<string>(authority.keyboard.code, event, authority) === snapshot.code
+      && publishMenuNativeValue<number>(
+        authority.keyboard.location,
+        event,
+        authority,
+      ) === snapshot.location
+      && !publishMenuNativeValue<boolean>(authority.keyboard.altKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.ctrlKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.metaKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.repeat, event, authority)
+      && !publishMenuNativeValue<boolean>(authority.keyboard.isComposing, event, authority)
+      && publishMenuNativeValue<number>(authority.ui.detail, event, authority) === snapshot.detail
+      && publishMenuNativeValue<Window | null>(authority.ui.view, event, authority) === snapshot.view
+      && path.length === snapshot.path.length
+      && path.every((entry, index) => entry === snapshot.path[index])
+      && publishMenuArrowIsCurrent(publication, snapshot.action)
+      && publication.isExact()
+    );
+  } catch {
+    return false;
+  }
+}
+
+function publishMenuReactEventMatches(
+  delivery: PublishMenuKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: PublishMenuReactProof,
+) {
+  const { snapshot } = delivery;
+  const authority = snapshot.publication.keyboardAuthority;
+  if (!authority) return false;
+  try {
+    return Boolean(
+      authority.getPrototypeOf(event) === proof.prototype
+      && proof.descriptors.every((descriptor) => descriptor.isCurrent())
+      && event.nativeEvent === snapshot.event
+      && event.type === snapshot.type
+      && event.currentTarget === snapshot.publication.dom.trigger
+      && event.target === snapshot.publication.dom.trigger
+      && event.eventPhase === authority.ownerWindow.Event.BUBBLING_PHASE
+      && event.bubbles === snapshot.bubbles
+      && event.cancelable === snapshot.cancelable
+      && !event.defaultPrevented
+      && event.isTrusted === snapshot.isTrusted
+      && event.timeStamp === snapshot.timeStamp
+      && event.key === snapshot.key
+      && event.code === snapshot.code
+      && event.location === snapshot.location
+      && event.altKey === snapshot.altKey
+      && event.ctrlKey === snapshot.ctrlKey
+      && event.metaKey === snapshot.metaKey
+      && event.shiftKey === snapshot.shiftKey
+      && event.repeat === snapshot.repeat
+      && event.detail === snapshot.detail
+      && Object.is(event.view, snapshot.view)
+      && publishMenuNativeCall<boolean>(
+        proof.isDefaultPrevented,
+        event,
+        [],
+        authority,
+      ) === false
+      && publishMenuNativeCall<boolean>(
+        proof.isPropagationStopped,
+        event,
+        [],
+        authority,
+      ) === false
+      && publishMenuNativeCall<boolean>(proof.isPersistent, event, [], authority) === true
+      && publishMenuNativeEventMatches(delivery)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function preventPublishMenuArrow(claim: PublishMenuClaimedArrow) {
+  const {
+    authority,
+    listenerProof,
+    nativeEvent,
+    publication,
+    reactEvent,
+    reactProof,
+  } = claim;
+  const syntheticDefault = authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented");
+  if (
+    !authority.historyIsClean()
+    || !publishMenuNativeListenerProofMatches(
+      listenerProof,
+      publication,
+      nativeEvent,
+      true,
+    )
+    || !reactProof.descriptors.every((descriptor) => descriptor.isCurrent())
+    || publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    || !syntheticDefault
+    || !("value" in syntheticDefault)
+    || syntheticDefault.value !== false
+    || syntheticDefault.writable !== true
+  ) {
+    return false;
+  }
+  publishMenuNativeCall<void>(
+    authority.event.preventDefault,
+    nativeEvent,
+    [],
+    authority,
+  );
+  if (
+    !publishMenuNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    || !authority.set(reactEvent, "defaultPrevented", true, reactEvent)
+  ) {
+    return false;
+  }
+  return authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented")?.value === true;
+}
+
+function suppressPublishMenuRadixArrowDown(
+  publication: PublishMenuPublication,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+) {
+  const authority = publication.keyboardAuthority;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !authority
+    || !(nativeEvent instanceof authority.ownerWindow.KeyboardEvent)
+    || authority.getPrototypeOf(nativeEvent) !== authority.keyboardPrototype
+    || event.type !== "keydown"
+    || event.currentTarget !== publication.dom.trigger
+  ) {
+    return false;
+  }
+  try {
+    const syntheticDefault = authority.getOwnPropertyDescriptor(event, "defaultPrevented");
+    if (
+      publishMenuNativeValue<string>(authority.event.type, nativeEvent, authority) !== "keydown"
+      || publishMenuNativeValue<string>(
+        authority.keyboard.key,
+        nativeEvent,
+        authority,
+      ) !== "ArrowDown"
+      || !syntheticDefault
+      || !("value" in syntheticDefault)
+      || syntheticDefault.value !== false
+      || syntheticDefault.writable !== true
+    ) {
+      return false;
+    }
+    return (
+      authority.set(event, "defaultPrevented", true, event)
+      && authority.getOwnPropertyDescriptor(event, "defaultPrevented")?.value === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function createPublishMenuOpenGuard(source: PublishMenuPublication): PublishMenuOpenGuard | null {
+  const MutationObserverConstructor = source.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor || !source.isExact()) return null;
+  const trigger = source.dom.trigger;
+  const records: MutationRecord[] = [];
+  const potentialGuards = new WeakSet<Node>();
+  let observer: MutationObserver | null = new MutationObserverConstructor((pending) => {
+    for (const record of pending) {
+      if (record.type === "attributes") {
+        if (
+          record.target === trigger
+          || (
+            record.target instanceof source.document.defaultView!.HTMLSpanElement
+            && (
+              potentialGuards.has(record.target)
+              || record.target.hasAttribute("data-radix-focus-guard")
+            )
+          )
+        ) {
+          records.push(record);
+        }
+        continue;
+      }
+      for (const node of [...record.addedNodes, ...record.removedNodes]) {
+        if (node instanceof source.document.defaultView!.HTMLSpanElement) {
+          potentialGuards.add(node);
+        }
+      }
+      records.push(record);
+    }
+  });
+  observer.observe(trigger, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (let ancestor = trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+    observer.observe(ancestor, {
+      attributeOldValue: ancestor === source.document.body,
+      attributes: ancestor === source.document.body,
+      childList: true,
+      subtree: ancestor === source.document.body,
+    });
+  }
+  let invalid = false;
+  return Object.freeze({
+    isExact: (successor: PublishMenuPublication) => {
+      if (observer) {
+        for (const record of observer.takeRecords()) {
+          if (record.type === "attributes") {
+            if (
+              record.target === trigger
+              || (
+                record.target instanceof source.document.defaultView!.HTMLSpanElement
+                && (
+                  potentialGuards.has(record.target)
+                  || record.target.hasAttribute("data-radix-focus-guard")
+                )
+              )
+            ) {
+              records.push(record);
+            }
+            continue;
+          }
+          for (const node of [...record.addedNodes, ...record.removedNodes]) {
+            if (node instanceof source.document.defaultView!.HTMLSpanElement) {
+              potentialGuards.add(node);
+            }
+          }
+          records.push(record);
+        }
+      }
+      const content = successor.dom.content;
+      const ownerWindow = source.document.defaultView;
+      if (
+        invalid
+        || !content
+        || !ownerWindow
+        || source.dom.trigger !== successor.dom.trigger
+        || source.document !== successor.document
+      ) {
+        invalid = true;
+        return false;
+      }
+      for (const record of records) {
+        if (record.type === "attributes" && record.target === trigger) {
+          const validTriggerChange =
+            (record.attributeName === "aria-expanded"
+              && record.oldValue === "false"
+              && trigger.getAttribute("aria-expanded") === "true")
+            || (record.attributeName === "data-state"
+              && record.oldValue === "closed"
+              && trigger.getAttribute("data-state") === "open")
+            || (record.attributeName === "aria-controls"
+              && record.oldValue === null
+              && trigger.getAttribute("aria-controls") === content.id)
+            || record.attributeName === "data-radix-popper-align"
+            || record.attributeName === "data-radix-popper-side";
+          if (!validTriggerChange) invalid = true;
+          continue;
+        }
+        if (record.type === "attributes") {
+          const element = record.target;
+          if (
+            !(element instanceof ownerWindow.HTMLSpanElement)
+            || !element.hasAttribute("data-radix-focus-guard")
+          ) {
+            invalid = true;
+          }
+          continue;
+        }
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        const expected = changed.every((node) =>
+          node.contains?.(content)
+          || (
+            node instanceof ownerWindow.HTMLSpanElement
+            && (
+              node.hasAttribute("data-radix-focus-guard")
+              || record.target === source.document.body
+            )
+          ));
+        if (!expected) invalid = true;
+      }
+      return !invalid;
+    },
+    dispose: () => {
+      observer?.disconnect();
+      observer = null;
+    },
+  });
+}
+
+function publishMenuRenderSuccessorMatches(
+  before: PublishMenuRender,
+  after: PublishMenuRender,
+) {
+  return (
+    after.visit === before.visit
+    && after.props === before.props
+    && after.session === before.session
+    && after.document === before.document
+    && after.role === before.role
+    && after.linked === before.linked
+    && after.canEdit === before.canEdit
+    && after.isOwner === before.isOwner
+    && after.githubConfigured === before.githubConfigured
+    && after.publishing === before.publishing
+    && after.sync === before.sync
+    && after.syncFields === before.syncFields
+    && after.actions.length === before.actions.length
+    && after.actions.every((action, index) => {
+      const previous = before.actions[index];
+      return Boolean(
+        previous
+        && action.name === previous.name
+        && action.enabled === previous.enabled
+        && action.label === previous.label
+        && action.callback === previous.callback
+      );
+    })
+  );
+}
+
+function publishMenuOpenSuccessorTarget(
+  intent: PublishMenuOpenIntent,
+  publication: PublishMenuPublication,
+) {
+  const { source, action, authority } = intent;
+  const currentAction = publication.render.actions.find(
+    (candidate) => candidate.name === action.target?.name,
+  );
+  const target = currentAction ? publication.dom.actions[currentAction.name] : null;
+  return (
+    !source.render.open
+    && publication.render.open
+    && source.document === publication.document
+    && source.dom.trigger === publication.dom.trigger
+    && authority.ownerDocument === publication.document
+    && authority.ownerWindow === publication.document.defaultView
+    && authority.historyIsClean()
+    && publishMenuNativeListenerProofMatches(
+      intent.listenerProof,
+      source,
+      intent.nativeEvent,
+      false,
+    )
+    && publishMenuArrowIsCurrent(source, action)
+    && publishMenuRenderSuccessorMatches(source.render, publication.render)
+    && currentAction?.enabled
+    && target?.ownerDocument === publication.document
+    && target.parentElement === publication.dom.content
+    && publication.isExact()
+    && intent.guard.isExact(publication)
+  )
+    ? target
+    : null;
+}
+
+function createPublishMenuOwners(
+  coordinator: PublishMenuPublicationCoordinator,
+): PublishMenuOwners {
+  const changed = <T extends HTMLElement>(
+    owner: PublishMenuElementOwner<T>,
+    element: T | null,
+    previous: T | null,
+  ) => coordinator.elementChanged(owner, element, previous);
+  const accepts = (tagName: string) => (element: HTMLElement) => element.tagName === tagName;
+  const replacement = () => coordinator.allowsElementReplacement();
+  const actionOwner = () =>
+    new PublishMenuElementOwner<HTMLDivElement>(accepts("DIV"), replacement, changed);
+  return Object.freeze({
+    trigger: new PublishMenuElementOwner<HTMLButtonElement>(
+      accepts("BUTTON"),
+      replacement,
+      changed,
+    ),
+    content: new PublishMenuElementOwner<HTMLDivElement>(accepts("DIV"), replacement, changed),
+    actions: Object.freeze({
+      publish: actionOwner(),
+      pull: actionOwner(),
+      sync: actionOwner(),
+      open: actionOwner(),
+      change: actionOwner(),
+      connect: actionOwner(),
+      download: actionOwner(),
+      share: actionOwner(),
+    }),
+  });
+}
+
+function publishMenuFactsAreCurrent(render: PublishMenuRender) {
+  const { document, props, session } = render;
+  const canEdit = session.role === "owner" || session.role === "editor";
+  const currentDocumentFields = snapshotMoreMenuDocument(document);
+  const actions = publishMenuActions(props, render.linked, canEdit);
+  return (
+    render.visit.session === session
+    && render.visit.document === document
+    && session.docId === document.id
+    && session.role === render.role
+    && document.storage !== "local" === render.linked
+    && canEdit === render.canEdit
+    && props.isOwner === render.isOwner
+    && props.githubConfigured === render.githubConfigured
+    && props.publishing === render.publishing
+    && props.sync === render.sync
+    && (props.sync ? JSON.stringify(props.sync) : null) === render.syncFields
+    && currentDocumentFields.length === render.documentFields.length
+    && currentDocumentFields.every((field, index) => {
+      const expected = render.documentFields[index];
+      return expected?.[0] === field[0] && Object.is(expected[1], field[1]);
+    })
+    && actions.length === render.actions.length
+    && actions.every((action, index) => {
+      const expected = render.actions[index];
+      return Boolean(
+        expected
+        && action.name === expected.name
+        && action.enabled === expected.enabled
+        && action.label === expected.label
+        && action.callback === expected.callback
+      );
+    })
+  );
+}
+
+function currentPublishMenuDom(
+  render: PublishMenuRender,
+  owners: PublishMenuOwners,
+): PublishMenuDom | null {
+  const trigger = owners.trigger.element();
+  const ownerDocument = trigger?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    !trigger
+    || !ownerDocument
+    || !ownerWindow
+    || !(trigger instanceof ownerWindow.HTMLButtonElement)
+    || !trigger.isConnected
+    || trigger.type !== "button"
+    || trigger.disabled
+    || trigger.dataset.testid !== "publish-menu"
+    || trigger.getAttribute("aria-label") !== "Publish options"
+    || trigger.className !==
+      "btn btn-primary rounded-l-none border-l border-white/20 px-1.5"
+    || trigger.getAttribute("aria-haspopup") !== "menu"
+    || trigger.getAttribute("aria-expanded") !== String(render.open)
+    || trigger.getAttribute("data-state") !== (render.open ? "open" : "closed")
+  ) {
+    return null;
+  }
+  const actions = Object.fromEntries(
+    Object.entries(owners.actions).map(([name, owner]) => [name, owner.element()]),
+  ) as Record<PublishMenuActionName, HTMLDivElement | null>;
+  const content = owners.content.element();
+  if (!render.open) {
+    if (content || Object.values(actions).some(Boolean)) return null;
+    return Object.freeze({
+      trigger,
+      content: null,
+      actions: Object.freeze(actions),
+    });
+  }
+  if (
+    !content
+    || !(content instanceof ownerWindow.HTMLDivElement)
+    || !content.isConnected
+    || content.ownerDocument !== ownerDocument
+    || content.getAttribute("role") !== "menu"
+    || content.getAttribute("data-state") !== "open"
+    || content.className !==
+      "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-72"
+  ) {
+    return null;
+  }
+  const publishedElements: HTMLDivElement[] = [];
+  for (const action of render.actions) {
+    const element = actions[action.name];
+    if (
+      !element
+      || !(element instanceof ownerWindow.HTMLDivElement)
+      || !element.isConnected
+      || element.ownerDocument !== ownerDocument
+      || element.parentElement !== content
+      || element.getAttribute("role") !== "menuitem"
+      || (element.getAttribute("aria-disabled") === "true") !== !action.enabled
+      || element.textContent !== action.label
+    ) {
+      return null;
+    }
+    publishedElements.push(element);
+  }
+  const actualElements = Array.from(content.children).filter(
+    (element): element is HTMLDivElement =>
+      element instanceof ownerWindow.HTMLDivElement
+      && element.getAttribute("role") === "menuitem",
+  );
+  if (
+    actualElements.length !== publishedElements.length
+    || actualElements.some((element, index) => element !== publishedElements[index])
+    || Object.entries(actions).some(([name, element]) =>
+      !render.actions.some((action) => action.name === name) && element !== null)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    trigger,
+    content,
+    actions: Object.freeze(actions),
+  });
+}
+
+function publishMenuDomIsSame(current: PublishMenuDom, published: PublishMenuDom) {
+  return (
+    current.trigger === published.trigger
+    && current.content === published.content
+    && Object.keys(current.actions).every((name) =>
+      current.actions[name as PublishMenuActionName]
+      === published.actions[name as PublishMenuActionName])
+  );
+}
+
+function publishMenuActions(
+  props: HeaderProps,
+  linked: boolean,
+  canEdit: boolean,
+): readonly PublishMenuAction[] {
+  const action = (
+    name: PublishMenuActionName,
+    enabled: boolean,
+    label: string,
+    callback: unknown,
+  ): PublishMenuAction => Object.freeze({
+    identity: Object.freeze({}),
+    name,
+    enabled,
+    label,
+    callback,
+  });
+  const { doc } = props;
+  return Object.freeze(linked
+    ? [
+        action(
+          "publish",
+          canEdit,
+          doc.storage === "gist" ? "Update gist" : "Commit to GitHub…",
+          props.onPublishNow,
+        ),
+        action(
+          "pull",
+          canEdit && props.sync?.status !== "remote-unreadable",
+          "Pull latest from GitHub",
+          props.onPull,
+        ),
+        action("sync", canEdit, "Sync…", props.onSync),
+        ...(doc.githubUrl
+          ? [action("open", true, "Open on GitHub", doc.githubUrl)]
+          : []),
+        ...(props.isOwner
+          ? [action("change", true, "Change connection…", props.onPublish)]
+          : []),
+      ]
+    : [
+        action(
+          "connect",
+          props.isOwner && props.githubConfigured,
+          `Gist or repository…${props.githubConfigured ? "" : GITHUB_NOT_CONFIGURED}`,
+          props.onPublish,
+        ),
+        action("download", true, "Download Markdown", props.onDownload),
+        action("share", true, "Share link…", props.onShare),
+      ]);
+}
+
+function createPublishMenuPresentation({
+  render,
+  coordinator,
+  owners,
+  commitOpen,
+}: {
+  render: PublishMenuRender;
+  coordinator: PublishMenuPublicationCoordinator;
+  owners: PublishMenuOwners;
+  commitOpen: (state: PublishMenuState) => void;
+}): PublishMenuPresentation {
+  const runtimeState: {
+    current: PublishMenuPublicationRuntime | null;
+    last: PublishMenuPublicationRuntime | null;
+  } = { current: null, last: null };
+
+  const createRuntime = (dom: PublishMenuDom): PublishMenuPublicationRuntime => {
+    type Retirement = "element" | "layout" | "mutation" | "other";
+    const triggerSnapshot = snapshotModeSwitcherDom(dom.trigger);
+    const contentSnapshot = dom.content ? snapshotModeSwitcherDom(dom.content) : null;
+    const placements = snapshotModeSwitcherPlacement(
+      dom.content ? [dom.trigger, dom.content] : [dom.trigger],
+    );
+    const placementNodes = new Set(placements.map(({ node }) => node));
+    const expectedOwners = new Map<PublishMenuElementOwnerHandle, HTMLElement>([
+      [owners.trigger, dom.trigger],
+    ]);
+    if (dom.content) {
+      expectedOwners.set(owners.content, dom.content);
+      for (const action of render.actions) {
+        const element = dom.actions[action.name];
+        if (element) expectedOwners.set(owners.actions[action.name], element);
+      }
+    }
+    const detached = new Set<PublishMenuElementOwnerHandle>();
+    const reattached = new Set<PublishMenuElementOwnerHandle>();
+    let replayInvalid = false;
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let mutationSeen = false;
+    const MutationObserverConstructor = dom.trigger.ownerDocument.defaultView?.MutationObserver;
+    let observer: MutationObserver | null = null;
+    const relevantMutation = (record: MutationRecord) => {
+      if (
+        record.type === "attributes"
+        && record.attributeName
+        && MODE_SWITCHER_DYNAMIC_ATTRIBUTES.has(record.attributeName)
+      ) {
+        return false;
+      }
+      const roots = dom.content ? [dom.trigger, dom.content] : [dom.trigger];
+      if (roots.some((root) => record.target === root || root.contains(record.target))) return true;
+      if (record.type !== "childList") return false;
+      return (
+        (record.previousSibling !== null && placementNodes.has(record.previousSibling))
+        || (record.nextSibling !== null && placementNodes.has(record.nextSibling))
+        || [...record.addedNodes, ...record.removedNodes].some((node) =>
+          roots.some((root) => node === root || node.contains?.(root)))
+      );
+    };
+    function inspectMutations(records: readonly MutationRecord[]) {
+      if (records.some(relevantMutation)) {
+        mutationSeen = true;
+        retire("mutation");
+      }
+    }
+    const mutationHistoryIsClean = () => {
+      if (observer) inspectMutations(observer.takeRecords());
+      return !mutationSeen;
+    };
+    const recordElementChange = (
+      owner: PublishMenuElementOwnerHandle,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+    ) => {
+      const expected = expectedOwners.get(owner);
+      if (!expected || replayInvalid) return;
+      if (!retired) retire("element");
+      if (retirement !== "element") return;
+      if (element === null) {
+        if (previous !== expected || detached.has(owner) || reattached.size > 0) {
+          replayInvalid = true;
+          return;
+        }
+        detached.add(owner);
+        return;
+      }
+      if (
+        previous !== null
+        || element !== expected
+        || detached.size !== expectedOwners.size
+        || !detached.has(owner)
+        || reattached.has(owner)
+      ) {
+        replayInvalid = true;
+        return;
+      }
+      reattached.add(owner);
+    };
+    const isExactElementReplay = () => (
+      retired
+      && retirement === "element"
+      && !replayInvalid
+      && detached.size === expectedOwners.size
+      && reattached.size === expectedOwners.size
+      && publication.isExact()
+    );
+    const publicationDocument = dom.trigger.ownerDocument;
+    const ownerWindow = publicationDocument.defaultView;
+    const keyboardAuthority = ownerWindow
+      ? capturePublishMenuKeyboardAuthority(
+          publicationDocument,
+          ownerWindow as Window & typeof globalThis,
+        )
+      : null;
+    const keyboardEvents = new Set<KeyboardEvent>();
+    const identity = Object.freeze({});
+    const first = render.enabledActions.at(0) ?? null;
+    const last = render.enabledActions.at(-1) ?? null;
+    const arrows: Readonly<Record<PublishMenuArrowKey, PublishMenuArrowAction>> = Object.freeze({
+      ArrowDown: Object.freeze({
+        identity: Object.freeze({}),
+        publicationIdentity: identity,
+        key: "ArrowDown",
+        destination: "first",
+        target: first,
+      }),
+      ArrowUp: Object.freeze({
+        identity: Object.freeze({}),
+        publicationIdentity: identity,
+        key: "ArrowUp",
+        destination: "last",
+        target: last,
+      }),
+    });
+    let keyboardListenerAttached = false;
+    const keyboardListener: PublishMenuKeyboardListener = function (event) {
+      coordinator.stageNative(publication, keyboardListenerRegistration, this, event);
+    };
+    const keyboardListenerRegistration: PublishMenuKeyboardListenerRegistration = Object.freeze({
+      identity: Object.freeze({}),
+      publicationIdentity: identity,
+      target: ownerWindow!,
+      listener: keyboardListener,
+      capture: true,
+      isCurrent: () => Boolean(
+        keyboardListenerAttached
+        && !retired
+        && publication.keyboardListener === keyboardListenerRegistration
+        && coordinator.active() === publication
+      ),
+    });
+    const releaseKeyboardListener = () => {
+      if (!keyboardAuthority || !keyboardListenerAttached) return;
+      publishMenuNativeCall<void>(
+        keyboardAuthority.removeEventListener,
+        keyboardListenerRegistration.target,
+        ["keydown", keyboardListenerRegistration.listener, keyboardListenerRegistration.capture],
+        keyboardAuthority,
+      );
+      keyboardListenerAttached = false;
+    };
+    const publication: PublishMenuPublication = Object.freeze({
+      identity,
+      render,
+      document: publicationDocument,
+      dom,
+      keyboardAuthority,
+      keyboardListener: keyboardAuthority ? keyboardListenerRegistration : null,
+      keyboardEvents,
+      arrows,
+      triggerSnapshot,
+      contentSnapshot,
+      placements,
+      isExact: () => {
+        if (
+          !mutationHistoryIsClean()
+          || !keyboardAuthority?.historyIsClean()
+          || !publishMenuFactsAreCurrent(render)
+        ) {
+          return false;
+        }
+        const current = currentPublishMenuDom(render, owners);
+        return Boolean(
+          current
+          && publishMenuDomIsSame(current, dom)
+          && placements.every(modeSwitcherPlacementMatches)
+          && modeSwitcherDomSnapshotMatches(triggerSnapshot)
+          && (!contentSnapshot || modeSwitcherDomSnapshotMatches(contentSnapshot))
+        );
+      },
+      recordElementChange,
+      isExactElementReplay,
+      retire: () => retire("other"),
+      dispose: () => {
+        observer?.disconnect();
+        observer = null;
+        coordinator.clearKeyboardEvents(publication);
+        releaseKeyboardListener();
+      },
+    });
+    function retire(reason: Retirement) {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      releaseKeyboardListener();
+      coordinator.retire(publication);
+      if (runtimeState.current?.publication === publication) runtimeState.current = null;
+      return true;
+    }
+    const runtime: PublishMenuPublicationRuntime = Object.freeze({
+      publication,
+      retireForLayout: () => retire(mutationSeen ? "mutation" : "layout"),
+      isExactElementReplay,
+      isExactLayoutReplay: () => (
+        retired
+        && retirement === "layout"
+        && publication.isExact()
+      ),
+    });
+    if (keyboardAuthority) {
+      publishMenuNativeCall<void>(
+        keyboardAuthority.addEventListener,
+        keyboardListenerRegistration.target,
+        ["keydown", keyboardListenerRegistration.listener, keyboardListenerRegistration.capture],
+        keyboardAuthority,
+      );
+      keyboardListenerAttached = true;
+    }
+    if (MutationObserverConstructor) {
+      observer = new MutationObserverConstructor(inspectMutations);
+      observer.observe(dom.trigger, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      for (let ancestor: Node | null = dom.trigger.parentNode; ancestor; ancestor = ancestor.parentNode) {
+        observer.observe(ancestor, { childList: true });
+      }
+      if (dom.content) {
+        observer.observe(dom.content, {
+          attributes: true,
+          characterData: true,
+          childList: true,
+          subtree: true,
+        });
+        for (let ancestor: Node | null = dom.content.parentNode; ancestor; ancestor = ancestor.parentNode) {
+          observer.observe(ancestor, { childList: true });
+        }
+      }
+    }
+    return runtime;
+  };
+
+  const currentPublication = () => {
+    const runtime = runtimeState.current;
+    const publication = runtime?.publication;
+    return runtime
+      && publication
+      && coordinator.active() === publication
+      && publication.render === render
+      && publication.isExact()
+      ? publication
+      : null;
+  };
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const publication = currentPublication();
+    if (publication) coordinator.stageReact(publication, event);
+  };
+  const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const publication = currentPublication();
+    const candidate = publication ?? runtimeState.last?.publication ?? null;
+    if (!publication) {
+      if (candidate) suppressPublishMenuRadixArrowDown(candidate, event);
+      return;
+    }
+    const claim = coordinator.claim(publication, event);
+    if (!claim) {
+      suppressPublishMenuRadixArrowDown(publication, event);
+      return;
+    }
+    if (!coordinator.prepareOpen(claim) || !preventPublishMenuArrow(claim)) {
+      coordinator.cancelOpen(publication);
+      suppressPublishMenuRadixArrowDown(publication, event);
+      return;
+    }
+    if (!publication.retire()) {
+      coordinator.cancelOpen(publication);
+      return;
+    }
+    commitOpen(Object.freeze({ visit: render.visit, open: true }));
+  };
+  const onOpenChange = (open: boolean) => {
+    if (render.open === open) return;
+    const publication = currentPublication();
+    if (publication) publication.retire();
+    commitOpen(Object.freeze({ visit: render.visit, open }));
+  };
+  const onOpenAutoFocus = (event: Event) => {
+    let publication = currentPublication();
+    if (!publication) {
+      establish();
+      publication = currentPublication();
+    }
+    if (!publication) return;
+    const ready = coordinator.consumeOpen(publication, event);
+    if (!ready) return;
+    if (
+      !publishMenuAutoFocusEventMatches(
+        ready.autoFocusProof,
+        publication,
+        event,
+        ready.authority,
+        false,
+      )
+      || !publishMenuNativeListenerProofMatches(
+        ready.listenerProof,
+        ready.source,
+        ready.nativeEvent,
+        false,
+      )
+    ) {
+      return;
+    }
+    publishMenuNativeCall<void>(
+      ready.authority.event.preventDefault,
+      event,
+      [],
+      ready.authority,
+    );
+    if (
+      !publishMenuAutoFocusEventMatches(
+        ready.autoFocusProof,
+        publication,
+        event,
+        ready.authority,
+        true,
+      )
+      || !publishMenuNativeListenerProofMatches(
+        ready.listenerProof,
+        ready.source,
+        ready.nativeEvent,
+        false,
+      )
+      || !publication.isExact()
+    ) {
+      return;
+    }
+    publishMenuNativeCall<void>(
+      ready.authority.focus,
+      ready.target,
+      [{ preventScroll: true }],
+      ready.authority,
+    );
+  };
+  function establish() {
+    if (runtimeState.current) return undefined;
+    if (
+      (
+        runtimeState.last
+        && !runtimeState.last.isExactLayoutReplay()
+        && !runtimeState.last.isExactElementReplay()
+      )
+      || !publishMenuFactsAreCurrent(render)
+    ) {
+      return undefined;
+    }
+    const dom = currentPublishMenuDom(render, owners);
+    if (!dom) return undefined;
+    const runtime = createRuntime(dom);
+    runtimeState.current = runtime;
+    runtimeState.last = runtime;
+    coordinator.publish(runtime.publication);
+    return runtime.retireForLayout;
+  }
+  return Object.freeze({
+    captureTrigger: owners.trigger.capture,
+    captureContent: owners.content.capture,
+    captureActions: Object.freeze(
+      Object.fromEntries(
+        Object.entries(owners.actions).map(([name, owner]) => [name, owner.capture]),
+      ) as Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>,
+    ),
+    establish,
+    onTriggerKeyDown,
+    onTriggerArrowKeyDown,
+    onOpenChange,
+    onOpenAutoFocus,
+  });
+}
+
+function PublishMenuOpenCommit({ presentation }: { presentation: PublishMenuPresentation }) {
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  return null;
+}
+
+function PublishMenu({ props }: { props: HeaderProps }) {
+  const { doc, session, githubConfigured } = props;
+  const linked = doc.storage !== "local";
+  const canEdit = session.role === "owner" || session.role === "editor";
+  const [mount] = useState(() => Symbol("publish menu"));
+  const [, setPublicationRevision] = useState(0);
+  const [coordinator] = useState(
+    () => new PublishMenuPublicationCoordinator(
+      () => setPublicationRevision((revision) => revision + 1),
+    ),
+  );
+  const [owners] = useState(() => createPublishMenuOwners(coordinator));
+  const visit = useMemo<PublishMenuVisit>(
+    () => Object.freeze({ mount, session, document: doc }),
+    [doc, mount, session],
+  );
+  const initialState = useMemo<PublishMenuState>(
+    () => Object.freeze({ visit, open: false }),
+    [visit],
+  );
+  const [storedState, setStoredState] = useState(initialState);
+  const state = storedState.visit === visit ? storedState : initialState;
+  const actions = publishMenuActions(props, linked, canEdit);
+  const render: PublishMenuRender = Object.freeze({
+    identity: Object.freeze({}),
+    visit,
+    props,
+    session,
+    document: doc,
+    documentFields: snapshotMoreMenuDocument(doc),
+    sync: props.sync,
+    syncFields: props.sync ? JSON.stringify(props.sync) : null,
+    role: session.role,
+    linked,
+    canEdit,
+    isOwner: props.isOwner,
+    githubConfigured,
+    publishing: props.publishing,
+    open: state.open,
+    actions,
+    enabledActions: Object.freeze(actions.filter((action) => action.enabled)),
+  });
+  const presentation = createPublishMenuPresentation({
+    render,
+    coordinator,
+    owners,
+    commitOpen: setStoredState,
+  });
+  useLayoutEffect(() => presentation.establish(), [presentation]);
+  const {
+    captureTrigger,
+    captureContent,
+    captureActions: {
+      publish: capturePublish,
+      pull: capturePull,
+      sync: captureSync,
+      open: captureOpen,
+      change: captureChange,
+      connect: captureConnect,
+      download: captureDownload,
+      share: captureShare,
+    },
+    onTriggerKeyDown,
+    onTriggerArrowKeyDown,
+    onOpenChange,
+    onOpenAutoFocus,
+  } = presentation;
+  const openAutoFocusProps = { onOpenAutoFocus };
+
+  return (
+    <Menu open={state.open} onOpenChange={onOpenChange}>
+      <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
+        {linked && canEdit && props.sync ? (
+          <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
+        ) : (
+          <MenuTrigger asChild>
+            <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+              {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
+              Publish
+            </button>
+          </MenuTrigger>
+        )}
+        <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
+          <button
+            ref={captureTrigger}
+            type="button"
+            className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5"
+            disabled={props.publishing}
+            aria-label="Publish options"
+            data-testid="publish-menu"
+            onKeyDown={onTriggerKeyDown}
+          >
+            <ChevronDown size={16} className="opacity-80" />
+          </button>
+        </MenuTrigger>
+      </div>
+      {state.open && (
+        <MenuContent
+          ref={captureContent}
+          align="end"
+          className="w-72"
+          {...openAutoFocusProps}
+        >
+          {linked ? (
+            <>
+            <MenuLabel>
+              {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
+              {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
+            </MenuLabel>
+            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+              {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
+            </MenuItem>
+            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+              Pull latest from GitHub
+            </MenuItem>
+            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+              Sync…
+            </MenuItem>
+            {doc.githubUrl && (
+              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+                Open on GitHub
+              </MenuItem>
+            )}
+            {props.isOwner && (
+              <>
+                <MenuSeparator />
+                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                  Change connection…
+                </MenuItem>
+              </>
+            )}
+            </>
+          ) : (
+            <>
+            <MenuLabel>Publish to GitHub</MenuLabel>
+            <MenuItem
+              ref={captureConnect}
+              icon={<GitHubIcon size={15} />}
+              onSelect={props.onPublish}
+              disabled={!props.isOwner || !githubConfigured}
+              title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
+              data-testid="menu-publish-github"
+            >
+              <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
+            </MenuItem>
+            <MenuSeparator />
+            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+              Download Markdown
+            </MenuItem>
+            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={props.onShare}>
+              Share link…
+            </MenuItem>
+            </>
+          )}
+          <PublishMenuOpenCommit presentation={presentation} />
+        </MenuContent>
+      )}
+    </Menu>
   );
 }
 
@@ -10339,79 +14758,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MoreMenuOpenCommit presentation={moreMenuPresentation} />
           </MenuContent>
         </Menu>}
-        {!embed && !compact && (
-          <Menu>
-            <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
-              {linked && canEdit && props.sync ? (
-                <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
-              ) : (
-                <MenuTrigger asChild>
-                  <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
-                    {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
-                    Publish
-                  </button>
-                </MenuTrigger>
-              )}
-              <MenuTrigger asChild>
-                <button type="button" className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5" disabled={props.publishing} aria-label="Publish options" data-testid="publish-menu">
-                  <ChevronDown size={16} className="opacity-80" />
-                </button>
-              </MenuTrigger>
-            </div>
-            <MenuContent align="end" className="w-72">
-              {linked ? (
-                <>
-                  <MenuLabel>
-                    {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
-                    {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
-                  </MenuLabel>
-                  <MenuItem icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
-                    {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
-                  </MenuItem>
-                  <MenuItem icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
-                    Pull latest from GitHub
-                  </MenuItem>
-                  <MenuItem icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
-                    Sync…
-                  </MenuItem>
-                  {doc.githubUrl && (
-                    <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
-                      Open on GitHub
-                    </MenuItem>
-                  )}
-                  {props.isOwner && (
-                    <>
-                      <MenuSeparator />
-                      <MenuItem icon={<Link2 size={15} />} onSelect={props.onPublish}>
-                        Change connection…
-                      </MenuItem>
-                    </>
-                  )}
-                </>
-              ) : (
-                <>
-                  <MenuLabel>Publish to GitHub</MenuLabel>
-                  <MenuItem
-                    icon={<GitHubIcon size={15} />}
-                    onSelect={props.onPublish}
-                    disabled={!props.isOwner || !githubConfigured}
-                    title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
-                    data-testid="menu-publish-github"
-                  >
-                    <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
-                  </MenuItem>
-                  <MenuSeparator />
-                  <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
-                    Download Markdown
-                  </MenuItem>
-                  <MenuItem icon={<Share2 size={15} />} onSelect={props.onShare}>
-                    Share link…
-                  </MenuItem>
-                </>
-              )}
-            </MenuContent>
-          </Menu>
-        )}
+        {!embed && !compact && <PublishMenu props={props} />}
       </div>
     </header>
   );
