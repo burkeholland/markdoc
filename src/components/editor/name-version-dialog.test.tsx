@@ -1057,8 +1057,7 @@ describe("NameVersionDialog keyboard action navigation", () => {
       backingWindow.addEventListener.bind(backingWindow);
     const removeEventListener =
       backingWindow.removeEventListener.bind(backingWindow);
-    let ownerWindow!: Window & typeof globalThis;
-    ownerWindow = new Proxy(backingWindow, {
+    const ownerWindow = new Proxy(backingWindow, {
       get: (target, property) => {
         if (property === "addEventListener") return addEventListener;
         if (property === "removeEventListener") return removeEventListener;
