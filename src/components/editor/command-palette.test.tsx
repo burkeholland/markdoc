@@ -461,6 +461,213 @@ afterEach(async () => {
   expect(unhandledRejections).toEqual([]);
 });
 
+describe("CommandPalette command titles", () => {
+  const firstTitle = `Alpha <strong title="literal">command</strong> 'quoted' ${"long document name ".repeat(12)}`;
+  const secondTitle = `Beta <img src="literal" alt='quoted'> command ${"another document name ".repeat(12)}`;
+
+  function expectCommandTitle(id: string, title: string) {
+    const row = screen.getByTestId(`palette-item-${id}`);
+    const span = row.querySelector<HTMLSpanElement>(":scope > span.flex-1");
+    if (!span) throw new Error("Command title span was not rendered");
+    expect(span.getAttribute("title")).toBe(title);
+    expect(span.textContent).toBe(title);
+    expect(span.className).toBe("flex-1 truncate");
+    expect(span.getAttributeNames().sort()).toEqual(["class", "title"]);
+    expect(span.childElementCount).toBe(0);
+    expect(span.childNodes).toHaveLength(title ? 1 : 0);
+    expect(row).toHaveAttribute("role", "option");
+    expect(row).not.toHaveAttribute("tabindex");
+    expect(row.querySelector("button, a, input, [tabindex], [role='tooltip']")).toBeNull();
+    return { row, span };
+  }
+
+  it("preserves raw root titles, row semantics, and highlight-only hover", async () => {
+    const run = vi.fn();
+    const children = vi.fn(() => []);
+    const onOpenChange = vi.fn();
+    const ordinary = { ...command("ordinary", firstTitle, run), icon: "FileText", shortcut: "Ctrl-K" };
+    const parent = childCommand("parent", secondTitle, children);
+    render(
+      <CommandPalette
+        open
+        onOpenChange={onOpenChange}
+        commands={commandProvider(ordinary, parent, command("empty", ""), command("whitespace", " \t  "))}
+      />,
+    );
+    const input = await screen.findByTestId("palette-input");
+    expect(firstTitle.length).toBeGreaterThanOrEqual(200);
+    expect(secondTitle.length).toBeGreaterThanOrEqual(200);
+    expect(firstTitle).not.toBe(secondTitle);
+
+    const { row: ordinaryRow } = expectCommandTitle("ordinary", firstTitle);
+    expect(ordinaryRow).toHaveAccessibleName(`${firstTitle.trim()}Ctrl-K`);
+    expect([...ordinaryRow.children].map((child) => child.tagName.toLowerCase())).toEqual(["svg", "span", "kbd", "svg"]);
+    expect(ordinaryRow.children[0]).toHaveClass("lucide-file-text");
+    expect(ordinaryRow.children[0]).toHaveAttribute("aria-hidden", "true");
+    expect(ordinaryRow.children[2]).toHaveTextContent("Ctrl-K");
+    expect(ordinaryRow.children[3]).toHaveClass("lucide-corner-down-left");
+    expect(ordinaryRow.children[3]).toHaveAttribute("aria-hidden", "true");
+    const { row: parentRow, span: parentSpan } = expectCommandTitle("parent", secondTitle);
+    expect(parentRow).toHaveAccessibleName(secondTitle.trim());
+    expect([...parentRow.children].map((child) => child.tagName.toLowerCase())).toEqual(["span", "span", "svg"]);
+    expect(parentRow.children[0]).toHaveClass("inline-block", "h-4", "w-4");
+    expect(parentRow.children[0]).toHaveAttribute("aria-hidden", "true");
+    expect(parentRow.children[2]).toHaveClass("lucide-chevron-right");
+    expect(parentRow.children[2]).toHaveAttribute("aria-hidden", "true");
+    for (const [id, title] of [["empty", ""], ["whitespace", " \t  "]]) {
+      const { row } = expectCommandTitle(id, title);
+      expect(row).toHaveAccessibleName("");
+      expect(row.children).toHaveLength(2);
+    }
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+
+    fireEvent.mouseEnter(parentSpan);
+    await act(async () => {});
+    expect(selectedCommand(input)).toBe("palette-item-parent");
+    expectCommandTitle("parent", secondTitle);
+    expect(ordinaryRow.querySelector(".lucide-corner-down-left")).toBeNull();
+    expect(parentRow.querySelector(".lucide-chevron-right")).toBeInTheDocument();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByTestId("command-palette").querySelector("button, a, [tabindex='0']")).toBeNull();
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(run).not.toHaveBeenCalled();
+    expect(parent.run).not.toHaveBeenCalled();
+    expect(children).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(input).toHaveFocus();
+  });
+
+  it("refreshes filtered, same-ID, and reopened titles before activating only the current command", async () => {
+    const oldRun = vi.fn();
+    const navigate = vi.fn();
+    const currentRun = vi.fn(() => navigate());
+    const oldItems = [command("shared", firstTitle, oldRun), command("other", secondTitle)];
+    const currentItems = [command("shared", secondTitle, currentRun)];
+    const rendered = render(<Harness items={oldItems} />);
+    const input = await screen.findByTestId("palette-input");
+    expectCommandTitle("shared", firstTitle);
+    expectCommandTitle("other", secondTitle);
+
+    fireEvent.change(input, { target: { value: "Alpha" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expectCommandTitle("shared", firstTitle);
+    expect(screen.queryByTitle(secondTitle)).toBeNull();
+    fireEvent.change(input, { target: { value: "" } });
+    rendered.rerender(<Harness items={currentItems} />);
+    expectCommandTitle("shared", secondTitle);
+    expect(screen.queryByTitle(firstTitle)).toBeNull();
+    expect(screen.queryByTestId("palette-item-other")).toBeNull();
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open palette" }));
+    await screen.findByTestId("palette-input");
+    const { span } = expectCommandTitle("shared", secondTitle);
+    expect(screen.queryByTitle(firstTitle)).toBeNull();
+    fireEvent.mouseEnter(span);
+    await act(async () => {});
+    expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+    expect(oldRun).not.toHaveBeenCalled();
+    expect(currentRun).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+
+    fireEvent.click(span);
+    await waitFor(() => expect(currentRun).toHaveBeenCalledOnce());
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(oldRun).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("command-palette")).toBeNull();
+  });
+
+  it("keeps loaded and nested titles current without loading or running on hover", async () => {
+    const pending = deferred<Command[]>();
+    const run = vi.fn();
+    const nestedChildren = vi.fn(() => pending.promise);
+    const nested = childCommand("nested", secondTitle, nestedChildren);
+    const sibling = command("sibling", firstTitle);
+    const children = vi.fn(() => [nested, sibling]);
+    const parent = childCommand("parent", firstTitle, children);
+    render(<Harness items={[parent]} />);
+    await screen.findByTestId("palette-input");
+    fireEvent.click(expectCommandTitle("parent", firstTitle).span);
+    await screen.findByTestId("palette-item-nested");
+    expect(children).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("palette-item-parent")).toBeNull();
+    const input = screen.getByTestId("palette-input");
+    fireEvent.mouseEnter(expectCommandTitle("sibling", firstTitle).span);
+    fireEvent.mouseEnter(expectCommandTitle("nested", secondTitle).span);
+    await act(async () => {});
+    expect(selectedCommand(input)).toBe("palette-item-nested");
+    expect(children).toHaveBeenCalledOnce();
+    expect(nestedChildren).not.toHaveBeenCalled();
+    expect(nested.run).not.toHaveBeenCalled();
+    expect(parent.run).not.toHaveBeenCalled();
+    expect(sibling.run).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.queryByRole("status")).toBeNull();
+
+    fireEvent.change(input, { target: { value: "Beta" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.queryByTitle(firstTitle)).toBeNull();
+    fireEvent.click(expectCommandTitle("nested", secondTitle).span);
+    await waitFor(() => expect(nestedChildren).toHaveBeenCalledOnce());
+    await settle(pending, "resolve", [command("leaf", firstTitle, run)]);
+    expect(screen.queryByTitle(secondTitle)).toBeNull();
+    const { span } = expectCommandTitle("leaf", firstTitle);
+    fireEvent.mouseEnter(span);
+    await act(async () => {});
+    expect(run).not.toHaveBeenCalled();
+    expect(children).toHaveBeenCalledOnce();
+    expect(nestedChildren).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+    expect(input).toHaveFocus();
+    fireEvent.click(span);
+    await waitFor(() => expect(run).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId("command-palette")).toBeNull();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "preserves hover cancellation of a pending child %s without extra command work",
+    async (settlement) => {
+      const pending = deferred<Command[]>();
+      const children = vi.fn(() => pending.promise);
+      const run = vi.fn();
+      const onOpenChange = vi.fn();
+      const parent = childCommand("parent", firstTitle, children);
+      render(
+        <CommandPalette
+          open
+          onOpenChange={onOpenChange}
+          commands={commandProvider(parent, command("ordinary", secondTitle, run))}
+        />,
+      );
+      const input = await screen.findByTestId("palette-input");
+      fireEvent.click(expectCommandTitle("parent", firstTitle).span);
+      await waitFor(() => expect(children).toHaveBeenCalledOnce());
+      expect(screen.getByRole("status")).toBeInTheDocument();
+
+      fireEvent.mouseEnter(expectCommandTitle("ordinary", secondTitle).span);
+      expect(selectedCommand(input)).toBe("palette-item-ordinary");
+      expect(screen.queryByRole("status")).toBeNull();
+      if (settlement === "resolve") {
+        await settle(pending, "resolve", [command("stale", "Stale child title")]);
+      } else {
+        await settle(pending, "reject", new Error("Stale child failed"));
+      }
+      expectCommandTitle("parent", firstTitle);
+      expectCommandTitle("ordinary", secondTitle);
+      expect(screen.queryByTitle("Stale child title")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getAllByRole("option")).toHaveLength(2);
+      expect(children).toHaveBeenCalledOnce();
+      expect(parent.run).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(input).toHaveFocus();
+    },
+  );
+});
+
 describe("CommandPalette child loading", () => {
   it("announces a failed load and retries once without duplicate click or Enter requests", async () => {
     const first = deferred<Command[]>();
