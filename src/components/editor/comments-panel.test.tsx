@@ -4814,6 +4814,76 @@ describe("CommentsPanel", () => {
       expect(targetReactions(view, "Comment")).toEqual({});
     });
 
+    it.each([
+      ["Comment", "capture", "present"],
+      ["Comment", "capture", "absent"],
+      ["Comment", "capture", "mutated"],
+      ["Comment", "bubble", "present"],
+      ["Comment", "bubble", "absent"],
+      ["Comment", "bubble", "mutated"],
+      ["Reply", "capture", "present"],
+      ["Reply", "capture", "absent"],
+      ["Reply", "capture", "mutated"],
+      ["Reply", "bubble", "present"],
+      ["Reply", "bubble", "absent"],
+      ["Reply", "bubble", "mutated"],
+    ] as const)(
+      "ignores a %s picker private React name on its real %s wrapper when %s",
+      async (target, phase, state) => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountPickers();
+        const { options } = await openPicker(view, target);
+        const source = options[0]!;
+        const destination = options[1]!;
+        const group = source.parentElement;
+        if (!(group instanceof HTMLDivElement)) {
+          throw new Error("The reaction keyboard group did not mount");
+        }
+        const property =
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
+        const element = phase === "capture" ? group : source;
+        const handler = reactProperty<
+          (event: ReactKeyboardEvent<HTMLElement>) => void
+        >(element, property);
+        const restore = replaceReactProperties(element, {
+          [property]: (event: ReactKeyboardEvent<HTMLElement>) => {
+            const wrapper = event as ReactKeyboardEvent<HTMLElement> & {
+              _reactName?: unknown;
+            };
+            if (state === "absent") {
+              expect(Reflect.deleteProperty(wrapper, "_reactName")).toBe(true);
+              expect("_reactName" in wrapper).toBe(false);
+            } else {
+              wrapper._reactName =
+                state === "present" ? "onKeyDown" : "irrelevant-private-name";
+              expect(wrapper._reactName).toBe(
+                state === "present" ? "onKeyDown" : "irrelevant-private-name",
+              );
+            }
+            handler(event);
+          },
+        });
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        try {
+          const accepted = reactionPickerKey(source, "ArrowRight");
+          expect(accepted.defaultPrevented).toBe(true);
+        } finally {
+          restore();
+        }
+
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(targetReactions(view, target)).toEqual({});
+      },
+    );
+
     it("rejects a structural Window terminal while retaining exact backing-receiver recovery", async () => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");

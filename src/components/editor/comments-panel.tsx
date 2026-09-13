@@ -3320,7 +3320,6 @@ interface ReactionPickerDelivery {
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly shiftKey: boolean;
-  readonly wrapperPrototype: object | null;
 }
 
 interface ReactionPickerReactMethods {
@@ -3829,7 +3828,6 @@ function exactReactionPickerDelivery(
     const shiftKey = keyboard.shiftKey.read(nativeEvent);
     const trusted = keyboard.trusted.read(nativeEvent);
     const reactEvent = event as KeyboardEvent<HTMLElement> & {
-      _reactName?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
       persist?: unknown;
@@ -3884,7 +3882,6 @@ function exactReactionPickerDelivery(
       event.defaultPrevented === defaultPrevented &&
       event.isTrusted === trusted &&
       Object.is(event.view, view) &&
-      reactEvent._reactName === "onKeyDown" &&
       reactEvent.isDefaultPrevented === methods.isDefaultPrevented &&
       reactEvent.isPropagationStopped === methods.isPropagationStopped &&
       typeof reactEvent.persist === "function"
@@ -3914,7 +3911,6 @@ function exactReactionPickerDelivery(
           ctrlKey,
           metaKey,
           shiftKey,
-          wrapperPrototype: keyboard.getPrototypeOf(event),
         })
       : null;
   } catch {
@@ -3954,8 +3950,7 @@ function reactionPickerDeliveriesMatch(
     capture.altKey === current.altKey &&
     capture.ctrlKey === current.ctrlKey &&
     capture.metaKey === current.metaKey &&
-    capture.shiftKey === current.shiftKey &&
-    capture.wrapperPrototype === current.wrapperPrototype
+    capture.shiftKey === current.shiftKey
   );
 }
 
@@ -3986,8 +3981,7 @@ function reactionPickerNativeFactsMatch(
     capture.altKey === bubble.altKey &&
     capture.ctrlKey === bubble.ctrlKey &&
     capture.metaKey === bubble.metaKey &&
-    capture.shiftKey === bubble.shiftKey &&
-    capture.wrapperPrototype === bubble.wrapperPrototype
+    capture.shiftKey === bubble.shiftKey
   );
 }
 
