@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   startTransition,
@@ -14,6 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { compile } from "tailwindcss";
 import type { ApiTokenDto } from "@/lib/api";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { TokensPanel } from "./tokens-panel";
@@ -539,6 +542,196 @@ describe("visible token management", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: `Revoke ${token.name}` })).toBeNull());
     expect(screen.getByTestId("token-row")).toHaveTextContent("Revoked");
     expect(mutations().every(([, init]) => init?.method === "DELETE")).toBe(true);
+  });
+});
+
+describe("token name wrapping", () => {
+  function expectNameSpan(row: HTMLElement, name: string) {
+    const span = within(row).getByText(name, { selector: "span", exact: true, normalizer: (value) => value });
+    expect(row.firstElementChild?.firstElementChild).toBe(span);
+    expect(span.tagName).toBe("SPAN");
+    expect(span.textContent).toBe(name);
+    expect(span.className).toBe("min-w-0 wrap-anywhere text-sm font-semibold text-ink");
+    expect(span.getAttributeNames()).toEqual(["class"]);
+    expect(span.children).toHaveLength(0);
+    expect(span.childNodes).toHaveLength(1);
+    expect(span.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    return span;
+  }
+
+  it("keeps bounded names literal and preserves active, revoked and expired row structure without passive work", async () => {
+    const tokens: ApiTokenDto[] = [
+      { ...token, name: "A".repeat(80), scope: "read", documentIds: null },
+      { ...token, id: "multiword", name: "Release Readiness Review Agent", documentIds: ["doc-one", "doc-two"] },
+      { ...token, id: "revoked", name: "Documentation Quality Review Agent", scope: "full", revokedAt: "2026-09-01T00:00:00.000Z" },
+      { ...token, id: "expired", name: `<img src=x onerror="alert(1)"> & 'quoted' agent`, expiresAt: "2000-01-01T00:00:00.000Z" },
+    ];
+    fetchMock.mockResolvedValueOnce(response({ tokens }));
+    renderPanel();
+    const rows = await screen.findAllByTestId("token-row");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const microtask = vi.spyOn(globalThis, "queueMicrotask");
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    const activeElement = document.activeElement;
+    const observer = new MutationObserver(vi.fn());
+    observer.observe(screen.getByTestId("token-manager"), { attributes: true, childList: true, characterData: true, subtree: true });
+    try {
+      // Inspect synchronously after setup; loading and the test runner can schedule their own work.
+      expect(tokens[0].name).toHaveLength(80);
+      expect(rows).toHaveLength(tokens.length);
+      expect(Array.from(rows[0].parentElement!.children)).toEqual(rows);
+      expect(rows[0].parentElement).toHaveClass("divide-y divide-line", { exact: true });
+      rows.forEach((row, index) => {
+        const current = tokens[index];
+        const state = ["Active", "Active", "Revoked", "Expired"][index];
+        const count = ["all documents", "2 documents", "1 document", "1 document"][index];
+        expect(current.name.length).toBeLessThanOrEqual(80);
+        expectNameSpan(row, current.name);
+        expect(row.tagName).toBe("LI");
+        expect(row).toHaveAttribute("tabindex", "-1");
+        expect(row).not.toHaveAttribute("data-token-match");
+        expect(row.className).toBe("flex min-w-0 flex-col gap-2 p-3");
+        const header = row.firstElementChild!;
+        expect(header.className).toBe("flex min-w-0 flex-wrap items-center gap-2");
+        expect(Array.from(header.children).map((child) => child.textContent)).toEqual([current.name, current.scope, state, count]);
+        expect(header.querySelectorAll("a, button, input, select, textarea, summary, [tabindex], [contenteditable]")).toHaveLength(0);
+        expect(within(row).getByTestId("token-scope-chip")).toHaveAttribute("data-scope", current.scope);
+        expect(within(row).getByTestId("token-documents-count").textContent).toBe(count);
+        expect(Array.from(row.children).map((child) => child.tagName)).toEqual([
+          "DIV", "P", ...(state === "Expired" ? ["P"] : []), ...(state === "Revoked" ? [] : ["DIV"]), "DETAILS",
+        ]);
+        expect(within(row).getByText("Details & agent requests").tagName).toBe("SUMMARY");
+        if (state === "Revoked") {
+          expect(within(row).queryByRole("group", { name: `${current.name} token actions` })).toBeNull();
+          expect(row.querySelectorAll("button")).toHaveLength(0);
+        } else {
+          const actions = within(row).getByRole("group", { name: `${current.name} token actions` });
+          expect(actions).toHaveClass("flex flex-wrap gap-2", { exact: true });
+          expect(Array.from(actions.children).map((child) => child.textContent)).toEqual(["Rename", "Replace", "Revoke"]);
+          expect(within(actions).getByRole("button", { name: `Rename ${current.name}` })).toBeEnabled();
+          expect(within(actions).getByRole("button", { name: `Revoke ${current.name}` })).toBeEnabled();
+          const replace = within(actions).getByRole("button", { name: `Replace ${current.name}` });
+          if (state === "Expired") expect(replace).toBeDisabled();
+          else expect(replace).toBeEnabled();
+          expect(row.querySelectorAll("button")).toHaveLength(4);
+          const collaborators = within(row).getByTestId("token-collaborators-may-ask");
+          expect(collaborators).toHaveAttribute("role", "switch");
+          expect(collaborators).toHaveAttribute("aria-checked", "false");
+          expect(collaborators).toHaveAttribute("aria-labelledby", `token-${current.id}-may-ask-label`);
+          expect(collaborators).toHaveAttribute("aria-describedby", `token-${current.id}-may-ask-help`);
+          expect(collaborators).toHaveAccessibleName("Collaborators may ask this agent");
+        }
+      });
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/tokens?includeRevoked=true");
+      expect(mutations()).toHaveLength(0);
+      expect(confirmMock).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(activeElement);
+      for (const scheduled of [timeout, interval, microtask, frame]) expect(scheduled).not.toHaveBeenCalled();
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("updates the same name span when a list reload replaces a token with the same ID", async () => {
+    const other = { ...token, id: "other-token", name: "Other Review Agent" };
+    const current = { ...token, name: "Current Release Review Agent" };
+    fetchMock.mockResolvedValueOnce(response({ tokens: [token, other] }))
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockResolvedValueOnce(response({ tokens: [current, { ...other, revokedAt: "2026-09-01T00:00:00.000Z" }] }));
+    confirmMock.mockReturnValue(true);
+    renderPanel();
+    const rows = await screen.findAllByTestId("token-row");
+    const span = expectNameSpan(rows[0], token.name);
+    const original = rows[0].innerHTML;
+
+    fireEvent.click(within(rows[1]).getByRole("button", { name: `Revoke ${other.name}` }));
+    await screen.findByRole("button", { name: `Rename ${current.name}` });
+
+    expect(screen.getAllByTestId("token-row")).toEqual(rows);
+    expect(expectNameSpan(rows[0], current.name)).toBe(span);
+    expect(rows[0].innerHTML).toBe(original.replaceAll(token.name, current.name));
+    expectNameSpan(rows[1], other.name);
+    expect(screen.queryByText(token.name, { exact: true })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0][0]).toBe(`/api/tokens/${other.id}`);
+    expect(mutations()[0][1]?.method).toBe("DELETE");
+  });
+
+  it("keeps the full name and matching highlight on the existing conflict row", async () => {
+    fetchMock.mockResolvedValueOnce(response({ tokens: [] }))
+      .mockResolvedValueOnce(response({ error: "Another active token has the same @mention name" }, 409))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    renderPanel();
+    await openCreate();
+    expect(screen.getByTestId("token-name")).toHaveAttribute("maxlength", "80");
+    fireEvent.click(screen.getByTestId("token-create"));
+    const row = await screen.findByTestId("token-row");
+    expectNameSpan(row, token.name);
+    expect(row.className).toBe("flex min-w-0 flex-col gap-2 p-3 ring-2 ring-inset ring-accent");
+    expect(row).toHaveAttribute("data-token-match", "true");
+    expect(row).toHaveFocus();
+    expect(within(row).getByRole("button", { name: `Replace ${token.name}` })).toBeEnabled();
+  });
+
+  it("renames only the current full name while preserving permissions, the other row and focus return", async () => {
+    const original = { ...token, name: "A".repeat(80) };
+    const other = { ...token, id: "other-token", name: "Other Documentation Review Agent" };
+    const name = "Renamed Documentation Quality Review Agent With Detailed Release Notes";
+    const pending = deferred<Response>();
+    fetchMock.mockResolvedValueOnce(response({ tokens: [original, other] })).mockReturnValueOnce(pending.promise);
+    renderPanel();
+    const rows = await screen.findAllByTestId("token-row");
+    const span = expectNameSpan(rows[0], original.name);
+    const otherSpan = expectNameSpan(rows[1], other.name);
+    const originalHtml = rows[0].innerHTML;
+    const otherHtml = rows[1].innerHTML;
+    const rename = within(rows[0]).getByRole("button", { name: `Rename ${original.name}` });
+    fireEvent.click(rename);
+    const input = screen.getByLabelText("Token name");
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue(original.name);
+    expect(input).toHaveAttribute("maxlength", "80");
+    expect(name.length).toBeLessThanOrEqual(80);
+    fireEvent.change(input, { target: { value: name } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(input).toBeDisabled();
+    for (const action of ["Rename", "Replace", "Revoke"]) {
+      expect(within(rows[0]).getByRole("button", { name: `${action} ${original.name}` })).toBeDisabled();
+    }
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0][0]).toBe(`/api/tokens/${original.id}`);
+    expect(mutations()[0][1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(mutations()[0][1]?.body))).toEqual({ name });
+    await act(async () => pending.resolve(response({ token: { ...original, name } })));
+    await waitFor(() => expect(rename).toHaveFocus());
+
+    expect(screen.getAllByTestId("token-row")).toEqual(rows);
+    expect(expectNameSpan(rows[0], name)).toBe(span);
+    expect(expectNameSpan(rows[1], other.name)).toBe(otherSpan);
+    expect(rows[0].innerHTML).toBe(originalHtml.replaceAll(original.name, name));
+    expect(rows[1].innerHTML).toBe(otherHtml);
+    expect(screen.queryByText(original.name, { exact: true })).toBeNull();
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(screen.queryByTestId("copy-token")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mutations()).toHaveLength(1);
+  });
+
+  it("emits overflow-wrap anywhere without word-break break-all from installed Tailwind", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["wrap-anywhere", "min-w-0", "flex-wrap"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all/);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.flex-wrap\s*\{\s*flex-wrap:\s*wrap;\s*\}/);
   });
 });
 

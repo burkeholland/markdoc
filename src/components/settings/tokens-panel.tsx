@@ -8455,7 +8455,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     <li ref={(element) => bindElement(candidate.row, element)} tabIndex={-1} className={facts.rowClassName}
       data-testid="token-row" data-token-match={facts.matching || undefined}>
       <div ref={(element) => bindElement(candidate.header, element)} className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="min-w-0 break-all text-sm font-semibold text-ink">{facts.token.name}</span>
+        <span className="min-w-0 wrap-anywhere text-sm font-semibold text-ink">{facts.token.name}</span>
         <ScopeChip scope={facts.token.scope} /><span className="text-xs text-ink-3">{facts.state}</span>
         <span className="text-xs text-ink-3" data-testid="token-documents-count">{facts.documentCount}</span>
       </div>
