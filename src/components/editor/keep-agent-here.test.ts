@@ -11,6 +11,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { compile } from "tailwindcss";
 
 const listTokens = vi.hoisted(() => vi.fn());
 const copyText = vi.hoisted(() => vi.fn());
@@ -2218,6 +2219,188 @@ describe("KeepAgentHerePanel token setup check", () => {
       window.removeEventListener("unhandledrejection", unhandled);
     }
   });
+});
+
+describe("KeepAgentHerePanel token setup error wrapping", () => {
+  const unbroken = "Unavailable".repeat(32);
+  const literal = '  <a href="/settings" tabindex="0">Try again</a>\n\t<strong>Unavailable & unchanged</strong>  ';
+
+  function expectError(message: string, pending = false) {
+    const row = screen.getByTestId("keep-agent-token-error");
+    const alert = screen.getByRole("alert");
+    const retry = screen.getByRole("button", { name: pending ? "Retrying…" : "Retry" });
+    expect(row.tagName).toBe("DIV");
+    expect(Object.fromEntries([...row.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40",
+      "data-testid": "keep-agent-token-error",
+    });
+    expect([...row.childNodes]).toEqual([alert, retry]);
+    expect(alert.tagName).toBe("SPAN");
+    expect(Object.fromEntries([...alert.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "min-w-0 flex-1 wrap-anywhere",
+      role: "alert",
+      "aria-atomic": "true",
+    });
+    expect(alert.textContent).toBe(message);
+    expect(alert.childNodes).toHaveLength(1);
+    expect(alert.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(retry.tagName).toBe("BUTTON");
+    expect(Object.fromEntries([...retry.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      type: "button",
+      class: "btn btn-outline btn-sm shrink-0",
+      ...(pending ? { disabled: "", "aria-busy": "true" } : {}),
+    });
+    expect(retry.textContent).toBe(pending ? "Retrying…" : "Retry");
+    expect(retry.childNodes).toHaveLength(1);
+    expect(retry.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect([...row.querySelectorAll("button, a, input, select, textarea, [tabindex]")]).toEqual([retry]);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.queryByRole("status")).toBeNull();
+    return { alert, retry: captureControl(retry) };
+  }
+
+  it.each([
+    { label: "unbroken message over 240 characters", message: unbroken, issue: false },
+    { label: "ordinary API issue", message: "Your token list is temporarily unavailable.", issue: true },
+    { label: "literal markup and whitespace API issue", message: literal, issue: true },
+  ])("wraps the exact $label in the existing alert beside Retry", async ({ message, issue }) => {
+    expect(unbroken.length).toBeGreaterThanOrEqual(240);
+    expect(unbroken).not.toMatch(/\s/);
+    listTokens.mockReset().mockRejectedValueOnce(issue
+      ? new ApiError(400, "Invalid request", [{ path: ["tokens"], message }])
+      : new ApiError(503, message));
+
+    render(panel());
+    await screen.findByRole("alert");
+
+    const { alert } = expectError(message);
+    expect([...screen.getByTestId("keep-agent-panel").querySelectorAll(".wrap-anywhere")]).toEqual([alert]);
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+    expect(listTokens).toHaveBeenCalledOnce();
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+  });
+
+  it("compiles the installed wrap-anywhere utility to overflow-wrap:anywhere", async () => {
+    const { build } = await compile("@tailwind utilities;");
+    expect(build(["wrap-anywhere"])).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+  });
+
+  it.each([
+    { count: 0, setup: true, label: "zero tokens" },
+    { count: 2, setup: false, label: "existing tokens" },
+  ])("replaces the raw error, rejects retired Retry, and recovers with $label", async ({ count, setup }) => {
+    const replacement = deferred<TokenListResponse>();
+    const recovery = deferred<TokenListResponse>();
+    listTokens
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(503, unbroken))
+      .mockReturnValueOnce(replacement.promise)
+      .mockReturnValueOnce(recovery.promise);
+    render(panel());
+    await screen.findByRole("alert");
+    const failed = expectError(unbroken);
+
+    fireEvent.click(failed.retry.element);
+    fireEvent.click(failed.retry.element);
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    const pending = expectError(unbroken, true);
+    expect(pending.alert).toBe(failed.alert);
+    expect(pending.retry.element).toBe(failed.retry.element);
+    expect(pending.retry.element).toBeDisabled();
+    expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+
+    await reject(replacement, new ApiError(400, "Invalid request", [{ path: ["tokens"], message: literal }]));
+    const current = expectError(literal);
+    expect(current.alert).toBe(failed.alert);
+    expect(current.retry.element).toBe(failed.retry.element);
+    expect(current.retry.element).toBeEnabled();
+    expect(current.retry.click).not.toBe(failed.retry.click);
+    expect(current.retry.click).not.toBe(pending.retry.click);
+    expect(screen.getByTestId("keep-agent-panel").textContent).not.toContain(unbroken);
+    act(() => {
+      invoke(failed.retry, current.retry.element);
+      invoke(pending.retry, current.retry.element);
+    });
+    expect(listTokens).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      invoke(current.retry);
+      invoke(current.retry);
+    });
+    expect(listTokens).toHaveBeenCalledTimes(3);
+    expectError(literal, true);
+    await resolve(recovery, tokenResponse(count));
+    expect(screen.queryByTestId("keep-agent-token-error")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(current.alert.isConnected).toBe(false);
+    expect(current.retry.element.isConnected).toBe(false);
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(Boolean(screen.queryByTestId("agent-connect-card"))).toBe(setup);
+    act(() => {
+      invoke(failed.retry);
+      invoke(pending.retry);
+      invoke(current.retry);
+    });
+    expect(listTokens).toHaveBeenCalledTimes(3);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(selectContents).not.toHaveBeenCalled();
+  });
+
+  it.each(["dialog close", "inactive panel", "document remount"] as const)(
+    "removes the old raw error and retires Retry across %s",
+    async (boundary) => {
+      const successor = deferred<TokenListResponse>();
+      const recovery = deferred<TokenListResponse>();
+      listTokens
+        .mockReset()
+        .mockRejectedValueOnce(new ApiError(503, unbroken))
+        .mockReturnValueOnce(successor.promise)
+        .mockReturnValueOnce(recovery.promise);
+      const rendered = render(boundary === "dialog close"
+        ? dialog(true)
+        : createElement(PanelBoundary, { panel: { doc: DOC } }));
+      await screen.findByRole("alert");
+      const stale = expectError(unbroken);
+
+      if (boundary === "dialog close") rendered.rerender(dialog(false));
+      else rendered.rerender(createElement(PanelBoundary, boundary === "inactive panel"
+        ? { panel: { doc: DOC, active: false } }
+        : { panel: { doc: { id: "doc-2", title: "Successor" } }, mount: "replacement" }));
+
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("keep-agent-token-error")).toBeNull();
+      expect(stale.alert.isConnected).toBe(false);
+      expect(stale.retry.element.isConnected).toBe(false);
+      const callsAtBoundary = listTokens.mock.calls.length;
+      act(() => {
+        invoke(stale.retry);
+        invoke(stale.retry);
+      });
+      expect(listTokens).toHaveBeenCalledTimes(callsAtBoundary);
+
+      if (boundary === "dialog close") rendered.rerender(dialog(true));
+      else if (boundary === "inactive panel") rendered.rerender(createElement(PanelBoundary, { panel: { doc: DOC } }));
+      expect(listTokens).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole("status")).toHaveTextContent("Checking token setup…");
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      await reject(successor, new ApiError(503, literal));
+      const current = expectError(literal);
+      expect(current.alert).not.toBe(stale.alert);
+      act(() => {
+        invoke(stale.retry, current.retry.element);
+      });
+      expect(listTokens).toHaveBeenCalledTimes(2);
+      fireEvent.click(current.retry.element);
+      fireEvent.click(current.retry.element);
+      expect(listTokens).toHaveBeenCalledTimes(3);
+      expectError(literal, true);
+      await resolve(recovery, tokenResponse(1));
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("agent-connect-card")).toBeNull();
+    },
+  );
 });
 
 describe("KeepAgentHerePanel exact control publications", () => {

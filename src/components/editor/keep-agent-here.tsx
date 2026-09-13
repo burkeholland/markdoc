@@ -3021,7 +3021,7 @@ function KeepAgentHerePanelContent({
           className={ERROR_CLASS}
           data-testid="keep-agent-token-error"
         >
-          <span className="min-w-0 flex-1" role="alert" aria-atomic="true">{render.tokenCheckError}</span>
+          <span className="min-w-0 flex-1 wrap-anywhere" role="alert" aria-atomic="true">{render.tokenCheckError}</span>
           <button
             ref={(element) => coordinator.bindElement(draft, "retry", element)}
             type="button"
