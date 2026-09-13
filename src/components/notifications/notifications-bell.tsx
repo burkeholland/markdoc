@@ -3657,7 +3657,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
               {facts.readError && readRetry && (
                 <li className="px-3 py-2">
                   <div className="flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
-                    <span>{facts.readError.message}</span>
+                    <span className="min-w-0 wrap-anywhere">{facts.readError.message}</span>
                     <button
                       ref={captureAction(readRetry)}
                       type="button"
