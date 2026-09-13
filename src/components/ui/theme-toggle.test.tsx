@@ -786,8 +786,19 @@ describe("mounted theme controls", () => {
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("rejects system-theme drift between capture and bubble and then recovers", () => {
+  it("scopes a persistent system-theme change to each click and key transaction", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    let prefersDark = false;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        get matches() {
+          return prefersDark;
+        },
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
     const { host } = renderDirect(
       <StrictMode>
         <ThemePicker />
@@ -795,16 +806,8 @@ describe("mounted theme controls", () => {
     );
     const storage = vi.spyOn(Storage.prototype, "setItem");
     const system = option(host, "system");
-    const originalMatchMedia = window.matchMedia;
     const restore = interceptKeyDown(system, (original, event) => {
-      Object.defineProperty(window, "matchMedia", {
-        configurable: true,
-        value: vi.fn(() => ({
-          matches: true,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        })),
-      });
+      prefersDark = true;
       original(event);
     });
     system.focus();
@@ -812,23 +815,139 @@ describe("mounted theme controls", () => {
 
     const rejected = dispatchKey(system, "ArrowRight");
     restore();
-    Object.defineProperty(window, "matchMedia", {
-      configurable: true,
-      value: originalMatchMedia,
-    });
 
     expect(rejected.defaultPrevented).toBe(false);
     expect(system).toHaveFocus();
     expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
     expect(focus).not.toHaveBeenCalled();
 
-    const accepted = dispatchKey(system, "ArrowRight");
+    act(() => dispatchClick(option(host, "light")));
+    expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
+    expect(prefersDark).toBe(true);
+
+    const light = option(host, "light");
+    light.focus();
+    focus.mockClear();
+    const accepted = dispatchKey(light, "ArrowRight");
     expect(accepted.defaultPrevented).toBe(true);
-    expect(option(host, "light")).toHaveFocus();
+    expect(option(host, "dark")).toHaveFocus();
     expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
-      .toEqual([[THEME_STORAGE_KEY, "light"]]);
+      .toEqual([
+        [THEME_STORAGE_KEY, "light"],
+        [THEME_STORAGE_KEY, "dark"],
+      ]);
     expect(focus).toHaveBeenCalledOnce();
   });
+
+  it.each(["wrong source", "malformed source", "reentrant bubble"] as const)(
+    "keeps the exact native pair available after a %s attempt",
+    (attempt) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { host } = renderDirect(
+        <StrictMode>
+          <ThemePicker />
+        </StrictMode>,
+      );
+      const storage = vi.spyOn(Storage.prototype, "setItem");
+      const system = option(host, "system");
+      const light = option(host, "light");
+      const wrongSource = captureKeyDown(light);
+      let reentered = false;
+      const restore = interceptKeyDown(system, (original, event) => {
+        if (attempt === "wrong source") {
+          wrongSource(event);
+        } else if (attempt === "malformed source") {
+          const descriptor = Object.getOwnPropertyDescriptor(event, "currentTarget");
+          if (!descriptor) throw new Error("The public currentTarget was not owned");
+          replacePublicEventValue(event, "currentTarget", light);
+          original(event);
+          Object.defineProperty(event, "currentTarget", descriptor);
+        } else {
+          const publicIsPropagationStopped = event.isPropagationStopped;
+          event.isPropagationStopped = function queryWithReentry(this: typeof event) {
+            if (!reentered) {
+              reentered = true;
+              original(event);
+            }
+            return Reflect.apply(publicIsPropagationStopped, this, []);
+          };
+        }
+        original(event);
+      });
+      system.focus();
+      focus.mockClear();
+      try {
+        const event = dispatchKey(system, "ArrowRight");
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(option(host, "light")).toHaveFocus();
+        expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+          .toEqual([[THEME_STORAGE_KEY, "light"]]);
+        expect(focus).toHaveBeenCalledOnce();
+        if (attempt === "reentrant bubble") expect(reentered).toBe(true);
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it.each([
+    ["a pre-claim query", "query", 1, false],
+    ["a post-claim query", "query", 3, false],
+    ["public prevention", "prevention", 0, true],
+  ] as const)(
+    "rolls back method drift caused by %s and admits a clean successor",
+    (_name, stage, driftAt, expectedPrevented) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { host } = renderDirect(
+        <StrictMode>
+          <ThemePicker />
+        </StrictMode>,
+      );
+      const storage = vi.spyOn(Storage.prototype, "setItem");
+      const system = option(host, "system");
+      let queryCount = 0;
+      const restore = interceptKeyDown(system, (original, event) => {
+        if (stage === "query") {
+          const publicIsPropagationStopped = event.isPropagationStopped;
+          event.isPropagationStopped = function queryWithDrift(this: typeof event) {
+            queryCount += 1;
+            const result = Reflect.apply(publicIsPropagationStopped, this, []);
+            if (queryCount === driftAt) event.preventDefault = vi.fn();
+            return result;
+          };
+        } else {
+          const publicPreventDefault = event.preventDefault;
+          event.preventDefault = function preventWithDrift(this: typeof event) {
+            const result = Reflect.apply(publicPreventDefault, this, []);
+            event.isPropagationStopped = vi.fn(() => false);
+            return result;
+          };
+        }
+        original(event);
+      });
+      system.focus();
+      focus.mockClear();
+
+      const rejected = dispatchKey(system, "ArrowRight");
+      restore();
+
+      expect(rejected.defaultPrevented).toBe(expectedPrevented);
+      expect(system).toHaveFocus();
+      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = option(host, "system");
+      successor.focus();
+      focus.mockClear();
+      const accepted = dispatchKey(successor, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(option(host, "light")).toHaveFocus();
+      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+        .toEqual([[THEME_STORAGE_KEY, "light"]]);
+      expect(focus).toHaveBeenCalledOnce();
+    },
+  );
 
   it("claims movement before public prevention reentry", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -1186,14 +1305,23 @@ describe("mounted theme controls", () => {
     );
     const storage = vi.spyOn(Storage.prototype, "setItem");
     const system = option(host, "system");
+    const replayBubble = captureKeyDown(system);
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const restore = interceptKeyDown(system, (original, wrapper) => {
+      bubbleWrapper = wrapper;
+      original(wrapper);
+    });
     system.focus();
     focus.mockClear();
     const event = keyboardEvent(document, "ArrowRight");
 
     act(() => {
       system.dispatchEvent(event);
+      if (!bubbleWrapper) throw new Error("The public bubble wrapper was not observed");
+      replayBubble(bubbleWrapper);
       option(host, "light").dispatchEvent(event);
     });
+    restore();
 
     expect(option(host, "light")).toHaveAttribute("aria-checked", "true");
     expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
@@ -1463,12 +1591,11 @@ describe("mounted theme controls", () => {
       captureWrapper = event;
       original(event);
     });
-    const restoreBubble = interceptKeyDown(system, (original, event) => {
+    const restoreBubble = interceptKeyDown(system, (_original, event) => {
       bubbleWrapper = event;
-      original(event);
     });
     system.focus();
-    const inert = dispatchKey(system, "Tab");
+    const inert = dispatchKey(system, "ArrowRight");
     restoreBubble();
     restoreCapture();
     expect(inert.defaultPrevented).toBe(false);
@@ -1477,6 +1604,21 @@ describe("mounted theme controls", () => {
     }
     act(() => view.root.render(null));
     const effects = trackThemeEffects();
+    const weakAccesses = [
+      vi.spyOn(WeakMap.prototype, "get"),
+      vi.spyOn(WeakMap.prototype, "set"),
+      vi.spyOn(WeakMap.prototype, "has"),
+      vi.spyOn(WeakMap.prototype, "delete"),
+      vi.spyOn(WeakSet.prototype, "add"),
+      vi.spyOn(WeakSet.prototype, "has"),
+      vi.spyOn(WeakSet.prototype, "delete"),
+    ];
+    const accessCount = () =>
+      weakAccesses.reduce((count, method) => count + method.mock.calls.length, 0);
+    const beforeRetainedCallbacks = accessCount();
+    staleCapture(captureWrapper);
+    staleBubble(bubbleWrapper);
+    const retainedCallbackAccesses = accessCount() - beforeRetainedCallbacks;
 
     const evidence = invokeStale(effects, view.host, [
       () => staleCapture(captureWrapper!),
@@ -1484,6 +1626,7 @@ describe("mounted theme controls", () => {
     ]);
 
     expectNoStaleEffects(evidence);
+    expect(retainedCallbackAccesses).toBe(0);
     act(() => view.root.render(
       <StrictMode>
         <ThemePicker />

@@ -178,7 +178,13 @@ class PublicationCoordinator<A extends PublicationAuthority> {
   #claimedActions = new WeakSet<object>();
   #claimedEvents = new WeakSet<object>();
   #claimedDeliveryParts = new WeakSet<object>();
-  #activeDelivery: object | null = null;
+  #activeDelivery: {
+    readonly publication: Publication<A>;
+    readonly action: object;
+    readonly events: readonly object[];
+    readonly parts: readonly object[];
+    readonly delivery: object;
+  } | null = null;
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -247,11 +253,16 @@ class PublicationCoordinator<A extends PublicationAuthority> {
     event: object,
     nativeEvent: Event,
   ) {
+    const active = this.#activeDelivery;
     return (
       this.#claimedPublications.has(publication)
       || this.#claimedActions.has(action)
       || this.#claimedEvents.has(event)
       || this.#claimedEvents.has(nativeEvent)
+      || active?.publication === publication
+      || active?.action === action
+      || active?.events.includes(event)
+      || active?.events.includes(nativeEvent)
     );
   }
 
@@ -263,6 +274,7 @@ class PublicationCoordinator<A extends PublicationAuthority> {
   ) {
     if (
       !this.isCurrent(publication)
+      || this.#activeDelivery
       || this.hasClaimed(publication, action, event, nativeEvent)
     ) {
       return false;
@@ -293,20 +305,43 @@ class PublicationCoordinator<A extends PublicationAuthority> {
     ) {
       return false;
     }
-    this.#claimedPublications.add(publication);
-    this.#claimedActions.add(action);
-    for (const event of events) this.#claimedEvents.add(event);
-    for (const part of deliveryParts) this.#claimedDeliveryParts.add(part);
-    this.#activeDelivery = delivery;
+    this.#activeDelivery = Object.freeze({
+      publication,
+      action,
+      events: Object.freeze([...events]),
+      parts: Object.freeze(deliveryParts),
+      delivery,
+    });
     return true;
   }
 
   deliveryIsActive(delivery: object) {
-    return this.#activeDelivery === delivery && this.#claimedDeliveryParts.has(delivery);
+    return this.#activeDelivery?.delivery === delivery;
+  }
+
+  commitDelivery(delivery: object) {
+    const active = this.#activeDelivery;
+    if (
+      !active
+      || active.delivery !== delivery
+      || !this.isCurrent(active.publication)
+      || this.#claimedPublications.has(active.publication)
+      || this.#claimedActions.has(active.action)
+      || active.events.some((event) => this.#claimedEvents.has(event))
+      || active.parts.some((part) => this.#claimedDeliveryParts.has(part))
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(active.publication);
+    this.#claimedActions.add(active.action);
+    for (const event of active.events) this.#claimedEvents.add(event);
+    for (const part of active.parts) this.#claimedDeliveryParts.add(part);
+    this.#activeDelivery = null;
+    return true;
   }
 
   finishDelivery(delivery: object) {
-    if (this.#activeDelivery === delivery) this.#activeDelivery = null;
+    if (this.#activeDelivery?.delivery === delivery) this.#activeDelivery = null;
   }
 }
 
@@ -905,7 +940,6 @@ interface PickerAuthority extends PublicationAuthority {
   readonly revision: number;
   readonly preference: ThemePreference;
   readonly setPreference: (next: ThemePreference) => void;
-  readonly prefersDark: boolean;
   readonly rootClassName: string;
   readonly rows: readonly PickerRowAuthority[];
 }
@@ -939,7 +973,6 @@ function pickerAuthoritiesMatch(
     && (!includeRevision || previous.revision === current.revision)
     && previous.preference === current.preference
     && previous.setPreference === current.setPreference
-    && previous.prefersDark === current.prefersDark
     && previous.rootClassName === current.rootClassName
     && previous.rows.length === current.rows.length
     && previous.rows.every((row, index) => {
@@ -1471,6 +1504,7 @@ interface PickerMovement {
 interface PickerKeyPair {
   readonly publication: Publication<PickerAuthority>;
   readonly action: object;
+  readonly prefersDark: boolean;
   readonly native: PickerNativeKeyboardFacts;
   readonly nativeEvent: KeyboardEvent;
   readonly capture: PickerReactKeyboardSnapshot;
@@ -1489,9 +1523,85 @@ interface PickerKeyPair {
   readonly windowClaim: object;
 }
 
+interface PickerPairingStore {
+  readonly isDisposed: () => boolean;
+  readonly isInvalid: (event: object) => boolean;
+  readonly has: (event: object) => boolean;
+  readonly stage: (event: object, pair: PickerKeyPair) => boolean;
+  readonly get: (event: object) => PickerKeyPair | null;
+  readonly begin: (event: object, pair: PickerKeyPair) => boolean;
+  readonly finish: (event: object, pair: PickerKeyPair) => void;
+  readonly consume: (event: object, pair: PickerKeyPair) => boolean;
+  readonly invalidate: (event: object) => void;
+  readonly dispose: () => void;
+}
+
 interface PickerKeyDelivery {
   readonly pair: PickerKeyPair;
   readonly bubble: PickerReactKeyboardSnapshot;
+}
+
+function createPickerPairingStore(): PickerPairingStore {
+  let pairs: WeakMap<object, PickerKeyPair> | null = new WeakMap();
+  let active: WeakMap<object, PickerKeyPair> | null = new WeakMap();
+  let invalid: WeakSet<object> | null = new WeakSet();
+  let disposed = false;
+  const isDisposed = () => disposed;
+  return Object.freeze({
+    isDisposed,
+    isInvalid: (event) => {
+      if (disposed || !invalid) return true;
+      return invalid.has(event);
+    },
+    has: (event) => {
+      if (disposed || !pairs) return false;
+      return pairs.has(event);
+    },
+    stage: (event, pair) => {
+      if (disposed || !pairs) return false;
+      if (pairs.has(event)) return false;
+      if (disposed || !pairs) return false;
+      pairs.set(event, pair);
+      return !disposed;
+    },
+    get: (event) => {
+      if (disposed || !pairs) return null;
+      return pairs.get(event) ?? null;
+    },
+    begin: (event, pair) => {
+      if (disposed || !active) return false;
+      if (active.has(event)) return false;
+      if (disposed || !active) return false;
+      active.set(event, pair);
+      return !disposed;
+    },
+    finish: (event, pair) => {
+      if (disposed || !active) return;
+      if (active.get(event) !== pair) return;
+      if (disposed || !active) return;
+      active.delete(event);
+    },
+    consume: (event, pair) => {
+      if (disposed || !pairs) return false;
+      if (pairs.get(event) !== pair) return false;
+      if (disposed || !pairs) return false;
+      const consumed = pairs.delete(event);
+      return !disposed && consumed;
+    },
+    invalidate: (event) => {
+      if (disposed || !pairs || !invalid) return;
+      pairs.delete(event);
+      if (disposed || !invalid) return;
+      invalid.add(event);
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      pairs = null;
+      active = null;
+      invalid = null;
+    },
+  });
 }
 
 function createPickerKeyListener(
@@ -1696,6 +1806,30 @@ function applyPickerReactMethod(
   }
 }
 
+function pickerReactMethodsRemainExact(
+  authority: PickerKeyboardAuthority,
+  event: ReactKeyboardEvent<HTMLElement>,
+  methods: PickerReactKeyboardMethods,
+  currentIsDefaultPrevented: (...args: never[]) => unknown,
+) {
+  return (
+    event.preventDefault === methods.preventDefault
+    && event.isDefaultPrevented === currentIsDefaultPrevented
+    && event.isPropagationStopped === methods.isPropagationStopped
+    && authority.methodMatches(event, "preventDefault", methods.preventDefault)
+    && authority.methodMatches(
+      event,
+      "isDefaultPrevented",
+      currentIsDefaultPrevented,
+    )
+    && authority.methodMatches(
+      event,
+      "isPropagationStopped",
+      methods.isPropagationStopped,
+    )
+  );
+}
+
 function capturePickerReactKeyboard(
   event: ReactKeyboardEvent<HTMLElement>,
   publication: Publication<PickerAuthority>,
@@ -1715,21 +1849,10 @@ function capturePickerReactKeyboard(
       wrapper as ReactKeyboardEvent<HTMLElement> & { isComposing?: unknown }
     ).isComposing;
     const view = wrapper.view;
-    const defaultResult = typeof isDefaultPrevented === "function"
-      ? applyPickerReactMethod(authority, isDefaultPrevented, wrapper)
-      : null;
-    const propagationResult = typeof isPropagationStopped === "function"
-      ? applyPickerReactMethod(authority, isPropagationStopped, wrapper)
-      : null;
     if (
       typeof preventDefault !== "function"
       || typeof isDefaultPrevented !== "function"
       || typeof isPropagationStopped !== "function"
-      || !authority.methodMatches(wrapper, "preventDefault", preventDefault)
-      || !authority.methodMatches(wrapper, "isDefaultPrevented", isDefaultPrevented)
-      || !authority.methodMatches(wrapper, "isPropagationStopped", isPropagationStopped)
-      || defaultResult?.value !== false
-      || propagationResult?.value !== false
       || wrapper === (nativeEvent as unknown)
       || wrapper.nativeEvent !== nativeEvent
       || wrapper.type !== native.type
@@ -1757,6 +1880,28 @@ function capturePickerReactKeyboard(
     ) {
       return null;
     }
+    const methods = Object.freeze({
+      preventDefault,
+      isDefaultPrevented,
+      isPropagationStopped,
+    });
+    if (!pickerReactMethodsRemainExact(authority, wrapper, methods, isDefaultPrevented)) {
+      return null;
+    }
+    const defaultResult = applyPickerReactMethod(authority, isDefaultPrevented, wrapper);
+    if (
+      defaultResult?.value !== false
+      || !pickerReactMethodsRemainExact(authority, wrapper, methods, isDefaultPrevented)
+    ) {
+      return null;
+    }
+    const propagationResult = applyPickerReactMethod(authority, isPropagationStopped, wrapper);
+    if (
+      propagationResult?.value !== false
+      || !pickerReactMethodsRemainExact(authority, wrapper, methods, isDefaultPrevented)
+    ) {
+      return null;
+    }
     return Object.freeze({
       event: wrapper,
       nativeEvent,
@@ -1764,11 +1909,7 @@ function capturePickerReactKeyboard(
       currentTarget,
       phase: native.phase,
       view,
-      methods: Object.freeze({
-        preventDefault,
-        isDefaultPrevented,
-        isPropagationStopped,
-      }),
+      methods,
     });
   } catch {
     return null;
@@ -1790,15 +1931,9 @@ function pickerReactKeyboardRemainsExact(
     const isComposing = (
       event as ReactKeyboardEvent<HTMLElement> & { isComposing?: unknown }
     ).isComposing;
-    const defaultResult = typeof currentIsDefaultPrevented === "function"
-      ? applyPickerReactMethod(authority, currentIsDefaultPrevented, event)
-      : null;
-    const propagationResult = applyPickerReactMethod(
-      authority,
-      methods.isPropagationStopped,
-      event,
-    );
-    return (
+    if (
+      typeof currentIsDefaultPrevented !== "function"
+      || (
       event.nativeEvent === snapshot.nativeEvent
       && event.type === native.type
       && event.target === snapshot.target
@@ -1824,25 +1959,44 @@ function pickerReactKeyboardRemainsExact(
       && (event.view === null
         || Object.is(event.view, publication.ownerRealm)
         || Object.is(event.view, native.path.at(-1)))
-      && event.preventDefault === methods.preventDefault
-      && event.isPropagationStopped === methods.isPropagationStopped
-      && authority.methodMatches(event, "preventDefault", methods.preventDefault)
-      && authority.methodMatches(
-        event,
-        "isPropagationStopped",
-        methods.isPropagationStopped,
-      )
-      && typeof currentIsDefaultPrevented === "function"
-      && authority.methodMatches(
-        event,
-        "isDefaultPrevented",
-        currentIsDefaultPrevented,
-      )
-      && defaultResult?.value === defaultPrevented
-      && propagationResult?.value === false
       && (!defaultPrevented
         ? currentIsDefaultPrevented === methods.isDefaultPrevented
         : true)
+      ) !== true
+      || !pickerReactMethodsRemainExact(
+        authority,
+        event,
+        methods,
+        currentIsDefaultPrevented,
+      )
+    ) {
+      return false;
+    }
+    const defaultResult = applyPickerReactMethod(authority, currentIsDefaultPrevented, event);
+    if (
+      defaultResult?.value !== defaultPrevented
+      || !pickerReactMethodsRemainExact(
+        authority,
+        event,
+        methods,
+        currentIsDefaultPrevented,
+      )
+    ) {
+      return false;
+    }
+    const propagationResult = applyPickerReactMethod(
+      authority,
+      methods.isPropagationStopped,
+      event,
+    );
+    return (
+      propagationResult?.value === false
+      && pickerReactMethodsRemainExact(
+        authority,
+        event,
+        methods,
+        currentIsDefaultPrevented,
+      )
     );
   } catch {
     return false;
@@ -1858,6 +2012,7 @@ function createPickerPresentation(
   let lastRuntime: PublicationRuntime<PickerAuthority> | null = null;
   let keyboardAuthority: PickerKeyboardAuthority | null = null;
   let keyboardListener: PickerKeyListener | null = null;
+  let pairingStore: PickerPairingStore | null = null;
   let successorRequested = false;
   let completePickerNavigation = (
     _row: PickerRowAuthority,
@@ -1868,10 +2023,19 @@ function createPickerPresentation(
     revision,
     preference,
     setPreference,
-    prefersDark,
     rootClassName,
     rows,
   } = authority;
+  const disposePairingStore = () => {
+    pairingStore?.dispose();
+    pairingStore = null;
+  };
+  const releaseKeyboard = (publication: Publication<PickerAuthority>) => {
+    disposePairingStore();
+    keyboardListener?.release(publication);
+    keyboardAuthority = null;
+    keyboardListener = null;
+  };
   const onElementChange = (
     owner: ElementOwnerView,
     element: Element | null,
@@ -1881,7 +2045,7 @@ function createPickerPresentation(
     const runtime = currentRuntime ?? lastRuntime;
     runtime?.noteRef(owner, element, previous);
     if (element === null || (element !== null && last !== null && element !== last)) {
-      if (currentRuntime) keyboardListener?.release(currentRuntime.publication);
+      if (currentRuntime) releaseKeyboard(currentRuntime.publication);
       currentRuntime?.retireForElement();
       currentRuntime = null;
     }
@@ -1905,6 +2069,7 @@ function createPickerPresentation(
     const onClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
       const publication = coordinator.active();
       const button = buttonOwner.element();
+      const eventPrefersDark = readSystemTheme();
       if (
         !publication
         || publication.isRetired()
@@ -1918,6 +2083,7 @@ function createPickerPresentation(
         || !exactDomIsCurrent()
         || !publication.publishedDomMatches()
         || themeStore.getSnapshot() !== preference
+        || eventPrefersDark === null
       ) {
         return;
       }
@@ -1925,6 +2091,12 @@ function createPickerPresentation(
       if (
         !nativeEvent
         || coordinator.hasClaimed(publication, action, event, nativeEvent)
+        || !systemThemeMatches(eventPrefersDark)
+        || !coordinator.isCurrent(publication)
+        || !factsAreCurrent()
+        || !exactDomIsCurrent()
+        || !publication.publishedDomMatches()
+        || !storeMatches(preference)
         || !coordinator.claim(publication, action, event, nativeEvent)
       ) {
         return;
@@ -1949,13 +2121,14 @@ function createPickerPresentation(
     rootOwner,
     ...rowPresentations.flatMap(({ buttonOwner, iconOwner }) => [buttonOwner, iconOwner]),
   ]);
-  const systemThemeIsCurrent = () => {
+  const readSystemTheme = () => {
     try {
-      return systemPrefersDark() === prefersDark;
+      return systemPrefersDark();
     } catch {
-      return false;
+      return null;
     }
   };
+  const systemThemeMatches = (expected: boolean) => readSystemTheme() === expected;
   const storeMatches = (expected: ThemePreference) => {
     try {
       return themeStore.getSnapshot() === expected;
@@ -1968,10 +2141,8 @@ function createPickerPresentation(
     && authority.revision === revision
     && authority.preference === preference
     && authority.setPreference === setPreference
-    && authority.prefersDark === prefersDark
     && authority.rootClassName === rootClassName
     && authority.rows === rows
-    && systemThemeIsCurrent()
     && rootClassName === PICKER_CLASS_NAME
     && rows.length === THEME_OPTIONS.length
     && rows.every((row, index) => (
@@ -2038,6 +2209,7 @@ function createPickerPresentation(
     destination: HTMLButtonElement,
     key: string,
     expectedStore: ThemePreference,
+    expectedPrefersDark: boolean,
   ) => {
     const events = keyboardAuthority;
     const listener = keyboardListener;
@@ -2079,11 +2251,12 @@ function createPickerPresentation(
       && exactDomIsCurrent()
       && runtime.publishedDomMatches()
       && storeMatches(expectedStore)
+      && systemThemeMatches(expectedPrefersDark)
     );
   };
-  const keyPairs = new WeakMap<object, PickerKeyPair>();
-  const invalidNativeKeys = new WeakSet<object>();
   const onKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const pairs = pairingStore;
+    if (!pairs || pairs.isDisposed()) return;
     let nativeEvent: unknown;
     let eventCurrentTarget: EventTarget | null;
     try {
@@ -2092,14 +2265,14 @@ function createPickerPresentation(
     } catch {
       return;
     }
-    if (!nativeEvent || typeof nativeEvent !== "object" || invalidNativeKeys.has(nativeEvent)) {
+    if (!nativeEvent || typeof nativeEvent !== "object" || pairs.isInvalid(nativeEvent)) {
       return;
     }
-    if (keyPairs.has(nativeEvent)) {
-      keyPairs.delete(nativeEvent);
-      invalidNativeKeys.add(nativeEvent);
+    if (pairs.has(nativeEvent)) {
+      pairs.invalidate(nativeEvent);
       return;
     }
+    const eventPrefersDark = readSystemTheme();
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const events = keyboardAuthority;
@@ -2111,6 +2284,7 @@ function createPickerPresentation(
       || !events
       || !listener
       || !root
+      || eventPrefersDark === null
       || runtime.isRetired()
       || eventCurrentTarget !== root
     ) {
@@ -2202,6 +2376,7 @@ function createPickerPresentation(
         destination,
         native.key,
         preference,
+        eventPrefersDark,
       )
     ) {
       return;
@@ -2215,9 +2390,10 @@ function createPickerPresentation(
       destination,
       key: native.key,
     });
-    keyPairs.set(nativeEvent, Object.freeze({
+    pairs.stage(nativeEvent, Object.freeze({
       publication,
       action: sourceRow.keyboardAction,
+      prefersDark: eventPrefersDark,
       native,
       nativeEvent: nativeEvent as KeyboardEvent,
       capture,
@@ -2240,6 +2416,8 @@ function createPickerPresentation(
     row: PickerRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
+    const pairs = pairingStore;
+    if (!pairs || pairs.isDisposed()) return;
     let nativeEvent: unknown;
     let eventCurrentTarget: EventTarget | null;
     try {
@@ -2248,12 +2426,11 @@ function createPickerPresentation(
     } catch {
       return;
     }
-    if (!nativeEvent || typeof nativeEvent !== "object" || invalidNativeKeys.has(nativeEvent)) {
+    if (!nativeEvent || typeof nativeEvent !== "object" || pairs.isInvalid(nativeEvent)) {
       return;
     }
-    const pair = keyPairs.get(nativeEvent);
+    const pair = pairs.get(nativeEvent);
     if (!pair || pair.nativeEvent !== nativeEvent) return;
-    keyPairs.delete(nativeEvent);
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const events = keyboardAuthority;
@@ -2270,82 +2447,92 @@ function createPickerPresentation(
     ) {
       return;
     }
-    const native = events.readKeyboard(nativeEvent);
-    const proof = native
-      ? listener.proofFor(nativeEvent as KeyboardEvent, publication)
-      : null;
-    const bubble = native && proof
-      ? capturePickerReactKeyboard(
-          event,
+    if (!pairs.begin(nativeEvent, pair)) return;
+    let delivery: PickerKeyDelivery | null = null;
+    let claimed = false;
+    let committed = false;
+    try {
+      const native = events.readKeyboard(nativeEvent);
+      const proof = native
+        ? listener.proofFor(nativeEvent as KeyboardEvent, publication)
+        : null;
+      const bubble = native && proof
+        ? capturePickerReactKeyboard(
+            event,
+            publication,
+            events,
+            native,
+            nativeEvent as KeyboardEvent,
+            pair.source,
+            pair.source,
+            proof,
+          )
+        : null;
+      if (
+        !native
+        || !proof
+        || !bubble
+        || bubble.event === pair.capture.event
+        || native.phase !== events.bubblingPhase
+        || pair.native.phase !== events.capturingPhase
+        || native.currentTarget !== pair.native.currentTarget
+        || proof !== pair.windowProof
+        || proof.receiver !== native.path.at(-1)
+        || !pickerNativeFactsMatch(pair.native, native)
+        || !pickerReactKeyboardRemainsExact(
+          pair.capture,
+          publication,
+          events,
+          pair.native,
+          null,
+        )
+        || !pickerReactKeyboardRemainsExact(
+          bubble,
           publication,
           events,
           native,
-          nativeEvent as KeyboardEvent,
           pair.source,
-          pair.source,
-          proof,
         )
-      : null;
-    if (
-      !native
-      || !proof
-      || !bubble
-      || bubble.event === pair.capture.event
-      || native.phase !== events.bubblingPhase
-      || pair.native.phase !== events.capturingPhase
-      || native.currentTarget !== pair.native.currentTarget
-      || proof !== pair.windowProof
-      || proof.receiver !== native.path.at(-1)
-      || !pickerNativeFactsMatch(pair.native, native)
-      || !pickerReactKeyboardRemainsExact(
-        pair.capture,
-        publication,
-        events,
-        pair.native,
-        null,
-      )
-      || !pickerReactKeyboardRemainsExact(
-        bubble,
-        publication,
-        events,
-        native,
-        pair.source,
-      )
-      || !movementIsCurrent(
-        runtime,
-        publication,
-        pair.sourceRow,
-        pair.destinationRow,
-        pair.source,
-        pair.destination,
-        pair.key,
-        preference,
-      )
-    ) {
-      return;
-    }
-    const delivery = Object.freeze<PickerKeyDelivery>({ pair, bubble });
-    if (
-      !coordinator.claimDelivery(
-        publication,
-        pair.action,
-        [pair.capture.event, bubble.event, pair.nativeEvent],
-        [
-          pair.movement,
-          pair.windowProof,
-          pair.publicationClaim,
-          pair.sourceClaim,
-          pair.destinationClaim,
-          pair.captureClaim,
-          pair.nativeClaim,
-          pair.windowClaim,
-        ],
-        delivery,
-      )
-    ) {
-      return;
-    }
-    try {
+        || !movementIsCurrent(
+          runtime,
+          publication,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+          preference,
+          pair.prefersDark,
+        )
+      ) {
+        return;
+      }
+      delivery = Object.freeze<PickerKeyDelivery>({ pair, bubble });
+      if (
+        !coordinator.claimDelivery(
+          publication,
+          pair.action,
+          [pair.capture.event, bubble.event, pair.nativeEvent],
+          [
+            pair.movement,
+            pair.windowProof,
+            pair.publicationClaim,
+            pair.sourceClaim,
+            pair.destinationClaim,
+            pair.captureClaim,
+            pair.nativeClaim,
+            pair.windowClaim,
+          ],
+          delivery,
+        )
+      ) {
+        return;
+      }
+      claimed = true;
+      if (!pairs.consume(nativeEvent, pair)) {
+        pairs.invalidate(nativeEvent);
+        return;
+      }
       if (
         !coordinator.deliveryIsActive(delivery)
         || !listener.retains(pair.windowProof, publication)
@@ -2372,6 +2559,13 @@ function createPickerPresentation(
           pair.destination,
           pair.key,
           preference,
+          pair.prefersDark,
+        )
+        || !pickerReactMethodsRemainExact(
+          events,
+          bubble.event,
+          bubble.methods,
+          bubble.methods.isDefaultPrevented,
         )
       ) {
         return;
@@ -2413,6 +2607,13 @@ function createPickerPresentation(
           pair.destination,
           pair.key,
           preference,
+          pair.prefersDark,
+        )
+        || !pickerReactMethodsRemainExact(
+          events,
+          bubble.event,
+          bubble.methods,
+          bubble.event.isDefaultPrevented,
         )
       ) {
         return;
@@ -2449,13 +2650,34 @@ function createPickerPresentation(
           pair.destination,
           pair.key,
           pair.destinationRow.authority.preference,
+          pair.prefersDark,
+        )
+        || !pickerReactMethodsRemainExact(
+          events,
+          bubble.event,
+          bubble.methods,
+          bubble.event.isDefaultPrevented,
         )
       ) {
         return;
       }
       events.focus.invoke(pair.destination, { preventScroll: true });
+      if (!coordinator.commitDelivery(delivery)) return;
+      committed = true;
     } finally {
-      coordinator.finishDelivery(delivery);
+      pairs.finish(nativeEvent, pair);
+      if (delivery && claimed) {
+        coordinator.finishDelivery(delivery);
+        if (!committed && currentRuntime === runtime) {
+          releaseKeyboard(publication);
+          runtime.retireForElement();
+          currentRuntime = null;
+          if (!successorRequested) {
+            successorRequested = true;
+            requestSuccessor();
+          }
+        }
+      }
     }
   };
   const requestReplaySuccessor = (runtime: PublicationRuntime<PickerAuthority>) => {
@@ -2517,8 +2739,9 @@ function createPickerPresentation(
       keyboardListener = null;
       return undefined;
     }
+    pairingStore = createPickerPairingStore();
     return () => {
-      keyboardListener?.release(runtime.publication);
+      releaseKeyboard(runtime.publication);
       runtime.retireForLayout();
     };
   };
@@ -2632,7 +2855,6 @@ export function ThemePicker() {
     revision: publicationRevision,
     preference,
     setPreference,
-    prefersDark: systemPrefersDark(),
     rootClassName: PICKER_CLASS_NAME,
     rows: candidateRows,
   });
