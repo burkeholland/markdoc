@@ -56,6 +56,22 @@ export interface FileDropDialogProps {
   onError: (message: string) => void;
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
+  const units = ["KiB", "MiB", "GiB"];
+  let size = bytes / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${Number(size.toFixed(1))} ${units[unit]}`;
+}
+
+function fileDropDescription(file: File): string {
+  return `What should happen with “${file.name}” (${formatFileSize(file.size)})?`;
+}
+
 function readText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -2423,8 +2439,7 @@ function createFileDropPresentation(
     Object.is(authority.pending.at, authority.at) &&
     authority.router.push === authority.routerPush &&
     authority.open &&
-    authority.description ===
-      `What should happen with “${authority.file.name}”?` &&
+    authority.description === fileDropDescription(authority.file) &&
     authority.options.length === FILE_DROP_ACTIONS.length &&
     authority.options.every((option, index) => {
       const action = FILE_DROP_ACTIONS[index];
@@ -3101,7 +3116,7 @@ export const FileDropDialog = memo(function FileDropDialog({
         onError,
         open: true,
         busyAction,
-        description: `What should happen with “${pending.file.name}”?`,
+        description: fileDropDescription(pending.file),
         options: Object.freeze([
           Object.freeze({
             index: 0,
