@@ -661,6 +661,24 @@ function dispatchTrustedKey(
   return { event, allowed };
 }
 
+function dispatchTrustedKeyDuringPublicCall(
+  source: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const view = source.ownerDocument.defaultView;
+  if (!view) throw new Error("Notification control has no owner window");
+  const ownerWindow = view as Window & typeof globalThis;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  markJsdomEventTrusted(event);
+  return { event, allowed: source.dispatchEvent(event) };
+}
+
 function dispatchTrustedDelete(
   source: HTMLButtonElement,
   init: KeyboardEventInit = {},
@@ -1531,6 +1549,271 @@ describe("notification strip keyboard browsing", () => {
         preventScroll: true,
       });
       expect(controls[2]).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("excludes list-capture public-query reentry, recursive entry, and exact-event replay without losing the rightful pair", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("capture-public-query-reentry");
+    const nested: {
+      current: ReturnType<typeof dispatchTrustedKeyDuringPublicCall> | null;
+    } = { current: null };
+    let outerNative: KeyboardEvent | null = null;
+    const replay: {
+      captureWrapper: ReactKeyboardEvent<HTMLUListElement> | null;
+      bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null;
+      captureHandler: CapturedActions["listKeyDownCapture"] | null;
+      bubbleHandler: KeyHandler | null;
+    } = {
+      captureWrapper: null,
+      bubbleWrapper: null,
+      captureHandler: null,
+      bubbleHandler: null,
+    };
+    let queried = false;
+    try {
+      const view = createStrictView(
+        router,
+        snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+      );
+      const actions = captureActions(1, view.host);
+      const controls = openButtons(view.host);
+      const source = controls[1]!;
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      const restoreCapture = interceptListKeyDownCapture(
+        actions.list,
+        (original, event) => {
+          if (!outerNative) outerNative = event.nativeEvent;
+          if (event.nativeEvent === outerNative && !replay.captureWrapper) {
+            replay.captureWrapper = event;
+            replay.captureHandler = original;
+            const defaultQuery = event.isDefaultPrevented;
+            event.isDefaultPrevented = function captureReentryQuery() {
+              if (!queried) {
+                queried = true;
+                original(event);
+                nested.current = dispatchTrustedKeyDuringPublicCall(
+                  source,
+                  "Home",
+                );
+              }
+              return defaultQuery.call(event);
+            };
+          }
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        source,
+        (original, event) => {
+          if (event.nativeEvent === outerNative && !replay.bubbleWrapper) {
+            replay.bubbleWrapper = event;
+            replay.bubbleHandler = original;
+          }
+          original(event);
+        },
+      );
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const outer = dispatchTrustedKey(source, "ArrowDown", {}, false);
+        expect(outer.allowed).toBe(false);
+        expect(outer.event.defaultPrevented).toBe(true);
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+
+      expect(queried).toBe(true);
+      expect(nested.current?.allowed).toBe(true);
+      expect(nested.current?.event.defaultPrevented).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(controls[2]).toHaveFocus();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      const captureWrapper = replay.captureWrapper;
+      const bubbleWrapper = replay.bubbleWrapper;
+      const replayCapture = replay.captureHandler;
+      const replayBubble = replay.bubbleHandler;
+      if (!captureWrapper || !bubbleWrapper || !replayCapture || !replayBubble) {
+        throw new Error("The exact phase wrappers were not retained");
+      }
+      replayCapture(captureWrapper);
+      replayBubble(bubbleWrapper);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[2]).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("excludes primary-bubble public-query reentry while accepting the still-exact rightful pair", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("bubble-public-query-reentry");
+    const nested: {
+      current: ReturnType<typeof dispatchTrustedKeyDuringPublicCall> | null;
+    } = { current: null };
+    let outerNative: KeyboardEvent | null = null;
+    let queried = false;
+    try {
+      const view = createStrictView(
+        router,
+        snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+      );
+      const actions = captureActions(1, view.host);
+      const controls = openButtons(view.host);
+      const source = controls[1]!;
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      const restoreCapture = interceptListKeyDownCapture(
+        actions.list,
+        (original, event) => {
+          if (!outerNative) outerNative = event.nativeEvent;
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        source,
+        (original, event) => {
+          if (event.nativeEvent === outerNative && !queried) {
+            const propagationQuery = event.isPropagationStopped;
+            event.isPropagationStopped = function bubbleReentryQuery() {
+              if (!queried) {
+                queried = true;
+                nested.current = dispatchTrustedKeyDuringPublicCall(
+                  source,
+                  "Home",
+                );
+              }
+              return propagationQuery.call(event);
+            };
+          }
+          original(event);
+        },
+      );
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const outer = dispatchTrustedKey(source, "ArrowDown", {}, false);
+        expect(outer.allowed).toBe(false);
+        expect(outer.event.defaultPrevented).toBe(true);
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+
+      expect(queried).toBe(true);
+      expect(nested.current?.allowed).toBe(true);
+      expect(nested.current?.event.defaultPrevented).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(controls[2]).toHaveFocus();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("rejects invalidating public-query reentry and accepts one distinct clean successor", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("invalidating-public-query-reentry");
+    const nested: {
+      current: ReturnType<typeof dispatchTrustedKeyDuringPublicCall> | null;
+    } = { current: null };
+    let attacked = false;
+    try {
+      const view = createStrictView(
+        router,
+        snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+      );
+      const controls = openButtons(view.host);
+      const source = controls[1]!;
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      const restoreBubble = interceptKeyDown(
+        source,
+        (original, event) => {
+          if (attacked) {
+            original(event);
+            return;
+          }
+          const retainedPreventDefault = event.preventDefault;
+          const retainedDefaultQuery = event.isDefaultPrevented;
+          event.isDefaultPrevented = function invalidatingReentryQuery() {
+            attacked = true;
+            nested.current = dispatchTrustedKeyDuringPublicCall(
+              source,
+              "Home",
+            );
+            event.preventDefault = vi.fn();
+            return retainedDefaultQuery.call(event);
+          };
+          original(event);
+          event.preventDefault = retainedPreventDefault;
+          event.isDefaultPrevented = retainedDefaultQuery;
+        },
+      );
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const rejected = dispatchTrustedKey(source, "ArrowDown", {}, false);
+        expect(rejected.allowed).toBe(true);
+        expect(rejected.event.defaultPrevented).toBe(false);
+        expect(nested.current?.allowed).toBe(true);
+        expect(nested.current?.event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(window.scrollX).toBe(scroll.x);
+        expect(window.scrollY).toBe(scroll.y);
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+
+        const recovered = dispatchTrustedKey(source, "ArrowDown", {}, false);
+        expect(recovered.allowed).toBe(false);
+        expect(recovered.event.defaultPrevented).toBe(true);
+      } finally {
+        restoreBubble();
+      }
+
+      expect(attacked).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(controls[2]).toHaveFocus();
+      expect(window.scrollX).toBe(scroll.x);
+      expect(window.scrollY).toBe(scroll.y);
       expect(store.markNotificationRead).not.toHaveBeenCalled();
       expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
       expect(router.push).not.toHaveBeenCalled();

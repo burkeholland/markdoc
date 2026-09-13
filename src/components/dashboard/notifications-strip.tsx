@@ -248,6 +248,23 @@ interface NotificationReactKeyboardSnapshot {
   readonly methods: NotificationReactKeyboardMethods;
 }
 
+interface NotificationReactKeyboardCurrentQueries {
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface NotificationListPublicCall {
+  readonly identity: symbol;
+  readonly method: (...args: never[]) => unknown;
+  readonly receiver: ReactKeyboardEvent<HTMLElement>;
+}
+
+interface NotificationListPublicCallFence {
+  readonly publication: NotificationStripPublication;
+  active: NotificationListPublicCall | null;
+  revoked: boolean;
+}
+
 interface NotificationRowMovement {
   readonly identity: symbol;
   readonly publication: NotificationStripPublication;
@@ -302,6 +319,7 @@ interface NotificationListMovement {
 interface NotificationListKeyPair {
   readonly publication: NotificationStripPublication;
   readonly pairings: WeakMap<KeyboardEvent, NotificationListKeyPair>;
+  readonly publicCalls: NotificationListPublicCallFence;
   readonly native: NotificationNativeKeyboardFacts;
   readonly nativeEvent: KeyboardEvent;
   readonly capture: NotificationReactKeyboardSnapshot;
@@ -2141,8 +2159,6 @@ function captureNotificationPublicReactKeyboard(
       typeof preventDefault !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
-      intrinsics.apply(isDefaultPrevented, event, []) !== false ||
-      intrinsics.apply(isPropagationStopped, event, []) !== false ||
       event.preventDefault !== preventDefault ||
       event.isDefaultPrevented !== isDefaultPrevented ||
       event.isPropagationStopped !== isPropagationStopped ||
@@ -2173,7 +2189,7 @@ function captureNotificationPublicReactKeyboard(
     ) {
       return null;
     }
-    return Object.freeze({
+    const captured = Object.freeze<NotificationReactKeyboardSnapshot>({
       event,
       nativeEvent,
       target: native.target as HTMLButtonElement,
@@ -2186,23 +2202,32 @@ function captureNotificationPublicReactKeyboard(
         isPropagationStopped,
       }),
     });
+    return notificationPublicReactKeyboardSurfaceIsExact(
+      captured,
+      publication,
+      native,
+      currentTarget,
+    )
+      ? captured
+      : null;
   } catch {
     return null;
   }
 }
 
-function notificationPublicReactKeyboardRemainsExact(
+function notificationPublicReactKeyboardSurfaceIsExact(
   snapshot: NotificationReactKeyboardSnapshot,
   publication: NotificationStripPublication,
   native: NotificationNativeKeyboardFacts,
   currentTarget: HTMLElement | null,
   defaultPrevented = false,
-) {
+): NotificationReactKeyboardCurrentQueries | null {
   const intrinsics = publication.events;
-  if (!intrinsics) return false;
+  if (!intrinsics) return null;
   try {
     const event = snapshot.event;
     const methods = snapshot.methods;
+    const currentPreventDefault = event.preventDefault;
     const currentIsDefaultPrevented = event.isDefaultPrevented;
     const currentIsPropagationStopped = event.isPropagationStopped;
     const reactIsComposing = (
@@ -2211,6 +2236,7 @@ function notificationPublicReactKeyboardRemainsExact(
       }
     ).isComposing;
     if (
+      typeof currentPreventDefault !== "function" ||
       typeof currentIsDefaultPrevented !== "function" ||
       typeof currentIsPropagationStopped !== "function" ||
       event.nativeEvent !== snapshot.nativeEvent ||
@@ -2239,16 +2265,29 @@ function notificationPublicReactKeyboardRemainsExact(
       (!Object.is(event.view, null) &&
         !Object.is(event.view, publication.ownerWindow) &&
         !Object.is(event.view, native.path.at(-1))) ||
-      event.preventDefault !== methods.preventDefault ||
-      event.isPropagationStopped !== methods.isPropagationStopped ||
-      (!defaultPrevented &&
-        currentIsDefaultPrevented !== methods.isDefaultPrevented) ||
-      intrinsics.apply(currentIsDefaultPrevented, event, []) !==
-        defaultPrevented ||
-      intrinsics.apply(currentIsPropagationStopped, event, []) !== false ||
-      event.preventDefault !== methods.preventDefault ||
+      currentPreventDefault !== methods.preventDefault ||
+      currentIsPropagationStopped !== methods.isPropagationStopped ||
+      (defaultPrevented
+        ? currentIsDefaultPrevented === methods.isDefaultPrevented
+        : currentIsDefaultPrevented !== methods.isDefaultPrevented) ||
+      !intrinsics.methodMatches(
+        event,
+        "preventDefault",
+        currentPreventDefault,
+      ) ||
+      !intrinsics.methodMatches(
+        event,
+        "isDefaultPrevented",
+        currentIsDefaultPrevented,
+      ) ||
+      !intrinsics.methodMatches(
+        event,
+        "isPropagationStopped",
+        currentIsPropagationStopped,
+      ) ||
+      event.preventDefault !== currentPreventDefault ||
       event.isDefaultPrevented !== currentIsDefaultPrevented ||
-      event.isPropagationStopped !== methods.isPropagationStopped ||
+      event.isPropagationStopped !== currentIsPropagationStopped ||
       event.nativeEvent !== snapshot.nativeEvent ||
       event.type !== native.type ||
       event.target !== snapshot.target ||
@@ -2273,11 +2312,14 @@ function notificationPublicReactKeyboardRemainsExact(
       event.detail !== native.detail ||
       !Object.is(event.view, snapshot.view)
     ) {
-      return false;
+      return null;
     }
-    return true;
+    return Object.freeze({
+      isDefaultPrevented: currentIsDefaultPrevented,
+      isPropagationStopped: currentIsPropagationStopped,
+    });
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -2409,6 +2451,7 @@ function createNotificationStripPublication(
   let listKeyPublication: NotificationStripPublication | null = null;
   let listKeyPairs: WeakMap<KeyboardEvent, NotificationListKeyPair> | null =
     null;
+  let listPublicCallFence: NotificationListPublicCallFence | null = null;
   let successorRequested = false;
   const snapshot = authority.snapshot;
   const items = authority.items;
@@ -2469,17 +2512,28 @@ function createNotificationStripPublication(
   const activateListNavigation = (
     publication: NotificationStripPublication,
   ) => {
-    if (listKeyPublication || listKeyPairs) return false;
+    if (listKeyPublication || listKeyPairs || listPublicCallFence) return false;
     listKeyPublication = publication;
     listKeyPairs = new WeakMap<KeyboardEvent, NotificationListKeyPair>();
+    listPublicCallFence = {
+      publication,
+      active: null,
+      revoked: false,
+    };
     return true;
   };
   const revokeListNavigation = (
     publication: NotificationStripPublication,
   ) => {
     if (listKeyPublication !== publication) return;
+    const publicCalls = listPublicCallFence;
+    if (publicCalls?.publication === publication) {
+      publicCalls.revoked = true;
+      publicCalls.active = null;
+    }
     listKeyPublication = null;
     listKeyPairs = null;
+    listPublicCallFence = null;
   };
 
   const factsAreCurrent = () => {
@@ -3238,10 +3292,104 @@ function createNotificationStripPublication(
     );
   };
 
+  const listPublicCallsAreIdle = (
+    publication: NotificationStripPublication,
+    publicCalls: NotificationListPublicCallFence,
+  ) =>
+    listPublicCallFence === publicCalls &&
+    listKeyPublication === publication &&
+    publicCalls.publication === publication &&
+    !publicCalls.revoked &&
+    publicCalls.active === null;
+
+  const invokeListPublicCall = (
+    publicCalls: NotificationListPublicCallFence,
+    method: (...args: never[]) => unknown,
+    receiver: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    const publication = publicCalls.publication;
+    const events = publication.events;
+    if (!events || !listPublicCallsAreIdle(publication, publicCalls)) {
+      return null;
+    }
+    const call = Object.freeze<NotificationListPublicCall>({
+      identity: Symbol("notification-list-public-call"),
+      method,
+      receiver,
+    });
+    publicCalls.active = call;
+    let value: unknown;
+    try {
+      value = events.apply(method, receiver, []);
+    } catch {
+      return null;
+    } finally {
+      if (
+        listPublicCallFence === publicCalls &&
+        !publicCalls.revoked &&
+        publicCalls.active === call
+      ) {
+        publicCalls.active = null;
+      }
+    }
+    return listPublicCallsAreIdle(publication, publicCalls)
+      ? Object.freeze({ value })
+      : null;
+  };
+
+  const listReactQueriesAreExact = (
+    publicCalls: NotificationListPublicCallFence,
+    snapshot: NotificationReactKeyboardSnapshot,
+    native: NotificationNativeKeyboardFacts,
+    currentTarget: HTMLElement | null,
+    defaultPrevented: boolean,
+    validateAfterCall: () => boolean,
+  ) => {
+    let queries = notificationPublicReactKeyboardSurfaceIsExact(
+      snapshot,
+      publicCalls.publication,
+      native,
+      currentTarget,
+      defaultPrevented,
+    );
+    if (!queries) return false;
+    const defaultResult = invokeListPublicCall(
+      publicCalls,
+      queries.isDefaultPrevented,
+      snapshot.event,
+    );
+    if (
+      !defaultResult ||
+      defaultResult.value !== defaultPrevented ||
+      !validateAfterCall()
+    ) {
+      return false;
+    }
+    queries = notificationPublicReactKeyboardSurfaceIsExact(
+      snapshot,
+      publicCalls.publication,
+      native,
+      currentTarget,
+      defaultPrevented,
+    );
+    if (!queries) return false;
+    const propagationResult = invokeListPublicCall(
+      publicCalls,
+      queries.isPropagationStopped,
+      snapshot.event,
+    );
+    return Boolean(
+      propagationResult &&
+      propagationResult.value === false &&
+      validateAfterCall(),
+    );
+  };
+
   const listMovementIsCurrent = (
     runtime: NotificationPublicationRuntime,
     publication: NotificationStripPublication,
     pairings: WeakMap<KeyboardEvent, NotificationListKeyPair>,
+    publicCalls: NotificationListPublicCallFence,
     sourceRow: NotificationRowPublication,
     destinationRow: NotificationRowPublication,
     source: HTMLButtonElement,
@@ -3260,6 +3408,7 @@ function createNotificationStripPublication(
       !runtime.isRetired() &&
       listKeyPublication === publication &&
       listKeyPairs === pairings &&
+      listPublicCallsAreIdle(publication, publicCalls) &&
       publication.authority === authority &&
       rows[sourceIndex] === sourceRow.authority &&
       rows[destinationIndex] === destinationRow.authority &&
@@ -3310,24 +3459,31 @@ function createNotificationStripPublication(
   const captureListNavigation = (
     event: ReactKeyboardEvent<HTMLUListElement>,
   ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const pairings = listKeyPairs;
+    const publicCalls = listPublicCallFence;
+    if (
+      !runtime ||
+      !publication ||
+      !pairings ||
+      !publicCalls ||
+      listKeyPublication !== publication ||
+      !listPublicCallsAreIdle(publication, publicCalls) ||
+      !coordinator.canStageListMovement()
+    ) {
+      return;
+    }
     let nativeEvent: unknown;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
     }
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const pairings = listKeyPairs;
     if (
-      !runtime ||
-      !publication ||
-      !pairings ||
-      listKeyPublication !== publication ||
       !nativeEvent ||
       typeof nativeEvent !== "object" ||
-      pairings.has(nativeEvent as KeyboardEvent) ||
-      !coordinator.canStageListMovement()
+      pairings.has(nativeEvent as KeyboardEvent)
     ) {
       return;
     }
@@ -3417,11 +3573,59 @@ function createNotificationStripPublication(
         runtime,
         publication,
         pairings,
+        publicCalls,
         sourceRow,
         resolved.row,
         source,
         resolved.destination,
         key,
+      )
+    ) {
+      return;
+    }
+    const captureAttemptIsCurrent = () => {
+      const currentNative = events.readKeyboard(
+        nativeEvent as KeyboardEvent,
+      );
+      return Boolean(
+        currentNative &&
+        notificationKeyboardStableFactsMatch(native, currentNative) &&
+        currentNative.currentTarget === native.currentTarget &&
+        currentNative.phase === native.phase &&
+        listener.proofFor(
+          nativeEvent as KeyboardEvent,
+          publication,
+        ) === proof &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          capture,
+          publication,
+          currentNative,
+          publication.list,
+        ) &&
+        !pairings.has(nativeEvent as KeyboardEvent) &&
+        coordinator.canStageListMovement() &&
+        listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          sourceRow,
+          resolved.row,
+          source,
+          resolved.destination,
+          key,
+        ),
+      );
+    };
+    if (
+      !captureAttemptIsCurrent() ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        capture,
+        native,
+        publication.list,
+        false,
+        captureAttemptIsCurrent,
       )
     ) {
       return;
@@ -3441,6 +3645,7 @@ function createNotificationStripPublication(
     const pair = Object.freeze<NotificationListKeyPair>({
       publication,
       pairings,
+      publicCalls,
       native,
       nativeEvent: nativeEvent as KeyboardEvent,
       capture,
@@ -3453,7 +3658,7 @@ function createNotificationStripPublication(
       destination: resolved.destination,
       key,
       movement,
-      publicationClaim: Object.freeze({ publication }),
+      publicationClaim: Object.freeze({ publication, publicCalls }),
       orderClaim: Object.freeze({
         rows: publication.rows,
         controls: publication.openControls,
@@ -3487,11 +3692,9 @@ function createNotificationStripPublication(
       }),
     });
     if (
-      currentRuntime === runtime &&
-      listKeyPublication === publication &&
+      captureAttemptIsCurrent() &&
       listKeyPairs === pairings &&
-      !pairings.has(pair.nativeEvent) &&
-      coordinator.canStageListMovement()
+      !pairings.has(pair.nativeEvent)
     ) {
       pairings.set(pair.nativeEvent, pair);
     }
@@ -3501,31 +3704,39 @@ function createNotificationStripPublication(
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const pairings = listKeyPairs;
+    const publicCalls = listPublicCallFence;
+    if (
+      !runtime ||
+      !publication ||
+      !pairings ||
+      !publicCalls ||
+      listKeyPublication !== publication ||
+      !listPublicCallsAreIdle(publication, publicCalls) ||
+      !coordinator.canStageListMovement()
+    ) {
+      return;
+    }
     let nativeEvent: unknown;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
     }
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const pairings = listKeyPairs;
     const pair =
-      pairings && nativeEvent && typeof nativeEvent === "object"
+      nativeEvent && typeof nativeEvent === "object"
         ? pairings.get(nativeEvent as KeyboardEvent)
         : undefined;
     if (
-      !runtime ||
-      !publication ||
-      !pairings ||
       !pair ||
-      listKeyPublication !== publication ||
       pair.publication !== publication ||
       pair.pairings !== pairings ||
+      pair.publicCalls !== publicCalls ||
       pair.nativeEvent !== nativeEvent ||
       pair.sourceRow.authority !== row ||
-      rows[row.index] !== row ||
-      !coordinator.canStageListMovement()
+      rows[row.index] !== row
     ) {
       return;
     }
@@ -3566,22 +3777,11 @@ function createNotificationStripPublication(
       proof !== pair.windowProof ||
       proof.receiver !== native.path.at(-1) ||
       !notificationKeyboardStableFactsMatch(pair.native, native) ||
-      !notificationPublicReactKeyboardRemainsExact(
-        pair.capture,
-        publication,
-        pair.native,
-        null,
-      ) ||
-      !notificationPublicReactKeyboardRemainsExact(
-        bubble,
-        publication,
-        native,
-        pair.source,
-      ) ||
       !listMovementIsCurrent(
         runtime,
         publication,
         pairings,
+        publicCalls,
         pair.sourceRow,
         pair.destinationRow,
         pair.source,
@@ -3593,36 +3793,93 @@ function createNotificationStripPublication(
     ) {
       return;
     }
+    const unclaimedDeliveryIsCurrent = () => {
+      const currentNative = events.readKeyboard(pair.nativeEvent);
+      return Boolean(
+        currentNative &&
+        notificationKeyboardStableFactsMatch(native, currentNative) &&
+        currentNative.currentTarget === native.currentTarget &&
+        currentNative.phase === native.phase &&
+        listener.proofFor(pair.nativeEvent, publication) === proof &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          pair.capture,
+          publication,
+          pair.native,
+          null,
+        ) &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          bubble,
+          publication,
+          currentNative,
+          pair.source,
+        ) &&
+        pairings.get(pair.nativeEvent) === pair &&
+        coordinator.canStageListMovement() &&
+        listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+        ),
+      );
+    };
+    if (
+      !unclaimedDeliveryIsCurrent() ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        bubble,
+        native,
+        pair.source,
+        false,
+        unclaimedDeliveryIsCurrent,
+      ) ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        pair.capture,
+        pair.native,
+        null,
+        false,
+        unclaimedDeliveryIsCurrent,
+      ) ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        bubble,
+        native,
+        pair.source,
+        false,
+        unclaimedDeliveryIsCurrent,
+      )
+    ) {
+      return;
+    }
     const delivery = Object.freeze<NotificationListKeyDelivery>({
       pair,
       bubble,
     });
-    if (!coordinator.claimListMovement(delivery)) return;
+    if (
+      !unclaimedDeliveryIsCurrent() ||
+      !coordinator.claimListMovement(delivery)
+    ) {
+      return;
+    }
     try {
       if (
         currentRuntime !== runtime ||
         listKeyPublication !== publication ||
         listKeyPairs !== pairings ||
         pairings.get(pair.nativeEvent) !== pair ||
-        !pairings.delete(pair.nativeEvent) ||
         !coordinator.listMovementIsDelivering(delivery) ||
         !listener.retains(pair.windowProof, publication) ||
-        !notificationPublicReactKeyboardRemainsExact(
-          pair.capture,
-          publication,
-          pair.native,
-          null,
-        ) ||
-        !notificationPublicReactKeyboardRemainsExact(
-          bubble,
-          publication,
-          native,
-          pair.source,
-        ) ||
         !listMovementIsCurrent(
           runtime,
           publication,
           pairings,
+          publicCalls,
           pair.sourceRow,
           pair.destinationRow,
           pair.source,
@@ -3632,11 +3889,87 @@ function createNotificationStripPublication(
       ) {
         return;
       }
-      events.apply(
+      const claimedDeliveryIsCurrent = (
+        defaultPrevented: boolean,
+        pairIsRetained = false,
+      ) => {
+        const currentNative = events.readKeyboard(pair.nativeEvent);
+        return Boolean(
+          currentNative &&
+          notificationKeyboardStableFactsMatch(
+            native,
+            currentNative,
+            defaultPrevented,
+          ) &&
+          currentNative.currentTarget === native.currentTarget &&
+          currentNative.phase === native.phase &&
+          listener.retains(pair.windowProof, publication) &&
+          coordinator.listMovementIsDelivering(delivery) &&
+          (pairIsRetained
+            ? pairings.get(pair.nativeEvent) === pair
+            : !pairings.has(pair.nativeEvent)) &&
+          notificationPublicReactKeyboardSurfaceIsExact(
+            pair.capture,
+            publication,
+            pair.native,
+            null,
+          ) &&
+          notificationPublicReactKeyboardSurfaceIsExact(
+            bubble,
+            publication,
+            currentNative,
+            pair.source,
+            defaultPrevented,
+          ) &&
+          listMovementIsCurrent(
+            runtime,
+            publication,
+            pairings,
+            publicCalls,
+            pair.sourceRow,
+            pair.destinationRow,
+            pair.source,
+            pair.destination,
+            pair.key,
+          ),
+        );
+      };
+      if (
+        !claimedDeliveryIsCurrent(false, true) ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          pair.capture,
+          pair.native,
+          null,
+          false,
+          () => claimedDeliveryIsCurrent(false, true),
+        ) ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          bubble,
+          native,
+          pair.source,
+          false,
+          () => claimedDeliveryIsCurrent(false, true),
+        ) ||
+        !claimedDeliveryIsCurrent(false, true) ||
+        !notificationPublicReactKeyboardSurfaceIsExact(
+          bubble,
+          publication,
+          native,
+          pair.source,
+        ) ||
+        !pairings.delete(pair.nativeEvent) ||
+        !claimedDeliveryIsCurrent(false)
+      ) {
+        return;
+      }
+      const prevention = invokeListPublicCall(
+        publicCalls,
         bubble.methods.preventDefault,
         bubble.event,
-        [],
       );
+      if (!prevention || !claimedDeliveryIsCurrent(true)) return;
       const preventedNative = events.readKeyboard(pair.nativeEvent);
       if (
         !preventedNative ||
@@ -3647,18 +3980,21 @@ function createNotificationStripPublication(
         ) ||
         preventedNative.currentTarget !== native.currentTarget ||
         preventedNative.phase !== native.phase ||
-        !notificationPublicReactKeyboardRemainsExact(
+        !listReactQueriesAreExact(
+          publicCalls,
           pair.capture,
-          publication,
           pair.native,
           null,
+          false,
+          () => claimedDeliveryIsCurrent(true),
         ) ||
-        !notificationPublicReactKeyboardRemainsExact(
+        !listReactQueriesAreExact(
+          publicCalls,
           bubble,
-          publication,
           preventedNative,
           pair.source,
           true,
+          () => claimedDeliveryIsCurrent(true),
         )
       ) {
         return;
@@ -3679,17 +4015,20 @@ function createNotificationStripPublication(
         currentRuntime !== runtime ||
         listKeyPublication !== publication ||
         listKeyPairs !== pairings ||
+        listPublicCallFence !== publicCalls ||
         pairings.has(pair.nativeEvent) ||
         !listMovementIsCurrent(
           runtime,
           publication,
           pairings,
+          publicCalls,
           pair.sourceRow,
           pair.destinationRow,
           pair.source,
           pair.destination,
           pair.key,
-        )
+        ) ||
+        !claimedDeliveryIsCurrent(true)
       ) {
         return;
       }
