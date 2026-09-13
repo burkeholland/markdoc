@@ -2938,7 +2938,7 @@ describe("GitHubPicker source focus navigation", () => {
     },
   );
 
-  it.each(["missing-stage", "crossed-native", "throwing-query"] as const)(
+  it.each(["missing-stage", "throwing-query"] as const)(
     "keeps a %s partial route inert and accepts the next clean event",
     async (failure) => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -2987,14 +2987,6 @@ describe("GitHubPicker source focus navigation", () => {
           "onKeyDownCapture",
           (event: ReactKeyboardEvent<HTMLButtonElement>) => {
             if (reject && failure === "missing-stage") return;
-            if (reject && failure === "crossed-native") {
-              sourceCapture(
-                clonePickerSyntheticEvent(event, {
-                  nativeEvent: pickerKeyboardEvent(source, "ArrowRight"),
-                }),
-              );
-              return;
-            }
             sourceCapture(event);
           },
         );
@@ -3025,6 +3017,149 @@ describe("GitHubPicker source focus navigation", () => {
       }
     },
   );
+
+  it("keeps nested exact-native routes isolated through crossed live delivery and replay", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured />,
+    );
+    try {
+      const source = view.picker.getByTestId(
+        "picker-tab-gist",
+      ) as HTMLButtonElement;
+      const destination = view.picker.getByTestId(
+        "picker-tab-repo",
+      ) as HTMLButtonElement;
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The picker has no owner Window");
+      const sourceCapture = reactProp<PickerKeyHandler<HTMLButtonElement>>(
+        source,
+        "onKeyDownCapture",
+      );
+      let outerWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+      let nestedEvent: KeyboardEvent | null = null;
+      const authenticatedWrappers: KeyboardEvent[] = [];
+      const restoreSource = replaceReactProp(
+        source,
+        "onKeyDownCapture",
+        (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          if (!outerWrapper) {
+            outerWrapper = event;
+            nestedEvent = pickerKeyboardEvent(source, "ArrowRight");
+            source.dispatchEvent(nestedEvent);
+            source.focus();
+            return;
+          }
+          if (!nestedEvent || event.nativeEvent !== nestedEvent) {
+            sourceCapture(event);
+            return;
+          }
+          const outerEvent = outerWrapper.nativeEvent;
+          const captures = [
+            [outerWrapper, outerEvent],
+            [event, nestedEvent],
+          ] as const;
+          for (const [wrapper, nativeEvent] of captures) {
+            if (
+              wrapper.nativeEvent === nativeEvent &&
+              wrapper.target === source &&
+              wrapper.currentTarget === source &&
+              wrapper.eventPhase === ownerWindow.Event.CAPTURING_PHASE
+            ) {
+              authenticatedWrappers.push(nativeEvent);
+            }
+          }
+          sourceCapture(outerWrapper);
+          sourceCapture(event);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const outerEvent = pickerKeyboardEvent(source, "ArrowRight");
+      const nativeCaptures: Array<{
+        event: Event;
+        receiver: EventTarget;
+        target: EventTarget | null;
+        currentTarget: EventTarget | null;
+        phase: number;
+        terminal: EventTarget | undefined;
+      }> = [];
+      const observeNativeCapture = function (
+        this: EventTarget,
+        nativeEvent: Event,
+      ) {
+        nativeCaptures.push({
+          event: nativeEvent,
+          receiver: this,
+          target: nativeEvent.target,
+          currentTarget: nativeEvent.currentTarget,
+          phase: nativeEvent.eventPhase,
+          terminal: nativeEvent.composedPath().at(-1),
+        });
+      };
+      ownerWindow.addEventListener("keydown", observeNativeCapture, true);
+
+      try {
+        act(() => {
+          source.dispatchEvent(outerEvent);
+        });
+      } finally {
+        ownerWindow.removeEventListener("keydown", observeNativeCapture, true);
+      }
+
+      expect(nestedEvent).not.toBeNull();
+      expect(authenticatedWrappers).toEqual([outerEvent, nestedEvent]);
+      expect(nativeCaptures.map(({ event }) => event)).toEqual([
+        outerEvent,
+        nestedEvent,
+      ]);
+      const terminalReceiver = nativeCaptures[0]?.receiver;
+      expect(terminalReceiver).toBeDefined();
+      for (const capture of nativeCaptures) {
+        expect(capture.receiver).toBe(terminalReceiver);
+        expect(capture.target).toBe(source);
+        expect(capture.currentTarget).toBe(capture.receiver);
+        expect(capture.phase).toBe(ownerWindow.Event.CAPTURING_PHASE);
+        expect(capture.terminal).toBe(capture.receiver);
+        expect((capture.event as KeyboardEvent).view).toBe(ownerWindow);
+      }
+      expect(outerEvent.defaultPrevented).toBe(true);
+      expect(nestedEvent!.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledTimes(2);
+      expect(focus).toHaveBeenCalledTimes(3);
+      expect(focus.mock.instances).toEqual([destination, source, destination]);
+      expect(focus).toHaveBeenNthCalledWith(1, { preventScroll: true });
+      expect(focus).toHaveBeenNthCalledWith(2);
+      expect(focus).toHaveBeenNthCalledWith(3, { preventScroll: true });
+
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      act(() => {
+        source.dispatchEvent(outerEvent);
+        source.dispatchEvent(nestedEvent!);
+      });
+
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = pickerKey(source, "ArrowRight");
+
+      expect(successor.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      restoreSource();
+    } finally {
+      await view.unmount();
+    }
+  });
 
   it("uses distinct capture and bubble wrappers, ignores persist compatibility drift, and calls public prevention once", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
