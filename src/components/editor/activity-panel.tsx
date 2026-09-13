@@ -174,6 +174,14 @@ interface ActivityKeyboardAuthority {
   readonly activeElement: ActivityCapturedGetter<Element | null>;
   readonly documentView: ActivityCapturedValue<Window | null>;
   readonly focus: ActivityCapturedMethod<readonly [FocusOptions?], void>;
+  readonly windowListen: ActivityCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
+  readonly windowUnlisten: ActivityCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
   readonly listen: ActivityCapturedMethod<
     readonly [string, EventListener, boolean],
     void
@@ -1182,6 +1190,43 @@ function captureActivityValue<Value>(
   return null;
 }
 
+function captureActivityTargetMethod<
+  Args extends readonly unknown[],
+  Result,
+>(
+  ownerWindow: Window & typeof globalThis,
+  target: object,
+  property: string,
+): ActivityCapturedMethod<Args, Result> | null {
+  const captured = captureActivityValue<(...args: Args) => Result>(
+    ownerWindow,
+    target,
+    property,
+  );
+  const apply = ownerWindow.Reflect.apply;
+  try {
+    const method = captured?.read();
+    if (!captured || typeof method !== "function") return null;
+    return Object.freeze({
+      invoke: (receiver: object, ...args: Args) =>
+        apply(method, receiver, args) as Result,
+      isCurrent: () => {
+        try {
+          return (
+            ownerWindow.Reflect.apply === apply &&
+            captured.isCurrent() &&
+            captured.read() === method
+          );
+        } catch {
+          return false;
+        }
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
 function captureActivityMethod<Args extends readonly unknown[], Result>(
   ownerWindow: Window & typeof globalThis,
   prototype: object,
@@ -1298,6 +1343,14 @@ function captureActivityKeyboardAuthority(
     "defaultView",
   );
   const focus = captureActivityMethod<readonly [FocusOptions?], void>(ownerWindow, htmlElementPrototype, "focus");
+  const windowListen = captureActivityTargetMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >(ownerWindow, ownerWindow, "addEventListener");
+  const windowUnlisten = captureActivityTargetMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >(ownerWindow, ownerWindow, "removeEventListener");
   const listen = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "addEventListener");
   const unlisten = captureActivityMethod<readonly [string, EventListener, boolean], void>(ownerWindow, eventTargetPrototype, "removeEventListener");
   const trusted = captureActivityTrustedGetter(ownerWindow);
@@ -1324,6 +1377,8 @@ function captureActivityKeyboardAuthority(
     !activeElement ||
     !documentView ||
     !focus ||
+    !windowListen ||
+    !windowUnlisten ||
     !listen ||
     !unlisten ||
     !trusted ||
@@ -1354,6 +1409,8 @@ function captureActivityKeyboardAuthority(
     activeElement,
     documentView,
     focus,
+    windowListen,
+    windowUnlisten,
     listen,
     unlisten,
     trusted,
@@ -2213,7 +2270,12 @@ function createActivityPublication({
       if (!listening || !keyboard) return;
       listening = false;
       try {
-        keyboard.unlisten.invoke(ownerWindow, "keydown", captureNative, true);
+        keyboard.windowUnlisten.invoke(
+          ownerWindow,
+          "keydown",
+          captureNative,
+          true,
+        );
         keyboard.unlisten.invoke(panelElement, "keydown", crossNativePanel, false);
         for (const target of nativeBubbleTargets) {
           keyboard.unlisten.invoke(target, "keydown", finalizeNative, false);
@@ -2738,7 +2800,12 @@ function createActivityPublication({
       if (!keyboard || !keyboard.isCurrent() || listening) return false;
       listening = true;
       try {
-        keyboard.listen.invoke(ownerWindow, "keydown", captureNative, true);
+        keyboard.windowListen.invoke(
+          ownerWindow,
+          "keydown",
+          captureNative,
+          true,
+        );
         keyboard.listen.invoke(panelElement, "keydown", crossNativePanel, false);
       } catch {
         removeListeners();
