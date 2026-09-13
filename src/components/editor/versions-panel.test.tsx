@@ -1198,9 +1198,15 @@ describe("VersionDiffView · header action keyboard navigation", () => {
       cancelable: true,
       key: "ArrowRight",
       code: "ArrowRight",
-      view: ownerWindow,
     });
     act(() => source.dispatchEvent(untrusted));
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expectNoVersionDiffExternalWork();
+
     const canceled = createVersionDiffActionKey(source, "ArrowRight");
     canceled.preventDefault();
     preventDefault.mockClear();
@@ -1493,6 +1499,7 @@ describe("VersionDiffView · header action keyboard navigation", () => {
     source.focus();
     preventDefault.mockClear();
     focus.mockClear();
+    scrollIntoView.mockClear();
 
     try {
       const result = dispatchVersionDiffActionKey(
@@ -1594,14 +1601,31 @@ describe("VersionDiffView · header action keyboard navigation", () => {
   });
 
   it("accepts an owner defaultView facade with its exact proven backing Window", () => {
-    const originalAdd = window.addEventListener.bind(window);
-    const originalRemove = window.removeEventListener.bind(window);
+    const defaultView = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(document),
+      "defaultView",
+    )?.get;
+    if (!defaultView) throw new Error("Missing defaultView getter");
+    const backingWindow = Reflect.apply(defaultView, document, []) as Window;
+    const originalAdd = backingWindow.addEventListener.bind(backingWindow);
+    const originalRemove = backingWindow.removeEventListener.bind(backingWindow);
+    const bridges = new WeakMap<EventListener, EventListener>();
+    let bridgeReceiver: EventTarget | null = null;
     const facadeAdd: Window["addEventListener"] = function (
       this: Window,
       type: string,
       listener: EventListenerOrEventListenerObject | null,
       options?: boolean | AddEventListenerOptions,
     ) {
+      if (type === "keydown" && typeof listener === "function") {
+        const bridge: EventListener = function (this: Window, event) {
+          bridgeReceiver = this;
+          Reflect.apply(listener, this, [event]);
+        };
+        bridges.set(listener, bridge);
+        originalAdd(type, bridge, options);
+        return;
+      }
       originalAdd(type, listener, options);
     } as Window["addEventListener"];
     const facadeRemove: Window["removeEventListener"] = function (
@@ -1610,10 +1634,14 @@ describe("VersionDiffView · header action keyboard navigation", () => {
       listener: EventListenerOrEventListenerObject | null,
       options?: boolean | EventListenerOptions,
     ) {
-      originalRemove(type, listener, options);
+      const bridge =
+        type === "keydown" && typeof listener === "function"
+          ? bridges.get(listener)
+          : undefined;
+      originalRemove(type, bridge ?? listener, options);
     } as Window["removeEventListener"];
     let facade!: Window & typeof globalThis;
-    facade = new Proxy(window as Window & typeof globalThis, {
+    facade = new Proxy(backingWindow as Window & typeof globalThis, {
       get(target, property) {
         if (property === "addEventListener") return facadeAdd;
         if (property === "removeEventListener") return facadeRemove;
@@ -1621,38 +1649,40 @@ describe("VersionDiffView · header action keyboard navigation", () => {
         return Reflect.get(target, property, target);
       },
     });
-    const defaultView = Object.getOwnPropertyDescriptor(
-      Document.prototype,
-      "defaultView",
-    )?.get;
-    if (!defaultView) throw new Error("Missing defaultView getter");
-    vi.spyOn(Document.prototype, "defaultView", "get").mockImplementation(
-      function (this: Document) {
-        const actual = Reflect.apply(defaultView, this, []) as Window | null;
-        return this === document ? facade : actual;
-      },
-    );
+    vi.spyOn(document, "defaultView", "get").mockReturnValue(facade);
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const fixture = createVersionDiffView(
       versionDiffComparePreview(),
       "unused live text",
     );
+    expect(document.defaultView).toBe(facade);
+    expect(document.defaultView).not.toBe(backingWindow);
     fireEvent.click(versionDiffActions(fixture.host).next);
     const actions = versionDiffActions(fixture.host);
     actions.previous.focus();
     preventDefault.mockClear();
     focus.mockClear();
 
-    const accepted = dispatchVersionDiffActionKey(
-      actions.previous,
-      "ArrowRight",
-      {},
-      false,
-    );
+    const accepted = new backingWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowRight",
+      code: "ArrowRight",
+      view: backingWindow,
+    });
+    expect(accepted.view).toBe(backingWindow);
+    trustKeyboardEvent(accepted, backingWindow);
+    let allowed = true;
+    act(() => {
+      allowed = actions.previous.dispatchEvent(accepted);
+    });
 
-    expect(accepted.event.view).toBe(facade);
-    expect(accepted.event.defaultPrevented).toBe(true);
+    expect(allowed).toBe(false);
+    expect(accepted.view).toBe(backingWindow);
+    expect(bridgeReceiver).toBe(backingWindow);
+    expect(bridgeReceiver).toBe(accepted.view);
+    expect(accepted.defaultPrevented).toBe(true);
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
     expect(actions.next).toHaveFocus();

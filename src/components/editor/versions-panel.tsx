@@ -5902,8 +5902,7 @@ class VersionDiffCoordinator {
       this.#claimedEvents.has(nativeEvent) ||
       this.#claimedProofs.has(proof) ||
       this.#claimedActions.has(source) ||
-      this.#claimedActions.has(destination) ||
-      publication.keyListener?.claim(proof, publication) !== true
+      this.#claimedActions.has(destination)
     ) {
       return false;
     }
@@ -7225,7 +7224,8 @@ function readVersionDiffActionDelivery(
     event.metaKey !== snapshot.metaKey ||
     event.shiftKey !== snapshot.shiftKey ||
     event.repeat !== snapshot.repeat ||
-    event.isComposing !== snapshot.isComposing ||
+    (event.isComposing !== undefined &&
+      event.isComposing !== snapshot.isComposing) ||
     !Object.is(event.view, snapshot.view)
   ) {
     return null;
@@ -7951,6 +7951,7 @@ function createVersionDiffPublication(
       source.element.disabled ||
       destination.element.disabled ||
       keyboard.activeElement() !== source.element ||
+      !publication.keyListener.claim(groupBubble.listener, publication) ||
       !coordinator.claimActionKeyboard(
         publication,
         movement,
