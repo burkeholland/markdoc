@@ -3815,7 +3815,7 @@ describe("StatsPopover writing goal action navigation", () => {
     );
     mountStrictGoal(session);
     const actions = captureGoalActions();
-    let nested: KeyboardEvent | null = null;
+    const nested: KeyboardEvent[] = [];
     focus.mockClear();
 
     const result = dispatchObserved(
@@ -3825,15 +3825,17 @@ describe("StatsPopover writing goal action navigation", () => {
       {},
       {
         duringPublicPreventDefault: () => {
-          if (nested) return;
-          nested = statsKey(actions.set, "ArrowDown");
-          actions.set.dispatchEvent(nested);
+          if (nested.length > 0) return;
+          const nestedEvent = statsKey(actions.set, "ArrowDown");
+          nested.push(nestedEvent);
+          actions.set.dispatchEvent(nestedEvent);
         },
       },
     );
 
     expectAccepted(focus, actions.clear!, result);
-    expect(nested?.defaultPrevented).toBe(false);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].defaultPrevented).toBe(false);
   });
 
   it("rejects replay, removes its Window listener on cleanup, and accepts a clean successor event", () => {
