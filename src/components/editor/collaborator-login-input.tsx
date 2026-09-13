@@ -437,6 +437,7 @@ interface InputPublicationCells {
   replay: InputReplay | null;
   renderToken: symbol | null;
   renderBinding: ControlBinding | null;
+  keyboardEntryActive: boolean;
   readonly retiredPublications: WeakSet<InputPublication>;
   readonly retiredRows: WeakSet<InputRowPublication>;
   readonly retiredActions: WeakSet<ActionPublication>;
@@ -2701,6 +2702,7 @@ function createInputPublication(
       ) => {
         if (
           released ||
+          cells.keyboardEntryActive ||
           !event ||
           typeof event !== "object" ||
           readingNativeEvents.has(event)
@@ -2709,6 +2711,7 @@ function createInputPublication(
         }
         const pair = nativePairs.get(event as globalThis.KeyboardEvent);
         if (!pair || pair.handling || pair.consumed) return;
+        cells.keyboardEntryActive = true;
         pair.handling = true;
         readingNativeEvents.add(event);
         try {
@@ -2722,24 +2725,32 @@ function createInputPublication(
         } finally {
           pair.handling = false;
           readingNativeEvents.delete(event);
+          cells.keyboardEntryActive = false;
         }
       };
 
       const deliverReact = (index: number, event: object) => {
         if (
-          released ||
+          !publicationMemoryIsCurrent() ||
+          cells.keyboardEntryActive ||
           !event ||
           typeof event !== "object" ||
           readingWrappers.has(event)
         ) {
           return;
         }
+        // The owning call, not runtime release, clears this component-wide fence.
+        cells.keyboardEntryActive = true;
         readingWrappers.add(event);
         let pair: InputKeyboardNativeReactPair | undefined;
         let handling = false;
         try {
           const native = (event as Record<PropertyKey, unknown>).nativeEvent;
-          if (!native || typeof native !== "object") return;
+          if (
+            !publicationMemoryIsCurrent() ||
+            !native ||
+            typeof native !== "object"
+          ) return;
           pair = nativePairs.get(native as globalThis.KeyboardEvent);
           if (
             !pair ||
@@ -2823,6 +2834,7 @@ function createInputPublication(
         } finally {
           if (handling && pair) pair.handling = false;
           readingWrappers.delete(event);
+          cells.keyboardEntryActive = false;
         }
       };
 
@@ -4000,6 +4012,7 @@ export function CollaboratorLoginInput({
     replay: null,
     renderToken: null,
     renderBinding: null,
+    keyboardEntryActive: false,
     retiredPublications: new WeakSet(),
     retiredRows: new WeakSet(),
     retiredActions: new WeakSet(),

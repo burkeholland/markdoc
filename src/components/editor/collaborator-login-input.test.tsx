@@ -1162,6 +1162,240 @@ describe("CollaboratorLoginInput", () => {
     },
   );
 
+  it.each(KEY_BOUNDARIES)(
+    "excludes distinct-wrapper keyboard entry reentry at %s before nativeEvent is read",
+    async (affectedBoundary) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      const onRoleChange = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} onRoleChange={onRoleChange} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const setTimer = vi.spyOn(globalThis, "setTimeout");
+      const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+      const scrollCalls = [
+        vi.spyOn(window, "scrollTo"),
+        vi.spyOn(window, "scrollBy"),
+        ...[exactInput, screen.getByTestId("share-login-suggestions"), ...listOptions()].flatMap((element) =>
+          ["scrollTo", "scrollBy", "scrollIntoView"].map((method) => {
+            const scroll = vi.fn();
+            Object.defineProperty(element, method, { configurable: true, value: scroll });
+            return scroll;
+          }),
+        ),
+      ];
+      const deliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+      let nested: ReturnType<typeof independentKeyboardDelivery> | undefined;
+      let nestedRead: ReturnType<typeof vi.fn> | undefined;
+      let nestedPrevent: ReturnType<typeof vi.fn> | undefined;
+      let attempted = false;
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        deliveries.push(delivery);
+        if (boundary === affectedBoundary) {
+          const native = source.nativeEvent;
+          const inner = independentKeyboardDelivery(source);
+          nested = inner;
+          const read = vi.fn(() => native);
+          nestedRead = read;
+          nestedPrevent = vi.fn(function (this: object) {
+            Reflect.apply(inner.preventDefault, this, []);
+            throw new Error("Nested prevention must not cancel the rightful Enter");
+          });
+          inner.values.set("preventDefault", nestedPrevent);
+          Object.defineProperty(inner.event, "nativeEvent", { get: read });
+          Object.defineProperty(delivery.event, "nativeEvent", {
+            get: () => {
+              if (!attempted) {
+                attempted = true;
+                deliver(inner.event);
+                // A rejected nested call must not clear the outer call's exclusion.
+                deliver(inner.event);
+              }
+              return native;
+            },
+          });
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      let accepted: globalThis.KeyboardEvent;
+      try {
+        accepted = dispatchKeyDown(exactInput, "Enter");
+      } finally {
+        restore();
+      }
+      expect(attempted).toBe(true);
+      expect(deliveries).toHaveLength(4);
+      expect(nestedRead).not.toHaveBeenCalled();
+      expect(nestedPrevent).not.toHaveBeenCalled();
+      expect(nested!.defaultQuery).not.toHaveBeenCalled();
+      expect(nested!.propagationQuery).not.toHaveBeenCalled();
+      expect(nested!.preventDefault).not.toHaveBeenCalled();
+      deliveries.slice(0, 3).forEach(({ preventDefault }) => expect(preventDefault).not.toHaveBeenCalled());
+      expect(deliveries[3].preventDefault).toHaveBeenCalledOnce();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onRoleChange).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+      expect(setTimer).not.toHaveBeenCalled();
+      expect(clearTimer).not.toHaveBeenCalled();
+      scrollCalls.forEach((scroll) => expect(scroll).not.toHaveBeenCalled());
+    },
+  );
+
+  it.each(KEY_BOUNDARIES)(
+    "retains keyboard entry reentry exclusion across publication replacement at %s",
+    async (affectedBoundary) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      const renderView = () => (
+        <StrictMode>
+          <KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />
+        </StrictMode>
+      );
+      const view = render(renderView());
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const outerDeliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+      const nestedDeliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+      const nestedReads: ReturnType<typeof vi.fn>[] = [];
+      const nestedEvents: globalThis.KeyboardEvent[] = [];
+      let replaced = false;
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        const delivery = independentKeyboardDelivery(source);
+        outerDeliveries.push(delivery);
+        if (boundary === affectedBoundary) {
+          const native = source.nativeEvent;
+          Object.defineProperty(delivery.event, "nativeEvent", {
+            get: () => {
+              if (!replaced) {
+                replaced = true;
+                flushSync(() => view.rerender(renderView()));
+                expect(input()).toBe(exactInput);
+                const restoreSuccessor = interceptKeyboardRoute(exactInput, (_nextBoundary, nextDeliver, nextSource) => {
+                  const successor = independentKeyboardDelivery(nextSource);
+                  const read = vi.fn(() => nextSource.nativeEvent);
+                  Object.defineProperty(successor.event, "nativeEvent", { get: read });
+                  nestedDeliveries.push(successor);
+                  nestedReads.push(read);
+                  nextDeliver(successor.event);
+                  successor.values.set("currentTarget", null);
+                });
+                try {
+                  for (let attempt = 0; attempt < 2; attempt++) {
+                    const next = keyboardEvent(exactInput, "Enter");
+                    nestedEvents.push(next);
+                    exactInput.dispatchEvent(next);
+                  }
+                } finally {
+                  restoreSuccessor();
+                }
+              }
+              return native;
+            },
+          });
+        }
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      let retired: globalThis.KeyboardEvent;
+      try {
+        retired = dispatchKeyDown(exactInput, "Enter");
+      } finally {
+        restore();
+      }
+      expect(replaced).toBe(true);
+      expect(nestedEvents).toHaveLength(2);
+      expect(nestedEvents[0]).not.toBe(nestedEvents[1]);
+      expect(nestedDeliveries).toHaveLength(8);
+      nestedEvents.forEach((event) => expect(event.defaultPrevented).toBe(false));
+      nestedReads.forEach((read) => expect(read).not.toHaveBeenCalled());
+      nestedDeliveries.forEach((delivery) => {
+        expect(delivery.defaultQuery).not.toHaveBeenCalled();
+        expect(delivery.propagationQuery).not.toHaveBeenCalled();
+        expect(delivery.preventDefault).not.toHaveBeenCalled();
+      });
+      outerDeliveries.forEach(({ preventDefault }) => expect(preventDefault).not.toHaveBeenCalled());
+      expect(retired.defaultPrevented).toBe(false);
+      expect(nativePrevent).not.toHaveBeenCalled();
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+      expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
+      const recovered = dispatchKeyDown(exactInput, "Enter");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(KEY_BOUNDARIES)(
+    "releases throwing keyboard entry reentry exclusion at %s without poisoning the pending pair",
+    async (affectedBoundary) => {
+      searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      render(<KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />);
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const nativePrevent = vi.spyOn(window.Event.prototype, "preventDefault");
+      const throwingRead = vi.fn(() => { throw new Error("Malformed nativeEvent accessor"); });
+      const deliveries: ReturnType<typeof independentKeyboardDelivery>[] = [];
+      let rejected: ReturnType<typeof independentKeyboardDelivery> | undefined;
+      const restore = interceptKeyboardRoute(exactInput, (boundary, deliver, source) => {
+        if (boundary === affectedBoundary) {
+          rejected = independentKeyboardDelivery(source);
+          Object.defineProperty(rejected.event, "nativeEvent", { get: throwingRead });
+          deliver(rejected.event);
+        }
+        const delivery = independentKeyboardDelivery(source);
+        deliveries.push(delivery);
+        deliver(delivery.event);
+        delivery.values.set("currentTarget", null);
+      });
+      let accepted: globalThis.KeyboardEvent;
+      try {
+        accepted = dispatchKeyDown(exactInput, "Enter");
+      } finally {
+        restore();
+      }
+      expect(throwingRead).toHaveBeenCalledOnce();
+      expect(rejected!.defaultQuery).not.toHaveBeenCalled();
+      expect(rejected!.propagationQuery).not.toHaveBeenCalled();
+      expect(rejected!.preventDefault).not.toHaveBeenCalled();
+      expect(deliveries).toHaveLength(4);
+      deliveries.slice(0, 3).forEach(({ preventDefault }) => expect(preventDefault).not.toHaveBeenCalled());
+      expect(deliveries[3].preventDefault).toHaveBeenCalledOnce();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nativePrevent).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octodog");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    },
+  );
+
   it("keeps two genuinely dispatched keyboard routes live across crossed deliveries without poisoning either", async () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
     const onChange = vi.fn();
