@@ -5909,7 +5909,6 @@ function captureCommitActionReactEvent(
       event.code !== native.code ||
       event.location !== native.location ||
       event.repeat !== native.repeat ||
-      event.isComposing !== native.composing ||
       event.ctrlKey !== native.ctrlKey ||
       event.altKey !== native.altKey ||
       event.metaKey !== native.metaKey ||
