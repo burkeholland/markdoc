@@ -2305,6 +2305,11 @@ function registerTrashKeyboardNativeAuthorityTests() {
       reject("ArrowRight", { shiftKey: true });
       reject("ArrowRight", { repeat: true });
       reject("ArrowRight", { isComposing: true });
+      reject("6", {
+        code: "Numpad6",
+        location:
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
       reject("Tab");
       reject("Enter");
       reject(" ");
@@ -2384,7 +2389,7 @@ function registerTrashKeyboardNativeAuthorityTests() {
       expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
       expect(view.setup.focus).toHaveBeenCalledTimes(1);
       expect(purge).toHaveFocus();
-      expect(rejected).toHaveLength(10);
+      expect(rejected).toHaveLength(11);
       expect(onRetry).not.toHaveBeenCalled();
       expect(onRestore).not.toHaveBeenCalled();
       expect(onPurge).not.toHaveBeenCalled();
@@ -10060,6 +10065,71 @@ describe("TrashView per-card keyboard navigation", () => {
   );
 
   it.each([
+    ["purge-button", "restore-button", "ArrowLeft", "Numpad4"],
+    ["purge-button", "restore-button", "ArrowUp", "Numpad8"],
+    ["restore-button", "purge-button", "ArrowRight", "Numpad6"],
+    ["restore-button", "purge-button", "ArrowDown", "Numpad2"],
+    ["purge-button", "restore-button", "Home", "Numpad7"],
+    ["restore-button", "purge-button", "End", "Numpad1"],
+  ] as const)(
+    "moves from %s to %s by semantic %s with physical %s",
+    (sourceId, destinationId, key, code) => {
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const view = renderTrashKeyboard(
+        trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        }),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const source = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const destination = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${destinationId}"]`,
+        )!;
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+
+        const event = dispatchTrashKey(source, key, {
+          code,
+          location:
+            view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        });
+
+        expect(event.code).toBe(code);
+        expect(event.location).toBe(
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        );
+        expect(event.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(view.setup.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(directTrashButton(
+          view.host,
+          second.title,
+          destinationId,
+        )).not.toHaveFocus();
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(onRestore).not.toHaveBeenCalled();
+        expect(onPurge).not.toHaveBeenCalled();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it.each([
     ["restore-button", "ArrowLeft"],
     ["restore-button", "ArrowUp"],
     ["restore-button", "Home"],
@@ -10135,6 +10205,14 @@ describe("TrashView per-card keyboard navigation", () => {
             Reflect.deleteProperty(event, "_reactName");
           },
           bubbleBefore: (event) => {
+            expect(event.defaultPrevented).toBe(false);
+            expect(
+              Reflect.apply(
+                event.isDefaultPrevented,
+                event,
+                [],
+              ),
+            ).toBe(false);
             const alternate = Object.create(
               Object.getPrototypeOf(event),
             );
@@ -10186,7 +10264,7 @@ describe("TrashView per-card keyboard navigation", () => {
           delivery.bubbleEvent,
           [],
         ),
-      ).toBe(false);
+      ).toBe(true);
       expect(
         Reflect.apply(
           delivery.bubbleEvent.isPropagationStopped,
@@ -10194,7 +10272,68 @@ describe("TrashView per-card keyboard navigation", () => {
           [],
         ),
       ).toBe(false);
+      expect(delivery.bubbleEvent.defaultPrevented).toBe(true);
       expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("exposes public prevention to a same-root synthetic ancestor", () => {
+    const onAncestorAction = vi.fn();
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const ancestorObservations: {
+      defaultPrevented: boolean;
+      queried: boolean;
+    }[] = [];
+    const view = renderTrashKeyboard(
+      <div
+        onKeyDown={(event) => {
+          ancestorObservations.push({
+            defaultPrevented: event.defaultPrevented,
+            queried: event.isDefaultPrevented(),
+          });
+          if (!event.defaultPrevented) onAncestorAction();
+        }}
+      >
+        {trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        })}
+      </div>,
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const event = dispatchTrashKey(restore, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(ancestorObservations).toEqual([
+        { defaultPrevented: true, queried: true },
+      ]);
+      expect(onAncestorAction).not.toHaveBeenCalled();
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
       expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
       expect(view.setup.focus).toHaveBeenCalledTimes(1);
       expect(purge).toHaveFocus();

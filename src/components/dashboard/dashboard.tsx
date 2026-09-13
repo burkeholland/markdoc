@@ -11930,6 +11930,7 @@ interface TrashKeyboardAuthority {
   readonly cancelBubble: TrashPropertyAuthority<boolean>;
   readonly key: TrashPropertyAuthority<string>;
   readonly code: TrashPropertyAuthority<string>;
+  readonly location: TrashPropertyAuthority<number>;
   readonly ctrlKey: TrashPropertyAuthority<boolean>;
   readonly metaKey: TrashPropertyAuthority<boolean>;
   readonly altKey: TrashPropertyAuthority<boolean>;
@@ -11990,6 +11991,8 @@ interface TrashKeyboardNativeProof {
   readonly terminal: EventTarget;
   readonly window: TrashKeyboardWindowProof;
   readonly key: TrashNavigationKey;
+  readonly code: string;
+  readonly location: number;
   readonly capture: TrashReactKeyProof;
   bubble: TrashReactKeyProof | null;
   crossed: boolean;
@@ -12366,6 +12369,11 @@ function captureTrashKeyboardAuthority(
       keyboardPrototype,
       "code",
     );
+    const location = captureTrashPropertyAuthority<number>(
+      ownerWindow,
+      keyboardPrototype,
+      "location",
+    );
     const ctrlKey = captureTrashPropertyAuthority<boolean>(
       ownerWindow,
       keyboardPrototype,
@@ -12433,6 +12441,7 @@ function captureTrashKeyboardAuthority(
       cancelBubble,
       key,
       code,
+      location,
       ctrlKey,
       metaKey,
       altKey,
@@ -12523,6 +12532,7 @@ function captureTrashKeyboardAuthority(
       cancelBubble: cancelBubble!,
       key: key!,
       code: code!,
+      location: location!,
       ctrlKey: ctrlKey!,
       metaKey: metaKey!,
       altKey: altKey!,
@@ -12678,6 +12688,34 @@ function trashReactKeyProofIsCurrent(
         proof.event,
         [],
       ) === proof.defaultPreventedResult &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isPropagationStopped,
+        proof.event,
+        [],
+      ) === proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
+
+function trashReactKeyProofWasPrevented(
+  proof: TrashReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as ReactKeyboardEvent<HTMLElement>;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      event.defaultPrevented === true &&
+      typeof isDefaultPrevented === "function" &&
+      TRUSTED_REFLECT_APPLY(
+        isDefaultPrevented,
+        proof.event,
+        [],
+      ) === true &&
       TRUSTED_REFLECT_APPLY(
         proof.isPropagationStopped,
         proof.event,
@@ -13491,7 +13529,8 @@ function createTrashPublication(
           !authority.defaultPrevented.read(event) &&
           !authority.cancelBubble.read(event) &&
           authority.key.read(event) === proof.key &&
-          authority.code.read(event) === proof.key &&
+          authority.code.read(event) === proof.code &&
+          authority.location.read(event) === proof.location &&
           !authority.ctrlKey.read(event) &&
           !authority.metaKey.read(event) &&
           !authority.altKey.read(event) &&
@@ -13629,6 +13668,8 @@ function createTrashPublication(
         const view = authority.view.read(nativeEvent);
         const delegatedRoot =
           authority.currentTarget.read(nativeEvent);
+        const code = authority.code.read(nativeEvent);
+        const location = authority.location.read(nativeEvent);
         if (
           !card ||
           card.authority !== cardAuthority ||
@@ -13653,7 +13694,6 @@ function createTrashPublication(
           authority.defaultPrevented.read(nativeEvent) ||
           authority.cancelBubble.read(nativeEvent) ||
           authority.key.read(nativeEvent) !== key ||
-          authority.code.read(nativeEvent) !== key ||
           authority.ctrlKey.read(nativeEvent) ||
           authority.metaKey.read(nativeEvent) ||
           authority.altKey.read(nativeEvent) ||
@@ -13717,6 +13757,8 @@ function createTrashPublication(
           terminal,
           window: windowProof,
           key,
+          code,
+          location,
           capture,
           bubble: null,
           crossed: false,
@@ -13820,7 +13862,17 @@ function createTrashPublication(
         keyboardProofs.delete(nativeEvent);
         if (!claimed) return;
         try {
-          authority.preventDefault.call(proof.event);
+          TRUSTED_REFLECT_APPLY(
+            bubble.preventDefault,
+            bubble.event,
+            [],
+          );
+          if (
+            !authority.defaultPrevented.read(proof.event) ||
+            !trashReactKeyProofWasPrevented(bubble)
+          ) {
+            return;
+          }
           authority.focus.call(
             proof.movement.destination.element,
             { preventScroll: true },
