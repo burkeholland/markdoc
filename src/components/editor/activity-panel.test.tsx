@@ -3130,7 +3130,43 @@ describe("ActivityPanel header focus movement", () => {
       const refresh = headerControl("Refresh activity");
       const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
       let mutated = false;
+      const mutate = (
+        event: ReactKeyboardEvent<HTMLButtonElement>,
+      ) => {
+        if (mutated) return;
+        mutated = true;
+        if (mutation === "native propagation") {
+          event.nativeEvent.stopPropagation();
+        } else {
+          Object.defineProperty(event, mutation, {
+            configurable: true,
+            value: () => false,
+          });
+        }
+      };
       const restore = replaceKeyHandler(refresh, (event) => {
+        if (property === "isDefaultPrevented") {
+          const originalPreventDefault = event.preventDefault;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            value: function (
+              this: ReactKeyboardEvent<HTMLButtonElement>,
+            ) {
+              Reflect.apply(originalPreventDefault, this, []);
+              Object.defineProperty(this, "isDefaultPrevented", {
+                configurable: true,
+                value: function (
+                  this: ReactKeyboardEvent<HTMLButtonElement>,
+                ) {
+                  mutate(this);
+                  return true;
+                },
+              });
+            },
+          });
+          bubble(event);
+          return;
+        }
         const query = event[property] as (...args: never[]) => boolean;
         Object.defineProperty(event, property, {
           configurable: true,
@@ -3139,15 +3175,7 @@ describe("ActivityPanel header focus movement", () => {
           ) {
             const result = Reflect.apply(query, this, []);
             if (this.nativeEvent.defaultPrevented && !mutated) {
-              mutated = true;
-              if (mutation === "native propagation") {
-                this.nativeEvent.stopPropagation();
-              } else {
-                Object.defineProperty(this, mutation, {
-                  configurable: true,
-                  value: () => false,
-                });
-              }
+              mutate(this);
             }
             return result;
           },
@@ -3226,6 +3254,26 @@ describe("ActivityPanel header focus movement", () => {
         }
       };
       const restore = replaceKeyHandler(refresh, (event) => {
+        if (property === "isDefaultPrevented") {
+          const originalPreventDefault = event.preventDefault;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            value: function (
+              this: ReactKeyboardEvent<HTMLButtonElement>,
+            ) {
+              Reflect.apply(originalPreventDefault, this, []);
+              Object.defineProperty(this, "isDefaultPrevented", {
+                configurable: true,
+                value: () => {
+                  mutate();
+                  return true;
+                },
+              });
+            },
+          });
+          bubble(event);
+          return;
+        }
         const callback = event[property] as (...args: never[]) => unknown;
         Object.defineProperty(event, property, {
           configurable: true,
