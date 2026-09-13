@@ -60,6 +60,10 @@ type KeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 interface CapturedActions {
   open: ClickHandler;
   keyDown: KeyHandler;
+  rowKeyDownCapture: (
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void;
+  dismissKeyDown: KeyHandler;
   dismiss: ClickHandler;
   readAll: ClickHandler;
   section: HTMLElement;
@@ -79,6 +83,9 @@ type CapturedPart = "section" | "readAllButton" | "list" | "item" | "openButton"
 type ReactPropsRecord = Record<string, unknown> & {
   onClick?: ClickHandler;
   onKeyDown?: KeyHandler;
+  onKeyDownCapture?: (
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void;
   ref?: unknown;
 };
 
@@ -212,11 +219,20 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
   const openButton = row.querySelector<HTMLButtonElement>('[data-testid="notification-open"]');
   const dismissButton = row.querySelector<HTMLButtonElement>('[data-testid="notification-dismiss"]');
   const readAllButton = section.querySelector<HTMLButtonElement>('[data-testid="notifications-strip-read-all"]');
-  if (!(list instanceof HTMLUListElement) || !openButton || !dismissButton || !readAllButton) {
+  const rowKeyDownCapture = reactPropsEntry(row).props
+    .onKeyDownCapture;
+  if (
+    !(list instanceof HTMLUListElement) ||
+    !openButton ||
+    !dismissButton ||
+    !readAllButton ||
+    typeof rowKeyDownCapture !== "function"
+  ) {
     throw new Error("Notification strip hierarchy was incomplete");
   }
   const open = reactHandler(openButton);
   const keyDown = reactKeyHandler(openButton);
+  const dismissKeyDown = reactKeyHandler(dismissButton);
   const dismiss = reactHandler(dismissButton);
   const readAll = reactHandler(readAllButton);
   clickTargets.set(open, openButton);
@@ -225,6 +241,11 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
   return {
     open,
     keyDown,
+    rowKeyDownCapture:
+      rowKeyDownCapture as (
+        event: ReactKeyboardEvent<HTMLLIElement>,
+      ) => void,
+    dismissKeyDown,
     dismiss,
     readAll,
     section,
@@ -297,6 +318,52 @@ function interceptKeyDown(
   return () => {
     record[propsKey] = props;
   };
+}
+
+function interceptKeyDownCapture(
+  element: HTMLLIElement,
+  invokeHandler: (
+    original: CapturedActions["rowKeyDownCapture"],
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void,
+) {
+  const { propsKey, record, props } = reactPropsEntry(element);
+  const original = props.onKeyDownCapture;
+  if (!original) {
+    throw new Error("The row did not have an onKeyDownCapture handler");
+  }
+  record[propsKey] = {
+    ...props,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLElement>) => {
+      invokeHandler(
+        original as CapturedActions["rowKeyDownCapture"],
+        event as ReactKeyboardEvent<HTMLLIElement>,
+      );
+    },
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function exposeKeyboardScalarThroughGetter(
+  event: ReactKeyboardEvent<HTMLElement>,
+  property: keyof ReactKeyboardEvent<HTMLElement>,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(event, property);
+  if (
+    !descriptor ||
+    !("value" in descriptor) ||
+    !descriptor.configurable
+  ) {
+    throw new Error(`${String(property)} was not configurable public data`);
+  }
+  const value = descriptor.value;
+  Object.defineProperty(event, property, {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get: () => value,
+  });
 }
 
 function connectedButton(label = "Other") {
@@ -1783,6 +1850,506 @@ describe("notification strip keyboard browsing", () => {
     } finally {
       window.MutationObserver = NativeMutationObserver;
       view?.host.remove();
+    }
+  });
+});
+
+describe("notification strip row action navigation", () => {
+  it.each([
+    ["Open", "ArrowRight", "Numpad6", 3, "dismiss"],
+    ["Mark as read", "ArrowLeft", "Numpad4", 3, "open"],
+    ["Mark as read", "ArrowUp", "Numpad8", 3, "open"],
+    ["Mark as read", "Home", "Numpad7", 3, "open"],
+  ] as const)(
+    "moves from %s on trusted %s without activating either action",
+    (sourceName, key, code, location, destinationName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const router = createRouter(`row-action-${key}`);
+      try {
+        const view = createStrictView(router, snapshot([ITEM]));
+        const actions = captureActions(0, view.host);
+        const source = sourceName === "Open"
+          ? actions.openButton
+          : actions.dismissButton;
+        const destination = destinationName === "open"
+          ? actions.openButton
+          : actions.dismissButton;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const result = dispatchTrustedKey(
+          source,
+          key,
+          { code, location },
+          false,
+        );
+
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(destination).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["Open", "ArrowLeft"],
+    ["Mark as read", "ArrowRight"],
+    ["Mark as read", "ArrowDown"],
+    ["Mark as read", "End"],
+  ] as const)(
+    "leaves the %s boundary key %s inert and unprevented",
+    (sourceName, key) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const router = createRouter(`row-boundary-${key}`);
+      try {
+        const view = createStrictView(router, snapshot([ITEM]));
+        const actions = captureActions(0, view.host);
+        const source = sourceName === "Open"
+          ? actions.openButton
+          : actions.dismissButton;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const result = dispatchTrustedKey(source, key, {}, false);
+
+        expect(result.allowed).toBe(true);
+        expect(result.event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ["ArrowDown", "Numpad2", 3],
+    ["End", "Numpad1", 3],
+  ] as const)(
+    "preserves Open-control vertical %s browsing for numeric-keypad input",
+    (key, code, location) => {
+      const router = createRouter(`vertical-row-action-${key}`);
+      const view = createStrictView(
+        router,
+        snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+      );
+      const controls = openButtons(view.host);
+      controls[1]!.focus();
+
+      const result = dispatchTrustedKey(
+        controls[1]!,
+        key,
+        { code, location },
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(controls[2]).toHaveFocus();
+      expect(captureActions(1, view.host).dismissButton).not.toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it("authenticates independent public capture and bubble wrappers before using only bubble prevention", () => {
+    const router = createRouter("independent-row-wrappers");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    const capturePreventDefault = vi.fn();
+    const bubblePreventDefault = vi.fn();
+    let captureWrapper: ReactKeyboardEvent<HTMLLIElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const restoreCapture = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        captureWrapper = event;
+        const originalPreventDefault = event.preventDefault;
+        event.preventDefault = function capturePrevention() {
+          capturePreventDefault();
+          originalPreventDefault.call(event);
+        };
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      actions.openButton,
+      (original, event) => {
+        bubbleWrapper = event;
+        const originalPreventDefault = event.preventDefault;
+        event.preventDefault = function bubblePrevention() {
+          bubblePreventDefault();
+          originalPreventDefault.call(event);
+        };
+        original(event);
+      },
+    );
+    try {
+      actions.openButton.focus();
+      const result = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(actions.dismissButton).toHaveFocus();
+      expect(captureWrapper).not.toBe(bubbleWrapper);
+      expect(capturePreventDefault).not.toHaveBeenCalled();
+      expect(bubblePreventDefault).toHaveBeenCalledOnce();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("accepts exact scalar wrapper values exposed through non-data descriptors", () => {
+    const router = createRouter("row-wrapper-accessors");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    const restoreCapture = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        exposeKeyboardScalarThroughGetter(event, "key");
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      actions.openButton,
+      (original, event) => {
+        exposeKeyboardScalarThroughGetter(event, "key");
+        original(event);
+      },
+    );
+    try {
+      actions.openButton.focus();
+      const result = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(actions.dismissButton).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("rejects scalar value and required-method drift without consuming a clean successor", () => {
+    const router = createRouter("replaced-row-wrapper-facts");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    actions.openButton.focus();
+
+    const restoreCapture = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        const descriptor = Object.getOwnPropertyDescriptor(event, "key");
+        if (!descriptor || !("value" in descriptor)) {
+          throw new Error("The capture wrapper key was not public data");
+        }
+        Object.defineProperty(event, "key", {
+          ...descriptor,
+          value: "ArrowLeft",
+        });
+        original(event);
+      },
+    );
+    try {
+      const rejectedCapture = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejectedCapture.allowed).toBe(true);
+      expect(rejectedCapture.event.defaultPrevented).toBe(false);
+      expect(actions.openButton).toHaveFocus();
+    } finally {
+      restoreCapture();
+    }
+
+    const restoreBubble = interceptKeyDown(
+      actions.openButton,
+      (original, event) => {
+        original(new Proxy(event, {
+          get(target, property, receiver) {
+            if (property === "preventDefault") return vi.fn();
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+      },
+    );
+    try {
+      const rejectedBubble = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejectedBubble.allowed).toBe(true);
+      expect(rejectedBubble.event.defaultPrevented).toBe(false);
+      expect(actions.openButton).toHaveFocus();
+    } finally {
+      restoreBubble();
+    }
+
+    const recovered = dispatchTrustedKey(
+      actions.openButton,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(recovered.allowed).toBe(false);
+    expect(actions.dismissButton).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("accepts the exact public owner Window and rejects a structural wrapper lookalike", () => {
+    const router = createRouter("row-window-proof");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    const ownerWindow = actions.openButton.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Notification control has no owner window");
+    actions.openButton.focus();
+
+    const restore = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        const descriptor = Object.getOwnPropertyDescriptor(event, "view");
+        if (!descriptor || !("value" in descriptor)) {
+          throw new Error("The capture wrapper view was not public data");
+        }
+        Object.defineProperty(event, "view", {
+          ...descriptor,
+          value: Object.create(ownerWindow),
+        });
+        original(event);
+      },
+    );
+    try {
+      const rejected = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(rejected.allowed).toBe(true);
+      expect(rejected.event.defaultPrevented).toBe(false);
+      expect(actions.openButton).toHaveFocus();
+    } finally {
+      restore();
+    }
+
+    const setExactView = (
+      event: ReactKeyboardEvent<HTMLElement>,
+    ) => {
+      const descriptor = Object.getOwnPropertyDescriptor(event, "view");
+      if (!descriptor || !("value" in descriptor)) {
+        throw new Error("The React wrapper view was not public data");
+      }
+      Object.defineProperty(event, "view", {
+        ...descriptor,
+        value: ownerWindow,
+      });
+    };
+    const restoreCapture = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        setExactView(event);
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      actions.openButton,
+      (original, event) => {
+        setExactView(event);
+        original(event);
+      },
+    );
+    try {
+      const accepted = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.allowed).toBe(false);
+      expect(actions.dismissButton).toHaveFocus();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("rejects untrusted and modified dismiss input before a trusted successor", () => {
+    const router = createRouter("dismiss-row-input");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    actions.dismissButton.focus();
+
+    const untrusted = dispatchKey(
+      actions.dismissButton,
+      "ArrowLeft",
+      {},
+      false,
+    );
+    const modified = dispatchTrustedKey(
+      actions.dismissButton,
+      "ArrowLeft",
+      { ctrlKey: true },
+      false,
+    );
+
+    expect(untrusted.allowed).toBe(true);
+    expect(untrusted.event.defaultPrevented).toBe(false);
+    expect(modified.allowed).toBe(true);
+    expect(modified.event.defaultPrevented).toBe(false);
+    expect(actions.dismissButton).toHaveFocus();
+
+    const recovered = dispatchTrustedKey(
+      actions.dismissButton,
+      "ArrowLeft",
+      {},
+      false,
+    );
+    expect(recovered.allowed).toBe(false);
+    expect(actions.openButton).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("retires restored DOM history and recovers only through a complete successor", async () => {
+    const router = createRouter("restored-row-action-dom");
+    const view = createStrictGenerationView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const stale = captureActions(0, view.host);
+    const next = stale.item.nextElementSibling;
+    stale.list.append(stale.item);
+    stale.list.insertBefore(stale.item, next);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    stale.openButton.focus();
+    const rejected = dispatchTrustedKey(
+      stale.openButton,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(rejected.allowed).toBe(true);
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(stale.openButton).toHaveFocus();
+
+    renderStrictGeneration(
+      view,
+      router,
+      snapshot([ITEM, ITEM_TWO], 2),
+      "successor",
+    );
+    const current = captureActions(0, view.host);
+    current.openButton.focus();
+    const accepted = dispatchTrustedKey(
+      current.openButton,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(accepted.allowed).toBe(false);
+    expect(current.dismissButton).toHaveFocus();
+  });
+
+  it("keeps native tab order and non-navigation activation keys untouched", async () => {
+    const user = userEvent.setup();
+    const router = createRouter("native-row-actions");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+
+    expect(actions.item).not.toHaveAttribute("role", "toolbar");
+    expect(actions.openButton.tabIndex).toBe(0);
+    expect(actions.dismissButton.tabIndex).toBe(0);
+    actions.openButton.focus();
+    await user.tab();
+    expect(actions.dismissButton).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(actions.openButton).toHaveFocus();
+
+    for (const key of ["Enter", " "] as const) {
+      const open = dispatchTrustedKey(actions.openButton, key, {}, false);
+      expect(open.allowed).toBe(true);
+      expect(open.event.defaultPrevented).toBe(false);
+      actions.dismissButton.focus();
+      const dismiss = dispatchTrustedKey(
+        actions.dismissButton,
+        key,
+        {},
+        false,
+      );
+      expect(dismiss.allowed).toBe(true);
+      expect(dismiss.event.defaultPrevented).toBe(false);
+      actions.openButton.focus();
+    }
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("removes every Strict Mode Window capture listener on retirement", async () => {
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const router = createRouter("row-listener-cleanup");
+    try {
+      const view = createStrictView(router, snapshot([ITEM]));
+      const addedListeners = addEventListener.mock.calls
+        .filter(([type, , options]) => type === "keydown" && options === true)
+        .map(([, listener]) => listener);
+      const removedBeforeUnmount = removeEventListener.mock.calls
+        .filter(([type, , options]) => type === "keydown" && options === true)
+        .map(([, listener]) => listener);
+      expect(addedListeners).toHaveLength(2);
+      expect(removedBeforeUnmount).toEqual([addedListeners[0]]);
+
+      await act(async () => {
+        view.root.unmount();
+        await Promise.resolve();
+      });
+      const index = directViews.indexOf(view);
+      if (index >= 0) directViews.splice(index, 1);
+      const removedAfterUnmount = removeEventListener.mock.calls
+        .filter(([type, , options]) => type === "keydown" && options === true)
+        .map(([, listener]) => listener);
+      expect(removedAfterUnmount).toEqual(addedListeners);
+    } finally {
+      addEventListener.mockRestore();
+      removeEventListener.mockRestore();
     }
   });
 });
