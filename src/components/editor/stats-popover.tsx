@@ -719,6 +719,13 @@ interface StatsGoalActionDelivery {
   readonly composing: boolean | undefined;
 }
 
+interface StatsGoalActionProof {
+  readonly generation: GoalGeneration;
+  readonly groupCapture: StatsGoalActionDelivery;
+  readonly actionCapture: StatsGoalActionDelivery | null;
+  readonly actionBubble: StatsGoalActionDelivery | null;
+}
+
 interface StatsGoalActionMovement {
   readonly identity: symbol;
   readonly disclosure: StatsDisclosurePublication;
@@ -5860,6 +5867,7 @@ function GoalEditor({
   const activeGenerationRef = useRef<GoalGeneration | null>(null);
   const claimedGenerationRef = useRef<GoalGeneration | null>(null);
   const activePublicationRef = useRef<GoalPublication | null>(null);
+  const actionProofRef = useRef<StatsGoalActionProof | null>(null);
   const { canEdit, kind, mode, value } = presentation;
   const goal = presentation.sharedGoal.goal;
   const progress = presentation.progress.progress;
@@ -6005,6 +6013,9 @@ function GoalEditor({
     publishGeneration(generation);
     return () => {
       if (activeGenerationRef.current === generation) activeGenerationRef.current = null;
+      if (actionProofRef.current?.generation === generation) {
+        actionProofRef.current = null;
+      }
       retireGenerationPublication(generation);
     };
   });
@@ -6198,13 +6209,16 @@ function GoalEditor({
     setGoal(presentation.session, null);
   }
 
-  let capturedActionGroup: StatsGoalActionDelivery | null = null;
-  let capturedAction: StatsGoalActionDelivery | null = null;
-  let bubbledAction: StatsGoalActionDelivery | null = null;
-  const clearActionProof = () => {
-    capturedActionGroup = null;
-    capturedAction = null;
-    bubbledAction = null;
+  const clearActionProof = (expected?: StatsGoalActionProof) => {
+    const proof = actionProofRef.current;
+    if (
+      !proof ||
+      proof.generation !== generation ||
+      (expected && proof !== expected)
+    ) {
+      return;
+    }
+    actionProofRef.current = null;
   };
   const actionDelivery = <T extends HTMLElement>(
     event: ReactKeyboardEvent<T>,
@@ -6244,9 +6258,21 @@ function GoalEditor({
     ) {
       return;
     }
-    capturedActionGroup = delivery;
+    const proof: StatsGoalActionProof = Object.freeze({
+      generation,
+      groupCapture: delivery,
+      actionCapture: null,
+      actionBubble: null,
+    });
+    actionProofRef.current = proof;
     queueMicrotask(() => {
-      if (capturedActionGroup === delivery) clearActionProof();
+      const current = actionProofRef.current;
+      if (
+        current?.generation === generation &&
+        current.groupCapture === delivery
+      ) {
+        actionProofRef.current = null;
+      }
     });
   };
   const actionKeyDownCapture = (
@@ -6265,10 +6291,12 @@ function GoalEditor({
             ownerWindow.Event.CAPTURING_PHASE,
           )
         : null;
+    const proof = actionProofRef.current;
     if (
-      !capturedActionGroup ||
-      capturedAction ||
-      bubbledAction ||
+      !proof ||
+      proof.generation !== generation ||
+      proof.actionCapture ||
+      proof.actionBubble ||
       !publication ||
       !source ||
       !delivery ||
@@ -6276,14 +6304,17 @@ function GoalEditor({
       delivery.source !== source ||
       delivery.sourceIdentity.key !== key ||
       !statsGoalActionDeliveriesMatchWithinPhase(
-        capturedActionGroup,
+        proof.groupCapture,
         delivery,
       )
     ) {
-      clearActionProof();
+      clearActionProof(proof ?? undefined);
       return;
     }
-    capturedAction = delivery;
+    actionProofRef.current = Object.freeze({
+      ...proof,
+      actionCapture: delivery,
+    });
   };
   const actionKeyDown = (
     key: "set" | "clear",
@@ -6301,10 +6332,12 @@ function GoalEditor({
             ownerWindow.Event.BUBBLING_PHASE,
           )
         : null;
+    const proof = actionProofRef.current;
     if (
-      !capturedActionGroup ||
-      !capturedAction ||
-      bubbledAction ||
+      !proof ||
+      proof.generation !== generation ||
+      !proof.actionCapture ||
+      proof.actionBubble ||
       !publication ||
       !source ||
       !delivery ||
@@ -6312,25 +6345,32 @@ function GoalEditor({
       delivery.source !== source ||
       delivery.sourceIdentity.key !== key ||
       !statsGoalActionDeliveriesMatchWithinPhase(
-        capturedActionGroup,
-        capturedAction,
+        proof.groupCapture,
+        proof.actionCapture,
       ) ||
       !statsGoalActionDeliveriesMatchAcrossPhases(
-        capturedAction,
+        proof.actionCapture,
         delivery,
       )
     ) {
-      clearActionProof();
+      clearActionProof(proof ?? undefined);
       return;
     }
-    bubbledAction = delivery;
+    actionProofRef.current = Object.freeze({
+      ...proof,
+      actionBubble: delivery,
+    });
   };
   const actionGroupKeyDown = (
     event: ReactKeyboardEvent<HTMLSpanElement>,
   ) => {
-    const groupCapture = capturedActionGroup;
-    const actionCapture = capturedAction;
-    const actionBubble = bubbledAction;
+    const proof = actionProofRef.current;
+    const groupCapture =
+      proof?.generation === generation ? proof.groupCapture : null;
+    const actionCapture =
+      proof?.generation === generation ? proof.actionCapture : null;
+    const actionBubble =
+      proof?.generation === generation ? proof.actionBubble : null;
     const publication = currentPublication(null);
     const ownerWindow = publication?.form.ownerDocument.defaultView;
     const groupBubble =
@@ -6341,7 +6381,7 @@ function GoalEditor({
             ownerWindow.Event.BUBBLING_PHASE,
           )
         : null;
-    clearActionProof();
+    if (proof?.generation === generation) clearActionProof(proof);
     if (
       !publication ||
       !groupCapture ||
