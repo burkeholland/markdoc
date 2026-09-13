@@ -2793,11 +2793,16 @@ interface ModeSwitcherTrustedAuthority {
   readonly isCurrent: () => boolean;
 }
 
+interface ModeSwitcherCapturedWindowMethod {
+  readonly method: ModeSwitcherNativeMethod;
+  readonly isCurrent: () => boolean;
+}
+
 interface ModeSwitcherKeyboardAuthority {
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
   readonly keyboardPrototype: object;
-  readonly atTargetPhase: number;
+  readonly capturingPhase: number;
   readonly bubblingPhase: number;
   readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
@@ -2883,30 +2888,95 @@ interface ModeSwitcherNativeKeyboardSnapshot {
 }
 
 interface ModeSwitcherReactKeyboardProof {
-  readonly prototype: object;
-  readonly descriptors: readonly ModeSwitcherCapturedDescriptor[];
+  readonly event: React.KeyboardEvent<HTMLButtonElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly currentTarget: HTMLButtonElement;
+  readonly target: EventTarget;
+  readonly eventPhase: number;
+  readonly type: string;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly isTrusted: boolean;
+  readonly timeStamp: number;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly detail: number;
+  readonly view: React.KeyboardEvent<HTMLButtonElement>["view"];
   readonly preventDefault: ModeSwitcherNativeMethod;
-  readonly stopPropagation: ModeSwitcherNativeMethod;
   readonly isDefaultPrevented: ModeSwitcherNativeMethod;
   readonly isPropagationStopped: ModeSwitcherNativeMethod;
-  readonly persist: ModeSwitcherNativeMethod;
-  readonly isPersistent: ModeSwitcherNativeMethod;
+}
+
+type ModeSwitcherReactKeyboardPhase = "capture" | "bubble";
+type ModeSwitcherReactKeyboardBoundary = "trigger" | "root";
+type ModeSwitcherKeyboardListener = (this: EventTarget, event: Event) => void;
+
+interface ModeSwitcherKeyboardListenerRegistration {
+  readonly identity: symbol;
+  readonly target: Window & typeof globalThis;
+  readonly listener: ModeSwitcherKeyboardListener;
+  readonly add: ModeSwitcherNativeMethod;
+  readonly remove: ModeSwitcherNativeMethod;
+  readonly capture: true;
+  readonly isCurrent: () => boolean;
+}
+
+interface ModeSwitcherNativeListenerProof {
+  readonly publication: ModeSwitcherPublication;
+  readonly registration: ModeSwitcherKeyboardListenerRegistration;
+  readonly event: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly eventPhase: number;
 }
 
 interface ModeSwitcherKeyboardDelivery {
   readonly snapshot: ModeSwitcherNativeKeyboardSnapshot;
-  reactEvent: React.KeyboardEvent<HTMLButtonElement> | null;
-  reactProof: ModeSwitcherReactKeyboardProof | null;
-  bubbleCurrentTarget: EventTarget | null;
-  reactCount: number;
-  invalid: boolean;
+  readonly listenerProof: ModeSwitcherNativeListenerProof;
+  delegationTarget: EventTarget | null;
+  captureEvent: React.KeyboardEvent<HTMLButtonElement> | null;
+  captureProof: ModeSwitcherReactKeyboardProof | null;
+  captureTriggerSeen: boolean;
+  captureRootSeen: boolean;
+  bubbleEvent: React.KeyboardEvent<HTMLButtonElement> | null;
+  bubbleProof: ModeSwitcherReactKeyboardProof | null;
+  bubbleAttempted: boolean;
+  bubbleTriggerSeen: boolean;
+  bubbleRootSeen: boolean;
+}
+
+interface ModeSwitcherKeyboardRoute {
+  readonly registration: ModeSwitcherKeyboardListenerRegistration;
+  readonly activate: () => boolean;
+  readonly stageReact: (
+    phase: ModeSwitcherReactKeyboardPhase,
+    boundary: ModeSwitcherReactKeyboardBoundary,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => ModeSwitcherKeyboardDelivery | null;
+  readonly consume: (delivery: ModeSwitcherKeyboardDelivery) => boolean;
+  readonly retains: (delivery: ModeSwitcherKeyboardDelivery) => boolean;
+  readonly runPublicCall: <Value>(callback: () => Value) => Value | null;
+  readonly retire: () => void;
+  readonly dispose: () => void;
 }
 
 interface ModeSwitcherClaimedArrow {
   readonly publication: ModeSwitcherPublication;
   readonly action: ModeSwitcherArrowAction;
   readonly authority: ModeSwitcherKeyboardAuthority;
+  readonly delivery: ModeSwitcherKeyboardDelivery;
+  readonly listenerProof: ModeSwitcherNativeListenerProof;
   readonly nativeEvent: KeyboardEvent;
+  readonly captureEvent: React.KeyboardEvent<HTMLButtonElement>;
+  readonly captureProof: ModeSwitcherReactKeyboardProof;
   readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
   readonly reactProof: ModeSwitcherReactKeyboardProof;
   readonly key: ModeSwitcherArrowKey;
@@ -2936,7 +3006,7 @@ interface ModeSwitcherPublication {
   readonly document: Document;
   readonly dom: ModeSwitcherDom;
   readonly keyboardAuthority: ModeSwitcherKeyboardAuthority | null;
-  readonly keyboardEvents: Set<KeyboardEvent>;
+  readonly keyboardRoute: ModeSwitcherKeyboardRoute | null;
   readonly arrowActions: Readonly<Record<ModeSwitcherArrowKey, ModeSwitcherArrowAction>>;
   readonly triggerParent: Node;
   readonly contentParent: Node | null;
@@ -3012,6 +3082,12 @@ interface ModeSwitcherPresentation {
   readonly captureReader: (element: HTMLDivElement | null) => void;
   readonly establish: () => (() => void) | undefined;
   readonly onTriggerPointerDown: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  readonly onTriggerArrowKeyDownCapture: (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onTriggerKeyDownCapture: (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void;
   readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
@@ -3028,9 +3104,18 @@ class ModeSwitcherPublicationCoordinator {
   #successorOf: ModeSwitcherPublication | null = null;
   #claimedEvents = new WeakSet<Event>();
   #claimedReactEvents = new WeakSet<object>();
-  #claimedPublications = new WeakSet<ModeSwitcherPublication>();
-  #claimedDisclosures = new WeakSet<ModeSwitcherArrowAction>();
-  #keyboardDeliveries = new WeakMap<KeyboardEvent, ModeSwitcherKeyboardDelivery>();
+  #claimedPublications = new WeakMap<
+    ModeSwitcherPublication,
+    ModeSwitcherClaimedArrow
+  >();
+  #claimedDisclosures = new WeakMap<
+    ModeSwitcherArrowAction,
+    ModeSwitcherClaimedArrow
+  >();
+  #claimedSources = new WeakMap<
+    HTMLButtonElement,
+    ModeSwitcherClaimedArrow
+  >();
   #disclosureIntent: ModeSwitcherDisclosureIntent | null = null;
   #selectionIntent: ModeSwitcherSelectionIntent | null = null;
   #focusIntent: ModeSwitcherFocusIntent | null = null;
@@ -3081,6 +3166,9 @@ class ModeSwitcherPublicationCoordinator {
     if (this.#active !== publication) return false;
     this.#active = null;
     this.#successorOf = publication;
+    publication.keyboardRoute?.retire();
+    const arrow = this.#claimedPublications.get(publication);
+    if (arrow) this.releaseArrowClaim(arrow);
     if (this.#disclosureIntent?.publication === publication) {
       this.#disclosureIntent = null;
     }
@@ -3140,144 +3228,122 @@ class ModeSwitcherPublicationCoordinator {
     return true;
   }
 
-  clearKeyboardEvents(publication: ModeSwitcherPublication) {
-    for (const event of publication.keyboardEvents) {
-      this.#keyboardDeliveries.delete(event);
-    }
-    publication.keyboardEvents.clear();
-  }
-
-  #clearKeyboardEvent(
-    publication: ModeSwitcherPublication,
-    event: KeyboardEvent,
-    delivery?: ModeSwitcherKeyboardDelivery,
-  ) {
-    const current = this.#keyboardDeliveries.get(event);
-    if (!delivery || current === delivery) this.#keyboardDeliveries.delete(event);
-    publication.keyboardEvents.delete(event);
-  }
-
-  stageNativeArrow(publication: ModeSwitcherPublication, event: Event) {
-    const authority = publication.keyboardAuthority;
-    if (
+  canStageArrow(publication: ModeSwitcherPublication, event: KeyboardEvent) {
+    return (
       this.#active === publication
-      && (
-        !publication.isExact()
-        || (authority !== null && !authority.historyIsClean())
-      )
-    ) {
-      publication.retire();
-      return;
-    }
-    if (
-      !authority
-      || !(event instanceof authority.ownerWindow.KeyboardEvent)
-      || this.#keyboardDeliveries.has(event)
-      || this.#claimedEvents.has(event)
-      || this.#claimedPublications.has(publication)
-      || this.#active !== publication
-    ) {
-      return;
-    }
-    const snapshot = readModeSwitcherNativeKeyboardEvent(publication, authority, event);
-    if (
-      !snapshot
-      || snapshot.eventPhase !== authority.atTargetPhase
-      || snapshot.currentTarget !== publication.dom.trigger
-      || !modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
-    ) {
-      return;
-    }
-    const delivery: ModeSwitcherKeyboardDelivery = {
-      snapshot,
-      reactEvent: null,
-      reactProof: null,
-      bubbleCurrentTarget: null,
-      reactCount: 0,
-      invalid: false,
-    };
-    this.#keyboardDeliveries.set(event, delivery);
-    publication.keyboardEvents.add(event);
-    queueMicrotask(() => this.#clearKeyboardEvent(publication, event, delivery));
-  }
-
-  stageReactArrow(
-    publication: ModeSwitcherPublication,
-    event: React.KeyboardEvent<HTMLButtonElement>,
-  ) {
-    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return;
-    const nativeEvent = event.nativeEvent;
-    const delivery = this.#keyboardDeliveries.get(nativeEvent);
-    const proof = captureModeSwitcherReactKeyboardProof(event, publication.keyboardAuthority);
-    if (
-      !delivery
-      || delivery.invalid
-      || !proof
-      || delivery.snapshot.publication !== publication
-      || !modeSwitcherReactKeyboardEventMatches(delivery, event, proof)
-    ) {
-      return;
-    }
-    delivery.reactCount += 1;
-    if (
-      delivery.reactCount !== 1
-      || (delivery.reactEvent !== null && delivery.reactEvent !== event)
-    ) {
-      delivery.invalid = true;
-      return;
-    }
-    delivery.reactEvent = event;
-    delivery.reactProof = proof;
-    delivery.bubbleCurrentTarget = modeSwitcherNativeValue<EventTarget | null>(
-      delivery.snapshot.publication.keyboardAuthority!.event.currentTarget,
-      nativeEvent,
-      delivery.snapshot.publication.keyboardAuthority!,
+      && !this.#claimedEvents.has(event)
+      && !this.#claimedPublications.has(publication)
+      && !this.#claimedDisclosures.has(publication.arrowActions.ArrowDown)
+      && !this.#claimedDisclosures.has(publication.arrowActions.ArrowUp)
+      && !this.#claimedSources.has(publication.dom.trigger)
     );
   }
 
   claimReactArrow(
     publication: ModeSwitcherPublication,
-    event: React.KeyboardEvent<HTMLButtonElement>,
+    delivery: ModeSwitcherKeyboardDelivery,
   ): ModeSwitcherClaimedArrow | null {
-    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
-    const nativeEvent = event.nativeEvent;
-    const delivery = this.#keyboardDeliveries.get(nativeEvent);
-    const snapshot = delivery?.snapshot;
-    const proof = delivery?.reactProof;
+    const snapshot = delivery.snapshot;
+    const captureEvent = delivery.captureEvent;
+    const captureProof = delivery.captureProof;
+    const event = delivery.bubbleEvent;
+    const proof = delivery.bubbleProof;
+    const nativeEvent = snapshot.event;
     const authority = publication.keyboardAuthority;
+    const route = publication.keyboardRoute;
     if (
-      !delivery
-      || !snapshot
+      !captureEvent
+      || !captureProof
+      || !event
       || !proof
       || !authority
-      || delivery.invalid
-      || delivery.reactCount !== 1
-      || delivery.reactEvent !== event
+      || !route
+      || !delivery.captureTriggerSeen
+      || !delivery.captureRootSeen
+      || !delivery.bubbleTriggerSeen
+      || !delivery.bubbleRootSeen
+      || captureEvent === event
       || snapshot.publication !== publication
       || this.#claimedPublications.has(publication)
       || this.#claimedDisclosures.has(snapshot.action)
+      || this.#claimedSources.has(snapshot.source)
+      || this.#claimedReactEvents.has(captureEvent)
       || this.#claimedEvents.has(nativeEvent)
       || this.#active !== publication
-      || !modeSwitcherReactKeyboardEventMatches(delivery, event, proof)
+      || !route.retains(delivery)
       || !modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
       || !publication.isExact()
     ) {
       return null;
     }
-    this.#claimedPublications.add(publication);
-    this.#claimedDisclosures.add(snapshot.action);
+    const wrappersAreCurrent = route.runPublicCall(() =>
+      modeSwitcherReactKeyboardEventMatches(
+        delivery,
+        captureEvent,
+        captureProof,
+        "capture",
+        true,
+      )
+      && modeSwitcherReactKeyboardEventMatches(
+        delivery,
+        event,
+        proof,
+        "bubble",
+        false,
+      ));
+    if (
+      wrappersAreCurrent !== true
+      || !route.consume(delivery)
+    ) {
+      return null;
+    }
+    this.#claimedReactEvents.add(captureEvent);
     this.#claimedReactEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
-    this.#clearKeyboardEvent(publication, nativeEvent, delivery);
-    return Object.freeze({
+    const claim: ModeSwitcherClaimedArrow = Object.freeze({
       publication,
       action: snapshot.action,
       authority,
+      delivery,
+      listenerProof: delivery.listenerProof,
       nativeEvent,
+      captureEvent,
+      captureProof,
       reactEvent: event,
       reactProof: proof,
       key: snapshot.key,
     });
+    this.#claimedPublications.set(publication, claim);
+    this.#claimedDisclosures.set(snapshot.action, claim);
+    this.#claimedSources.set(snapshot.source, claim);
+    return claim;
+  }
+
+  retainsArrowClaim(claim: ModeSwitcherClaimedArrow) {
+    return Boolean(
+      this.#active === claim.publication
+      && this.#claimedPublications.get(claim.publication) === claim
+      && this.#claimedDisclosures.get(claim.action) === claim
+      && this.#claimedSources.get(claim.action.trigger) === claim
+      && this.#claimedReactEvents.has(claim.captureEvent)
+      && this.#claimedReactEvents.has(claim.reactEvent)
+      && this.#claimedEvents.has(claim.nativeEvent)
+      && claim.publication.keyboardRoute?.retains(claim.delivery)
+      && modeSwitcherArrowActionIsCurrent(claim.publication, claim.action)
+      && claim.publication.isExact()
+    );
+  }
+
+  releaseArrowClaim(claim: ModeSwitcherClaimedArrow) {
+    if (this.#claimedPublications.get(claim.publication) === claim) {
+      this.#claimedPublications.delete(claim.publication);
+    }
+    if (this.#claimedDisclosures.get(claim.action) === claim) {
+      this.#claimedDisclosures.delete(claim.action);
+    }
+    if (this.#claimedSources.get(claim.action.trigger) === claim) {
+      this.#claimedSources.delete(claim.action.trigger);
+    }
   }
 
   publishDisclosure(
@@ -3312,8 +3378,8 @@ class ModeSwitcherPublicationCoordinator {
         intent.arrow !== null
         && (
           intent.arrow.publication !== publication
-          || !this.#claimedPublications.has(publication)
-          || !this.#claimedDisclosures.has(intent.arrow.action)
+          || this.#claimedPublications.get(publication) !== intent.arrow
+          || this.#claimedDisclosures.get(intent.arrow.action) !== intent.arrow
           || !this.#claimedReactEvents.has(intent.arrow.reactEvent)
           || !this.#claimedEvents.has(intent.arrow.nativeEvent)
           || !modeSwitcherArrowActionIsCurrent(publication, intent.arrow.action)
@@ -3395,8 +3461,8 @@ class ModeSwitcherPublicationCoordinator {
       arrow.key !== "ArrowUp"
       || arrow.publication.render.open
       || this.#active !== arrow.publication
-      || !this.#claimedPublications.has(arrow.publication)
-      || !this.#claimedDisclosures.has(arrow.action)
+      || this.#claimedPublications.get(arrow.publication) !== arrow
+      || this.#claimedDisclosures.get(arrow.action) !== arrow
       || !modeSwitcherArrowActionIsCurrent(arrow.publication, arrow.action)
       || !arrow.publication.isExact()
     ) {
@@ -3535,6 +3601,60 @@ function captureModeSwitcherMethod(
     : null;
 }
 
+function captureModeSwitcherWindowMethod(
+  ownerWindow: Window & typeof globalThis,
+  property: "addEventListener" | "removeEventListener",
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+): ModeSwitcherCapturedWindowMethod | null {
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: Array<{
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }> = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(Object.freeze({
+      target,
+      descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+      prototype,
+    }));
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const method = reflectGet(ownerWindow, property, ownerWindow);
+  if (!found || typeof method !== "function") return null;
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = Boolean(
+      ownerWindow.Reflect.get === reflectGet
+      && path.every(({ target: entry, descriptor, prototype }) =>
+        getPrototypeOf(entry) === prototype
+        && (
+          descriptor
+            ? modeSwitcherDescriptorsMatch(
+                getOwnPropertyDescriptor(entry, property),
+                descriptor,
+              )
+            : getOwnPropertyDescriptor(entry, property) === undefined
+        ))
+      && reflectGet(ownerWindow, property, ownerWindow) === method
+    );
+    return historyIsClean;
+  };
+  return isCurrent()
+    ? Object.freeze({ method: method as ModeSwitcherNativeMethod, isCurrent })
+    : null;
+}
+
 function captureModeSwitcherTrustedAuthority(
   ownerWindow: Window & typeof globalThis,
   getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
@@ -3596,7 +3716,6 @@ function captureModeSwitcherKeyboardAuthority(
   const uiPrototype = ownerWindow.UIEvent.prototype;
   const documentPrototype = ownerWindow.Document.prototype;
   const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
-  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
   if (
     typeof getOwnPropertyDescriptor !== "function"
     || typeof getPrototypeOf !== "function"
@@ -3637,15 +3756,17 @@ function captureModeSwitcherKeyboardAuthority(
   const view = captureModeSwitcherGetter(uiPrototype, "view", getOwnPropertyDescriptor);
   const activeElement = captureModeSwitcherGetter(documentPrototype, "activeElement", getOwnPropertyDescriptor);
   const focus = captureModeSwitcherMethod(htmlElementPrototype, "focus", getOwnPropertyDescriptor);
-  const addEventListener = captureModeSwitcherMethod(
-    eventTargetPrototype,
+  const addEventListener = captureModeSwitcherWindowMethod(
+    ownerWindow,
     "addEventListener",
     getOwnPropertyDescriptor,
+    getPrototypeOf,
   );
-  const removeEventListener = captureModeSwitcherMethod(
-    eventTargetPrototype,
+  const removeEventListener = captureModeSwitcherWindowMethod(
+    ownerWindow,
     "removeEventListener",
     getOwnPropertyDescriptor,
+    getPrototypeOf,
   );
   const captures = [
     type,
@@ -3673,11 +3794,11 @@ function captureModeSwitcherKeyboardAuthority(
     view,
     activeElement,
     focus,
-    addEventListener,
-    removeEventListener,
   ];
   if (
     !trusted
+    || !addEventListener
+    || !removeEventListener
     || captures.some((capture) => capture === null)
     || getPrototypeOf(keyboardPrototype) !== uiPrototype
     || getPrototypeOf(uiPrototype) !== eventPrototype
@@ -3703,11 +3824,12 @@ function captureModeSwitcherKeyboardAuthority(
       && ownerWindow.UIEvent.prototype === uiPrototype
       && ownerWindow.Document.prototype === documentPrototype
       && ownerWindow.HTMLElement.prototype === htmlElementPrototype
-      && ownerWindow.EventTarget.prototype === eventTargetPrototype
       && getPrototypeOf(keyboardPrototype) === uiPrototype
       && getPrototypeOf(uiPrototype) === eventPrototype
       && getPrototypeOf(eventPrototype) === ownerWindow.Object.prototype
       && trusted.isCurrent()
+      && addEventListener.isCurrent()
+      && removeEventListener.isCurrent()
       && descriptors.every((descriptor) => descriptor.isCurrent())
     );
     return historyIsClean;
@@ -3716,7 +3838,7 @@ function captureModeSwitcherKeyboardAuthority(
     ownerDocument,
     ownerWindow,
     keyboardPrototype,
-    atTargetPhase: ownerWindow.Event.AT_TARGET,
+    capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
     getOwnPropertyDescriptor,
     getPrototypeOf,
@@ -3757,8 +3879,8 @@ function captureModeSwitcherKeyboardAuthority(
       activeElement: activeElement!.getter,
     }),
     focus: focus!.method,
-    addEventListener: addEventListener!.method,
-    removeEventListener: removeEventListener!.method,
+    addEventListener: addEventListener.method,
+    removeEventListener: removeEventListener.method,
     historyIsClean: checkHistory,
   });
 }
@@ -3792,7 +3914,7 @@ function modeSwitcherTriggerPathMatches(
   path: readonly EventTarget[],
   trigger: HTMLButtonElement,
   ownerDocument: Document,
-  ownerWindow: Window & typeof globalThis,
+  terminal: EventTarget,
 ) {
   const expected: EventTarget[] = [];
   let current: Node | null = trigger;
@@ -3801,22 +3923,11 @@ function modeSwitcherTriggerPathMatches(
     if (current === ownerDocument) break;
     current = current.parentNode;
   }
-  const terminal = path.at(-1);
   return (
     expected.at(-1) === ownerDocument
     && path.length === expected.length + 1
     && expected.every((entry, index) => path[index] === entry)
-    && (
-      terminal === ownerWindow
-      || (
-        typeof terminal === "object"
-        && terminal !== null
-        && "document" in terminal
-        && terminal.document === ownerDocument
-        && "window" in terminal
-        && terminal.window === terminal
-      )
-    )
+    && path.at(-1) === terminal
   );
 }
 
@@ -3841,6 +3952,7 @@ function readModeSwitcherNativeKeyboardEvent(
   publication: ModeSwitcherPublication,
   authority: ModeSwitcherKeyboardAuthority,
   event: KeyboardEvent,
+  receiver: EventTarget,
 ): ModeSwitcherNativeKeyboardSnapshot | null {
   if (
     publication.keyboardAuthority !== authority
@@ -3897,9 +4009,9 @@ function readModeSwitcherNativeKeyboardEvent(
     if (
       !action
       || type !== "keydown"
-      || eventPhase !== authority.atTargetPhase
+      || eventPhase !== authority.capturingPhase
       || target !== trigger
-      || currentTarget !== trigger
+      || currentTarget !== receiver
       || !bubbles
       || !cancelable
       || defaultPrevented
@@ -3911,13 +4023,13 @@ function readModeSwitcherNativeKeyboardEvent(
       || modeSwitcherNativeValue<boolean>(authority.keyboard.shiftKey, event, authority)
       || modeSwitcherNativeValue<boolean>(authority.keyboard.repeat, event, authority)
       || modeSwitcherNativeValue<boolean>(authority.keyboard.isComposing, event, authority)
-      || (view !== null && view !== authority.ownerWindow)
+      || (view !== null && view !== authority.ownerWindow && view !== receiver)
       || modeSwitcherActiveElement(authority) !== trigger
       || !modeSwitcherTriggerPathMatches(
         path,
         trigger,
         authority.ownerDocument,
-        authority.ownerWindow,
+        receiver,
       )
       || !modeSwitcherArrowActionIsCurrent(publication, action)
     ) {
@@ -3957,76 +4069,470 @@ function readModeSwitcherNativeKeyboardEvent(
   }
 }
 
-function captureModeSwitcherReactMethod(
-  value: object,
-  property: PropertyKey,
+function createModeSwitcherKeyboardRoute(
   authority: ModeSwitcherKeyboardAuthority,
-) {
-  let current: object | null = value;
-  while (current && current !== authority.ownerWindow.Object.prototype) {
-    const capture = captureModeSwitcherDescriptor(
-      current,
-      property,
-      authority.getOwnPropertyDescriptor,
-    );
-    if (capture) {
-      const method = capture.descriptor.value;
-      return typeof method === "function"
-        ? Object.freeze({ capture, method: method as ModeSwitcherNativeMethod })
-        : null;
+  publicationForRoute: () => ModeSwitcherPublication | null,
+  coordinator: ModeSwitcherPublicationCoordinator,
+): ModeSwitcherKeyboardRoute {
+  let deliveries = new WeakMap<KeyboardEvent, ModeSwitcherKeyboardDelivery>();
+  let seenEvents = new WeakSet<Event>();
+  let claimedDeliveries = new WeakSet<ModeSwitcherKeyboardDelivery>();
+  let active = false;
+  let attached = false;
+  let retired = false;
+  let disposed = false;
+  let publicCallActive = false;
+
+  const replacePairingAccess = () => {
+    deliveries = new WeakMap();
+    seenEvents = new WeakSet();
+    claimedDeliveries = new WeakSet();
+  };
+  const registration: ModeSwitcherKeyboardListenerRegistration = Object.freeze({
+    identity: Symbol("mode-switcher-window-keydown"),
+    target: authority.ownerWindow,
+    listener: function (this: EventTarget, event: Event) {
+      const publication = publicationForRoute();
+      let targetsTrigger = false;
+      try {
+        targetsTrigger = Boolean(
+          publication
+          && event instanceof authority.ownerWindow.KeyboardEvent
+          && modeSwitcherNativeValue<EventTarget | null>(
+            authority.event.target,
+            event,
+            authority,
+          ) === publication.dom.trigger
+        );
+      } catch {
+        return;
+      }
+      if (!targetsTrigger) return;
+      if (
+        publication
+        && coordinator.active() === publication
+        && (
+          !authority.historyIsClean()
+          || !publication.isExact()
+        )
+      ) {
+        publication.retire();
+        return;
+      }
+      const existing = deliveries.get(event as KeyboardEvent);
+      if (seenEvents.has(event)) {
+        if (
+          existing
+          && existing.captureTriggerSeen
+          && existing.captureRootSeen
+          && !existing.bubbleAttempted
+        ) {
+          return;
+        }
+        deliveries.delete(event as KeyboardEvent);
+        return;
+      }
+      seenEvents.add(event);
+      if (
+        !publication
+        || !active
+        || retired
+        || disposed
+        || publicCallActive
+        || publication.keyboardRoute !== route
+        || publication.keyboardAuthority !== authority
+        || !registration.isCurrent()
+        || !(event instanceof authority.ownerWindow.KeyboardEvent)
+        || !coordinator.canStageArrow(publication, event)
+        || !publication.isExact()
+      ) {
+        return;
+      }
+      const snapshot = readModeSwitcherNativeKeyboardEvent(
+        publication,
+        authority,
+        event,
+        this,
+      );
+      if (!snapshot) return;
+      const terminal = snapshot.path.at(-1);
+      if (!terminal || terminal !== this) return;
+      const listenerProof: ModeSwitcherNativeListenerProof = Object.freeze({
+        publication,
+        registration,
+        event,
+        receiver: this,
+        currentTarget: snapshot.currentTarget as EventTarget,
+        terminal,
+        eventPhase: snapshot.eventPhase,
+      });
+      const delivery: ModeSwitcherKeyboardDelivery = {
+        snapshot,
+        listenerProof,
+        delegationTarget: null,
+        captureEvent: null,
+        captureProof: null,
+        captureTriggerSeen: false,
+        captureRootSeen: false,
+        bubbleEvent: null,
+        bubbleProof: null,
+        bubbleAttempted: false,
+        bubbleTriggerSeen: false,
+        bubbleRootSeen: false,
+      };
+      if (
+        modeSwitcherNativeListenerProofMatches(
+          listenerProof,
+          publication,
+          event,
+        )
+      ) {
+        deliveries.set(event, delivery);
+      }
+    },
+    add: authority.addEventListener,
+    remove: authority.removeEventListener,
+    capture: true,
+    isCurrent: () => {
+      const publication = publicationForRoute();
+      return Boolean(
+        publication
+        && active
+        && attached
+        && !retired
+        && !disposed
+        && publication.keyboardRoute === route
+        && publication.keyboardAuthority === authority
+        && registration.target === authority.ownerWindow
+        && registration.add === authority.addEventListener
+        && registration.remove === authority.removeEventListener
+        && authority.historyIsClean()
+      );
+    },
+  });
+
+  const runPublicCall = <Value,>(callback: () => Value): Value | null => {
+    if (
+      publicCallActive
+      || !active
+      || retired
+      || disposed
+      || !registration.isCurrent()
+    ) {
+      return null;
     }
-    current = authority.getPrototypeOf(current);
-  }
-  return null;
+    publicCallActive = true;
+    try {
+      return callback();
+    } catch {
+      return null;
+    } finally {
+      publicCallActive = false;
+    }
+  };
+
+  const route: ModeSwitcherKeyboardRoute = Object.freeze({
+    registration,
+    activate: () => {
+      if (
+        active
+        || attached
+        || retired
+        || disposed
+        || !authority.historyIsClean()
+      ) {
+        return false;
+      }
+      active = true;
+      try {
+        modeSwitcherNativeCall<void>(
+          registration.add,
+          registration.target,
+          ["keydown", registration.listener, registration.capture],
+          authority,
+        );
+      } catch {
+        active = false;
+        replacePairingAccess();
+        return false;
+      }
+      attached = true;
+      if (registration.isCurrent()) return true;
+      active = false;
+      modeSwitcherNativeCall<void>(
+        registration.remove,
+        registration.target,
+        ["keydown", registration.listener, registration.capture],
+        authority,
+      );
+      attached = false;
+      replacePairingAccess();
+      return false;
+    },
+    stageReact: (
+      phase: ModeSwitcherReactKeyboardPhase,
+      boundary: ModeSwitcherReactKeyboardBoundary,
+      event: React.KeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const publication = publicationForRoute();
+      if (
+        !publication
+        || !event
+        || typeof event !== "object"
+        || publication.keyboardRoute !== route
+      ) {
+        return null;
+      }
+      return runPublicCall(() => {
+        const nativeEvent = event.nativeEvent;
+        const delivery = nativeEvent instanceof authority.ownerWindow.KeyboardEvent
+          ? deliveries.get(nativeEvent)
+          : undefined;
+        if (delivery && phase === "bubble") delivery.bubbleAttempted = true;
+        if (
+          !delivery
+          || delivery.snapshot.publication !== publication
+          || !coordinator.canStageArrow(publication, nativeEvent)
+          || !modeSwitcherNativeListenerProofMatches(
+            delivery.listenerProof,
+            publication,
+            nativeEvent,
+          )
+          || !modeSwitcherNativeKeyboardEventMatches(delivery, phase)
+        ) {
+          return null;
+        }
+        const proof = captureModeSwitcherReactKeyboardProof(
+          event,
+          delivery,
+          phase,
+        );
+        if (!proof) return null;
+        const delegationTarget = modeSwitcherNativeValue<EventTarget | null>(
+          authority.event.currentTarget,
+          nativeEvent,
+          authority,
+        );
+        if (
+          !delegationTarget
+          || !delivery.snapshot.path.includes(delegationTarget)
+          || (
+            delivery.delegationTarget !== null
+            && delivery.delegationTarget !== delegationTarget
+          )
+        ) {
+          return null;
+        }
+        if (phase === "capture") {
+          if (boundary === "trigger") {
+            if (delivery.captureRootSeen) return null;
+            if (
+              delivery.captureEvent !== null
+              && delivery.captureEvent !== event
+            ) {
+              return null;
+            }
+            delivery.delegationTarget = delegationTarget;
+            delivery.captureEvent = event;
+            delivery.captureProof = proof;
+            delivery.captureTriggerSeen = true;
+            return delivery;
+          }
+          if (
+            !delivery.captureTriggerSeen
+            || delivery.captureRootSeen
+            || delivery.captureEvent !== event
+            || !delivery.captureProof
+            || !modeSwitcherReactKeyboardEventMatches(
+              delivery,
+              event,
+              delivery.captureProof,
+              "capture",
+              false,
+            )
+          ) {
+            return null;
+          }
+          delivery.captureRootSeen = true;
+          return delivery;
+        }
+        if (
+          !delivery.captureTriggerSeen
+          || !delivery.captureRootSeen
+          || !delivery.captureEvent
+          || !delivery.captureProof
+        ) {
+          return null;
+        }
+        if (boundary === "trigger") {
+          if (delivery.bubbleRootSeen) return null;
+          if (
+            delivery.bubbleEvent !== null
+            && delivery.bubbleEvent !== event
+          ) {
+            return null;
+          }
+          delivery.bubbleEvent = event;
+          delivery.bubbleProof = proof;
+          delivery.bubbleTriggerSeen = true;
+          return delivery;
+        }
+        if (
+          !delivery.bubbleTriggerSeen
+          || delivery.bubbleRootSeen
+          || delivery.bubbleEvent !== event
+          || !delivery.bubbleProof
+          || delivery.captureEvent === event
+          || !modeSwitcherReactKeyboardEventMatches(
+            delivery,
+            event,
+            delivery.bubbleProof,
+            "bubble",
+            false,
+          )
+        ) {
+          return null;
+        }
+        delivery.bubbleRootSeen = true;
+        return delivery;
+      });
+    },
+    consume: (delivery: ModeSwitcherKeyboardDelivery) => {
+      if (
+        !registration.isCurrent()
+        || claimedDeliveries.has(delivery)
+        || deliveries.get(delivery.snapshot.event) !== delivery
+        || !delivery.captureTriggerSeen
+        || !delivery.captureRootSeen
+        || !delivery.bubbleTriggerSeen
+        || !delivery.bubbleRootSeen
+      ) {
+        return false;
+      }
+      deliveries.delete(delivery.snapshot.event);
+      claimedDeliveries.add(delivery);
+      return true;
+    },
+    retains: (delivery: ModeSwitcherKeyboardDelivery) => Boolean(
+      registration.isCurrent()
+      && (
+        deliveries.get(delivery.snapshot.event) === delivery
+        || claimedDeliveries.has(delivery)
+      )
+      && delivery.listenerProof.registration === registration
+      && modeSwitcherNativeListenerProofMatches(
+        delivery.listenerProof,
+        delivery.snapshot.publication,
+        delivery.snapshot.event,
+      )
+    ),
+    runPublicCall,
+    retire: () => {
+      if (retired) return;
+      retired = true;
+      active = false;
+      replacePairingAccess();
+      if (attached) {
+        modeSwitcherNativeCall<void>(
+          registration.remove,
+          registration.target,
+          ["keydown", registration.listener, registration.capture],
+          authority,
+        );
+        attached = false;
+      }
+    },
+    dispose: () => {
+      if (disposed) return;
+      route.retire();
+      disposed = true;
+      replacePairingAccess();
+    },
+  });
+  return route;
 }
 
 function captureModeSwitcherReactKeyboardProof(
   event: React.KeyboardEvent<HTMLButtonElement>,
-  authority: ModeSwitcherKeyboardAuthority | null,
+  delivery: ModeSwitcherKeyboardDelivery,
+  phase: ModeSwitcherReactKeyboardPhase,
 ): ModeSwitcherReactKeyboardProof | null {
+  const { snapshot } = delivery;
+  const authority = snapshot.publication.keyboardAuthority;
   if (!authority || !event || typeof event !== "object") return null;
-  const prototype = authority.getPrototypeOf(event);
-  if (!prototype || prototype === authority.ownerWindow.Object.prototype) return null;
-  const preventDefault = captureModeSwitcherReactMethod(event, "preventDefault", authority);
-  const stopPropagation = captureModeSwitcherReactMethod(event, "stopPropagation", authority);
-  const isDefaultPrevented = captureModeSwitcherReactMethod(event, "isDefaultPrevented", authority);
-  const isPropagationStopped = captureModeSwitcherReactMethod(
-    event,
-    "isPropagationStopped",
-    authority,
-  );
-  const persist = captureModeSwitcherReactMethod(event, "persist", authority);
-  const isPersistent = captureModeSwitcherReactMethod(event, "isPersistent", authority);
-  const methods = [
-    preventDefault,
-    stopPropagation,
-    isDefaultPrevented,
-    isPropagationStopped,
-    persist,
-    isPersistent,
-  ];
-  if (methods.some((method) => method === null)) return null;
-  return Object.freeze({
-    prototype,
-    descriptors: Object.freeze(methods.map((method) => method!.capture)),
-    preventDefault: preventDefault!.method,
-    stopPropagation: stopPropagation!.method,
-    isDefaultPrevented: isDefaultPrevented!.method,
-    isPropagationStopped: isPropagationStopped!.method,
-    persist: persist!.method,
-    isPersistent: isPersistent!.method,
-  });
+  try {
+    const nativeEvent = event.nativeEvent;
+    const preventDefault = event.preventDefault as ModeSwitcherNativeMethod;
+    const isDefaultPrevented = event.isDefaultPrevented as ModeSwitcherNativeMethod;
+    const isPropagationStopped = event.isPropagationStopped as ModeSwitcherNativeMethod;
+    const currentTarget = event.currentTarget;
+    const target = event.target;
+    const eventPhase = event.eventPhase;
+    const proof: ModeSwitcherReactKeyboardProof = Object.freeze({
+      event,
+      nativeEvent,
+      currentTarget,
+      target,
+      eventPhase,
+      type: event.type,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      isTrusted: event.isTrusted,
+      timeStamp: event.timeStamp,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      repeat: event.repeat,
+      detail: event.detail,
+      view: event.view,
+      preventDefault,
+      isDefaultPrevented,
+      isPropagationStopped,
+    });
+    return (
+      event !== (nativeEvent as unknown)
+      && nativeEvent === snapshot.event
+      && currentTarget === snapshot.source
+      && target === snapshot.source
+      && eventPhase === (
+        phase === "capture" ? authority.capturingPhase : authority.bubblingPhase
+      )
+      && typeof preventDefault === "function"
+      && typeof isDefaultPrevented === "function"
+      && typeof isPropagationStopped === "function"
+      && modeSwitcherReactKeyboardEventMatches(delivery, event, proof, phase, false)
+    )
+      ? proof
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function modeSwitcherNativeKeyboardEventMatches(
   delivery: ModeSwitcherKeyboardDelivery,
+  phase: ModeSwitcherReactKeyboardPhase,
+  defaultPrevented = false,
 ) {
   const { snapshot } = delivery;
   const { publication, event } = snapshot;
   const authority = publication.keyboardAuthority;
+  const route = publication.keyboardRoute;
   if (
     !authority
+    || !route
     || !authority.historyIsClean()
+    || !route.retains(delivery)
+    || !modeSwitcherNativeListenerProofMatches(
+      delivery.listenerProof,
+      publication,
+      event,
+    )
     || authority.getPrototypeOf(event) !== authority.keyboardPrototype
     || !authority.trusted.matches(event)
     || authority.trusted.read(event) !== true
@@ -4057,12 +4563,12 @@ function modeSwitcherNativeKeyboardEventMatches(
         authority.event.eventPhase,
         event,
         authority,
-      ) === authority.bubblingPhase
+      ) === (phase === "capture" ? authority.capturingPhase : authority.bubblingPhase)
       && currentTarget !== null
       && path.includes(currentTarget)
       && (
-        delivery.bubbleCurrentTarget === null
-        || currentTarget === delivery.bubbleCurrentTarget
+        delivery.delegationTarget === null
+        || currentTarget === delivery.delegationTarget
       )
       && modeSwitcherNativeValue<boolean>(
         authority.event.bubbles,
@@ -4074,11 +4580,11 @@ function modeSwitcherNativeKeyboardEventMatches(
         event,
         authority,
       ) === snapshot.cancelable
-      && !modeSwitcherNativeValue<boolean>(
+      && modeSwitcherNativeValue<boolean>(
         authority.event.defaultPrevented,
         event,
         authority,
-      )
+      ) === defaultPrevented
       && !modeSwitcherNativeValue<boolean>(
         authority.event.cancelBubble,
         event,
@@ -4123,6 +4629,11 @@ function modeSwitcherNativeKeyboardEventMatches(
         snapshot.detail
       && modeSwitcherNativeValue<Window | null>(authority.ui.view, event, authority) ===
         snapshot.view
+      && (
+        snapshot.view === null
+        || snapshot.view === authority.ownerWindow
+        || snapshot.view === delivery.listenerProof.receiver
+      )
       && path.length === snapshot.path.length
       && path.every((entry, index) => entry === snapshot.path[index])
       && modeSwitcherArrowActionIsCurrent(publication, snapshot.action)
@@ -4133,110 +4644,334 @@ function modeSwitcherNativeKeyboardEventMatches(
   }
 }
 
-function modeSwitcherReactKeyboardEventMatches(
+function modeSwitcherNativeListenerProofMatches(
+  proof: ModeSwitcherNativeListenerProof,
+  publication: ModeSwitcherPublication,
+  event: KeyboardEvent,
+) {
+  const authority = publication.keyboardAuthority;
+  const route = publication.keyboardRoute;
+  const registration = route?.registration;
+  return Boolean(
+    authority
+    && route
+    && registration
+    && Object.isFrozen(proof)
+    && Object.isFrozen(registration)
+    && proof.publication === publication
+    && proof.registration === registration
+    && proof.event === event
+    && proof.receiver === proof.currentTarget
+    && proof.receiver === proof.terminal
+    && proof.eventPhase === authority.capturingPhase
+    && registration.target === authority.ownerWindow
+    && registration.listener === route.registration.listener
+    && registration.add === authority.addEventListener
+    && registration.remove === authority.removeEventListener
+    && registration.capture === true
+    && registration.isCurrent()
+  );
+}
+
+function modeSwitcherReactKeyboardCancellationStateMatches(
   delivery: ModeSwitcherKeyboardDelivery,
   event: React.KeyboardEvent<HTMLButtonElement>,
   proof: ModeSwitcherReactKeyboardProof,
+  authority: ModeSwitcherKeyboardAuthority,
+  wrapperDefaultPrevented: boolean,
+  nativeDefaultPrevented: boolean,
+  isDefaultPrevented: ModeSwitcherNativeMethod,
 ) {
-  const { snapshot } = delivery;
-  const reactEvent = event as React.KeyboardEvent<HTMLButtonElement> & {
-    readonly _reactName?: unknown;
-    readonly isPersistent?: unknown;
-  };
-  const authority = snapshot.publication.keyboardAuthority;
-  if (!authority) return false;
+  const nativeEvent = delivery.snapshot.event;
   try {
     return Boolean(
-      authority.getPrototypeOf(event) === proof.prototype
-      && proof.descriptors.every((descriptor) => descriptor.isCurrent())
-      && event.nativeEvent === snapshot.event
-      && event.type === snapshot.type
-      && event.currentTarget === snapshot.source
-      && event.target === snapshot.source
-      && event.eventPhase === authority.bubblingPhase
-      && event.bubbles === snapshot.bubbles
-      && event.cancelable === snapshot.cancelable
-      && !event.defaultPrevented
-      && event.isTrusted === snapshot.isTrusted
-      && event.timeStamp === snapshot.timeStamp
-      && event.key === snapshot.key
-      && event.code === snapshot.code
-      && event.location === snapshot.location
-      && event.altKey === snapshot.altKey
-      && event.ctrlKey === snapshot.ctrlKey
-      && event.metaKey === snapshot.metaKey
-      && event.shiftKey === snapshot.shiftKey
-      && event.repeat === snapshot.repeat
-      && event.detail === snapshot.detail
-      && Object.is(event.view, snapshot.view)
-      && reactEvent._reactName === "onKeyDown"
-      && modeSwitcherNativeCall<boolean>(
-        proof.isDefaultPrevented,
-        event,
-        [],
+      proof.event === event
+      && event.nativeEvent === nativeEvent
+      && event.defaultPrevented === wrapperDefaultPrevented
+      && modeSwitcherNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        nativeEvent,
         authority,
-      ) === false
-      && modeSwitcherNativeCall<boolean>(
-        proof.isPropagationStopped,
-        event,
-        [],
+      ) === nativeDefaultPrevented
+      && !modeSwitcherNativeValue<boolean>(
+        authority.event.cancelBubble,
+        nativeEvent,
         authority,
-      ) === false
-      && modeSwitcherNativeCall<boolean>(
-        proof.isPersistent,
-        event,
-        [],
-        authority,
-      ) === true
-      && modeSwitcherNativeKeyboardEventMatches(delivery)
+      )
+      && event.preventDefault === proof.preventDefault
+      && event.isDefaultPrevented === isDefaultPrevented
+      && event.isPropagationStopped === proof.isPropagationStopped
     );
   } catch {
     return false;
   }
 }
 
-function preventModeSwitcherArrow(claim: ModeSwitcherClaimedArrow) {
-  const { authority, nativeEvent, reactEvent, reactProof } = claim;
-  if (
-    !authority.historyIsClean()
-    || !reactProof.descriptors.every((descriptor) => descriptor.isCurrent())
-    || modeSwitcherNativeValue<boolean>(
-      authority.event.defaultPrevented,
-      nativeEvent,
+function modeSwitcherReactKeyboardEventMatches(
+  delivery: ModeSwitcherKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: ModeSwitcherReactKeyboardProof,
+  phase: ModeSwitcherReactKeyboardPhase,
+  releasedCurrentTarget: boolean,
+  nativeDefaultPrevented = false,
+) {
+  const { snapshot } = delivery;
+  const authority = snapshot.publication.keyboardAuthority;
+  if (!authority) return false;
+  try {
+    const publicFactsMatch = Boolean(
+      proof.event === event
+      && proof.nativeEvent === snapshot.event
+      && proof.currentTarget === snapshot.source
+      && proof.target === snapshot.source
+      && proof.eventPhase === (
+        phase === "capture" ? authority.capturingPhase : authority.bubblingPhase
+      )
+      && event.nativeEvent === snapshot.event
+      && event.type === proof.type
+      && proof.type === snapshot.type
+      && event.currentTarget === (releasedCurrentTarget ? null : proof.currentTarget)
+      && event.target === proof.target
+      && event.eventPhase === proof.eventPhase
+      && event.bubbles === proof.bubbles
+      && proof.bubbles === snapshot.bubbles
+      && event.cancelable === proof.cancelable
+      && proof.cancelable === snapshot.cancelable
+      && event.defaultPrevented === proof.defaultPrevented
+      && proof.defaultPrevented === false
+      && event.isTrusted === proof.isTrusted
+      && proof.isTrusted === snapshot.isTrusted
+      && event.timeStamp === proof.timeStamp
+      && proof.timeStamp === snapshot.timeStamp
+      && event.key === proof.key
+      && proof.key === snapshot.key
+      && event.code === proof.code
+      && proof.code === snapshot.code
+      && event.location === proof.location
+      && proof.location === snapshot.location
+      && event.altKey === proof.altKey
+      && proof.altKey === snapshot.altKey
+      && event.ctrlKey === proof.ctrlKey
+      && proof.ctrlKey === snapshot.ctrlKey
+      && event.metaKey === proof.metaKey
+      && proof.metaKey === snapshot.metaKey
+      && event.shiftKey === proof.shiftKey
+      && proof.shiftKey === snapshot.shiftKey
+      && event.repeat === proof.repeat
+      && proof.repeat === snapshot.repeat
+      && event.detail === proof.detail
+      && proof.detail === snapshot.detail
+      && Object.is(event.view, proof.view)
+      && Object.is(proof.view, snapshot.view)
+      && event.preventDefault === proof.preventDefault
+      && event.isDefaultPrevented === proof.isDefaultPrevented
+      && event.isPropagationStopped === proof.isPropagationStopped
+    );
+    if (
+      !publicFactsMatch
+      || modeSwitcherNativeCall<boolean>(
+        proof.isDefaultPrevented,
+        event,
+        [],
+        authority,
+      ) !== false
+      || !modeSwitcherReactKeyboardCancellationStateMatches(
+        delivery,
+        event,
+        proof,
+        authority,
+        false,
+        nativeDefaultPrevented,
+        proof.isDefaultPrevented,
+      )
+      || modeSwitcherNativeCall<boolean>(
+        proof.isPropagationStopped,
+        event,
+        [],
+        authority,
+      ) !== false
+    ) {
+      return false;
+    }
+    return modeSwitcherReactKeyboardCancellationStateMatches(
+      delivery,
+      event,
+      proof,
       authority,
-    )
-  ) {
+      false,
+      nativeDefaultPrevented,
+      proof.isDefaultPrevented,
+    );
+  } catch {
     return false;
   }
-  const syntheticDefault = authority.getOwnPropertyDescriptor(
-    reactEvent,
-    "defaultPrevented",
-  );
-  if (
-    !syntheticDefault
-    || !("value" in syntheticDefault)
-    || syntheticDefault.value !== false
-    || syntheticDefault.writable !== true
-  ) {
+}
+
+function modeSwitcherReactKeyboardEventWasPrevented(
+  delivery: ModeSwitcherKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: ModeSwitcherReactKeyboardProof,
+  authority: ModeSwitcherKeyboardAuthority,
+) {
+  const { snapshot } = delivery;
+  try {
+    const isDefaultPrevented = event.isDefaultPrevented as ModeSwitcherNativeMethod;
+    const publicFactsMatch = Boolean(
+      proof.event === event
+      && proof.nativeEvent === snapshot.event
+      && proof.currentTarget === snapshot.source
+      && proof.target === snapshot.source
+      && proof.eventPhase === authority.bubblingPhase
+      && event.currentTarget === proof.currentTarget
+      && event.nativeEvent === proof.nativeEvent
+      && event.type === proof.type
+      && proof.type === snapshot.type
+      && event.target === proof.target
+      && event.eventPhase === proof.eventPhase
+      && event.bubbles === proof.bubbles
+      && proof.bubbles === snapshot.bubbles
+      && event.cancelable === proof.cancelable
+      && proof.cancelable === snapshot.cancelable
+      && event.isTrusted === proof.isTrusted
+      && proof.isTrusted === snapshot.isTrusted
+      && event.timeStamp === proof.timeStamp
+      && proof.timeStamp === snapshot.timeStamp
+      && event.key === proof.key
+      && proof.key === snapshot.key
+      && event.code === proof.code
+      && proof.code === snapshot.code
+      && event.location === proof.location
+      && proof.location === snapshot.location
+      && event.altKey === proof.altKey
+      && event.ctrlKey === proof.ctrlKey
+      && event.metaKey === proof.metaKey
+      && event.shiftKey === proof.shiftKey
+      && event.repeat === proof.repeat
+      && event.detail === proof.detail
+      && Object.is(event.view, proof.view)
+      && Object.is(proof.view, snapshot.view)
+      && event.preventDefault === proof.preventDefault
+      && event.isDefaultPrevented === isDefaultPrevented
+      && event.isPropagationStopped === proof.isPropagationStopped
+      && typeof isDefaultPrevented === "function"
+      && event.defaultPrevented === true
+    );
+    if (
+      !publicFactsMatch
+      || modeSwitcherNativeCall<boolean>(
+        isDefaultPrevented,
+        event,
+        [],
+        authority,
+      ) !== true
+      || !modeSwitcherReactKeyboardCancellationStateMatches(
+        delivery,
+        event,
+        proof,
+        authority,
+        true,
+        true,
+        isDefaultPrevented,
+      )
+      || modeSwitcherNativeCall<boolean>(
+        proof.isPropagationStopped,
+        event,
+        [],
+        authority,
+      ) !== false
+    ) {
+      return false;
+    }
+    return modeSwitcherReactKeyboardCancellationStateMatches(
+      delivery,
+      event,
+      proof,
+      authority,
+      true,
+      true,
+      isDefaultPrevented,
+    );
+  } catch {
     return false;
   }
-  modeSwitcherNativeCall<void>(
-    authority.event.preventDefault,
-    nativeEvent,
-    [],
+}
+
+function preventModeSwitcherArrow(
+  claim: ModeSwitcherClaimedArrow,
+  coordinator: ModeSwitcherPublicationCoordinator,
+) {
+  const {
     authority,
-  );
-  if (
-    !modeSwitcherNativeValue<boolean>(
+    captureEvent,
+    captureProof,
+    delivery,
+    nativeEvent,
+    publication,
+    reactEvent,
+    reactProof,
+  } = claim;
+  const route = publication.keyboardRoute;
+  if (!route) return false;
+  const beforePrevention = route.runPublicCall(() => Boolean(
+    authority.historyIsClean()
+    && coordinator.retainsArrowClaim(claim)
+    && modeSwitcherNativeKeyboardEventMatches(delivery, "bubble")
+    && modeSwitcherReactKeyboardEventMatches(
+      delivery,
+      captureEvent,
+      captureProof,
+      "capture",
+      true,
+    )
+    && modeSwitcherReactKeyboardEventMatches(
+      delivery,
+      reactEvent,
+      reactProof,
+      "bubble",
+      false,
+    )
+    && !modeSwitcherNativeValue<boolean>(
       authority.event.defaultPrevented,
       nativeEvent,
       authority,
     )
-    || !authority.set(reactEvent, "defaultPrevented", true, reactEvent)
-  ) {
-    return false;
-  }
-  return authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented")?.value === true;
+  ));
+  if (beforePrevention !== true) return false;
+  const prevented = route.runPublicCall(() =>
+    modeSwitcherNativeCall<void>(
+      reactProof.preventDefault,
+      reactEvent,
+      [],
+      authority,
+    ));
+  if (prevented === null) return false;
+  const finalValidation = route.runPublicCall(() => Boolean(
+    modeSwitcherNativeValue<boolean>(
+      authority.event.defaultPrevented,
+      nativeEvent,
+      authority,
+    )
+    && modeSwitcherReactKeyboardEventWasPrevented(
+      delivery,
+      reactEvent,
+      reactProof,
+      authority,
+    )
+    && coordinator.retainsArrowClaim(claim)
+    && modeSwitcherNativeKeyboardEventMatches(delivery, "bubble", true)
+    && modeSwitcherReactKeyboardEventMatches(
+      delivery,
+      captureEvent,
+      captureProof,
+      "capture",
+      true,
+      true,
+    )
+    && modeSwitcherActiveElement(authority) === claim.action.trigger
+    && modeSwitcherArrowActionIsCurrent(publication, claim.action)
+    && publication.isExact()
+  ));
+  return finalValidation === true;
 }
 
 function suppressModeSwitcherRadixArrowDown(
@@ -4255,7 +4990,6 @@ function suppressModeSwitcherRadixArrowDown(
     return false;
   }
   try {
-    const syntheticDefault = authority.getOwnPropertyDescriptor(event, "defaultPrevented");
     if (
       modeSwitcherNativeValue<string>(authority.event.type, nativeEvent, authority) !== "keydown"
       || modeSwitcherNativeValue<string>(
@@ -4263,17 +4997,12 @@ function suppressModeSwitcherRadixArrowDown(
         nativeEvent,
         authority,
       ) !== "ArrowDown"
-      || !syntheticDefault
-      || !("value" in syntheticDefault)
-      || syntheticDefault.value !== false
-      || syntheticDefault.writable !== true
+      || event.defaultPrevented !== false
     ) {
       return false;
     }
-    return (
-      authority.set(event, "defaultPrevented", true, event)
-      && authority.getOwnPropertyDescriptor(event, "defaultPrevented")?.value === true
-    );
+    if (!authority.set(event, "defaultPrevented", true, event)) return false;
+    return Boolean(event.defaultPrevented);
   } catch {
     return false;
   }
@@ -5678,7 +6407,6 @@ function createModeSwitcherPresentation({
           ownerWindow as Window & typeof globalThis,
         )
       : null;
-    const keyboardEvents = new Set<KeyboardEvent>();
     const arrowActions: Readonly<Record<ModeSwitcherArrowKey, ModeSwitcherArrowAction>> =
       Object.freeze({
         ArrowDown: Object.freeze({
@@ -5698,15 +6426,19 @@ function createModeSwitcherPresentation({
           destination: "last",
         }),
       });
-    let keyboardListenerAttached = false;
-    const keyboardListener = (event: Event) =>
-      coordinator.stageNativeArrow(publication, event);
+    const keyboardRoute = keyboardAuthority
+      ? createModeSwitcherKeyboardRoute(
+          keyboardAuthority,
+          () => publication,
+          coordinator,
+        )
+      : null;
     const publication: ModeSwitcherPublication = Object.freeze({
       render,
       document: publicationDocument,
       dom,
       keyboardAuthority,
-      keyboardEvents,
+      keyboardRoute,
       arrowActions,
       triggerParent,
       contentParent,
@@ -5731,16 +6463,7 @@ function createModeSwitcherPresentation({
       dispose: () => {
         observer?.disconnect();
         observer = null;
-        coordinator.clearKeyboardEvents(publication);
-        if (keyboardAuthority && keyboardListenerAttached) {
-          modeSwitcherNativeCall<void>(
-            keyboardAuthority.removeEventListener,
-            dom.trigger,
-            ["keydown", keyboardListener, true],
-            keyboardAuthority,
-          );
-          keyboardListenerAttached = false;
-        }
+        keyboardRoute?.dispose();
       },
     });
     function retire(reason: Retirement) {
@@ -5768,15 +6491,7 @@ function createModeSwitcherPresentation({
         && publication.isExact()
       ),
     });
-    if (keyboardAuthority) {
-      modeSwitcherNativeCall<void>(
-        keyboardAuthority.addEventListener,
-        dom.trigger,
-        ["keydown", keyboardListener, true],
-        keyboardAuthority,
-      );
-      keyboardListenerAttached = true;
-    }
+    keyboardRoute?.activate();
     if (MutationObserverConstructor) {
       observer = new MutationObserverConstructor(inspectMutations);
       observer.observe(dom.trigger, { attributes: true, characterData: true, childList: true, subtree: true });
@@ -5854,15 +6569,26 @@ function createModeSwitcherPresentation({
     }
     coordinator.publishDisclosure(publication, !render.open, [nativeEvent]);
   };
+  const onTriggerKeyDownCapture = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = currentPublication();
+    publication?.keyboardRoute?.stageReact("capture", "trigger", event);
+  };
+  const onTriggerArrowKeyDownCapture = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = currentPublication();
+    publication?.keyboardRoute?.stageReact("capture", "root", event);
+  };
   const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const publication = currentPublication();
-    if (
-      publication
-      && (event.key === "ArrowDown" || event.key === "ArrowUp")
-    ) {
-      coordinator.stageReactArrow(publication, event);
-      return;
-    }
+    const stagedArrow = publication?.keyboardRoute?.stageReact(
+      "bubble",
+      "trigger",
+      event,
+    );
+    if (stagedArrow) return;
     if (!["Enter", " "].includes(event.key)) return;
     const trigger = publication?.dom.trigger;
     const ownerWindow = publication?.document.defaultView;
@@ -5902,22 +6628,30 @@ function createModeSwitcherPresentation({
       if (candidate) suppressModeSwitcherRadixArrowDown(candidate, event);
       return;
     }
-    const arrow = coordinator.claimReactArrow(publication, event);
+    const delivery = publication.keyboardRoute?.stageReact(
+      "bubble",
+      "root",
+      event,
+    );
+    const arrow = delivery
+      ? coordinator.claimReactArrow(publication, delivery)
+      : null;
     if (!arrow) {
       suppressModeSwitcherRadixArrowDown(publication, event);
       return;
     }
-    if (!preventModeSwitcherArrow(arrow)) {
+    if (!preventModeSwitcherArrow(arrow, coordinator)) {
+      coordinator.releaseArrowClaim(arrow);
       suppressModeSwitcherRadixArrowDown(publication, event);
       return;
     }
     coordinator.publishDisclosure(publication, true, [arrow.nativeEvent], true, arrow);
-    onOpenChange(true);
+    if (!onOpenChange(true)) coordinator.releaseArrowClaim(arrow);
   };
   const onOpenChange = (open: boolean) => {
     const publication = currentPublication();
     const intent = publication && coordinator.consumeDisclosure(publication, open);
-    if (!publication || !intent) return;
+    if (!publication || !intent) return false;
     if (render.open === open) {
       const arrow = intent.arrow;
       const target = arrow && open
@@ -5929,11 +6663,12 @@ function createModeSwitcherPresentation({
         || arrow.authority.ownerDocument !== publication.document
         || arrow.authority.ownerWindow !== publication.document.defaultView
         || !arrow.authority.historyIsClean()
+        || !coordinator.retainsArrowClaim(arrow)
         || modeSwitcherActiveElement(arrow.authority) !== publication.dom.trigger
         || !publication.isExact()
         || !publication.retire()
       ) {
-        return;
+        return false;
       }
       commitOpen(Object.freeze({ visit: render.visit, open: true }));
       modeSwitcherNativeCall<void>(
@@ -5942,19 +6677,20 @@ function createModeSwitcherPresentation({
         [{ preventScroll: true }],
         arrow.authority,
       );
-      return;
+      return true;
     }
     if (open) {
       if (intent.arrow?.key === "ArrowUp" && !coordinator.prepareOpenFocus(intent.arrow)) {
-        return;
+        return false;
       }
       if (!publication.retire()) {
         coordinator.cancelOpenFocus(publication);
-        return;
+        return false;
       }
       commitOpen(Object.freeze({ visit: render.visit, open: true }));
+      return true;
     } else {
-      close(publication, intent.returnFocus);
+      return close(publication, intent.returnFocus);
     }
   };
   const onOpenAutoFocus = (event: Event) => {
@@ -6139,6 +6875,8 @@ function createModeSwitcherPresentation({
     captureReader: owners.reader.capture,
     establish,
     onTriggerPointerDown,
+    onTriggerArrowKeyDownCapture,
+    onTriggerKeyDownCapture,
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -6221,6 +6959,8 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
     captureGroup,
     captureReader,
     onTriggerPointerDown,
+    onTriggerArrowKeyDownCapture,
+    onTriggerKeyDownCapture,
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -6242,12 +6982,17 @@ export function ModeSwitcher({ session }: { session: CollabSession }) {
   const openAutoFocusProps = { onOpenAutoFocus };
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
-      <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
+      <MenuTrigger
+        asChild
+        onKeyDownCapture={onTriggerArrowKeyDownCapture}
+        onKeyDown={onTriggerArrowKeyDown}
+      >
         <button
           ref={captureTrigger}
           type="button"
           className={triggerClassName}
           onPointerDown={onTriggerPointerDown}
+          onKeyDownCapture={onTriggerKeyDownCapture}
           onKeyDown={onTriggerKeyDown}
           data-testid="mode-switcher"
         >
