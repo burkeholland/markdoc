@@ -192,11 +192,6 @@ interface ActivityKeyboardAuthority {
     void
   >;
   readonly trusted: ActivityTrustedGetter;
-  readonly reactMethodMatches: (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => boolean;
   readonly isCurrent: () => boolean;
 }
 
@@ -204,10 +199,8 @@ type ActivityHeaderKeyPhase = "capture" | "bubble";
 
 interface ActivityReactKeyMethods {
   readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
 }
 
 interface ActivityHeaderKeyFacts {
@@ -1312,8 +1305,6 @@ function captureActivityKeyboardAuthority(
   const HTMLElementConstructor = ownerWindow.HTMLElement;
   const EventTargetConstructor = ownerWindow.EventTarget;
   const apply = ownerWindow.Reflect.apply;
-  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
-  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
   const eventPrototype = EventConstructor.prototype;
   const uiEventPrototype = UIEventConstructor.prototype;
   const keyboardPrototype = KeyboardEventConstructor.prototype;
@@ -1442,26 +1433,6 @@ function captureActivityKeyboardAuthority(
       documentView.read() === ownerWindow;
     return historyIsClean;
   };
-  const reactMethodMatches = (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => {
-    if (!isCurrent() || typeof value !== "function") return false;
-    try {
-      let owner: object | null = event;
-      while (owner) {
-        const descriptor = getOwnPropertyDescriptor(owner, property);
-        if (descriptor) {
-          return "value" in descriptor && descriptor.value === value;
-        }
-        owner = getPrototypeOf(owner) as object | null;
-      }
-    } catch {
-      historyIsClean = false;
-    }
-    return false;
-  };
   if (!isCurrent()) return null;
   return Object.freeze({
     ownerWindow,
@@ -1497,7 +1468,6 @@ function captureActivityKeyboardAuthority(
     listen,
     unlisten,
     trusted,
-    reactMethodMatches,
     isCurrent,
   });
 }
@@ -1645,45 +1615,23 @@ function activityReactKeyMethods(
   try {
     const methods = Object.freeze({
       preventDefault: event.preventDefault as (...args: never[]) => unknown,
-      stopPropagation: event.stopPropagation as (...args: never[]) => unknown,
       isDefaultPrevented: event.isDefaultPrevented as (
         ...args: never[]
       ) => unknown,
       isPropagationStopped: event.isPropagationStopped as (
         ...args: never[]
       ) => unknown,
-      persist: event.persist as (...args: never[]) => unknown,
     });
     if (
-      !keyboard.reactMethodMatches(
-        event,
-        "preventDefault",
-        methods.preventDefault,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "stopPropagation",
-        methods.stopPropagation,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "isDefaultPrevented",
-        methods.isDefaultPrevented,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "isPropagationStopped",
-        methods.isPropagationStopped,
-      ) ||
-      !keyboard.reactMethodMatches(event, "persist", methods.persist) ||
+      typeof methods.preventDefault !== "function" ||
+      typeof methods.isDefaultPrevented !== "function" ||
+      typeof methods.isPropagationStopped !== "function" ||
       keyboard.apply(methods.isDefaultPrevented, event, []) !== false ||
       keyboard.apply(methods.isPropagationStopped, event, []) !== false ||
       (expected !== undefined &&
         (methods.preventDefault !== expected.preventDefault ||
-          methods.stopPropagation !== expected.stopPropagation ||
           methods.isDefaultPrevented !== expected.isDefaultPrevented ||
-          methods.isPropagationStopped !== expected.isPropagationStopped ||
-          methods.persist !== expected.persist))
+          methods.isPropagationStopped !== expected.isPropagationStopped))
     ) {
       return null;
     }
@@ -2269,7 +2217,7 @@ function createActivityPublication({
     let replayRefs: ActivityRefReplay[] = [];
     let domGuard: ActivityDomGuard | null = null;
     let listening = false;
-    const nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
+    let nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
     const seenNativeKeys = new WeakSet<object>();
     const nativeBubbleTargets = new Set<EventTarget>();
     const publishedDomMatches = () =>
@@ -2305,6 +2253,7 @@ function createActivityPublication({
       if (retired) return false;
       retired = true;
       retirement = reason;
+      nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
       removeListeners();
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
@@ -2425,13 +2374,6 @@ function createActivityPublication({
           bubbleRootEvent: null,
         };
         nativeDeliveries.set(nativeEvent, delivery);
-        queueMicrotask(() => {
-          queueMicrotask(() => {
-            if (nativeDeliveries.get(nativeEvent) === delivery) {
-              nativeDeliveries.delete(nativeEvent);
-            }
-          });
-        });
       } catch {
         nativeDeliveries.delete(nativeEvent);
       }
@@ -2736,6 +2678,22 @@ function createActivityPublication({
       const delivery = nativeDeliveries.get(nativeEvent);
       if (retired || !keyboard || !delivery) return;
       if (delivery.snapshot.publication !== publication) return;
+      try {
+        if (
+          keyboard.eventCurrentTarget.read(nativeEvent) !==
+            delivery.delegationTarget ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE
+        ) {
+          return;
+        }
+      } catch {
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        nativeDeliveries.delete(nativeEvent);
+        return;
+      }
+      nativeDeliveries.delete(nativeEvent);
       const staged = delivery.snapshot;
       const captureEvent = delivery.captureEvent;
       const bubbleEvent = delivery.bubbleEvent;
@@ -2749,12 +2707,9 @@ function createActivityPublication({
             ? "navigate-refresh"
             : "navigate-close"
         ];
+      let claimed = false;
       try {
         if (
-          keyboard.eventCurrentTarget.read(nativeEvent) !==
-            delivery.delegationTarget ||
-          keyboard.eventPhase.read(nativeEvent) !==
-            keyboard.Event.BUBBLING_PHASE ||
           !delivery.crossedPanel ||
           delivery.captureInvalid ||
           delivery.bubbleInvalid ||
@@ -2795,7 +2750,20 @@ function createActivityPublication({
         );
         const destination =
           destinationIndex === null ? null : (controls[destinationIndex] ?? null);
+        const bubbleMethods = activityReactKeyMethods(
+          bubbleEvent,
+          keyboard,
+          delivery.bubbleMethods,
+        );
         if (
+          !activityReactKeyMethods(
+            captureEvent,
+            keyboard,
+            delivery.captureMethods,
+          ) ||
+          !bubbleMethods ||
+          bubbleEvent.nativeEvent !== nativeEvent ||
+          bubbleEvent.defaultPrevented !== false ||
           destinationIndex === null ||
           !destination ||
           destination.element === source.element ||
@@ -2818,35 +2786,25 @@ function createActivityPublication({
         ) {
           return;
         }
+        claimed = true;
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
-        nativeDeliveries.delete(nativeEvent);
-        const bubbleMethods = activityReactKeyMethods(
-          bubbleEvent,
-          keyboard,
-          delivery.bubbleMethods,
-        );
-        if (
-          !bubbleMethods ||
-          bubbleEvent.nativeEvent !== nativeEvent ||
-          bubbleEvent.defaultPrevented !== false
-        ) {
-          return;
-        }
         keyboard.apply(bubbleMethods.preventDefault, bubbleEvent, []);
         const currentIsDefaultPrevented = bubbleEvent.isDefaultPrevented as (
           ...args: never[]
         ) => unknown;
+        const currentIsPropagationStopped =
+          bubbleEvent.isPropagationStopped as (...args: never[]) => unknown;
         if (
           !keyboard.isCurrent() ||
           !keyboard.eventDefaultPrevented.read(nativeEvent) ||
+          keyboard.eventCancelBubble.read(nativeEvent) ||
           !bubbleEvent.defaultPrevented ||
-          !keyboard.reactMethodMatches(
-            bubbleEvent,
-            "isDefaultPrevented",
-            currentIsDefaultPrevented,
-          ) ||
-          keyboard.apply(currentIsDefaultPrevented, bubbleEvent, []) !== true
+          typeof currentIsDefaultPrevented !== "function" ||
+          typeof currentIsPropagationStopped !== "function" ||
+          currentIsPropagationStopped !== bubbleMethods.isPropagationStopped ||
+          keyboard.apply(currentIsDefaultPrevented, bubbleEvent, []) !== true ||
+          keyboard.apply(currentIsPropagationStopped, bubbleEvent, []) !== false
         ) {
           return;
         }
@@ -2855,8 +2813,9 @@ function createActivityPublication({
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
         return;
+      } finally {
+        if (claimed) requestPublicationSuccessor();
       }
-      requestPublicationSuccessor();
     }
 
     const attachListeners = () => {
