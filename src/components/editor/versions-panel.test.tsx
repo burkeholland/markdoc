@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { compile } from "tailwindcss";
 import {
   StrictMode,
   useLayoutEffect,
@@ -8399,6 +8400,280 @@ describe("VersionsPanel · compare target", () => {
         }),
       ),
     );
+  });
+});
+
+describe("VersionsPanel - sidebar error wrapping", () => {
+  const longMessage = "VersionHistoryFailure".repeat(16);
+  const literalMessage = '  <img src=x onerror="alert(1)"> & <button>Retry</button>\n  "unchanged"  ';
+  const messages = [
+    ["unbroken", longMessage],
+    ["ordinary", "The version history service is unavailable. Please try again."],
+    ["literal", literalMessage],
+  ] as const;
+  const rawText = { normalizer: (text: string) => text };
+
+  function expectMessage(message: string, kind: "list" | "action") {
+    const text = screen.getByText(message, rawText);
+    const panel = screen.getByTestId("versions-panel");
+    expect(text.tagName).toBe("DIV");
+    expect(text.textContent).toBe(message);
+    expect(text.childNodes).toHaveLength(1);
+    expect(text.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(text.childElementCount).toBe(0);
+    expect(text.getAttributeNames()).toEqual(["class"]);
+    expect(text.tabIndex).toBe(-1);
+    expect(text.className).toBe(kind === "list"
+      ? "wrap-anywhere"
+      : "mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger wrap-anywhere");
+    expect(panel.className).toBe("flex w-[340px] shrink-0 flex-col border-l border-line bg-surface-2");
+    expect(panel.children).toHaveLength(2);
+    const body = panel.children.item(1);
+    expect(body?.className).toBe("scrollbar-thin flex-1 overflow-y-auto p-3");
+    if (kind === "list") {
+      const alert = screen.getByRole("alert");
+      const retry = within(alert).getByRole("button", { name: "Retry" });
+      expect(alert.parentElement).toBe(body);
+      expect(alert.className).toBe("mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40");
+      expect(alert).toHaveAttribute("aria-atomic", "true");
+      expect([...alert.children]).toEqual([text, retry]);
+      expect(retry.className).toBe("btn btn-outline btn-sm mt-2 gap-1.5");
+      expect(retry).toHaveAttribute("type", "button");
+      expect(retry.tabIndex).toBe(0);
+      expect(retry).toBeEnabled();
+    } else {
+      expect(text.parentElement).toBe(body);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expectMutationControlsToBeDisabled(false);
+    }
+    return text;
+  }
+
+  function expectPassiveMessage(
+    text: HTMLElement,
+    onClose: ReturnType<typeof vi.fn>,
+    onPreview: ReturnType<typeof vi.fn>,
+  ) {
+    const panel = screen.getByTestId("versions-panel");
+    const nodes = [...panel.querySelectorAll("*")];
+    const tabStops = nodes.filter((node) => node instanceof HTMLElement && node.tabIndex >= 0);
+    const focused = document.activeElement;
+    const markup = panel.outerHTML;
+    const observer = new MutationObserver(() => {});
+    observer.observe(panel, { attributes: true, childList: true, characterData: true, subtree: true });
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, "focus"),
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+      vi.spyOn(globalThis, "fetch"),
+    ];
+    const effects = [
+      versions, version, renameVersion, restoreVersion, copyVersion,
+      push, pendingNotice, onClose, onPreview, ...spies,
+    ];
+    const counts = effects.map((effect) => effect.mock.calls.length);
+    try {
+      // Stay synchronous after settlement so polling and React cleanup are outside this interval.
+      act(() => {
+        fireEvent.pointerOver(text);
+        fireEvent.mouseOver(text);
+        fireEvent.mouseMove(text);
+        fireEvent.mouseOut(text);
+        fireEvent.pointerOut(text);
+      });
+      expect(effects.map((effect) => effect.mock.calls.length)).toEqual(counts);
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(panel.outerHTML).toBe(markup);
+      expect([...panel.querySelectorAll("*")]).toEqual(nodes);
+      expect(nodes.filter((node) => node instanceof HTMLElement && node.tabIndex >= 0)).toEqual(tabStops);
+      expect(document.activeElement).toBe(focused);
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    } finally {
+      observer.disconnect();
+      for (const spy of spies) spy.mockRestore();
+    }
+  }
+
+  it.each(messages)("preserves the %s list failure as passive, wrapped raw text", async (label, message) => {
+    const docId = `wrapped-list-${label}`;
+    versions.mockRejectedValueOnce(new ApiError(503, message));
+    const props = { session: session(docId), onClose: vi.fn(), onPreview: vi.fn(), refreshKey: 0 };
+    const { unmount } = render(<VersionsPanel {...props} />);
+
+    await screen.findByText(message, rawText);
+    const text = expectMessage(message, "list");
+    expect(screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent))
+      .toEqual(["Refresh versions", "Close version history", "Retry"]);
+    expectPassiveMessage(text, props.onClose, props.onPreview);
+    expect(versions).toHaveBeenCalledExactlyOnceWith(docId);
+    unmount();
+    expect(text).not.toBeInTheDocument();
+    expect(screen.queryByText(message, rawText)).not.toBeInTheDocument();
+  });
+
+  it.each(messages)("preserves the %s action failure without changing rows, controls or the compare hint", async (label, message) => {
+    const docId = `wrapped-action-${label}`;
+    restoreVersion.mockRejectedValueOnce(new ApiError(503, message));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const props = { session: session(docId), onClose: vi.fn(), onPreview: vi.fn(), refreshKey: 0 };
+    const { unmount } = render(<VersionsPanel {...props} />);
+    const row = await screen.findByTestId("version-item");
+    fireEvent.click(within(row).getByText("Draft"));
+    await waitFor(() => expect(props.onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(within(row).getByRole("checkbox", { name: "Compare v1" }));
+    await waitFor(() => expect(props.onPreview).toHaveBeenCalledTimes(2));
+    const rowMarkup = row.outerHTML;
+    const hint = screen.getByTestId("compare-hint");
+    const hintMarkup = hint.outerHTML;
+    const buttons = screen.getAllByRole("button");
+    const buttonMarkup = buttons.map((button) => button.outerHTML);
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+    await screen.findByText(message, rawText);
+    const text = expectMessage(message, "action");
+    expect(row.outerHTML).toBe(rowMarkup);
+    expect(hint.outerHTML).toBe(hintMarkup);
+    expect(screen.getAllByRole("button")).toEqual(buttons);
+    expect(buttons.map((button) => button.outerHTML)).toEqual(buttonMarkup);
+    expectPassiveMessage(text, props.onClose, props.onPreview);
+    expect(restoreVersion).toHaveBeenCalledExactlyOnceWith(docId, named.id);
+    unmount();
+    expect(text).not.toBeInTheDocument();
+    expect(screen.queryByText(message, rawText)).not.toBeInTheDocument();
+  });
+
+  it("replaces a list error, rejects its stale Retry, and recovers with one current Retry request", async () => {
+    const docId = "wrapped-list-replacement";
+    const recovery = deferred<{ versions: VersionSummary[] }>();
+    versions.mockReset()
+      .mockRejectedValueOnce(new Error(longMessage))
+      .mockRejectedValueOnce(new Error(literalMessage))
+      .mockReturnValueOnce(recovery.promise);
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+    await screen.findByText(longMessage, rawText);
+    expectMessage(longMessage, "list");
+    const staleRetry = capturedProps(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" })).onClick;
+    expect(staleRetry).toBeTypeOf("function");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh versions" }));
+    await screen.findByText(literalMessage, rawText);
+    expectMessage(literalMessage, "list");
+    expect(screen.queryByText(longMessage, rawText)).not.toBeInTheDocument();
+
+    const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry" });
+    const before = versions.mock.calls.length;
+    const restore = interceptClick(retry, (current, event) => {
+      staleRetry?.(event);
+      expect(versions).toHaveBeenCalledTimes(before);
+      current(event);
+      current(event);
+      expect(versions).toHaveBeenCalledTimes(before + 1);
+    });
+    try {
+      fireEvent.click(retry);
+    } finally {
+      restore();
+    }
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    await act(async () => recovery.resolve({ versions: [] }));
+    expect(screen.getByText("No versions yet")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(literalMessage, rawText)).not.toBeInTheDocument();
+    expect(versions).toHaveBeenCalledTimes(3);
+    expect(versions).toHaveBeenLastCalledWith(docId);
+  });
+
+  it("replaces an action error and allows one current Restore retry while rejecting stale and consumed handlers", async () => {
+    const docId = "wrapped-action-replacement";
+    const recovery = deferred<{ ok: boolean }>();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    restoreVersion
+      .mockRejectedValueOnce(new Error(longMessage))
+      .mockRejectedValueOnce(new Error(literalMessage))
+      .mockReturnValueOnce(recovery.promise);
+    const onPreview = vi.fn();
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+    fireEvent.click(await screen.findByText("Draft"));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await screen.findByText(longMessage, rawText);
+    expectMessage(longMessage, "action");
+    const staleRestore = capturedProps(screen.getByRole<HTMLButtonElement>("button", { name: "Restore" })).onClick;
+    expect(staleRestore).toBeTypeOf("function");
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    expect(screen.queryByText(longMessage, rawText)).not.toBeInTheDocument();
+    await screen.findByText(literalMessage, rawText);
+    expectMessage(literalMessage, "action");
+
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: "Restore" });
+    const before = restoreVersion.mock.calls.length;
+    const confirmations = confirm.mock.calls.length;
+    const restore = interceptClick(button, (current, event) => {
+      staleRestore?.(event);
+      expect(restoreVersion).toHaveBeenCalledTimes(before);
+      expect(confirm).toHaveBeenCalledTimes(confirmations);
+      current(event);
+      current(event);
+      expect(restoreVersion).toHaveBeenCalledTimes(before + 1);
+      expect(confirm).toHaveBeenCalledTimes(confirmations + 1);
+    });
+    try {
+      fireEvent.click(button);
+    } finally {
+      restore();
+    }
+    expect(screen.queryByText(literalMessage, rawText)).not.toBeInTheDocument();
+    expectMutationControlsToBeDisabled(true);
+    await act(async () => recovery.resolve({ ok: true }));
+    expect(restoreVersion).toHaveBeenCalledTimes(3);
+    expect(restoreVersion).toHaveBeenLastCalledWith(docId, named.id);
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(onPreview).toHaveBeenLastCalledWith(null);
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.queryByText(longMessage, rawText)).not.toBeInTheDocument();
+    expect(screen.queryByText(literalMessage, rawText)).not.toBeInTheDocument();
+  });
+
+  it.each(["list", "action"] as const)("drops the %s message and stale control when switching documents", async (kind) => {
+    const docId = `wrapped-switch-${kind}`;
+    const nextDocId = `${docId}-next`;
+    const message = `${longMessage}${literalMessage}`;
+    if (kind === "list") versions.mockRejectedValueOnce(new Error(message));
+    else restoreVersion.mockRejectedValueOnce(new Error(message));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const props = { session: session(docId), onClose: vi.fn(), onPreview: vi.fn(), refreshKey: 0 };
+    const { rerender } = render(<VersionsPanel {...props} />);
+    if (kind === "action") {
+      fireEvent.click(await screen.findByText("Draft"));
+      await waitFor(() => expect(props.onPreview).toHaveBeenCalledOnce());
+      fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    }
+    await screen.findByText(message, rawText);
+    const text = expectMessage(message, kind);
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: kind === "list" ? "Retry" : "Restore" });
+    const stale = capturedProps(button).onClick;
+    expect(stale).toBeTypeOf("function");
+    rerender(<VersionsPanel {...props} session={session(nextDocId)} />);
+    await screen.findByText("Draft");
+    expect(text).not.toBeInTheDocument();
+    expect(button).not.toBeInTheDocument();
+    expect(screen.queryByText(message, rawText)).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    const counts = [versions, restoreVersion].map((effect) => effect.mock.calls.length);
+    expectInert(stale, button, screen.getByTestId("versions-panel"));
+    fireEvent.click(button);
+    expect([versions, restoreVersion].map((effect) => effect.mock.calls.length)).toEqual(counts);
+    expect(versions).toHaveBeenLastCalledWith(nextDocId);
+  });
+
+  it("emits overflow-wrap anywhere from installed Tailwind for the error utility", async () => {
+    expect(longMessage.length).toBeGreaterThanOrEqual(240);
+    expect(longMessage).not.toMatch(/\s/);
+    const { build } = await compile("@tailwind utilities;");
+    expect(build(["wrap-anywhere"])).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
   });
 });
 
