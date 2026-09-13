@@ -5992,6 +5992,7 @@ interface CommitDialogRender {
   readonly onBridgeSubmitCapture: (event: ReactFormEvent<HTMLDivElement>) => void;
   readonly onBridgeSubmit: (event: ReactFormEvent<HTMLDivElement>) => void;
   readonly onMessageChange: (event: ReactChangeEvent<HTMLInputElement>) => void;
+  readonly onMessageKeyDownCapture: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   readonly onMessageKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void;
   readonly onCancel: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onSubmitClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -7416,8 +7417,55 @@ class CommitPublicationCoordinator {
   private readonly operations = new WeakSet<CommitDialogOperation>();
   private readonly timers = new WeakSet<CommitDialogTimerOwner>();
   private readonly firedTimers = new WeakSet<CommitDialogTimerOwner>();
+  private enterDelivery = false;
+  private readonly enterForms = new WeakSet<HTMLFormElement>();
+  private readonly enterSubmits = new WeakSet<Event>();
+  private readonly enterNativeEvents = new WeakSet<Event>();
 
   constructor(private readonly mount: symbol) {}
+
+  enterIsDelivering() {
+    return this.enterDelivery;
+  }
+
+  noteEnterForm(form: HTMLFormElement) {
+    this.enterForms.add(form);
+  }
+
+  clearEnterForm(form: HTMLFormElement) {
+    this.enterForms.delete(form);
+  }
+
+  enterOwnsForm(form: HTMLFormElement | null) {
+    return form !== null && this.enterForms.has(form);
+  }
+
+  noteEnterSubmit(event: Event) {
+    this.enterSubmits.add(event);
+  }
+
+  enterOwnsSubmit(event: Event) {
+    return this.enterSubmits.has(event);
+  }
+
+  enterSawNative(event: Event) {
+    return this.enterNativeEvents.has(event);
+  }
+
+  noteEnterNative(event: Event) {
+    this.enterNativeEvents.add(event);
+  }
+
+  deliverEnter<T>(deliver: () => T): T | undefined {
+    if (this.enterDelivery) return undefined;
+    this.enterDelivery = true;
+    try {
+      return deliver();
+    } finally {
+      // Publication cleanup must not unlock an arbitrary callback still on the stack.
+      this.enterDelivery = false;
+    }
+  }
 
   active() {
     return this.activePublication;
@@ -8555,43 +8603,565 @@ function exactCommitClick(
     : null;
 }
 
-function exactCommitKey(
-  event: ReactKeyboardEvent<HTMLInputElement>,
-  input: HTMLInputElement,
-  form: HTMLFormElement,
-  content: HTMLDivElement,
+type CommitEnterWrapper = ReactFormEvent<HTMLElement>;
+type CommitEnterBoundary = "bridge-capture" | "input-capture" | "input" | "bridge";
+
+interface CommitEnterDelivery {
+  readonly event: CommitEnterWrapper;
+  readonly nativeEvent: KeyboardEvent | SubmitEvent;
+  readonly target: HTMLInputElement | HTMLFormElement;
+  readonly phase: number;
+  readonly prevent: CommitEnterWrapper["preventDefault"];
+  queryDefault: CommitEnterWrapper["isDefaultPrevented"];
+  readonly queryPropagation: CommitEnterWrapper["isPropagationStopped"];
+  prevented: boolean;
+  forwarding: CommitEnterDelivery | null;
+}
+
+interface CommitEnterNative {
+  readonly event: KeyboardEvent | SubmitEvent;
+  readonly path: readonly EventTarget[];
+  readonly receiver: EventTarget;
+  readonly trusted: boolean;
+  readonly code: string | null;
+  readonly location: number | null;
+  readonly deliveries: Map<CommitEnterBoundary, CommitEnterDelivery>;
+  finished: boolean;
+}
+
+interface CommitEnterClaim {
+  readonly key: CommitEnterNative;
+  readonly action: object;
+  readonly message: string;
+  readonly submit: CommitCurrentValue<WeakRef<SubmitEvent> | null>;
+  readonly attempt: CommitCurrentValue<WeakRef<SubmitEvent> | null>;
+  ready: boolean;
+  consumed: boolean;
+}
+
+// The form retains only a weak reference to a key. Neither a completed dispatch
+// nor a retained React handler can keep a stale event/claim alive.
+function createCommitEnterRoute(
+  publication: CommitDialogPublication,
+  coordinator: CommitPublicationCoordinator,
+  dom: {
+    message: HTMLInputElement;
+    form: HTMLFormElement;
+    submit: HTMLButtonElement;
+    content: HTMLDivElement;
+    bridge: HTMLDivElement;
+  },
+  isCurrent: () => boolean,
+  invalidate: () => void,
+  commit: () => void,
 ) {
-  if (!event || typeof event !== "object") return null;
-  const ownerDocument = input.ownerDocument;
+  const ownerDocument = publication.ownerDocument;
   const ownerWindow = ownerDocument.defaultView;
-  const nativeEvent = event.nativeEvent;
-  return ownerWindow &&
-    commitSyntheticEventShape(event, "onKeyDown", false) &&
-    event.type === "keydown" &&
-    event.key === "Enter" &&
-    !event.altKey &&
-    !event.ctrlKey &&
-    !event.metaKey &&
-    !event.shiftKey &&
-    nativeEvent instanceof ownerWindow.KeyboardEvent &&
-    nativeEvent.constructor === ownerWindow.KeyboardEvent &&
-    nativeEvent.type === "keydown" &&
-    nativeEvent.key === "Enter" &&
-    !nativeEvent.isComposing &&
-    nativeEvent.eventPhase !== ownerWindow.Event.NONE &&
-    event.eventPhase === nativeEvent.eventPhase &&
-    event.bubbles === nativeEvent.bubbles &&
-    event.cancelable === nativeEvent.cancelable &&
-    !event.defaultPrevented &&
-    !nativeEvent.defaultPrevented &&
-    event.currentTarget === input &&
-    event.target === input &&
-    nativeEvent.target === input &&
-    input.form === form &&
-    input.isConnected &&
-    commitEventPath(nativeEvent, input, ownerDocument, [input, form, content])
-    ? nativeEvent
-    : null;
+  if (!ownerWindow) return null;
+  const Keyboard = ownerWindow.KeyboardEvent;
+  const Submit = ownerWindow.SubmitEvent;
+  const EventConstructor = ownerWindow.Event;
+  const composedPath = EventConstructor.prototype.composedPath;
+  const getModifierState = Keyboard.prototype.getModifierState;
+  const add = ownerWindow.addEventListener;
+  const remove = ownerWindow.removeEventListener;
+  const apply = Reflect.apply;
+  const nativeProofs = new WeakMap<Event, CommitEnterNative>();
+  const keys = new WeakMap<KeyboardEvent, CommitEnterClaim>();
+  const forms = new WeakMap<HTMLFormElement, WeakRef<KeyboardEvent>>();
+  const submits = new WeakMap<SubmitEvent, CommitEnterClaim>();
+  const wrappers = new WeakMap<object, CommitEnterDelivery>();
+  const seen = new WeakSet<Event>();
+  const replayed = new WeakSet<Event>();
+  let released = false;
+
+  const internal = () =>
+    !released &&
+    coordinator.isCurrent(publication) &&
+    !publication.isRetired() &&
+    !publication.authority.submitDisabled &&
+    publication.authority.trimmedMessage.length > 0;
+  const listenerIsCurrent = () =>
+    ownerDocument.defaultView === ownerWindow &&
+    ownerWindow.KeyboardEvent === Keyboard &&
+    ownerWindow.SubmitEvent === Submit &&
+    ownerWindow.Event === EventConstructor &&
+    EventConstructor.prototype.composedPath === composedPath &&
+    Keyboard.prototype.getModifierState === getModifierState &&
+    ownerWindow.addEventListener === add &&
+    ownerWindow.removeEventListener === remove;
+  const current = () => {
+    const exact =
+      listenerIsCurrent() &&
+      dom.message.ownerDocument === ownerDocument &&
+      dom.form.ownerDocument === ownerDocument &&
+      dom.content.ownerDocument === ownerDocument &&
+      dom.bridge.ownerDocument === ownerDocument &&
+      dom.message.isConnected &&
+      dom.form.isConnected &&
+      dom.content.isConnected &&
+      dom.bridge.isConnected &&
+      dom.message.form === dom.form &&
+      dom.message.parentElement === dom.form &&
+      dom.form.parentElement === dom.content &&
+      !dom.message.disabled &&
+      dom.submit.isConnected &&
+      dom.submit.form === dom.form &&
+      !dom.submit.disabled &&
+      dom.message.value === publication.authority.message &&
+      dom.message.value.trim() === publication.authority.trimmedMessage &&
+      ownerDocument.activeElement === dom.message &&
+      isCurrent();
+    if (!exact && internal()) invalidate();
+    return exact && internal();
+  };
+  const pending = () => {
+    const key = forms.get(dom.form)?.deref();
+    return key ? keys.get(key) : undefined;
+  };
+  const retains = (claim: CommitEnterClaim) =>
+    internal() &&
+    !claim.consumed &&
+    keys.get(claim.key.event as KeyboardEvent) === claim &&
+    claim.message === publication.authority.trimmedMessage;
+  const nativeMatches = (
+    proof: CommitEnterNative,
+    prevented: boolean,
+    dispatching: boolean,
+  ) => {
+    const event = proof.event;
+    const keyboard = event instanceof Keyboard;
+    const target = keyboard ? dom.message : dom.form;
+    if (
+      event.type !== (keyboard ? "keydown" : "submit") ||
+      event.target !== target ||
+      event.bubbles !== true ||
+      event.cancelable !== true ||
+      event.defaultPrevented !== prevented ||
+      event.cancelBubble !== false ||
+      event.isTrusted !== proof.trusted ||
+      (dispatching && event.eventPhase === EventConstructor.NONE) ||
+      (!dispatching && event.eventPhase !== EventConstructor.NONE)
+    ) {
+      return false;
+    }
+    if (keyboard) {
+      if (
+        event.key !== "Enter" ||
+        event.code !== proof.code ||
+        event.location !== proof.location ||
+        !["", "Enter", "NumpadEnter"].includes(event.code) ||
+        (event.location !== 0 && event.location !== 3) ||
+        (event.code === "NumpadEnter" && event.location !== 3) ||
+        (event.code === "Enter" && event.location !== 0) ||
+        event.repeat !== false ||
+        event.isComposing !== false ||
+        event.altKey !== false ||
+        event.ctrlKey !== false ||
+        event.metaKey !== false ||
+        event.shiftKey !== false ||
+        apply(getModifierState, event, ["Alt"]) !== false ||
+        apply(getModifierState, event, ["Control"]) !== false ||
+        apply(getModifierState, event, ["Meta"]) !== false ||
+        apply(getModifierState, event, ["Shift"]) !== false
+      ) {
+        return false;
+      }
+    } else if (
+      !(event instanceof Submit) ||
+      (event.submitter !== null && event.submitter !== dom.submit)
+    ) {
+      return false;
+    }
+    if (!dispatching) return true;
+    const path = apply(composedPath, event, []) as EventTarget[];
+    return (
+      path.length === proof.path.length &&
+      path.every((entry, index) => entry === proof.path[index]) &&
+      path[0] === target &&
+      path.includes(dom.form) &&
+      path.includes(dom.content) &&
+      path.at(-2) === ownerDocument &&
+      path.at(-1) === proof.receiver
+    );
+  };
+  const methodsMatch = (delivery: CommitEnterDelivery) =>
+    delivery.event.preventDefault === delivery.prevent &&
+    delivery.event.isDefaultPrevented === delivery.queryDefault &&
+    delivery.event.isPropagationStopped === delivery.queryPropagation;
+  const sharesPhase = (earlier: CommitEnterDelivery, active: CommitEnterDelivery) =>
+    earlier.nativeEvent === active.nativeEvent &&
+    earlier.phase === active.phase &&
+    earlier.target === active.target &&
+    earlier.prevent === active.prevent &&
+    earlier.queryDefault === active.queryDefault &&
+    earlier.queryPropagation === active.queryPropagation;
+  const deliveryMatches = (
+    delivery: CommitEnterDelivery,
+    active: CommitEnterDelivery | null,
+    currentTarget: HTMLElement | null,
+  ) => {
+    const event = delivery.event;
+    const native = delivery.nativeEvent;
+    const keyboard = native instanceof Keyboard;
+    const key = event as ReactKeyboardEvent<HTMLElement>;
+    const target = event.currentTarget;
+    return (
+      event.nativeEvent === native &&
+      event.target === delivery.target &&
+      (event === active?.event
+        ? target === currentTarget
+        : target === null ||
+          (!!active && sharesPhase(delivery, active) && target === currentTarget)) &&
+      event.type === (keyboard ? "keydown" : "submit") &&
+      event.eventPhase === delivery.phase &&
+      event.bubbles === true &&
+      event.cancelable === true &&
+      event.isTrusted === native.isTrusted &&
+      event.defaultPrevented === delivery.prevented &&
+      (!keyboard ||
+        (key.key === native.key &&
+          key.code === native.code &&
+          key.location === native.location &&
+          key.repeat === false &&
+          key.altKey === false &&
+          key.ctrlKey === false &&
+          key.metaKey === false &&
+          key.shiftKey === false)) &&
+      methodsMatch(delivery)
+    );
+  };
+  const validate = (
+    claim: CommitEnterClaim,
+    proof: CommitEnterNative,
+    deliveries: readonly CommitEnterDelivery[],
+    active: CommitEnterDelivery | null,
+    currentTarget: HTMLElement | null,
+    prevented = false,
+  ) => {
+    const facts = () =>
+      retains(claim) &&
+      current() &&
+      nativeMatches(claim.key, false, proof === claim.key) &&
+      (proof === claim.key ||
+        (claim.ready &&
+          pending() === claim &&
+          submits.get(proof.event as SubmitEvent) === claim &&
+          claim.submit.get()?.deref() === proof.event &&
+          nativeMatches(proof, prevented, true))) &&
+      deliveries.every((entry) =>
+        deliveryMatches(entry, active, currentTarget),
+      ) &&
+      internal() &&
+      retains(claim);
+    if (!facts()) return false;
+    for (const delivery of deliveries) {
+      // Public queries may reenter, retire the dialog, or replace another
+      // method. Validate after each call, never invoking an earlier snapshot.
+      if (!methodsMatch(delivery)) return false;
+      const defaultPrevented = apply(delivery.queryDefault, delivery.event, []);
+      if (defaultPrevented !== delivery.prevented || !facts()) return false;
+      if (!methodsMatch(delivery)) return false;
+      const propagationStopped = apply(
+        delivery.queryPropagation,
+        delivery.event,
+        [],
+      );
+      if (propagationStopped !== false || !facts()) return false;
+    }
+    return facts();
+  };
+  const readDelivery = (
+    event: CommitEnterWrapper,
+    proof: CommitEnterNative,
+    target: HTMLInputElement | HTMLFormElement,
+  ): CommitEnterDelivery | null => {
+    const previous = wrappers.get(event);
+    if (previous) {
+      return previous.nativeEvent === proof.event && methodsMatch(previous)
+        ? previous
+        : null;
+    }
+    const prevent = event.preventDefault;
+    const queryDefault = event.isDefaultPrevented;
+    const queryPropagation = event.isPropagationStopped;
+    if (
+      typeof prevent !== "function" ||
+      typeof queryDefault !== "function" ||
+      typeof queryPropagation !== "function"
+    ) {
+      return null;
+    }
+    return {
+      event,
+      nativeEvent: proof.event,
+      target,
+      phase: proof.event.eventPhase,
+      prevent,
+      queryDefault,
+      queryPropagation,
+      prevented: false,
+      forwarding: null,
+    };
+  };
+  const deliver = (
+    event: CommitEnterWrapper,
+    boundary: CommitEnterBoundary,
+    keyboard: boolean,
+  ) => {
+    if (!event || typeof event !== "object") return;
+    const native = event.nativeEvent;
+    const proof = nativeProofs.get(native);
+    const claim = keyboard
+      ? keys.get(native as KeyboardEvent)
+      : submits.get(native as SubmitEvent);
+    if (!proof || !claim || proof.finished || replayed.has(native)) return;
+    const order: CommitEnterBoundary[] = keyboard
+      ? ["bridge-capture", "input-capture", "input", "bridge"]
+      : ["bridge-capture", "input", "bridge"];
+    const previous = proof.deliveries.get(boundary);
+    if (!previous && order[proof.deliveries.size] !== boundary) return;
+    const target = keyboard ? dom.message : dom.form;
+    const currentTarget = boundary.startsWith("bridge") ? dom.bridge : target;
+    const expectedPhase = boundary.endsWith("capture")
+      ? EventConstructor.CAPTURING_PHASE
+      : EventConstructor.BUBBLING_PHASE;
+    if (
+      native.eventPhase !== expectedPhase ||
+      native.currentTarget === ownerDocument ||
+      native.currentTarget === proof.receiver ||
+      !native.currentTarget ||
+      !proof.path.includes(native.currentTarget)
+    ) {
+      return;
+    }
+    if (
+      previous &&
+      (previous.event === event ||
+        deliveryMatches(previous, null, null) ||
+        deliveryMatches(previous, previous, currentTarget))
+    ) {
+      return;
+    }
+    const delivery = readDelivery(event, proof, target);
+    if (!delivery) return;
+    const deliveries = [
+      ...[...claim.key.deliveries.values()].filter((entry) => entry !== previous),
+      ...(proof === claim.key
+        ? []
+        : [...proof.deliveries.values()].filter((entry) => entry !== previous)),
+      delivery,
+    ];
+    // Distinct public aliases can forward React's live per-phase currentTarget.
+    // Record only this observed transition, not an assumed hidden backing object.
+    const forwarding = deliveries.filter((entry) =>
+      entry !== delivery &&
+      sharesPhase(entry, delivery) &&
+      entry.event.currentTarget === currentTarget,
+    );
+    if (!validate(claim, proof, deliveries, delivery, currentTarget)) return;
+    for (const entry of forwarding) entry.forwarding = delivery;
+    wrappers.set(event, delivery);
+    proof.deliveries.set(boundary, delivery);
+  };
+  const remember: EventListener = function (this: EventTarget, event) {
+    coordinator.deliverEnter(() => {
+      if (
+        released ||
+        !coordinator.isCurrent(publication)
+      ) return;
+      if (seen.has(event) || coordinator.enterSawNative(event)) {
+        replayed.add(event);
+        return;
+      }
+      if (!(event instanceof Keyboard) && !(event instanceof Submit)) return;
+      const keyboard = event instanceof Keyboard;
+      if (
+        (keyboard
+          ? event.target !== dom.message || event.key !== "Enter"
+          : !(event instanceof Submit) || event.target !== dom.form) ||
+        !listenerIsCurrent() ||
+        event.currentTarget !== this ||
+        event.eventPhase !== EventConstructor.CAPTURING_PHASE
+      ) {
+        return;
+      }
+      if (!keyboard && !pending()) return;
+      const path = apply(composedPath, event, []) as EventTarget[];
+      if (path.at(-1) !== this || path.at(-2) !== ownerDocument) return;
+      const proof: CommitEnterNative = {
+        event,
+        path,
+        receiver: this,
+        trusted: event.isTrusted,
+        code: keyboard ? event.code : null,
+        location: keyboard ? event.location : null,
+        deliveries: new Map(),
+        finished: false,
+      };
+      seen.add(event);
+      coordinator.noteEnterNative(event);
+      nativeProofs.set(event, proof);
+      if (keyboard) {
+        const claim: CommitEnterClaim = {
+          key: proof,
+          action: Object.freeze({}),
+          message: publication.authority.trimmedMessage,
+          submit: new CommitCurrentValue<WeakRef<SubmitEvent> | null>(null),
+          attempt: new CommitCurrentValue<WeakRef<SubmitEvent> | null>(null),
+          ready: false,
+          consumed: false,
+        };
+        keys.set(event, claim);
+        // A malformed/unfinished Enter still cannot fall back to native-submit
+        // authority. A second key may not replace a rightful pending claim.
+        const previous = pending();
+        if (
+          !previous ||
+          (previous.key.event.eventPhase === EventConstructor.NONE &&
+            (!previous.ready ||
+              previous.attempt.get()?.deref()?.eventPhase === EventConstructor.NONE))
+        ) {
+          forms.set(dom.form, new WeakRef(event));
+        }
+        coordinator.noteEnterForm(dom.form);
+      } else {
+        coordinator.noteEnterSubmit(event);
+        const claim = pending();
+        const selected = claim?.submit.get()?.deref();
+        if (
+          claim &&
+          selected &&
+          selected.eventPhase === EventConstructor.NONE &&
+          retains(claim) &&
+          pending() === claim &&
+          claim.submit.get()?.deref() === selected
+        ) {
+          // An ended attempt must not reserve a good key indefinitely. Keep its
+          // native identity rejected, without displacing a still-live dispatch.
+          replayed.add(selected);
+          submits.delete(selected);
+          claim.submit.set(null);
+        }
+        if (claim && !claim.submit.get()?.deref()) {
+          submits.set(event, claim);
+          claim.attempt.set(new WeakRef(event));
+        }
+      }
+    });
+  };
+  const submitBoundary = (
+    event: CommitEnterWrapper,
+    boundary: "bridge-capture" | "input" | "bridge",
+  ) => {
+    if (!pending()) return false;
+    coordinator.deliverEnter(() => {
+      if (!event || typeof event !== "object") return;
+      const native = event.nativeEvent;
+      const claim = submits.get(native as SubmitEvent);
+      const proof = nativeProofs.get(native);
+      if (!claim || !proof || proof.finished || !claim.ready) return;
+      const selected = claim.submit.get()?.deref();
+      if (selected && selected !== native) return;
+      const previous = claim.submit.get();
+      if (!selected) claim.submit.set(new WeakRef(native as SubmitEvent));
+      const size = proof.deliveries.size;
+      deliver(event, boundary, false);
+      if (proof.deliveries.size === size && !selected) claim.submit.set(previous);
+    });
+    return true;
+  };
+  const finish = (event: Event) => {
+    const proof = nativeProofs.get(event);
+    if (!proof) return false;
+    coordinator.deliverEnter(() => {
+      if (
+        proof.finished ||
+        replayed.has(event) ||
+        event.currentTarget !== ownerDocument ||
+        event.eventPhase !== EventConstructor.BUBBLING_PHASE
+      ) {
+        return;
+      }
+      proof.finished = true;
+      const keyboard = event instanceof Keyboard;
+      const claim = keyboard
+        ? keys.get(event)
+        : submits.get(event as SubmitEvent);
+      const final = proof.deliveries.get("bridge");
+      if (!claim || !final) return;
+      const deliveries = [
+        ...claim.key.deliveries.values(),
+        ...(keyboard ? [] : proof.deliveries.values()),
+      ];
+      if (!validate(claim, proof, deliveries, null, null)) return;
+      if (keyboard) {
+        if (pending() === claim) claim.ready = true;
+        return;
+      }
+      if (!methodsMatch(final) || !retains(claim)) return;
+      apply(final.prevent, final.event, []);
+      if (!retains(claim)) return;
+      // React 19 changes this callable during preventDefault. Adopt only this
+      // immediate result, including the previously observed live phase aliases.
+      const queryDefault = final.event.isDefaultPrevented;
+      if (!retains(claim) || typeof queryDefault !== "function") return;
+      for (const delivery of deliveries) {
+        if (delivery.forwarding !== final) continue;
+        delivery.queryDefault = queryDefault;
+        delivery.prevented = true;
+      }
+      final.queryDefault = queryDefault;
+      final.prevented = true;
+      if (!validate(claim, proof, deliveries, null, null, true)) return;
+      if (
+        !retains(claim) ||
+        !coordinator.claimTerminal(
+          publication,
+          claim.action,
+          final.event,
+          event,
+        )
+      ) {
+        return;
+      }
+      claim.consumed = true;
+      coordinator.clearEnterForm(dom.form);
+      commit();
+    });
+    return true;
+  };
+  apply(add, ownerWindow, ["keydown", remember, true]);
+  apply(add, ownerWindow, ["submit", remember, true]);
+  return {
+    key: (event: ReactKeyboardEvent<HTMLElement>, boundary: CommitEnterBoundary) =>
+      coordinator.deliverEnter(() => {
+        if (!event || typeof event !== "object") return true;
+        const native = event.nativeEvent;
+        const recognized =
+          nativeProofs.has(native) ||
+          coordinator.enterSawNative(native) ||
+          (native instanceof Keyboard &&
+            native.target === dom.message &&
+            native.key === "Enter") ||
+          (event.target === dom.message && event.key === "Enter");
+        if (recognized) deliver(event, boundary, true);
+        return recognized;
+      }),
+    submit: submitBoundary,
+    finish,
+    clear: () => {
+      forms.delete(dom.form);
+      coordinator.clearEnterForm(dom.form);
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      forms.delete(dom.form);
+      apply(remove, ownerWindow, ["keydown", remember, true]);
+      apply(remove, ownerWindow, ["submit", remember, true]);
+    },
+  };
 }
 
 function exactOwnedCommitSubmit(
@@ -9111,6 +9681,7 @@ function createCommitDialogRender(
   let successorRequested = false;
   let establishmentQueued = false;
   let navigationPair: CommitActionNavigationPair | null = null;
+  let enterRoute: ReturnType<typeof createCommitEnterRoute> = null;
   let dismissal:
     | {
         readonly kind: "instant";
@@ -9341,6 +9912,8 @@ function createCommitDialogRender(
     publication: CommitDialogPublication,
     nativeEvent: Event,
   ) => {
+    if (coordinator.enterIsDelivering() || enterRoute?.finish(nativeEvent)) return;
+    if (coordinator.enterOwnsSubmit(nativeEvent)) return;
     const candidate = bridgeReactDeliveries.get(nativeEvent);
     bridgeReactDeliveries.delete(nativeEvent);
     pendingReactDeliveries.delete(nativeEvent);
@@ -9964,6 +10537,8 @@ function createCommitDialogRender(
       expectedOwners(),
       dom,
       (publication) => {
+        enterRoute?.release();
+        enterRoute = null;
         if (navigationPair?.publication === publication) {
           navigationPair = null;
         }
@@ -9978,6 +10553,14 @@ function createCommitDialogRender(
       currentRuntime = null;
       return undefined;
     }
+    enterRoute = createCommitEnterRoute(
+      runtime.publication,
+      coordinator,
+      dom,
+      () => owns(runtime.publication),
+      () => invalidate(runtime),
+      () => startOperation(runtime.publication, authority),
+    );
     return runtime.retireForLayout;
   };
   const stageInstantDismissal = (
@@ -10191,19 +10774,31 @@ function createCommitDialogRender(
     deliverReactEvent(event, "onClick", "click");
   };
   const onBridgeKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (coordinator.enterIsDelivering()) return;
+    if (enterRoute?.key(event, "bridge-capture") ||
+        coordinator.enterSawNative(event.nativeEvent)) return;
     if (!captureActionNavigation(event)) {
       captureReactEvent(event, "onKeyDown", "keydown");
     }
   };
   const onBridgeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (coordinator.enterIsDelivering()) return;
+    if (enterRoute?.key(event, "bridge") ||
+        coordinator.enterSawNative(event.nativeEvent)) return;
     if (!completeActionNavigation(event)) {
       deliverReactEvent(event, "onKeyDown", "keydown");
     }
   };
   const onBridgeSubmitCapture = (event: ReactFormEvent<HTMLDivElement>) => {
+    if (coordinator.enterIsDelivering() || enterRoute?.submit(event, "bridge-capture")) return;
+    if (coordinator.enterOwnsSubmit(event.nativeEvent) ||
+        coordinator.enterOwnsForm(formOwner.element())) return;
     captureReactEvent(event, "onSubmit", "submit");
   };
   const onBridgeSubmit = (event: ReactFormEvent<HTMLDivElement>) => {
+    if (coordinator.enterIsDelivering() || enterRoute?.submit(event, "bridge")) return;
+    if (coordinator.enterOwnsSubmit(event.nativeEvent) ||
+        coordinator.enterOwnsForm(formOwner.element())) return;
     deliverReactEvent(event, "onSubmit", "submit");
   };
   const onMessageChange = (event: ReactChangeEvent<HTMLInputElement>) => {
@@ -10231,30 +10826,28 @@ function createCommitDialogRender(
       updateMessage(publication, authority, message);
     });
   };
+  const onMessageKeyDownCapture = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    enterRoute?.key(event, "input-capture");
+  };
   const onMessageKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key !== "Enter") return;
-    const publication = coordinator.active();
-    const dom = exactDom();
-    if (!publication || !dom || event.currentTarget !== dom.message) return;
-    const nativeEvent = exactCommitKey(event, dom.message, dom.form, dom.content);
-    const action = Object.freeze({ identity: Symbol("commit-message-key") });
-    if (!nativeEvent) return;
-    stageReactDelivery(event, nativeEvent, () => {
-      if (
-        owns(publication) &&
-        coordinator.claimReactEvent(publication, action, event, nativeEvent)
-      ) {
-        return;
-      }
-    });
+    enterRoute?.key(event, "input");
   };
   const onSubmitClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (coordinator.enterIsDelivering()) return;
     const publication = coordinator.active();
     const dom = exactDom();
     if (!publication || !dom || event.currentTarget !== dom.submit) return;
     const nativeEvent = exactCommitClick(event, dom.submit, dom.submit, dom.content, dom.form);
     const action = Object.freeze({ identity: Symbol("commit-submit-click") });
     if (!nativeEvent) return;
+    if (
+      nativeEvent.detail > 0 ||
+      dom.form.ownerDocument.activeElement === dom.submit ||
+      !coordinator.enterOwnsForm(dom.form)
+    ) {
+      enterRoute?.clear();
+      coordinator.clearEnterForm(dom.form);
+    }
     stageReactDelivery(event, nativeEvent, () => {
       if (
         owns(publication) &&
@@ -10287,6 +10880,9 @@ function createCommitDialogRender(
     });
   };
   const onSubmit = (event: ReactFormEvent<HTMLFormElement>) => {
+    if (coordinator.enterIsDelivering() || enterRoute?.submit(event, "input")) return;
+    if (coordinator.enterOwnsSubmit(event.nativeEvent) ||
+        coordinator.enterOwnsForm(formOwner.element())) return;
     const ownedNativeEvent = exactOwnedCommitSubmit(event, coordinator);
     if (!ownedNativeEvent) return;
     if (!coordinator.submitIsPrepared(ownedNativeEvent)) {
@@ -10346,6 +10942,7 @@ function createCommitDialogRender(
     onBridgeSubmitCapture,
     onBridgeSubmit,
     onMessageChange,
+    onMessageKeyDownCapture,
     onMessageKeyDown,
     onCancel,
     onSubmitClick,
@@ -10944,6 +11541,7 @@ export const CommitDialog = memo(function CommitDialog({
   const onBridgeSubmitCapture = presentation?.onBridgeSubmitCapture;
   const onBridgeSubmit = presentation?.onBridgeSubmit;
   const onMessageChange = presentation?.onMessageChange;
+  const onMessageKeyDownCapture = presentation?.onMessageKeyDownCapture;
   const onMessageKeyDown = presentation?.onMessageKeyDown;
   const onCancel = presentation?.onCancel;
   const onSubmitClick = presentation?.onSubmitClick;
@@ -10982,6 +11580,7 @@ export const CommitDialog = memo(function CommitDialog({
                 className="input"
                 value={shown.message}
                 onChange={onMessageChange}
+                onKeyDownCapture={onMessageKeyDownCapture}
                 onKeyDown={onMessageKeyDown}
                 autoFocus
                 data-testid="commit-message"

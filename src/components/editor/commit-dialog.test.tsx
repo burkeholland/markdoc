@@ -11,6 +11,7 @@ import {
   type RefCallback,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DocumentDto } from "@/server/dto";
@@ -2103,6 +2104,1316 @@ describe("CommitDialog visit authority", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+
+  describe("public Enter provenance", () => {
+    type Stage =
+      | "key bridge capture"
+      | "key input capture"
+      | "key input"
+      | "key bridge"
+      | "submit bridge capture"
+      | "submit form"
+      | "submit bridge";
+    type PublicEvent = ReactFormEvent<HTMLElement>;
+    type Handler = (event: PublicEvent) => void;
+    type Delivery = {
+      stage: Stage;
+      event: PublicEvent;
+      prevent: ReturnType<typeof vi.fn<() => void>>;
+    };
+
+    function publicEvent(source: PublicEvent) {
+      const event: PublicEvent = {
+        nativeEvent: source.nativeEvent,
+        target: source.target,
+        currentTarget: source.currentTarget,
+        type: source.type,
+        eventPhase: source.eventPhase,
+        bubbles: source.bubbles,
+        cancelable: source.cancelable,
+        isTrusted: source.isTrusted,
+        timeStamp: source.timeStamp,
+        defaultPrevented: false,
+        preventDefault() {
+          source.preventDefault();
+          event.defaultPrevented = true;
+          event.isDefaultPrevented = () => true;
+        },
+        isDefaultPrevented: () => event.defaultPrevented,
+        isPropagationStopped: () => false,
+        get stopPropagation(): PublicEvent["stopPropagation"] {
+          throw new Error("Enter must not read wrapper stopPropagation");
+        },
+        get persist(): PublicEvent["persist"] {
+          throw new Error("Enter must not read wrapper persistence");
+        },
+      };
+      if (source.nativeEvent instanceof KeyboardEvent) {
+        const native = source.nativeEvent;
+        Object.assign(event, {
+          key: native.key,
+          code: native.code,
+          location: native.location,
+          repeat: native.repeat,
+          altKey: native.altKey,
+          ctrlKey: native.ctrlKey,
+          metaKey: native.metaKey,
+          shiftKey: native.shiftKey,
+        });
+      }
+      for (const name of ["_reactName", "isPersistent", "constructor", "isComposing"]) {
+        Object.defineProperty(event, name, {
+          get: () => {
+            throw new Error(`Enter must not read wrapper ${name}`);
+          },
+        });
+      }
+      return event;
+    }
+
+    function probe(
+      host: HTMLDivElement,
+      hook?: (delivery: Delivery, handler: Handler) => boolean | void,
+      accessor = false,
+      forwarding = false,
+    ) {
+      const bridge = commitBridge(host);
+      const input = message();
+      const form = commitForm();
+      const bindings: Array<[HTMLElement, string, Stage]> = [
+        [bridge, "onKeyDownCapture", "key bridge capture"],
+        [input, "onKeyDownCapture", "key input capture"],
+        [input, "onKeyDown", "key input"],
+        [bridge, "onKeyDown", "key bridge"],
+        [bridge, "onSubmitCapture", "submit bridge capture"],
+        [form, "onSubmit", "submit form"],
+        [bridge, "onSubmit", "submit bridge"],
+      ];
+      const deliveries: Delivery[] = [];
+      const sourcePreventions = new WeakMap<PublicEvent, Delivery["prevent"]>();
+      const restores = bindings.map(([element, prop, stage]) => {
+        const handler = reactProp<Handler>(element, prop);
+        const wrapped = (source: PublicEvent) => {
+          const event = forwarding ? new Proxy(source, {}) : publicEvent(source);
+          let prevent = forwarding ? sourcePreventions.get(source) : undefined;
+          if (!prevent) {
+            const originalPrevent = event.preventDefault;
+            prevent = vi.fn(function (this: PublicEvent) {
+              Reflect.apply(originalPrevent, this, []);
+            });
+            event.preventDefault = prevent;
+            if (forwarding) sourcePreventions.set(source, prevent);
+          }
+          if (accessor) {
+            const prototype = Object.create(null);
+            for (const key of Object.keys(event)) {
+              if (key === "persist" || key === "stopPropagation") continue;
+              let value = Reflect.get(event, key);
+              Reflect.deleteProperty(event, key);
+              Object.defineProperty(prototype, key, {
+                configurable: true,
+                get: () => value,
+                set: (next: unknown) => { value = next; },
+              });
+            }
+            Object.setPrototypeOf(event, prototype);
+          }
+          const delivery = { stage, event, prevent };
+          deliveries.push(delivery);
+          try {
+            if (hook?.(delivery, handler) !== true) handler(event);
+          } finally {
+            if (!forwarding) Reflect.set(event, "currentTarget", null);
+          }
+        };
+        setReactProp(element, prop, wrapped);
+        return () => {
+          if (element.isConnected && reactProp<Handler>(element, prop) === wrapped) {
+            setReactProp(element, prop, handler);
+          }
+        };
+      });
+      return {
+        deliveries,
+        restore: () => restores.forEach((restore) => restore()),
+        key: (init: KeyboardEventInit = {}) =>
+          dispatchCommitKey(input, "Enter", init, false),
+        submit: () => {
+          const event = nativeSubmit(form);
+          fireEvent(form, event);
+          return event;
+        },
+        preventionCount: () =>
+          [...new Set(deliveries.map(({ prevent }) => prevent))]
+            .reduce((count, prevent) => count + prevent.mock.calls.length, 0),
+      };
+    }
+
+    async function cleanSuccessor(
+      host: HTMLDivElement,
+      current: CommitActions,
+      text?: string,
+    ) {
+      if (text !== undefined) {
+        fireEvent.change(message(), { target: { value: `  ${text}  ` } });
+      }
+      await flushPublication();
+      const expectedMessage = text ?? message().value.trim();
+      const delivery = probe(host);
+      try {
+        const before = current.onCommit.mock.calls.length;
+        const key = delivery.key();
+        expect(key.defaultPrevented).toBe(false);
+        expect(current.onCommit).toHaveBeenCalledTimes(before);
+        expect(delivery.preventionCount()).toBe(0);
+        const event = delivery.submit();
+        expect(event.defaultPrevented).toBe(true);
+        expect(delivery.preventionCount()).toBe(1);
+        expect(current.onCommit).toHaveBeenCalledTimes(before + 1);
+        expect(current.onCommit).toHaveBeenLastCalledWith(expectedMessage);
+      } finally {
+        delivery.restore();
+      }
+    }
+
+    it.each([false, true])(
+      "accepts independent public deliveries with inherited accessors=%s and final React 19 query replacement",
+      async (accessor) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "public",
+            doc: repoDocument("public-enter", "public.md"),
+            actions: current,
+          });
+          fireEvent.change(message(), { target: { value: "  Public Enter  " } });
+          await flushPublication();
+          const delivery = probe(host, undefined, accessor);
+          try {
+            expect(delivery.key().defaultPrevented).toBe(false);
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+            const submit = delivery.submit();
+            expect(submit.defaultPrevented).toBe(true);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Public Enter");
+            expect(new Set(delivery.deliveries.map(({ event }) => event)).size).toBe(7);
+            expect(delivery.deliveries.at(-1)?.prevent).toHaveBeenCalledOnce();
+            expect(delivery.deliveries.slice(0, -1).every(({ prevent }) =>
+              prevent.mock.calls.length === 0,
+            )).toBe(true);
+            fireEvent(commitForm(), submit);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    describe("revision four corrections", () => {
+      it.each(["accepted", "blank", "malformed", "unfinished"] as const)(
+        "keeps %s Enter authority across native implicit-style button activation",
+        async (kind) => {
+          const first = deferred<void>();
+          const second = deferred<void>();
+          const current = actions(first.promise, second.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "implicit",
+              doc: repoDocument("implicit-enter", "implicit.md"),
+              actions: current,
+            });
+            const text = kind === "blank" ? " \t " : "  Implicit commit  ";
+            fireEvent.change(message(), { target: { value: text } });
+            await flushPublication();
+            const form = commitForm();
+            const button = screen.getByTestId<HTMLButtonElement>("commit-submit");
+            const submitted: SubmitEvent[] = [];
+            const observeSubmit = (event: Event) => {
+              expect(event).toBeInstanceOf(SubmitEvent);
+              submitted.push(event as SubmitEvent);
+            };
+            form.addEventListener("submit", observeSubmit, true);
+            const delivery = probe(host, ({ stage, event }) => {
+              if (stage !== "key input") return;
+              if (kind === "unfinished") return true;
+              if (kind === "malformed") Reflect.set(event, "code", "Space");
+            });
+            try {
+              const key = delivery.key();
+              expect(key.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              expect(document.activeElement).toBe(message());
+              // jsdom supplies a genuine submit from this native click's default
+              // activation. This is not OS-trusted implicit keyboard activation.
+              const click = new MouseEvent("click", {
+                bubbles: true, cancelable: true, detail: 0, button: 0,
+              });
+              fireEvent(button, click);
+              expect(click.defaultPrevented).toBe(false);
+              expect(submitted).toHaveLength(1);
+              expect(submitted[0].submitter).toBe(button);
+              expect(submitted[0].defaultPrevented).toBe(kind === "accepted");
+              expect(delivery.preventionCount()).toBe(kind === "accepted" ? 1 : 0);
+              if (kind === "accepted") {
+                expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Implicit commit");
+                expect(delivery.deliveries.at(-1)?.prevent).toHaveBeenCalledOnce();
+              } else {
+                expect(current.onCommit).not.toHaveBeenCalled();
+                expect(document.activeElement).toBe(message());
+              }
+            } finally {
+              form.removeEventListener("submit", observeSubmit, true);
+              delivery.restore();
+            }
+            if (kind === "accepted") {
+              await resolve(first);
+            } else {
+              // Independent pointer activation retains the ordinary blank-message
+              // semantics, rather than inheriting the rejected Enter claim.
+              fireEvent.click(button, { detail: 1 });
+              expect(current.onCommit).toHaveBeenCalledExactlyOnceWith(text.trim());
+              await reject(first, "Try the focused button");
+              await flushPublication();
+              const rejected = probe(host);
+              try {
+                rejected.key({ repeat: true });
+                expect(rejected.preventionCount()).toBe(0);
+              } finally {
+                rejected.restore();
+              }
+              button.focus();
+              fireEvent.click(button, { detail: 0 });
+              expect(current.onCommit).toHaveBeenCalledTimes(2);
+              expect(current.onCommit).toHaveBeenLastCalledWith(text.trim());
+              await resolve(second);
+            }
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it.each([false, true])(
+        "accepts live forwarding aliases at all seven boundaries but rejects later Q2 drift=%s",
+        async (drift) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "forwarding",
+              doc: repoDocument("forwarding-enter", "forwarding.md"),
+              actions: current,
+            });
+            fireEvent.change(message(), { target: { value: "  Forwarded commit  " } });
+            await flushPublication();
+            const prior = new Map<string, PublicEvent>();
+            let immediateQuery: PublicEvent["isDefaultPrevented"] | undefined;
+            const laterQuery = vi.fn(() => true);
+            let prevented = false;
+            let replaying = false;
+            const delivery = probe(host, ({ stage, event }) => {
+              if (replaying) return;
+              const phase = `${event.type}:${event.eventPhase}`;
+              const earlier = prior.get(phase);
+              if (earlier) {
+                expect(earlier).not.toBe(event);
+                expect(earlier.currentTarget).toBe(event.currentTarget);
+                expect(earlier.preventDefault).toBe(event.preventDefault);
+                expect(earlier.isDefaultPrevented).toBe(event.isDefaultPrevented);
+              }
+              prior.set(phase, event);
+              if (stage !== "submit form") return;
+              const prevent = event.preventDefault;
+              event.preventDefault = function (this: PublicEvent) {
+                Reflect.apply(prevent, this, []);
+                immediateQuery = this.isDefaultPrevented;
+                prevented = true;
+              };
+              if (drift) {
+                const native = event.nativeEvent;
+                const nativeDefault = Object.getOwnPropertyDescriptor(
+                  Event.prototype, "defaultPrevented",
+                )!.get!;
+                Object.defineProperty(native, "defaultPrevented", {
+                  get: () => {
+                    if (prevented) event.isDefaultPrevented = laterQuery;
+                    return Reflect.apply(nativeDefault, native, []);
+                  },
+                });
+              }
+            }, false, true);
+            try {
+              expect(delivery.key().defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              const submitted = delivery.submit();
+              expect(submitted.defaultPrevented).toBe(true);
+              expect(delivery.deliveries).toHaveLength(7);
+              expect(new Set(delivery.deliveries.map(({ event }) => event)).size).toBe(7);
+              expect(delivery.preventionCount()).toBe(1);
+              const final = delivery.deliveries.at(-1)!;
+              expect(final.prevent.mock.contexts).toEqual([final.event]);
+              expect(immediateQuery).toBeTypeOf("function");
+              expect(laterQuery).not.toHaveBeenCalled();
+              if (drift) {
+                expect(current.onCommit).not.toHaveBeenCalled();
+              } else {
+                const formDelivery = delivery.deliveries[5];
+                expect(formDelivery.event.isDefaultPrevented).toBe(immediateQuery);
+                expect(formDelivery.event.defaultPrevented).toBe(true);
+                expect(delivery.deliveries[4].event.defaultPrevented).toBe(false);
+                expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Forwarded commit");
+              }
+              replaying = true;
+              fireEvent(commitForm(), submitted);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledTimes(drift ? 0 : 1);
+            } finally {
+              delivery.restore();
+            }
+            if (drift) await cleanSuccessor(host, current);
+            await resolve(pending);
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it.each(["malformed form", "malformed bridge", "incomplete bridge"] as const)(
+        "releases an ended %s submit while retaining the same completed key",
+        async (failure) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "candidate",
+              doc: repoDocument("candidate-enter", "candidate.md"),
+              actions: current,
+            });
+            let abandoned: Event | undefined;
+            const delivery = probe(host, ({ stage, event }) => {
+              if (!stage.startsWith("submit")) return;
+              abandoned ??= event.nativeEvent;
+              if (event.nativeEvent !== abandoned) return;
+              if (stage === "submit form" && failure === "malformed form") {
+                event.type = "keydown";
+              }
+              if (stage === "submit bridge") {
+                if (failure === "incomplete bridge") return true;
+                if (failure === "malformed bridge") event.currentTarget = document.body;
+              }
+            });
+            try {
+              const key = delivery.key();
+              expect(key.defaultPrevented).toBe(false);
+              const first = delivery.submit();
+              expect(first).toBe(abandoned);
+              expect(first.eventPhase).toBe(Event.NONE);
+              expect(first.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              fireEvent(commitForm(), first);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              const second = delivery.submit();
+              expect(second).not.toBe(first);
+              expect(second.defaultPrevented).toBe(true);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Update candidate.md");
+              expect(delivery.deliveries.filter(({ stage }) => stage.startsWith("key")))
+                .toHaveLength(4);
+              fireEvent(commitForm(), first);
+              fireEvent(commitForm(), second);
+              expect(first.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledOnce();
+            } finally {
+              delivery.restore();
+            }
+            await resolve(pending);
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it("does not displace a still-dispatching selected submit with a crossed candidate", async () => {
+        const first = deferred<void>();
+        const second = deferred<void>();
+        const current = actions(first.promise, second.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "live-candidate",
+            doc: repoDocument("live-candidate-enter", "live-candidate.md"),
+            actions: current,
+          });
+          let crossing = false;
+          let crossed: SubmitEvent | undefined;
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== "submit form" || crossing) return;
+            crossing = true;
+            expect(event.nativeEvent.eventPhase).toBe(Event.BUBBLING_PHASE);
+            crossed = delivery.submit();
+            expect(crossed.defaultPrevented).toBe(false);
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(true);
+            expect(crossed).toBeInstanceOf(SubmitEvent);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+            fireEvent(commitForm(), crossed!);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await reject(first, "Clean candidate successor");
+          await cleanSuccessor(host, current);
+          await resolve(second);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      });
+
+      it.each(["unmount", "replacement"] as const)(
+        "does not read or call Q1 after final prevention causes %s",
+        async (change) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const doc = repoDocument("retired-query-enter", "retired-query.md");
+          const { host, root } = createHost();
+          const retiredReads = vi.fn();
+          const retiredCalls = vi.fn();
+          let retired = false;
+          try {
+            await render(root, { visit: "first", doc, actions: current });
+            const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+            const delivery = probe(host, ({ stage, event }) => {
+              if (stage !== "submit bridge") return;
+              let query = event.isDefaultPrevented;
+              Object.defineProperty(event, "isDefaultPrevented", {
+                get: () => {
+                  if (retired) retiredReads();
+                  return query;
+                },
+                set: (next: PublicEvent["isDefaultPrevented"]) => {
+                  query = function (this: PublicEvent) {
+                    if (retired) retiredCalls();
+                    return Reflect.apply(next, this, []);
+                  };
+                },
+              });
+              const prevent = event.preventDefault;
+              event.preventDefault = () => {
+                prevent();
+                flushSync(() => root.render(
+                  <StrictMode>
+                    <CommitBoundary
+                      visit="replacement"
+                      doc={{ ...doc }}
+                      actions={current}
+                      present={change !== "unmount"}
+                    />
+                  </StrictMode>,
+                ));
+                // The fixture's replacement may manage focus; only effects
+                // after it retires this delivery belong to the assertion.
+                focus.mockClear();
+                retired = true;
+              };
+            });
+            try {
+              delivery.key();
+              expect(delivery.submit().defaultPrevented).toBe(true);
+              expect(retired).toBe(true);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(retiredReads).not.toHaveBeenCalled();
+              expect(retiredCalls).not.toHaveBeenCalled();
+              expect(current.onCommit).not.toHaveBeenCalled();
+              expect(current.onOpenChange).not.toHaveBeenCalled();
+              expect(focus).not.toHaveBeenCalled();
+            } finally {
+              delivery.restore();
+              focus.mockRestore();
+            }
+            await render(root, { visit: "successor", doc: { ...doc }, actions: current });
+            await cleanSuccessor(host, current);
+            await resolve(pending);
+            expect(retiredReads).not.toHaveBeenCalled();
+            expect(retiredCalls).not.toHaveBeenCalled();
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+    });
+
+    const malformed: Array<[string, Record<string, unknown>]> = [
+      ["key", { key: "Escape" }],
+      ["code", { code: "Space" }],
+      ["location", { location: 2 }],
+      ["repeat", { repeat: true }],
+      ["alt", { altKey: true }],
+      ["control", { ctrlKey: true }],
+      ["meta", { metaKey: true }],
+      ["shift", { shiftKey: true }],
+      ["type", { type: "keyup" }],
+      ["bubbles", { bubbles: false }],
+      ["cancelable", { cancelable: false }],
+      ["trust", { isTrusted: true }],
+      ["canceled", { defaultPrevented: true }],
+      ["default query", { isDefaultPrevented: () => true }],
+      ["propagation query", { isPropagationStopped: () => true }],
+      ["prevention method", { preventDefault: null }],
+    ];
+    it.each(malformed)(
+      "rejects malformed key %s without consuming the rightful delivery",
+      async (_name, change) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "malformed",
+            doc: repoDocument("malformed-enter", "malformed.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event, prevent }, handler) => {
+            if (stage !== "key input") return;
+            const original = new Map(Object.keys(change).map((key) => [key, Reflect.get(event, key)]));
+            Object.assign(event, change);
+            handler(event);
+            expect(prevent).not.toHaveBeenCalled();
+            expect(current.onCommit).not.toHaveBeenCalled();
+            for (const [key, value] of original) Reflect.set(event, key, value);
+            handler(event);
+            handler(event);
+            return true;
+          });
+          try {
+            delivery.key();
+            expect(delivery.preventionCount()).toBe(0);
+            delivery.submit();
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Update malformed.md");
+          } finally {
+            delivery.restore();
+          }
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each([
+      "key bridge capture", "key input capture", "key input", "key bridge",
+      "submit bridge capture", "submit form", "submit bridge",
+    ] as const)(
+      "rejects wrong currentTarget at %s and preserves its rightful delivery",
+      async (boundary) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "wrong-target",
+            doc: repoDocument("wrong-target-enter", "targets.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event, prevent }, handler) => {
+            if (stage !== boundary) return;
+            const target = event.currentTarget;
+            event.currentTarget = document.body;
+            handler(event);
+            expect(prevent).not.toHaveBeenCalled();
+            expect(current.onCommit).not.toHaveBeenCalled();
+            event.currentTarget = target;
+            handler(event);
+            return true;
+          });
+          try {
+            delivery.key();
+            delivery.submit();
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each([
+      { repeat: true },
+      { isComposing: true },
+      { ctrlKey: true },
+      { code: "Space" },
+      { location: 2 },
+      { bubbles: false },
+      { cancelable: false },
+    ])("rejects native key facts %j and immediately recovers", async (init) => {
+      const pending = deferred<void>();
+      const current = actions(pending.promise);
+      const { host, root } = createHost();
+      try {
+        await render(root, {
+          visit: "native",
+          doc: repoDocument("native-enter", "native.md"),
+          actions: current,
+        });
+        const delivery = probe(host);
+        try {
+          delivery.key(init);
+          expect(delivery.submit().defaultPrevented).toBe(false);
+          expect(delivery.preventionCount()).toBe(0);
+          expect(current.onCommit).not.toHaveBeenCalled();
+        } finally {
+          delivery.restore();
+        }
+        await cleanSuccessor(host, current);
+        await resolve(pending);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["", " \t "])("does not submit blank message %j", async (text) => {
+      const pending = deferred<void>();
+      const current = actions(pending.promise);
+      const { host, root } = createHost();
+      try {
+        await render(root, {
+          visit: "blank",
+          doc: repoDocument("blank-enter", "blank.md"),
+          actions: current,
+        });
+        fireEvent.change(message(), { target: { value: text } });
+        await flushPublication();
+        const delivery = probe(host);
+        try {
+          delivery.key();
+          expect(delivery.submit().defaultPrevented).toBe(false);
+          expect(delivery.preventionCount()).toBe(0);
+          expect(current.onCommit).not.toHaveBeenCalled();
+        } finally {
+          delivery.restore();
+        }
+        await cleanSuccessor(host, current, "Nonblank Enter successor");
+        await resolve(pending);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it("keeps crossed genuine keys and submit deliveries separate, then accepts a complete successor after error", async () => {
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const current = actions(first.promise, second.promise);
+      const { host, root } = createHost();
+      try {
+        await render(root, {
+          visit: "crossed",
+          doc: repoDocument("crossed-enter", "crossed.md"),
+          actions: current,
+        });
+        let outer: PublicEvent | undefined;
+        let nested = false;
+        let crossed = false;
+        const delivery = probe(host, ({ stage, event }, handler) => {
+          if (stage !== "key input") return;
+          if (!nested) {
+            outer = event;
+            nested = true;
+            dispatchCommitKey(message(), "Enter", {}, false);
+          } else if (!crossed && outer) {
+            crossed = true;
+            const native = event.nativeEvent;
+            event.nativeEvent = outer.nativeEvent;
+            handler(event);
+            event.nativeEvent = native;
+          }
+        });
+
+        try {
+          const key = delivery.key();
+          expect(crossed).toBe(true);
+          expect(key.defaultPrevented).toBe(false);
+          expect(delivery.preventionCount()).toBe(0);
+          expect(current.onCommit).not.toHaveBeenCalled();
+          const submission = delivery.submit();
+          expect(submission.defaultPrevented).toBe(true);
+          expect(delivery.preventionCount()).toBe(1);
+          expect(current.onCommit).toHaveBeenCalledOnce();
+          delivery.submit();
+          fireEvent(message(), key);
+          expect(delivery.preventionCount()).toBe(1);
+          expect(current.onCommit).toHaveBeenCalledOnce();
+        } finally {
+          delivery.restore();
+        }
+        await reject(first, "Retry this commit");
+        expect(screen.getByText("Retry this commit")).toBeVisible();
+        await cleanSuccessor(host, current);
+        await resolve(second);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["key bridge", "submit bridge"] as const)(
+      "does not complete an unfinished %s dispatch through replay",
+      async (missing) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "unfinished",
+            doc: repoDocument("unfinished-enter", "unfinished.md"),
+            actions: current,
+          });
+          let omit = true;
+          const delivery = probe(host, ({ stage }) => stage === missing && omit);
+          try {
+            const key = delivery.key();
+            const submit = missing === "submit bridge" ? delivery.submit() : null;
+            omit = false;
+            if (submit) fireEvent(commitForm(), submit);
+            else fireEvent(message(), key);
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          } finally {
+            delivery.restore();
+          }
+          await cleanSuccessor(host, current);
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("preserves keyboard activation of Commit after an Enter submission fails", async () => {
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const current = actions(first.promise, second.promise);
+      const { host, root } = createHost();
+      try {
+        await render(root, {
+          visit: "button",
+          doc: repoDocument("button-enter", "button.md"),
+          actions: current,
+        });
+        const delivery = probe(host);
+        try {
+          delivery.key();
+          delivery.submit();
+          expect(current.onCommit).toHaveBeenCalledOnce();
+        } finally {
+          delivery.restore();
+        }
+        await reject(first, "Try again");
+        await flushPublication();
+        const button = screen.getByTestId<HTMLButtonElement>("commit-submit");
+        button.focus();
+        fireEvent.click(button, { detail: 0 });
+        expect(current.onCommit).toHaveBeenCalledTimes(2);
+        expect(current.onCommit).toHaveBeenLastCalledWith("Update button.md");
+        await resolve(second);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["isDefaultPrevented", "isPropagationStopped"] as const)(
+      "never invokes a stale %s replaced by an earlier public callback",
+      async (method) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        const stale = vi.fn(() => false);
+        try {
+          await render(root, {
+            visit: "method",
+            doc: repoDocument("method-enter", "method.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== "submit bridge") return;
+            if (method === "isPropagationStopped") {
+              event.isPropagationStopped = stale;
+              event.isDefaultPrevented = () => {
+                event.isPropagationStopped = () => false;
+                return false;
+              };
+            } else {
+              event.isDefaultPrevented = stale;
+              const native = event.nativeEvent;
+              Object.defineProperty(event, "defaultPrevented", {
+                get: () => {
+                  event.isDefaultPrevented = () => false;
+                  return native.defaultPrevented;
+                },
+              });
+            }
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(false);
+            expect(stale).not.toHaveBeenCalled();
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          } finally {
+            delivery.restore();
+          }
+          await cleanSuccessor(host, current);
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    const reentrantBoundaries = ([
+      "key bridge capture", "key input capture", "key input", "key bridge",
+      "submit bridge capture", "submit form", "submit bridge",
+    ] as const).flatMap((boundary) =>
+      (["isDefaultPrevented", "isPropagationStopped"] as const).map((method) => ({
+        boundary,
+        method,
+      })),
+    );
+    it.each([
+      ...reentrantBoundaries,
+      { boundary: "submit bridge" as const, method: "preventDefault" as const },
+    ])(
+      "excludes reentrant key and submit attempts from $boundary $method",
+      async ({ boundary, method }) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "reentrant",
+            doc: repoDocument("reentrant-enter", "reentrant.md"),
+            actions: current,
+          });
+          let attempted = false;
+          let innerKey: KeyboardEvent | undefined;
+          let innerSubmit: SubmitEvent | undefined;
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== boundary) return;
+            const original = event[method];
+            Reflect.set(event, method, () => {
+              if (!attempted) {
+                attempted = true;
+                innerKey = dispatchCommitKey(message(), "Enter", {}, false);
+                innerSubmit = nativeSubmit(commitForm());
+                fireEvent(commitForm(), innerSubmit);
+              }
+              return original();
+            });
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(true);
+            expect(attempted).toBe(true);
+            expect(innerKey?.defaultPrevented).toBe(false);
+            expect(innerSubmit?.defaultPrevented).toBe(false);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each([
+      "target", "nativeEvent", "type", "bubbles", "cancelable",
+      "defaultPrevented", "isDefaultPrevented", "isPropagationStopped",
+    ] as const)(
+      "rejects malformed submit %s without preventing or consuming its rightful delivery",
+      async (field) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "submit-facts",
+            doc: repoDocument("submit-facts-enter", "submit-facts.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event, prevent }, handler) => {
+            if (stage !== "submit form") return;
+            const original = Reflect.get(event, field);
+            const invalid =
+              field === "target" ? document.body :
+              field === "nativeEvent" ? nativeSubmit(commitForm()) :
+              field === "type" ? "keydown" :
+              field === "defaultPrevented" ? true :
+              field.startsWith("is") ? () => true : false;
+            Reflect.set(event, field, invalid);
+            handler(event);
+            expect(prevent).not.toHaveBeenCalled();
+            expect(current.onCommit).not.toHaveBeenCalled();
+            Reflect.set(event, field, original);
+            handler(event);
+            return true;
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(true);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each([
+      "message", "form", "content", "disabled", "focus", "connectivity",
+      "Window", "addEventListener", "removeEventListener",
+    ] as const)(
+      "rejects current %s drift from a public query and accepts a clean successor",
+      async (field) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        let restore = () => {};
+        try {
+          await render(root, {
+            visit: "drift",
+            doc: repoDocument("drift-enter", "drift.md"),
+            actions: current,
+          });
+          let changed = false;
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== "submit bridge") return;
+            event.isDefaultPrevented = () => {
+              if (!changed) {
+                changed = true;
+                const input = message();
+                const form = commitForm();
+                const button = screen.getByTestId<HTMLButtonElement>("commit-submit");
+                if (field === "message") {
+                  const value = input.value;
+                  input.value = "Not the authorized message";
+                  restore = () => { input.value = value; };
+                } else if (field === "form") {
+                  input.setAttribute("form", "another-form");
+                  restore = () => input.removeAttribute("form");
+                } else if (field === "content") {
+                  const content = form.parentElement!;
+                  content.setAttribute("data-enter-content", "changed");
+                  restore = () => content.removeAttribute("data-enter-content");
+                } else if (field === "disabled") {
+                  button.disabled = true;
+                  restore = () => { button.disabled = false; };
+                } else if (field === "focus") {
+                  button.focus();
+                  restore = () => input.focus();
+                } else if (field === "connectivity") {
+                  const next = input.nextSibling;
+                  input.remove();
+                  restore = () => {
+                    form.insertBefore(input, next);
+                    input.focus();
+                  };
+                } else if (field === "Window") {
+                  const descriptor = Object.getOwnPropertyDescriptor(document, "defaultView");
+                  let changedRead = false;
+                  Object.defineProperty(document, "defaultView", {
+                    configurable: true,
+                    get: () => {
+                      if (!changedRead) {
+                        changedRead = true;
+                        return null;
+                      }
+                      return window;
+                    },
+                  });
+                  restore = () => {
+                    if (descriptor) Object.defineProperty(document, "defaultView", descriptor);
+                    else Reflect.deleteProperty(document, "defaultView");
+                  };
+                } else {
+                  const original = window[field];
+                  Reflect.set(window, field, (...args: unknown[]) =>
+                    Reflect.apply(original, window, args),
+                  );
+                  restore = () => Reflect.set(window, field, original);
+                }
+              }
+              return false;
+            };
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(false);
+            expect(changed).toBe(true);
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          } finally {
+            restore();
+            delivery.restore();
+          }
+          await render(root, {
+            visit: "recovered",
+            doc: repoDocument("drift-enter-recovered", "recovered.md"),
+            actions: current,
+          });
+          await cleanSuccessor(host, current);
+          await resolve(pending);
+        } finally {
+          restore();
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each(["independent capture", "independent bubble", "later final query"] as const)(
+      "does not adopt an unrelated %s replacement after exact prevention",
+      async (replacement) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        const allowedQuery = vi.fn(() => true);
+        let capture: PublicEvent | undefined;
+        try {
+          await render(root, {
+            visit: "replacement",
+            doc: repoDocument("replacement-enter", "replacement.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage === (replacement === "independent bubble"
+              ? "submit form" : "submit bridge capture")) capture = event;
+            if (stage !== "submit bridge") return;
+            const native = event.nativeEvent;
+            const nativeDefault = Object.getOwnPropertyDescriptor(Event.prototype, "defaultPrevented")!.get!;
+            let prevented = false;
+            const prevent = event.preventDefault;
+            event.preventDefault = () => {
+              prevent();
+              event.isDefaultPrevented = allowedQuery;
+              prevented = true;
+              if (replacement !== "later final query" && capture) {
+                capture.isDefaultPrevented = () => false;
+              }
+            };
+            if (replacement === "later final query") {
+              Object.defineProperty(native, "defaultPrevented", {
+                get: () => {
+                  if (prevented) event.isDefaultPrevented = () => true;
+                  return Reflect.apply(nativeDefault, native, []);
+                },
+              });
+            }
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(true);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(allowedQuery).not.toHaveBeenCalled();
+            expect(current.onCommit).not.toHaveBeenCalled();
+          } finally {
+            delivery.restore();
+          }
+          await cleanSuccessor(host, current);
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it("keeps callback exclusion through synchronous republication during prevention", async () => {
+      const pending = deferred<void>();
+      const current = actions(pending.promise);
+      const doc = repoDocument("republication-enter", "republication.md");
+      const { host, root } = createHost();
+      try {
+        await render(root, { visit: "first", doc, actions: current });
+        let nestedKey: KeyboardEvent | undefined;
+        let nestedSubmit: SubmitEvent | undefined;
+        const delivery = probe(host, ({ stage, event }) => {
+          if (stage !== "submit bridge") return;
+          const prevent = event.preventDefault;
+          event.preventDefault = () => {
+            prevent();
+            flushSync(() => root.render(
+              <StrictMode>
+                <CommitBoundary visit="second" doc={{ ...doc }} actions={current} />
+              </StrictMode>,
+            ));
+            nestedKey = dispatchCommitKey(message(), "Enter", {}, false);
+            nestedSubmit = nativeSubmit(commitForm());
+            fireEvent(commitForm(), nestedSubmit);
+          };
+        });
+        try {
+          delivery.key();
+          expect(delivery.submit().defaultPrevented).toBe(true);
+          expect(delivery.preventionCount()).toBe(1);
+          expect(nestedKey?.defaultPrevented).toBe(false);
+          expect(nestedSubmit?.defaultPrevented).toBe(false);
+          expect(current.onCommit).not.toHaveBeenCalled();
+        } finally {
+          delivery.restore();
+        }
+        await cleanSuccessor(host, current);
+        await resolve(pending);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    });
+
+    it.each(["before prevention", "during prevention"] as const)(
+      "rejects DOM invalidation %s and restores a clean route",
+      async (when) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "dom",
+            doc: repoDocument("dom-enter", "dom.md"),
+            actions: current,
+          });
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== "submit bridge") return;
+            const mutate = () => {
+              const form = commitForm();
+              form.setAttribute("data-enter-drift", "changed");
+              form.removeAttribute("data-enter-drift");
+            };
+            if (when === "before prevention") {
+              event.isPropagationStopped = () => {
+                mutate();
+                return false;
+              };
+            } else {
+              const prevent = event.preventDefault;
+              event.preventDefault = () => {
+                prevent();
+                mutate();
+              };
+            }
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(when === "during prevention");
+            expect(delivery.preventionCount()).toBe(when === "during prevention" ? 1 : 0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          } finally {
+            delivery.restore();
+          }
+          await flushPublication();
+          await cleanSuccessor(host, current);
+          await resolve(pending);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
+
+    it.each(["rerender", "close/reopen", "remount", "partial replay", "unmount"] as const)(
+      "retires retained Enter claims on %s",
+      async (change) => {
+        const pending = deferred<void>();
+        const current = actions(pending.promise);
+        const doc = repoDocument("lifecycle-enter", "lifecycle.md");
+        const { host, root } = createHost();
+        let unmounted = false;
+        try {
+          await render(root, { visit: "first", doc, actions: current });
+          const oldForm = commitForm();
+          const oldInput = message();
+          const delivery = probe(host);
+          const key = delivery.key();
+          delivery.restore();
+          if (change === "partial replay") {
+            act(() => reactRef(oldInput)(null));
+          } else if (change === "unmount") {
+            await act(async () => root.unmount());
+            unmounted = true;
+          } else if (change === "rerender") {
+            await render(root, { visit: "next", doc: { ...doc }, actions: current });
+          } else {
+            await render(root, {
+              visit: "closed", doc, actions: current,
+              ...(change === "remount" ? { present: false } : { open: false }),
+            });
+            await render(root, { visit: "next", doc, actions: current });
+          }
+          const stale = nativeSubmit(oldForm);
+          fireEvent(oldInput, key);
+          fireEvent(oldForm, stale);
+          expect(current.onCommit).not.toHaveBeenCalled();
+          expect(stale.defaultPrevented).toBe(false);
+          if (change === "partial replay") {
+            await render(root, { visit: "fresh", doc: { ...doc }, actions: current });
+          }
+          if (!unmounted) {
+            await cleanSuccessor(host, current);
+            await resolve(pending);
+          }
+        } finally {
+          if (!unmounted) await act(async () => root.unmount());
+          host.remove();
+        }
+      },
+    );
   });
 
   it.each(["close button", "Escape"] as const)(
