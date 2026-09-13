@@ -199,6 +199,9 @@ interface JsdomEventImplementation {
   isTrusted: boolean;
   currentTarget: unknown;
   eventPhase: number;
+  key: string;
+  _canceledFlag: boolean;
+  _stopPropagationFlag: boolean;
   _path: unknown[];
 }
 
@@ -210,6 +213,9 @@ function jsdomEventImplementation(event: Event): JsdomEventImplementation {
       const value = candidate as Partial<JsdomEventImplementation>;
       return typeof value.isTrusted === "boolean" &&
         typeof value.eventPhase === "number" &&
+        typeof value.key === "string" &&
+        typeof value._canceledFlag === "boolean" &&
+        typeof value._stopPropagationFlag === "boolean" &&
         Array.isArray(value._path);
     });
   if (!implementation) throw new Error("Unable to read jsdom's internal event slots");
@@ -934,6 +940,158 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
   );
 
   it.each([
+    "native propagation stop",
+    "wrapper scalar drift",
+    "default-query identity drift",
+    "destination detach",
+    "destination reparent",
+    "destination disable",
+    "destination replacement",
+    "query reentrancy",
+  ] as const)(
+    "runs callback-free final validation after post-prevention %s",
+    async (scenario) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const navigation = captureSetupNavigation(view.host);
+      const holder = document.createElement("div");
+      let bubbleWrapper!: ReactKeyboardEvent<HTMLAnchorElement>;
+      let restoreDestination = () => {};
+      let mutated = false;
+      const mutate = (wrapper: ReactKeyboardEvent<HTMLElement>) => {
+        if (mutated) return;
+        mutated = true;
+        if (scenario === "native propagation stop") {
+          wrapper.nativeEvent.stopPropagation();
+        } else if (scenario === "wrapper scalar drift") {
+          Object.defineProperty(wrapper, "code", {
+            configurable: true,
+            value: "Numpad6",
+          });
+        } else if (scenario === "default-query identity drift") {
+          Object.defineProperty(wrapper, "isDefaultPrevented", {
+            configurable: true,
+            value: vi.fn(() => true),
+          });
+        } else if (scenario === "destination detach") {
+          const parent = navigation.connect.parentNode;
+          const next = navigation.connect.nextSibling;
+          navigation.connect.remove();
+          restoreDestination = () => parent?.insertBefore(navigation.connect, next);
+        } else if (scenario === "destination reparent") {
+          const parent = navigation.connect.parentNode;
+          const next = navigation.connect.nextSibling;
+          holder.append(navigation.connect);
+          restoreDestination = () => parent?.insertBefore(navigation.connect, next);
+        } else if (scenario === "destination disable") {
+          navigation.connect.setAttribute("aria-disabled", "true");
+          restoreDestination = () => navigation.connect.removeAttribute("aria-disabled");
+        } else if (scenario === "destination replacement") {
+          const replacement = navigation.connect.cloneNode(true);
+          if (!(replacement instanceof HTMLAnchorElement)) {
+            throw new Error("The cloned destination is not an anchor");
+          }
+          navigation.connect.replaceWith(replacement);
+          restoreDestination = () => replacement.replaceWith(navigation.connect);
+        } else {
+          navigation.tokensKey(bubbleWrapper);
+        }
+      };
+      const replacementQuery = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        if (scenario !== "wrapper scalar drift") mutate(this);
+        return true;
+      });
+      const isPropagationStopped = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        if (this.defaultPrevented && scenario === "wrapper scalar drift") {
+          mutate(this);
+        }
+        return false;
+      });
+      const bubblePreventDefault = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        this.nativeEvent.preventDefault();
+        this.defaultPrevented = true;
+        Object.defineProperty(this, "isDefaultPrevented", {
+          configurable: true,
+          value: replacementQuery,
+        });
+      });
+      const methods = (
+        preventDefault: PublicSetupWrapperMethods["preventDefault"],
+      ): PublicSetupWrapperMethods => ({
+        preventDefault,
+        isDefaultPrevented: vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return this.defaultPrevented;
+        }),
+        isPropagationStopped,
+      });
+      navigation.tokens.focus();
+      focus.mockClear();
+      nativePreventDefault.mockClear();
+      const event = setupKeyEvent(navigation.tokens, "ArrowRight");
+
+      dispatchSetupKeyWithPublicWrappers(
+        navigation.tokens,
+        event,
+        (current) => publicSetupWrapper(
+          current,
+          Object.freeze({ phase: "capture" }),
+          methods(vi.fn()),
+        ),
+        (current) => {
+          bubbleWrapper = publicSetupWrapper(
+            current,
+            Object.freeze({ phase: "bubble" }),
+            methods(bubblePreventDefault),
+          );
+          return bubbleWrapper;
+        },
+      );
+
+      expect(mutated).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(nativePreventDefault).toHaveBeenCalledOnce();
+      expect(focus).not.toHaveBeenCalled();
+      expect(navigation.tokens).toHaveFocus();
+
+      restoreDestination();
+      holder.remove();
+      act(() => {
+        view.root.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(KeepAgentHerePanel, {
+              key: "clean-successor",
+              doc: { id: "doc-2", title: "Clean successor" },
+            }),
+          ),
+        );
+      });
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const recovered = captureSetupNavigation(view.host);
+      recovered.tokens.focus();
+      focus.mockClear();
+      const accepted = dispatchSetupKey(recovered.tokens, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nativePreventDefault).toHaveBeenCalledTimes(2);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(recovered.connect).toHaveFocus();
+    },
+  );
+
+  it.each([
     ["Control", { ctrlKey: true }],
     ["Alt", { altKey: true }],
     ["Meta", { metaKey: true }],
@@ -1231,6 +1389,91 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(navigation.tokens).toHaveFocus();
   });
+
+  it.each([
+    "default-query method drift",
+    "propagation-query scalar drift",
+    "propagation-query method drift",
+    "default-query native drift",
+    "propagation-query native drift",
+    "throwing default query",
+    "reentrant default query",
+  ] as const)(
+    "stably rejects pre-consumption %s without consuming the rightful bubble",
+    async (scenario) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const navigation = captureSetupNavigation(view.host);
+      navigation.tokens.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = setupKeyEvent(navigation.tokens, "ArrowRight");
+      const implementation = jsdomEventImplementation(event);
+      const deferredBubble = deferSetupBubble(navigation.tokens, event);
+      const isDefaultPrevented = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        if (scenario === "default-query method drift") {
+          Object.defineProperty(this, "preventDefault", {
+            configurable: true,
+            value: vi.fn(),
+          });
+        } else if (scenario === "default-query native drift") {
+          implementation.key = "End";
+        } else if (scenario === "throwing default query") {
+          throw new Error("malicious pre-consumption query");
+        } else if (scenario === "reentrant default query") {
+          navigation.tokensKey(malicious);
+        }
+        return false;
+      });
+      const isPropagationStopped = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        if (scenario === "propagation-query scalar drift") {
+          Object.defineProperty(this, "key", {
+            configurable: true,
+            value: "End",
+          });
+        } else if (scenario === "propagation-query method drift") {
+          Object.defineProperty(this, "preventDefault", {
+            configurable: true,
+            value: vi.fn(),
+          });
+        } else if (scenario === "propagation-query native drift") {
+          implementation.key = "End";
+        }
+        return false;
+      });
+      const malicious = publicSetupWrapper(
+        deferredBubble.wrapper,
+        Object.freeze({ phase: "malicious-bubble" }),
+        {
+          preventDefault: deferredBubble.wrapper.preventDefault,
+          isDefaultPrevented,
+          isPropagationStopped,
+        },
+      );
+
+      deferredBubble.invoke(navigation.tokensKey, malicious);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(navigation.tokens).toHaveFocus();
+
+      implementation.key = "ArrowRight";
+      deferredBubble.invoke();
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(navigation.connect).toHaveFocus();
+    },
+  );
 
   it("binds exact facade registration methods to the backing Window and rejects lookalikes and drift", async () => {
     const realAdd = window.addEventListener;

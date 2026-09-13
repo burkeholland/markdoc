@@ -526,6 +526,7 @@ interface KeepAgentPanelNavClaim {
   readonly source: HTMLAnchorElement;
   readonly destinationRole: PanelNavRole;
   readonly destination: HTMLAnchorElement;
+  readonly pendingNavRoutes: WeakMap<KeyboardEvent, KeepAgentPanelNavRoute>;
   readonly capture: KeepAgentPanelNavReactSnapshot;
   readonly bubble: KeepAgentPanelNavReactSnapshot;
   readonly nativeEvent: KeyboardEvent;
@@ -533,6 +534,18 @@ interface KeepAgentPanelNavClaim {
   readonly preventDefault: () => void;
   readonly isPropagationStopped: () => boolean;
   readonly focus: KeepAgentPanelNavIntrinsics["focus"];
+}
+
+interface KeepAgentPanelNavPreventedProof {
+  readonly isDefaultPrevented: () => boolean;
+  readonly defaultPrevented: true;
+  readonly propagationStopped: false;
+}
+
+interface KeepAgentPanelNavAuthentication {
+  readonly route: KeepAgentPanelNavRoute;
+  phase: "predicates" | "effect" | "post-predicates" | "final";
+  reentered: boolean;
 }
 
 function descendantsOf(element: HTMLElement): readonly Node[] {
@@ -1056,6 +1069,55 @@ function panelNavReactSnapshotMatches(
 ): boolean {
   const { event } = snapshot;
   try {
+    if (
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      )
+    ) {
+      return false;
+    }
+    const defaultPrevented = intrinsics.apply(
+      snapshot.isDefaultPrevented,
+      event,
+      [],
+    );
+    if (
+      defaultPrevented !== false ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      )
+    ) {
+      return false;
+    }
+    const propagationStopped = intrinsics.apply(
+      snapshot.isPropagationStopped,
+      event,
+      [],
+    );
+    return propagationStopped === false &&
+      panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        releasedCurrentTarget,
+      );
+  } catch {
+    return false;
+  }
+}
+
+function panelNavReactSnapshotIsStable(
+  snapshot: KeepAgentPanelNavReactSnapshot,
+  intrinsics: KeepAgentPanelNavIntrinsics,
+  releasedCurrentTarget = false,
+  defaultPrevented = snapshot.defaultPrevented,
+  isDefaultPrevented = snapshot.isDefaultPrevented,
+): boolean {
+  const { event } = snapshot;
+  try {
     return intrinsics.isCurrent() &&
       event.type === snapshot.type &&
       event.target === snapshot.target &&
@@ -1066,7 +1128,7 @@ function panelNavReactSnapshotMatches(
       event.eventPhase === snapshot.eventPhase &&
       event.bubbles === snapshot.bubbles &&
       event.cancelable === snapshot.cancelable &&
-      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.defaultPrevented === defaultPrevented &&
       event.isTrusted === snapshot.isTrusted &&
       event.nativeEvent === snapshot.nativeEvent &&
       event.key === snapshot.key &&
@@ -1079,50 +1141,66 @@ function panelNavReactSnapshotMatches(
       event.repeat === snapshot.repeat &&
       Object.is(event.view, snapshot.view) &&
       event.preventDefault === snapshot.preventDefault &&
-      event.isDefaultPrevented === snapshot.isDefaultPrevented &&
+      event.isDefaultPrevented === isDefaultPrevented &&
       event.isPropagationStopped === snapshot.isPropagationStopped &&
       typeof snapshot.preventDefault === "function" &&
-      typeof snapshot.isDefaultPrevented === "function" &&
-      typeof snapshot.isPropagationStopped === "function" &&
-      intrinsics.apply(snapshot.isDefaultPrevented, event, []) === false &&
-      intrinsics.apply(snapshot.isPropagationStopped, event, []) === false;
+      typeof isDefaultPrevented === "function" &&
+      typeof snapshot.isPropagationStopped === "function";
   } catch {
     return false;
   }
 }
 
-function panelNavReactSnapshotIsPrevented(
+function readPanelNavReactPreventedProof(
   snapshot: KeepAgentPanelNavReactSnapshot,
   intrinsics: KeepAgentPanelNavIntrinsics,
-): boolean {
+): KeepAgentPanelNavPreventedProof | null {
   const { event } = snapshot;
   try {
-    return intrinsics.isCurrent() &&
-      event.type === snapshot.type &&
-      event.target === snapshot.target &&
-      event.currentTarget === snapshot.currentTarget &&
-      event.eventPhase === snapshot.eventPhase &&
-      event.bubbles === snapshot.bubbles &&
-      event.cancelable === snapshot.cancelable &&
-      event.defaultPrevented === true &&
-      event.isTrusted === snapshot.isTrusted &&
-      event.nativeEvent === snapshot.nativeEvent &&
-      event.key === snapshot.key &&
-      event.code === snapshot.code &&
-      event.location === snapshot.location &&
-      event.altKey === snapshot.altKey &&
-      event.ctrlKey === snapshot.ctrlKey &&
-      event.metaKey === snapshot.metaKey &&
-      event.shiftKey === snapshot.shiftKey &&
-      event.repeat === snapshot.repeat &&
-      Object.is(event.view, snapshot.view) &&
-      event.preventDefault === snapshot.preventDefault &&
-      event.isPropagationStopped === snapshot.isPropagationStopped &&
-      typeof event.isDefaultPrevented === "function" &&
-      intrinsics.apply(event.isDefaultPrevented, event, []) === true &&
-      intrinsics.apply(snapshot.isPropagationStopped, event, []) === false;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    if (
+      typeof isDefaultPrevented !== "function" ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        false,
+        true,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    const defaultPrevented = intrinsics.apply(
+      isDefaultPrevented,
+      event,
+      [],
+    );
+    if (
+      defaultPrevented !== true ||
+      !panelNavReactSnapshotIsStable(
+        snapshot,
+        intrinsics,
+        false,
+        true,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    const propagationStopped = intrinsics.apply(
+      snapshot.isPropagationStopped,
+      event,
+      [],
+    );
+    return propagationStopped === false
+      ? Object.freeze({
+          isDefaultPrevented,
+          defaultPrevented: true,
+          propagationStopped: false,
+        })
+      : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1151,6 +1229,7 @@ class KeepAgentPanelCoordinator {
   #claimedNavPublications = new WeakSet<KeepAgentPanelPublication>();
   #claimedReactEvents = new WeakSet<object>();
   #claimedNativeEvents = new WeakSet<Event>();
+  #navAuthentication: KeepAgentPanelNavAuthentication | null = null;
   #navEffect: KeepAgentPanelNavClaim | null = null;
 
   constructor(mount: symbol) {
@@ -2137,23 +2216,45 @@ class KeepAgentPanelCoordinator {
     const route = nativeEvent
       ? pendingNavRoutes?.get(nativeEvent)
       : undefined;
-    const snapshot = publication && nativeEvent
-      ? readPanelNavNativeEvent(nativeEvent, publication.navIntrinsics)
-      : null;
-    const bubble = publication &&
-      nativeEvent instanceof publication.ownerWindow.KeyboardEvent
-        ? readPanelNavReactEvent(
-            event as ReactKeyboardEvent<HTMLElement>,
-            nativeEvent,
-            publication.navIntrinsics,
-          )
+    const activeAuthentication = this.#navAuthentication;
+    if (activeAuthentication) {
+      if (
+        nativeEvent === activeAuthentication.route.nativeEvent &&
+        (
+          activeAuthentication.phase === "predicates" ||
+          activeAuthentication.phase === "post-predicates"
+        )
+      ) {
+        activeAuthentication.reentered = true;
+      }
+      return;
+    }
+    if (!route) return;
+    const authentication: KeepAgentPanelNavAuthentication = {
+      route,
+      phase: "predicates",
+      reentered: false,
+    };
+    this.#navAuthentication = authentication;
+    try {
+      const capture = route.captureSnapshot;
+      const captureNativeSnapshot = route.captureNativeSnapshot;
+      const snapshot = publication && nativeEvent
+        ? readPanelNavNativeEvent(nativeEvent, publication.navIntrinsics)
         : null;
-    if (
+      const bubble = publication &&
+        nativeEvent instanceof publication.ownerWindow.KeyboardEvent
+          ? readPanelNavReactEvent(
+              event as ReactKeyboardEvent<HTMLElement>,
+              nativeEvent,
+              publication.navIntrinsics,
+            )
+          : null;
+      if (
       !publication ||
       !pendingNavRoutes ||
       !action ||
       !source ||
-      !route ||
       !snapshot ||
       !bubble ||
       route.invalid ||
@@ -2167,9 +2268,9 @@ class KeepAgentPanelCoordinator {
       route.nativeEvent !== nativeEvent ||
       publication.pendingNavRoutes !== pendingNavRoutes ||
       pendingNavRoutes.get(nativeEvent) !== route ||
-      !route.captureSnapshot ||
-      !route.captureNativeSnapshot ||
-      route.captureSnapshot.event === bubble.event ||
+      !capture ||
+      !captureNativeSnapshot ||
+      capture.event === bubble.event ||
       publication.generation !== generation ||
       publication.draft !== generation.authority ||
       publication.retired ||
@@ -2222,16 +2323,16 @@ class KeepAgentPanelCoordinator {
       !snapshot.path.includes(snapshot.currentTarget) ||
       !panelNavNativeSnapshotsMatch(route.windowSnapshot, snapshot, false) ||
       !panelNavNativeSnapshotsMatch(
-        route.captureNativeSnapshot,
+        captureNativeSnapshot,
         snapshot,
         false,
       ) ||
-      route.captureNativeSnapshot.currentTarget !== snapshot.currentTarget ||
-      route.captureNativeSnapshot.eventPhase !==
+      captureNativeSnapshot.currentTarget !== snapshot.currentTarget ||
+      captureNativeSnapshot.eventPhase !==
         publication.navIntrinsics.capturingPhase ||
       !this.#navWindowProofIsCurrent(publication, route) ||
       !panelNavReactSnapshotMatches(
-        route.captureSnapshot,
+        capture,
         publication.navIntrinsics,
         true,
       ) ||
@@ -2242,17 +2343,76 @@ class KeepAgentPanelCoordinator {
         [],
       ) !== source ||
       this.#navEffect ||
-      this.#claimedReactEvents.has(route.captureSnapshot.event) ||
+      this.#claimedReactEvents.has(capture.event) ||
       this.#claimedReactEvents.has(event) ||
       this.#claimedNativeEvents.has(nativeEvent) ||
       !this.#navActionIsCurrent(publication, action) ||
       !this.#publicationIsCurrent(publication)
-    ) {
-      return;
-    }
+      ) {
+        return;
+      }
 
-    if (!pendingNavRoutes.delete(nativeEvent)) return;
-    const claim: KeepAgentPanelNavClaim = Object.freeze({
+      const stableSnapshot = readPanelNavNativeEvent(
+        nativeEvent,
+        publication.navIntrinsics,
+      );
+      if (
+      !stableSnapshot ||
+      !panelNavNativeSnapshotsMatch(snapshot, stableSnapshot, true) ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
+      route.invalid ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      route.action !== action ||
+      route.sourceRole !== sourceRole ||
+      route.source !== source ||
+      route.destinationRole === sourceRole ||
+      route.destination !== publication.elements[route.destinationRole] ||
+      route.nativeEvent !== nativeEvent ||
+      route.captureSnapshot !== capture ||
+      route.captureNativeSnapshot !== captureNativeSnapshot ||
+      publication.generation !== generation ||
+      publication.draft !== generation.authority ||
+      publication.retired ||
+      publication.draft.retired ||
+      !publication.draft.committed ||
+      !publication.render.active ||
+      action.generation !== generation ||
+      action.render !== publication.render ||
+      action.sourceRole !== sourceRole ||
+      action.sourceIndex !== PANEL_NAV_ROLES.indexOf(sourceRole) ||
+      action.source !== source ||
+      action.ownerDocument !== publication.ownerDocument ||
+      action.order !== PANEL_NAV_ROLES ||
+      !Object.isFrozen(action) ||
+      !panelNavReactSnapshotIsStable(
+        capture,
+        publication.navIntrinsics,
+        true,
+      ) ||
+      !panelNavReactSnapshotIsStable(
+        bubble,
+        publication.navIntrinsics,
+      ) ||
+      !this.#navWindowProofIsCurrent(publication, route) ||
+      !this.#navActionIsCurrent(publication, action) ||
+      !this.#publicationIsCurrent(publication) ||
+      publication.navIntrinsics.apply(
+        publication.navIntrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source ||
+      this.#navEffect ||
+      this.#claimedReactEvents.has(capture.event) ||
+      this.#claimedReactEvents.has(event) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
+      authentication.reentered
+      ) {
+        return;
+      }
+      if (!pendingNavRoutes.delete(nativeEvent)) return;
+      const claim: KeepAgentPanelNavClaim = Object.freeze({
       identity: Symbol("keep-agent-panel-nav-claim"),
       publication,
       generation,
@@ -2264,20 +2424,22 @@ class KeepAgentPanelCoordinator {
       source,
       destinationRole: route.destinationRole,
       destination: route.destination,
-      capture: route.captureSnapshot,
+      pendingNavRoutes,
+      capture,
       bubble,
       nativeEvent,
       windowProof: route.windowProof,
       preventDefault: bubble.preventDefault,
       isPropagationStopped: bubble.isPropagationStopped,
       focus: publication.navIntrinsics.focus,
-    });
-    this.#navEffect = claim;
-    this.#claimedNavPublications.add(publication);
-    this.#claimedReactEvents.add(claim.capture.event);
-    this.#claimedReactEvents.add(claim.bubble.event);
-    this.#claimedNativeEvents.add(claim.nativeEvent);
-    try {
+      });
+      this.#navEffect = claim;
+      this.#claimedNavPublications.add(publication);
+      this.#claimedReactEvents.add(claim.capture.event);
+      this.#claimedReactEvents.add(claim.bubble.event);
+      this.#claimedNativeEvents.add(claim.nativeEvent);
+      authentication.phase = "effect";
+      try {
       const immediateSnapshot = readPanelNavNativeEvent(
         claim.nativeEvent,
         claim.publication.navIntrinsics,
@@ -2301,12 +2463,12 @@ class KeepAgentPanelCoordinator {
           claim.destination ||
         !claim.publication.render.active ||
         !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
-        !panelNavReactSnapshotMatches(
+        !panelNavReactSnapshotIsStable(
           claim.capture,
           claim.publication.navIntrinsics,
           true,
         ) ||
-        !panelNavReactSnapshotMatches(
+        !panelNavReactSnapshotIsStable(
           claim.bubble,
           claim.publication.navIntrinsics,
         ) ||
@@ -2343,12 +2505,94 @@ class KeepAgentPanelCoordinator {
           immediateSnapshot,
           preventedSnapshot,
         ) ||
-        !panelNavReactSnapshotIsPrevented(
+        claim.publication.pendingNavRoutes !== claim.pendingNavRoutes ||
+        claim.pendingNavRoutes.has(claim.nativeEvent) ||
+        claim.bubble.preventDefault !== claim.preventDefault ||
+        claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
+        !panelNavReactSnapshotIsStable(
+         claim.capture,
+         claim.publication.navIntrinsics,
+         true,
+        ) ||
+        !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
+        !this.#navActionIsCurrent(claim.publication, claim.action) ||
+        !this.#publicationIsCurrent(claim.publication) ||
+        claim.publication.navIntrinsics.apply(
+          claim.publication.navIntrinsics.activeElement,
+          claim.publication.ownerDocument,
+          [],
+        ) !== claim.source
+      ) {
+        return;
+      }
+      authentication.phase = "post-predicates";
+      const preventedProof = readPanelNavReactPreventedProof(
+        claim.bubble,
+        claim.publication.navIntrinsics,
+      );
+      authentication.phase = "final";
+      const finalSnapshot = readPanelNavNativeEvent(
+        claim.nativeEvent,
+        claim.publication.navIntrinsics,
+      );
+      if (
+        this.#navEffect !== claim ||
+        !preventedProof ||
+        !finalSnapshot ||
+        !panelNavNativeSnapshotIsPrevented(
+          immediateSnapshot,
+          finalSnapshot,
+        ) ||
+        !panelNavNativeSnapshotsMatch(
+          preventedSnapshot,
+          finalSnapshot,
+          true,
+        ) ||
+        claim.publication.generation !== claim.generation ||
+        claim.publication.draft !== claim.draft ||
+        claim.generation.authority !== claim.draft ||
+        claim.publication.retired ||
+        claim.draft.retired ||
+        !claim.draft.committed ||
+        claim.nav !== claim.publication.elements.nav ||
+        claim.route.publication !== claim.publication ||
+        claim.route.generation !== claim.generation ||
+        claim.route.action !== claim.action ||
+        claim.route.sourceRole !== claim.sourceRole ||
+        claim.route.source !== claim.source ||
+        claim.route.destinationRole !== claim.destinationRole ||
+        claim.route.destination !== claim.destination ||
+        claim.route.nativeEvent !== claim.nativeEvent ||
+        claim.route.windowProof !== claim.windowProof ||
+        claim.action.source !== claim.source ||
+        claim.publication.elements[claim.sourceRole] !== claim.source ||
+        claim.publication.elements[claim.destinationRole] !==
+          claim.destination ||
+        claim.publication.pendingNavRoutes !== claim.pendingNavRoutes ||
+        claim.pendingNavRoutes.has(claim.nativeEvent) ||
+        !claim.publication.render.active ||
+        !panelNavReactSnapshotIsStable(
+          claim.capture,
+          claim.publication.navIntrinsics,
+          true,
+        ) ||
+        !panelNavReactSnapshotIsStable(
           claim.bubble,
           claim.publication.navIntrinsics,
+          false,
+          true,
+          preventedProof.isDefaultPrevented,
         ) ||
         claim.bubble.preventDefault !== claim.preventDefault ||
         claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
+        preventedProof.defaultPrevented !== true ||
+        preventedProof.propagationStopped !== false ||
+        claim.focus !== claim.publication.navIntrinsics.focus ||
+        !this.#claimedNavPublications.has(claim.publication) ||
+        !this.#claimedReactEvents.has(claim.capture.event) ||
+        !this.#claimedReactEvents.has(claim.bubble.event) ||
+        !this.#claimedNativeEvents.has(claim.nativeEvent) ||
+        authentication.reentered ||
         !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
         !this.#navActionIsCurrent(claim.publication, claim.action) ||
         !this.#publicationIsCurrent(claim.publication) ||
@@ -2363,8 +2607,13 @@ class KeepAgentPanelCoordinator {
       claim.publication.navIntrinsics.apply(claim.focus, claim.destination, [
         { preventScroll: true },
       ]);
+      } finally {
+        if (this.#navEffect === claim) this.#navEffect = null;
+      }
     } finally {
-      if (this.#navEffect === claim) this.#navEffect = null;
+      if (this.#navAuthentication === authentication) {
+        this.#navAuthentication = null;
+      }
     }
   }
 
@@ -2451,7 +2700,7 @@ class KeepAgentPanelCoordinator {
     receiver: EventTarget,
     nativeEvent: Event,
   ) {
-    if (this.#navEffect) return;
+    if (this.#navAuthentication || this.#navEffect) return;
     const pendingNavRoutes = publication.pendingNavRoutes;
     const snapshot = readPanelNavNativeEvent(
       nativeEvent,
