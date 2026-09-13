@@ -195,6 +195,27 @@ interface CapturedSetupNavigation {
   connectRef: ElementRef<HTMLAnchorElement>;
 }
 
+interface JsdomEventImplementation {
+  isTrusted: boolean;
+  currentTarget: unknown;
+  eventPhase: number;
+  _path: unknown[];
+}
+
+function jsdomEventImplementation(event: Event): JsdomEventImplementation {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is JsdomEventImplementation => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const value = candidate as Partial<JsdomEventImplementation>;
+      return typeof value.isTrusted === "boolean" &&
+        typeof value.eventPhase === "number" &&
+        Array.isArray(value._path);
+    });
+  if (!implementation) throw new Error("Unable to read jsdom's internal event slots");
+  return implementation;
+}
+
 function captureSetupNavigation(host: HTMLElement = document.body): CapturedSetupNavigation {
   const scope = within(host);
   const nav = scope.getByRole("navigation", { name: "Agent setup" });
@@ -221,19 +242,9 @@ function captureSetupNavigation(host: HTMLElement = document.body): CapturedSetu
 }
 
 function markJsdomEventTrusted(event: Event) {
-  const implementation = Object.getOwnPropertySymbols(event)
-    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
-    .find(
-      (candidate): candidate is { isTrusted: boolean } =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "isTrusted" in candidate &&
-        candidate.isTrusted === false,
-    );
-  const descriptor = implementation
-    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
-    : undefined;
-  if (!implementation || !descriptor?.writable) {
+  const implementation = jsdomEventImplementation(event);
+  const descriptor = Object.getOwnPropertyDescriptor(implementation, "isTrusted");
+  if (!descriptor?.writable) {
     throw new Error("Unable to set jsdom's internal event trust slot");
   }
   Object.defineProperty(implementation, "isTrusted", {
@@ -372,6 +383,81 @@ function dispatchSetupKeyWithPublicWrappers(
     if (navRecord[navKey] === captureReplacement) navRecord[navKey] = navProps;
     if (sourceRecord[sourceKey] === bubbleReplacement) sourceRecord[sourceKey] = sourceProps;
   }
+}
+
+function deferSetupBubble(
+  source: HTMLAnchorElement,
+  event: KeyboardEvent,
+) {
+  const bubble = reactHandler<SetupKeyHandler>(source, "onKeyDown");
+  const propsKey = Object.keys(source).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the setup link");
+  const record = source as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey]!;
+  let retained: ReactKeyboardEvent<HTMLAnchorElement> | null = null;
+  let dispatchState: Pick<JsdomEventImplementation, "currentTarget" | "eventPhase" | "_path"> | null =
+    null;
+  const replacement = {
+    ...props,
+    onKeyDown: (current: ReactKeyboardEvent<HTMLAnchorElement>) => {
+      retained = publicSetupWrapper(
+        current,
+        Object.freeze({ phase: "retained-bubble" }),
+        {
+          preventDefault: current.preventDefault,
+          isDefaultPrevented: current.isDefaultPrevented,
+          isPropagationStopped: current.isPropagationStopped,
+        },
+      );
+      const implementation = jsdomEventImplementation(event);
+      dispatchState = {
+        currentTarget: implementation.currentTarget,
+        eventPhase: implementation.eventPhase,
+        _path: [...implementation._path],
+      };
+    },
+  };
+  record[propsKey] = replacement;
+  try {
+    act(() => {
+      source.dispatchEvent(event);
+    });
+  } finally {
+    if (record[propsKey] === replacement) record[propsKey] = props;
+  }
+  if (!retained || !dispatchState) {
+    throw new Error("React did not deliver the deferred setup bubble");
+  }
+  const retainedWrapper = retained as ReactKeyboardEvent<HTMLAnchorElement>;
+  const retainedDispatchState = dispatchState as Pick<
+    JsdomEventImplementation,
+    "currentTarget" | "eventPhase" | "_path"
+  >;
+
+  return {
+    wrapper: retainedWrapper,
+    invoke(
+      handler: SetupKeyHandler = bubble,
+      wrapper: ReactKeyboardEvent<HTMLAnchorElement> = retainedWrapper,
+    ) {
+      const implementation = jsdomEventImplementation(event);
+      const previous = {
+        currentTarget: implementation.currentTarget,
+        eventPhase: implementation.eventPhase,
+        _path: implementation._path,
+      };
+      implementation.currentTarget = retainedDispatchState.currentTarget;
+      implementation.eventPhase = retainedDispatchState.eventPhase;
+      implementation._path = [...retainedDispatchState._path];
+      try {
+        act(() => handler(wrapper));
+      } finally {
+        implementation.currentTarget = previous.currentTarget;
+        implementation.eventPhase = previous.eventPhase;
+        implementation._path = previous._path;
+      }
+    },
+  };
 }
 
 function renderDirect(node: ReactNode, parent: HTMLElement = document.body): DirectView {
@@ -638,6 +724,41 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
     },
   );
 
+  it("accepts React 19 replacing the bubble wrapper's public default-prevention query", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const { tokens, connect, tokensKey } = captureSetupNavigation(view.host);
+    let wrapper: ReactKeyboardEvent<HTMLAnchorElement> | null = null;
+    let before: PublicSetupWrapperMethods["isDefaultPrevented"] | null = null;
+    let after: PublicSetupWrapperMethods["isDefaultPrevented"] | null = null;
+    tokens.focus();
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+    const event = setupKeyEvent(tokens, "ArrowRight");
+
+    dispatchSetupKeyWithHandler(tokens, event, (current) => {
+      wrapper = current;
+      before = current.isDefaultPrevented;
+      tokensKey(current);
+      after = current.isDefaultPrevented;
+    });
+
+    expect(wrapper).not.toBeNull();
+    expect(before).not.toBeNull();
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+    expect(Reflect.apply(after!, wrapper!, [])).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(connect);
+    expect(connect).toHaveFocus();
+  });
+
   it("uses one exact retained bubble wrapper for prevention and the owner-realm destination for focus", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
@@ -650,6 +771,11 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
     const bubblePrototype = Object.freeze({ phase: "bubble" });
     let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
     let bubbleWrapper: ReactKeyboardEvent<HTMLAnchorElement> | null = null;
+    const replacementQuery = vi.fn(function (
+      this: ReactKeyboardEvent<HTMLElement>,
+    ) {
+      return this.defaultPrevented;
+    });
     const captureMethods: PublicSetupWrapperMethods = {
       preventDefault: vi.fn(),
       isDefaultPrevented: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
@@ -661,6 +787,10 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
       expect(this).toBe(bubbleWrapper);
       this.nativeEvent.preventDefault();
       this.defaultPrevented = true;
+      Object.defineProperty(this, "isDefaultPrevented", {
+        configurable: true,
+        value: replacementQuery,
+      });
     });
     const bubbleMethods: PublicSetupWrapperMethods = {
       preventDefault: bubblePreventDefault,
@@ -703,11 +833,105 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
     expect(bubblePreventDefault.mock.contexts[0]).toBe(bubbleWrapper);
     expect(nativePreventDefault).toHaveBeenCalledOnce();
     expect(event.defaultPrevented).toBe(true);
-    expect(bubbleMethods.isDefaultPrevented).toHaveReturnedWith(true);
+    expect(bubbleMethods.isDefaultPrevented).toHaveReturnedWith(false);
+    expect(replacementQuery).toHaveBeenCalledOnce();
+    expect(replacementQuery.mock.contexts[0]).toBe(bubbleWrapper);
+    expect(replacementQuery).toHaveReturnedWith(true);
     expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     expect(focus.mock.contexts[0]).toBe(connect);
     expect(connect).toHaveFocus();
   });
+
+  it.each([
+    "false replacement query",
+    "throwing replacement query",
+    "preventDefault drift",
+    "isPropagationStopped drift",
+  ] as const)(
+    "rejects malicious post-prevention %s before focus and permits a clean successor",
+    async (scenario) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const { tokens, connect } = captureSetupNavigation(view.host);
+      let bubbleWrapper: ReactKeyboardEvent<HTMLAnchorElement> | null = null;
+      const bubblePreventDefault = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        this.nativeEvent.preventDefault();
+        this.defaultPrevented = true;
+        const query = scenario === "throwing replacement query"
+          ? vi.fn(() => {
+              throw new Error("malicious query");
+            })
+          : vi.fn(() => scenario !== "false replacement query");
+        Object.defineProperty(this, "isDefaultPrevented", {
+          configurable: true,
+          value: query,
+        });
+        if (scenario === "preventDefault drift") {
+          Object.defineProperty(this, "preventDefault", {
+            configurable: true,
+            value: vi.fn(),
+          });
+        }
+        if (scenario === "isPropagationStopped drift") {
+          Object.defineProperty(this, "isPropagationStopped", {
+            configurable: true,
+            value: vi.fn(() => false),
+          });
+        }
+      });
+      const methods = (
+        preventDefault: PublicSetupWrapperMethods["preventDefault"],
+      ): PublicSetupWrapperMethods => ({
+        preventDefault,
+        isDefaultPrevented: vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return this.defaultPrevented;
+        }),
+        isPropagationStopped: vi.fn(() => false),
+      });
+      tokens.focus();
+      focus.mockClear();
+      nativePreventDefault.mockClear();
+      const event = setupKeyEvent(tokens, "ArrowRight");
+
+      dispatchSetupKeyWithPublicWrappers(
+        tokens,
+        event,
+        (current) => publicSetupWrapper(
+          current,
+          Object.freeze({ phase: "capture" }),
+          methods(vi.fn()),
+        ),
+        (current) => {
+          bubbleWrapper = publicSetupWrapper(
+            current,
+            Object.freeze({ phase: "bubble" }),
+            methods(bubblePreventDefault),
+          );
+          return bubbleWrapper;
+        },
+      );
+
+      expect(bubbleWrapper).not.toBeNull();
+      expect(event.defaultPrevented).toBe(true);
+      expect(nativePreventDefault).toHaveBeenCalledOnce();
+      expect(focus).not.toHaveBeenCalled();
+      expect(tokens).toHaveFocus();
+
+      const accepted = dispatchSetupKey(tokens, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nativePreventDefault).toHaveBeenCalledTimes(2);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(connect).toHaveFocus();
+    },
+  );
 
   it.each([
     ["Control", { ctrlKey: true }],
@@ -782,6 +1006,97 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
     expect(focus).not.toHaveBeenCalled();
   });
 
+  it.each([1, 2] as const)(
+    "retains an exact native-event route through %i microtask checkpoint levels",
+    async (levels) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const { tokens, connect } = captureSetupNavigation(view.host);
+      tokens.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = setupKeyEvent(tokens, "ArrowRight");
+      const deferredBubble = deferSetupBubble(tokens, event);
+
+      await act(async () => {
+        for (let level = 0; level < levels; level += 1) {
+          await new Promise<void>((resolveCheckpoint) => {
+            queueMicrotask(resolveCheckpoint);
+          });
+        }
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      deferredBubble.invoke();
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(connect).toHaveFocus();
+    },
+  );
+
+  it("keeps a rightful route isolated from unrelated and reentrant input", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const navigation = captureSetupNavigation(view.host);
+    const copy = within(view.host).getByTestId("keep-agent-copy");
+    navigation.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rightful = setupKeyEvent(navigation.tokens, "ArrowRight");
+    const deferredBubble = deferSetupBubble(navigation.tokens, rightful);
+
+    const unsupported = dispatchSetupKey(navigation.tokens, "PageDown");
+    const outside = setupKeyEvent(copy, "ArrowRight");
+    act(() => copy.dispatchEvent(outside));
+    const untrusted = setupKeyEvent(navigation.tokens, "ArrowRight", {}, false);
+    act(() => navigation.tokens.dispatchEvent(untrusted));
+    const reentrantWrapper = publicSetupWrapper(
+      deferredBubble.wrapper,
+      Object.freeze({ phase: "reentrant-bubble" }),
+      {
+        preventDefault: deferredBubble.wrapper.preventDefault,
+        isDefaultPrevented: vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          const nested = setupKeyEvent(navigation.tokens, "PageDown");
+          navigation.tokens.dispatchEvent(nested);
+          Object.defineProperty(this, "preventDefault", {
+            configurable: true,
+            value: vi.fn(),
+          });
+          return false;
+        }),
+        isPropagationStopped: deferredBubble.wrapper.isPropagationStopped,
+      },
+    );
+    deferredBubble.invoke(navigation.tokensKey, reentrantWrapper);
+
+    expect(unsupported.defaultPrevented).toBe(false);
+    expect(outside.defaultPrevented).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(rightful.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(navigation.tokens).toHaveFocus();
+
+    deferredBubble.invoke();
+    expect(rightful.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(navigation.connect).toHaveFocus();
+  });
+
   it.each([
     ["capture", "preventDefault"],
     ["capture", "isDefaultPrevented"],
@@ -848,6 +1163,74 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
       expect(connect).toHaveFocus();
     },
   );
+
+  it("does not consume a rightful pair through wrong-source, malformed, or drifted bubbles", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const navigation = captureSetupNavigation(view.host);
+    navigation.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const event = setupKeyEvent(navigation.tokens, "ArrowRight");
+    const deferredBubble = deferSetupBubble(navigation.tokens, event);
+
+    deferredBubble.invoke(navigation.connectKey);
+    const malformed = publicSetupWrapper(
+      deferredBubble.wrapper,
+      Object.freeze({ phase: "malformed-bubble" }),
+      {
+        preventDefault: deferredBubble.wrapper.preventDefault,
+        isDefaultPrevented: deferredBubble.wrapper.isDefaultPrevented,
+        isPropagationStopped: deferredBubble.wrapper.isPropagationStopped,
+      },
+    );
+    Object.defineProperty(malformed, "currentTarget", {
+      configurable: true,
+      value: navigation.connect,
+    });
+    deferredBubble.invoke(navigation.tokensKey, malformed);
+    const drifted = publicSetupWrapper(
+      deferredBubble.wrapper,
+      Object.freeze({ phase: "drifted-bubble" }),
+      {
+        preventDefault: deferredBubble.wrapper.preventDefault,
+        isDefaultPrevented: vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          Object.defineProperty(this, "preventDefault", {
+            configurable: true,
+            value: vi.fn(),
+          });
+          return false;
+        }),
+        isPropagationStopped: deferredBubble.wrapper.isPropagationStopped,
+      },
+    );
+    deferredBubble.invoke(navigation.tokensKey, drifted);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(navigation.tokens).toHaveFocus();
+
+    deferredBubble.invoke();
+    expect(event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(navigation.connect).toHaveFocus();
+
+    navigation.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    deferredBubble.invoke();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(navigation.tokens).toHaveFocus();
+  });
 
   it("binds exact facade registration methods to the backing Window and rejects lookalikes and drift", async () => {
     const realAdd = window.addEventListener;
@@ -1269,6 +1652,68 @@ describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
       } as unknown as ReactKeyboardEvent<HTMLAnchorElement>);
     });
     expect(retainedPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    const removed = remove.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    expect(removed).toEqual(expect.arrayContaining(added));
+  });
+
+  it("revokes pending routes on generation retirement and cleanup while a clean successor recovers", async () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const stale = captureSetupNavigation(view.host);
+    stale.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const staleEvent = setupKeyEvent(stale.tokens, "ArrowRight");
+    const staleBubble = deferSetupBubble(stale.tokens, staleEvent);
+
+    act(() => {
+      view.root.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(KeepAgentHerePanel, {
+            doc: { id: "doc-2", title: "Successor" },
+          }),
+        ),
+      );
+    });
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const successor = captureSetupNavigation(view.host);
+    staleBubble.invoke();
+    expect(staleEvent.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    successor.tokens.focus();
+    focus.mockClear();
+    const accepted = dispatchSetupKey(successor.tokens, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(successor.connect).toHaveFocus();
+
+    successor.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const cleanupEvent = setupKeyEvent(successor.tokens, "ArrowRight");
+    const cleanupBubble = deferSetupBubble(successor.tokens, cleanupEvent);
+    const added = add.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    act(() => view.root.render(createElement("div")));
+    cleanupBubble.invoke();
+
+    expect(cleanupEvent.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
     const removed = remove.mock.calls
       .filter(([type, , options]) => type === "keydown" && options === true)

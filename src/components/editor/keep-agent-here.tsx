@@ -353,7 +353,7 @@ interface KeepAgentPanelPublication {
   readonly back: KeepAgentPanelAction | null;
   readonly retry: KeepAgentPanelAction | null;
   readonly copy: KeepAgentPanelAction;
-  pendingNavRoute: KeepAgentPanelNavRoute | null;
+  pendingNavRoutes: WeakMap<KeyboardEvent, KeepAgentPanelNavRoute>;
   retired: boolean;
   mutated: boolean;
   observer: MutationObserver | null;
@@ -531,7 +531,6 @@ interface KeepAgentPanelNavClaim {
   readonly nativeEvent: KeyboardEvent;
   readonly windowProof: KeepAgentPanelNavWindowProof;
   readonly preventDefault: () => void;
-  readonly isDefaultPrevented: () => boolean;
   readonly isPropagationStopped: () => boolean;
   readonly focus: KeepAgentPanelNavIntrinsics["focus"];
 }
@@ -1952,7 +1951,7 @@ class KeepAgentPanelCoordinator {
       back: back ? action("back", back) : null,
       retry: retry ? action("retry", retry) : null,
       copy: action("copy", copy),
-      pendingNavRoute: null,
+      pendingNavRoutes: new WeakMap(),
       retired: false,
       mutated: false,
       observer: null,
@@ -2033,6 +2032,7 @@ class KeepAgentPanelCoordinator {
   }
 
   #retirePublication(publication: KeepAgentPanelPublication, preserveObserver: boolean) {
+    publication.pendingNavRoutes = new WeakMap();
     if (!publication.retired) {
       publication.retired = true;
       publication.draft.retired = true;
@@ -2059,7 +2059,7 @@ class KeepAgentPanelCoordinator {
   }
 
   #disconnect(publication: KeepAgentPanelPublication) {
-    publication.pendingNavRoute = null;
+    publication.pendingNavRoutes = new WeakMap();
     const listener = publication.navWindowListener;
     if (listener.active) {
       listener.active = false;
@@ -2133,7 +2133,10 @@ class KeepAgentPanelCoordinator {
     const action = publication?.navActions[sourceRole];
     const source = action?.source;
     const nativeEvent = event?.nativeEvent;
-    const route = publication?.pendingNavRoute;
+    const pendingNavRoutes = publication?.pendingNavRoutes;
+    const route = nativeEvent
+      ? pendingNavRoutes?.get(nativeEvent)
+      : undefined;
     const snapshot = publication && nativeEvent
       ? readPanelNavNativeEvent(nativeEvent, publication.navIntrinsics)
       : null;
@@ -2145,11 +2148,9 @@ class KeepAgentPanelCoordinator {
             publication.navIntrinsics,
           )
         : null;
-    if (route && route.nativeEvent === nativeEvent) {
-      publication.pendingNavRoute = null;
-    }
     if (
       !publication ||
+      !pendingNavRoutes ||
       !action ||
       !source ||
       !route ||
@@ -2164,6 +2165,8 @@ class KeepAgentPanelCoordinator {
       route.destinationRole === sourceRole ||
       route.destination !== publication.elements[route.destinationRole] ||
       route.nativeEvent !== nativeEvent ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
       !route.captureSnapshot ||
       !route.captureNativeSnapshot ||
       route.captureSnapshot.event === bubble.event ||
@@ -2248,6 +2251,7 @@ class KeepAgentPanelCoordinator {
       return;
     }
 
+    if (!pendingNavRoutes.delete(nativeEvent)) return;
     const claim: KeepAgentPanelNavClaim = Object.freeze({
       identity: Symbol("keep-agent-panel-nav-claim"),
       publication,
@@ -2265,7 +2269,6 @@ class KeepAgentPanelCoordinator {
       nativeEvent,
       windowProof: route.windowProof,
       preventDefault: bubble.preventDefault,
-      isDefaultPrevented: bubble.isDefaultPrevented,
       isPropagationStopped: bubble.isPropagationStopped,
       focus: publication.navIntrinsics.focus,
     });
@@ -2345,7 +2348,6 @@ class KeepAgentPanelCoordinator {
           claim.publication.navIntrinsics,
         ) ||
         claim.bubble.preventDefault !== claim.preventDefault ||
-        claim.bubble.isDefaultPrevented !== claim.isDefaultPrevented ||
         claim.bubble.isPropagationStopped !== claim.isPropagationStopped ||
         !this.#navWindowProofIsCurrent(claim.publication, claim.route) ||
         !this.#navActionIsCurrent(claim.publication, claim.action) ||
@@ -2372,9 +2374,13 @@ class KeepAgentPanelCoordinator {
   ) {
     const publication = this.#current;
     const nativeEvent = event?.nativeEvent;
-    const route = publication?.pendingNavRoute;
+    const pendingNavRoutes = publication?.pendingNavRoutes;
+    const route = nativeEvent
+      ? pendingNavRoutes?.get(nativeEvent)
+      : undefined;
     if (
       !publication ||
+      !pendingNavRoutes ||
       !route ||
       route.nativeEvent !== nativeEvent ||
       route.invalid
@@ -2401,6 +2407,8 @@ class KeepAgentPanelCoordinator {
       route.publication !== publication ||
       route.generation !== generation ||
       publication.generation !== generation ||
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.get(nativeEvent) !== route ||
       capture.type !== "keydown" ||
       capture.currentTarget !== publication.elements.nav ||
       capture.target !== route.source ||
@@ -2443,12 +2451,8 @@ class KeepAgentPanelCoordinator {
     receiver: EventTarget,
     nativeEvent: Event,
   ) {
-    const previous = publication.pendingNavRoute;
-    if (previous) {
-      previous.invalid = true;
-      publication.pendingNavRoute = null;
-    }
     if (this.#navEffect) return;
+    const pendingNavRoutes = publication.pendingNavRoutes;
     const snapshot = readPanelNavNativeEvent(
       nativeEvent,
       publication.navIntrinsics,
@@ -2473,6 +2477,8 @@ class KeepAgentPanelCoordinator {
       snapshot.shiftKey ||
       snapshot.repeat ||
       snapshot.isComposing ||
+      pendingNavRoutes.has(nativeEvent) ||
+      this.#claimedNativeEvents.has(nativeEvent) ||
       (snapshot.view !== null &&
         snapshot.view !== publication.ownerWindow &&
         snapshot.view !== receiver) ||
@@ -2526,7 +2532,13 @@ class KeepAgentPanelCoordinator {
       currentTarget: snapshot.currentTarget,
       pathTerminal: snapshot.path.at(-1)!,
     });
-    publication.pendingNavRoute = {
+    if (
+      publication.pendingNavRoutes !== pendingNavRoutes ||
+      pendingNavRoutes.has(nativeEvent)
+    ) {
+      return;
+    }
+    pendingNavRoutes.set(nativeEvent, {
       identity: Symbol("keep-agent-panel-nav-route"),
       publication,
       generation: publication.generation,
@@ -2541,7 +2553,7 @@ class KeepAgentPanelCoordinator {
       captureSnapshot: null,
       captureNativeSnapshot: null,
       invalid: false,
-    };
+    });
   }
 
   #navWindowListenerIsCurrent(
