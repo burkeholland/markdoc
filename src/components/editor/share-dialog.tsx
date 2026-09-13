@@ -218,11 +218,17 @@ interface SharePresentationRuntime {
   agentToggle: HTMLButtonElement | null;
   agentPanel: HTMLDivElement | null;
   agentDirectionalIntrinsics: ShareDirectionalEventIntrinsics | null;
-  agentDirectionalStage: ShareDirectionalNativeStage | null;
-  agentDirectionalPair: ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction> | null;
-  removeAgentDirectionalCapture: (() => void) | null;
+  agentDirectionalCapture: ShareDirectionalNativeCapture | null;
+  agentDirectionalPairs: WeakMap<
+    KeyboardEvent,
+    ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction>
+  >;
+  agentDirectionalFence:
+    | ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction>
+    | null;
   removeNavigation: ShareRemoveNavigationPublication | null;
   removeNavigationPairs: WeakMap<KeyboardEvent, ShareRemoveNavigationPair>;
+  removeNavigationFence: ShareRemoveNavigationPair | null;
   controlBindings: Set<ShareControlElementRole>;
   footer: HTMLDivElement | null;
   done: HTMLButtonElement | null;
@@ -349,11 +355,6 @@ interface ShareRemoveKeyboardAuthority {
   readonly terminal: ShareRemoveTerminalRegistration;
   readonly apply: typeof Reflect.apply;
   readonly prototypeOf: typeof Object.getPrototypeOf;
-  readonly methodMatches: (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => boolean;
   readonly isCurrent: () => boolean;
 }
 
@@ -410,7 +411,6 @@ interface ShareRemoveNativeSnapshot {
 
 interface ShareRemoveReactMethods {
   readonly preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
-  readonly stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
   readonly isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
   readonly isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
 }
@@ -422,6 +422,26 @@ interface ShareRemoveReactSnapshot {
   readonly currentTarget: HTMLElement;
   readonly phase: number;
   readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly composing: boolean | null;
+  readonly type: string;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly isTrusted: boolean;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly locale: string;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
+  readonly detail: number;
+  readonly timeStamp: number;
+  readonly repeat: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
   readonly methods: ShareRemoveReactMethods;
 }
 
@@ -451,11 +471,8 @@ interface ShareRemoveNavigationDelivery {
 
 interface ShareDirectionalEventIntrinsics {
   readonly keyboardPrototype: object;
-  readonly objectPrototype: object;
   readonly capturingPhase: number;
   readonly bubblingPhase: number;
-  readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
-  readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
   readonly apply: typeof Reflect.apply;
   readonly trusted: ShareDirectionalTrustedAuthority;
@@ -469,7 +486,6 @@ interface ShareDirectionalEventIntrinsics {
     defaultPrevented: (this: Event) => boolean;
     cancelBubble: (this: Event) => boolean;
     composedPath: (this: Event) => EventTarget[];
-    preventDefault: (this: Event) => void;
   }>;
   readonly keyboard: Readonly<{
     key: (this: KeyboardEvent) => string;
@@ -511,55 +527,65 @@ interface ShareDirectionalNativeSnapshot {
 
 type ShareDirectionalReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
   readonly isComposing?: unknown;
-  readonly isPersistent?: unknown;
 };
 
-type ShareDirectionalReactMethodName =
-  | "preventDefault"
-  | "stopPropagation"
-  | "isDefaultPrevented"
-  | "isPropagationStopped"
-  | "persist"
-  | "isPersistent";
+type ShareDirectionalReactMethod = (...args: never[]) => unknown;
 
-const SHARE_DIRECTIONAL_REACT_METHOD_NAMES = Object.freeze([
-  "preventDefault",
-  "stopPropagation",
-  "isDefaultPrevented",
-  "isPropagationStopped",
-  "persist",
-  "isPersistent",
-] satisfies ShareDirectionalReactMethodName[]);
-
-interface ShareDirectionalReactMethodSnapshot {
-  readonly owner: object;
-  readonly descriptor: Readonly<PropertyDescriptor>;
-  readonly method: (...args: never[]) => unknown;
+interface ShareDirectionalReactMethods {
+  readonly preventDefault: ShareDirectionalReactMethod;
+  readonly isDefaultPrevented: ShareDirectionalReactMethod;
+  readonly isPropagationStopped: ShareDirectionalReactMethod;
 }
 
 interface ShareDirectionalReactSnapshot {
   readonly event: ReactKeyboardEvent<HTMLButtonElement>;
-  readonly prototype: object;
   readonly nativeEvent: Event;
   readonly target: EventTarget;
   readonly currentTarget: HTMLButtonElement;
   readonly eventPhase: number;
-  readonly methods: Readonly<Record<
-    ShareDirectionalReactMethodName,
-    ShareDirectionalReactMethodSnapshot
-  >>;
+  readonly view: ReactKeyboardEvent<HTMLButtonElement>["view"];
+  readonly composing: boolean | null;
+  readonly type: string;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly isTrusted: boolean;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly locale: string;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
+  readonly detail: number;
+  readonly timeStamp: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly methods: ShareDirectionalReactMethods;
 }
 
 interface ShareDirectionalNativeStage {
-  readonly nativeEvent: Event;
+  readonly registration: ShareDirectionalNativeCapture;
+  readonly nativeEvent: KeyboardEvent;
   readonly receiver: EventTarget;
   readonly snapshot: ShareDirectionalNativeSnapshot;
+}
+
+interface ShareDirectionalNativeCapture {
+  readonly proofFor: (event: KeyboardEvent) => ShareDirectionalNativeStage | null;
+  readonly claim: (stage: ShareDirectionalNativeStage) => boolean;
+  readonly retains: (stage: ShareDirectionalNativeStage) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
 }
 
 interface ShareDirectionalPair<Publication extends object, Action extends object> {
   readonly publication: Publication;
   readonly action: Action;
-  readonly nativeEvent: Event;
+  readonly nativeEvent: KeyboardEvent;
   readonly stage: ShareDirectionalNativeStage;
   readonly capture: ShareDirectionalReactSnapshot;
 }
@@ -567,6 +593,7 @@ interface ShareDirectionalPair<Publication extends object, Action extends object
 interface ShareAgentDirectionalAction {
   readonly presentation: SharePresentation;
   readonly visit: ShareVisit;
+  readonly permissionContext: PermissionContext;
   readonly documentId: string;
   readonly origin: string;
   readonly expanded: boolean;
@@ -605,12 +632,15 @@ interface LocalAgentCardPublication {
   readonly ownerWindow: Window & typeof globalThis;
   readonly placement: SharePlacementChain;
   readonly intrinsics: ShareDirectionalEventIntrinsics;
-  directionalStage: ShareDirectionalNativeStage | null;
-  directionalPair: ShareDirectionalPair<
+  directionalCapture: ShareDirectionalNativeCapture | null;
+  directionalPairs: WeakMap<
+    KeyboardEvent,
+    ShareDirectionalPair<LocalAgentCardPublication, LocalAgentDirectionalAction>
+  >;
+  directionalFence: ShareDirectionalPair<
     LocalAgentCardPublication,
     LocalAgentDirectionalAction
   > | null;
-  removeDirectionalCapture: (() => void) | null;
   observer: MutationObserver | null;
   placementObserver: MutationObserver | null;
   active: boolean;
@@ -1066,8 +1096,6 @@ function captureShareDirectionalIntrinsics(
   ownerWindow: Window & typeof globalThis,
 ): ShareDirectionalEventIntrinsics | null {
   const objectConstructor = ownerWindow.Object;
-  const objectPrototype = objectConstructor.prototype;
-  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
   const getPrototypeOf = objectConstructor.getPrototypeOf;
   const apply = ownerWindow.Reflect.apply;
   const eventPrototype = ownerWindow.Event.prototype;
@@ -1095,8 +1123,6 @@ function captureShareDirectionalIntrinsics(
   const view = shareDirectionalGetter<UIEvent, Window | null>(uiEventPrototype, "view");
   const activeElement = shareDirectionalGetter<Document, Element | null>(documentPrototype, "activeElement");
   const composedPath = eventPrototype.composedPath;
-  const preventDefault = eventPrototype.preventDefault;
-  const isPrototypeOf = ownerWindow.Object.prototype.isPrototypeOf;
   if (
     !trusted ||
     !type ||
@@ -1118,19 +1144,14 @@ function captureShareDirectionalIntrinsics(
     !isComposing ||
     !view ||
     !activeElement ||
-    typeof composedPath !== "function" ||
-    typeof preventDefault !== "function" ||
-    typeof isPrototypeOf !== "function"
+    typeof composedPath !== "function"
   ) {
     return null;
   }
   return Object.freeze({
     keyboardPrototype,
-    objectPrototype,
     capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
-    isPrototypeOf,
-    getOwnPropertyDescriptor,
     getPrototypeOf,
     apply,
     trusted,
@@ -1144,7 +1165,6 @@ function captureShareDirectionalIntrinsics(
       defaultPrevented,
       cancelBubble,
       composedPath,
-      preventDefault,
     }),
     keyboard: Object.freeze({
       key,
@@ -1168,11 +1188,7 @@ function readShareDirectionalNativeEvent(
 ): ShareDirectionalNativeSnapshot | null {
   try {
     if (
-      !intrinsics.apply(
-        intrinsics.isPrototypeOf,
-        intrinsics.keyboardPrototype,
-        [event],
-      ) ||
+      intrinsics.getPrototypeOf(event) !== intrinsics.keyboardPrototype ||
       !intrinsics.trusted.isCurrent() ||
       !intrinsics.trusted.matches(event)
     ) {
@@ -1232,68 +1248,6 @@ function shareDirectionalDestination(key: string, expanded: boolean): boolean | 
   return null;
 }
 
-function captureShareDirectionalReactMethod(
-  event: ReactKeyboardEvent<HTMLButtonElement>,
-  name: ShareDirectionalReactMethodName,
-  intrinsics: ShareDirectionalEventIntrinsics,
-): ShareDirectionalReactMethodSnapshot | null {
-  let owner: object | null = event;
-  for (let depth = 0; owner && depth < 16; depth++) {
-    const descriptor = intrinsics.getOwnPropertyDescriptor(owner, name);
-    if (descriptor) {
-      if (
-        typeof descriptor.value !== "function" ||
-        descriptor.get !== undefined ||
-        descriptor.set !== undefined
-      ) {
-        return null;
-      }
-      return Object.freeze({
-        owner,
-        descriptor: Object.freeze({ ...descriptor }),
-        method: descriptor.value as (...args: never[]) => unknown,
-      });
-    }
-    owner = intrinsics.getPrototypeOf(owner);
-  }
-  return null;
-}
-
-function shareDirectionalReactMethodsAreCurrent(
-  snapshot: ShareDirectionalReactSnapshot,
-  intrinsics: ShareDirectionalEventIntrinsics,
-): boolean {
-  return SHARE_DIRECTIONAL_REACT_METHOD_NAMES
-    .every((name) =>
-      shareDirectionalDescriptorsMatch(
-        intrinsics.getOwnPropertyDescriptor(snapshot.methods[name].owner, name),
-        snapshot.methods[name].descriptor,
-      )
-    );
-}
-
-function shareDirectionalReactMethodsMatch(
-  capture: ShareDirectionalReactSnapshot,
-  bubble: ShareDirectionalReactSnapshot,
-): boolean {
-  return SHARE_DIRECTIONAL_REACT_METHOD_NAMES
-    .every((name) => {
-      const captureMethod = capture.methods[name];
-      const bubbleMethod = bubble.methods[name];
-      const captureIsOwn = captureMethod.owner === capture.event;
-      const bubbleIsOwn = bubbleMethod.owner === bubble.event;
-      return (
-        captureMethod.method === bubbleMethod.method &&
-        captureIsOwn === bubbleIsOwn &&
-        (captureIsOwn || captureMethod.owner === bubbleMethod.owner) &&
-        shareDirectionalDescriptorsMatch(
-          bubbleMethod.descriptor,
-          captureMethod.descriptor,
-        )
-      );
-    });
-}
-
 function captureShareDirectionalReactEvent(
   event: ReactKeyboardEvent<HTMLButtonElement>,
   nativeEvent: Event,
@@ -1306,102 +1260,151 @@ function captureShareDirectionalReactEvent(
 ): ShareDirectionalReactSnapshot | null {
   try {
     const proof = event as ShareDirectionalReactEvent;
-    const reactPrototype = intrinsics.getPrototypeOf(event);
-    const preventDefault = captureShareDirectionalReactMethod(
-      event,
-      "preventDefault",
-      intrinsics,
-    );
-    const stopPropagation = captureShareDirectionalReactMethod(
-      event,
-      "stopPropagation",
-      intrinsics,
-    );
-    const isDefaultPrevented = captureShareDirectionalReactMethod(
-      event,
-      "isDefaultPrevented",
-      intrinsics,
-    );
-    const isPropagationStopped = captureShareDirectionalReactMethod(
-      event,
-      "isPropagationStopped",
-      intrinsics,
-    );
-    const persist = captureShareDirectionalReactMethod(event, "persist", intrinsics);
-    const isPersistent = captureShareDirectionalReactMethod(
-      event,
-      "isPersistent",
-      intrinsics,
-    );
+    const preventDefault = event.preventDefault;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
     if (
-      !reactPrototype ||
-      !preventDefault ||
-      !stopPropagation ||
-      !isDefaultPrevented ||
-      !isPropagationStopped ||
-      !persist ||
-      !isPersistent
+      typeof preventDefault !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function"
     ) {
       return null;
     }
-    const methods = Object.freeze({
+    const methods: ShareDirectionalReactMethods = Object.freeze({
       preventDefault,
-      stopPropagation,
       isDefaultPrevented,
       isPropagationStopped,
-      persist,
-      isPersistent,
     });
+    const composing = proof.isComposing === undefined
+      ? null
+      : proof.isComposing;
+    if (composing !== null && typeof composing !== "boolean") return null;
     const reactSnapshot: ShareDirectionalReactSnapshot = Object.freeze({
       event,
-      prototype: reactPrototype,
       nativeEvent,
       target: event.target,
       currentTarget: event.currentTarget,
       eventPhase: event.eventPhase,
+      view: event.view,
+      composing,
+      type: event.type,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      isTrusted: event.isTrusted,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      locale: event.locale,
+      charCode: event.charCode,
+      keyCode: event.keyCode,
+      which: event.which,
+      detail: event.detail,
+      timeStamp: event.timeStamp,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      repeat: event.repeat,
       methods,
     });
-    if (
-      reactPrototype &&
-      reactPrototype !== intrinsics.objectPrototype &&
-      event.type === snapshot.type &&
-      event.type === "keydown" &&
-      event.nativeEvent === nativeEvent &&
-      event.currentTarget === control &&
-      event.target === control &&
-      event.eventPhase === snapshot.eventPhase &&
-      event.eventPhase === expectedPhase &&
-      event.bubbles === snapshot.bubbles &&
-      event.cancelable === snapshot.cancelable &&
-      !event.defaultPrevented &&
-      event.isTrusted === snapshot.isTrusted &&
-      Object.is(event.view, snapshot.view) &&
-      event.key === snapshot.key &&
-      event.code === snapshot.code &&
-      event.location === snapshot.location &&
-      event.altKey === snapshot.altKey &&
-      event.ctrlKey === snapshot.ctrlKey &&
-      event.metaKey === snapshot.metaKey &&
-      event.shiftKey === snapshot.shiftKey &&
-      event.repeat === snapshot.repeat &&
-      (proof.isComposing === undefined ||
-        proof.isComposing === snapshot.isComposing) &&
-      isDefaultPrevented.owner === event &&
-      isPropagationStopped.owner === event &&
-      preventDefault.owner !== event &&
-      stopPropagation.owner !== event &&
-      persist.owner !== event &&
-      isPersistent.owner !== event &&
-      intrinsics.apply(isDefaultPrevented.method, event, []) === false &&
-      intrinsics.apply(isPropagationStopped.method, event, []) === false &&
-      intrinsics.apply(isPersistent.method, event, []) === true &&
+    return shareDirectionalReactSnapshotIsCurrent(
+      reactSnapshot,
+      nativeEvent,
+      snapshot,
+      control,
+      ownerDocument,
+      ownerWindow,
+      intrinsics,
+      expectedPhase,
+      control,
+      false,
+      isDefaultPrevented,
+    )
+      ? reactSnapshot
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function shareDirectionalReactSnapshotIsCurrent(
+  react: ShareDirectionalReactSnapshot,
+  nativeEvent: Event,
+  snapshot: ShareDirectionalNativeSnapshot,
+  control: HTMLButtonElement,
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+  intrinsics: ShareDirectionalEventIntrinsics,
+  expectedPhase: number,
+  liveCurrentTarget: HTMLButtonElement | null,
+  expectedDefaultPrevented: boolean,
+  currentDefaultQuery: ShareDirectionalReactMethod,
+): boolean {
+  try {
+    const event = react.event as ShareDirectionalReactEvent;
+    const composing = event.isComposing === undefined
+      ? null
+      : event.isComposing;
+    const terminal = snapshot.path.at(-1);
+    return (
+      react.nativeEvent === nativeEvent &&
+      react.target === control &&
+      react.currentTarget === control &&
+      react.eventPhase === expectedPhase &&
+      react.type === "keydown" &&
+      react.type === snapshot.type &&
+      react.bubbles === snapshot.bubbles &&
+      react.cancelable === snapshot.cancelable &&
+      !react.defaultPrevented &&
+      react.isTrusted === snapshot.isTrusted &&
+      (react.view === null ||
+        Object.is(react.view, ownerWindow) ||
+        Object.is(react.view, terminal)) &&
+      react.key === snapshot.key &&
+      react.code === snapshot.code &&
+      react.location === snapshot.location &&
+      react.altKey === snapshot.altKey &&
+      react.ctrlKey === snapshot.ctrlKey &&
+      react.metaKey === snapshot.metaKey &&
+      react.shiftKey === snapshot.shiftKey &&
+      react.repeat === snapshot.repeat &&
+      react.composing === composing &&
+      (composing === null || composing === snapshot.isComposing) &&
+      event.type === react.type &&
+      event.nativeEvent === react.nativeEvent &&
+      event.target === react.target &&
+      event.currentTarget === liveCurrentTarget &&
+      event.eventPhase === react.eventPhase &&
+      event.bubbles === react.bubbles &&
+      event.cancelable === react.cancelable &&
+      event.defaultPrevented === expectedDefaultPrevented &&
+      event.isTrusted === react.isTrusted &&
+      event.view === react.view &&
+      event.key === react.key &&
+      event.code === react.code &&
+      event.location === react.location &&
+      event.locale === react.locale &&
+      event.charCode === react.charCode &&
+      event.keyCode === react.keyCode &&
+      event.which === react.which &&
+      event.detail === react.detail &&
+      event.timeStamp === react.timeStamp &&
+      event.altKey === react.altKey &&
+      event.ctrlKey === react.ctrlKey &&
+      event.metaKey === react.metaKey &&
+      event.shiftKey === react.shiftKey &&
+      event.repeat === react.repeat &&
+      event.preventDefault === react.methods.preventDefault &&
+      event.isDefaultPrevented === currentDefaultQuery &&
+      event.isPropagationStopped === react.methods.isPropagationStopped &&
       snapshot.type === "keydown" &&
       snapshot.target === control &&
       snapshot.currentTarget !== null &&
       snapshot.eventPhase === expectedPhase &&
       snapshot.bubbles &&
       snapshot.cancelable &&
-      !snapshot.defaultPrevented &&
+      snapshot.defaultPrevented === expectedDefaultPrevented &&
       !snapshot.cancelBubble &&
       snapshot.isTrusted &&
       !snapshot.altKey &&
@@ -1410,36 +1413,65 @@ function captureShareDirectionalReactEvent(
       !snapshot.shiftKey &&
       !snapshot.repeat &&
       !snapshot.isComposing &&
-      (snapshot.view === null || snapshot.view === ownerWindow) &&
+      (snapshot.view === null ||
+        snapshot.view === ownerWindow ||
+        snapshot.view === terminal) &&
       snapshot.path.includes(snapshot.currentTarget) &&
-      snapshot.path.at(-1) !== undefined &&
+      terminal !== undefined &&
       shareDirectionalPathMatches(
         snapshot.path,
         control,
         ownerDocument,
-        snapshot.path.at(-1)!,
+        terminal,
       ) &&
-      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) === control &&
-      shareDirectionalReactMethodsAreCurrent(reactSnapshot, intrinsics)
-    ) {
-      return reactSnapshot;
-    }
-    return null;
+      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) === control
+    );
   } catch {
-    return null;
+    return false;
+  }
+}
+
+function queryShareDirectionalReactMethod(
+  snapshot: ShareDirectionalReactSnapshot,
+  method: ShareDirectionalReactMethod,
+  expected: boolean,
+  intrinsics: ShareDirectionalEventIntrinsics,
+  revalidate: () => boolean,
+): boolean {
+  try {
+    const result = intrinsics.apply(method, snapshot.event, []);
+    return result === expected && revalidate();
+  } catch {
+    return false;
+  }
+}
+
+function callShareDirectionalReactMethod(
+  snapshot: ShareDirectionalReactSnapshot,
+  method: ShareDirectionalReactMethod,
+  intrinsics: ShareDirectionalEventIntrinsics,
+  revalidate: () => boolean,
+): boolean {
+  try {
+    intrinsics.apply(method, snapshot.event, []);
+    return revalidate();
+  } catch {
+    return false;
   }
 }
 
 function shareDirectionalNativeSnapshotsMatch(
   first: ShareDirectionalNativeSnapshot,
   second: ShareDirectionalNativeSnapshot,
+  expectedSecondDefaultPrevented = first.defaultPrevented,
 ): boolean {
   return (
     first.type === second.type &&
     first.target === second.target &&
     first.bubbles === second.bubbles &&
     first.cancelable === second.cancelable &&
-    first.defaultPrevented === second.defaultPrevented &&
+    !first.defaultPrevented &&
+    second.defaultPrevented === expectedSecondDefaultPrevented &&
     first.cancelBubble === second.cancelBubble &&
     first.key === second.key &&
     first.code === second.code &&
@@ -1458,7 +1490,8 @@ function shareDirectionalNativeSnapshotsMatch(
 }
 
 function captureShareDirectionalNativeStage(
-  nativeEvent: Event,
+  registration: ShareDirectionalNativeCapture,
+  nativeEvent: KeyboardEvent,
   receiver: EventTarget,
   snapshot: ShareDirectionalNativeSnapshot,
   control: HTMLButtonElement,
@@ -1481,13 +1514,14 @@ function captureShareDirectionalNativeStage(
       terminal,
     )
   )
-    ? Object.freeze({ nativeEvent, receiver, snapshot })
+    ? Object.freeze({ registration, nativeEvent, receiver, snapshot })
     : null;
 }
 
 function shareDirectionalStageMatches(
   stage: ShareDirectionalNativeStage,
-  nativeEvent: Event,
+  registration: ShareDirectionalNativeCapture,
+  nativeEvent: KeyboardEvent,
   snapshot: ShareDirectionalNativeSnapshot,
   control: HTMLButtonElement,
   ownerDocument: Document,
@@ -1497,6 +1531,7 @@ function shareDirectionalStageMatches(
   const terminal = stage.snapshot.path.at(-1);
   return (
     terminal !== undefined &&
+    stage.registration === registration &&
     stage.nativeEvent === nativeEvent &&
     ownerDocument.defaultView === ownerWindow &&
     stage.receiver === stage.snapshot.currentTarget &&
@@ -1510,40 +1545,61 @@ function shareDirectionalStageMatches(
       terminal,
     ) &&
     snapshot.path.at(-1) === terminal &&
-    shareDirectionalNativeSnapshotsMatch(stage.snapshot, snapshot)
+    shareDirectionalNativeSnapshotsMatch(
+      stage.snapshot,
+      snapshot,
+      snapshot.defaultPrevented,
+    )
   );
 }
 
-function installShareDirectionalNativeCapture<
-  Publication extends object,
-  Action extends object,
->(
+function installShareDirectionalNativeCapture(
   control: HTMLButtonElement,
   intrinsics: ShareDirectionalEventIntrinsics,
   eligible: () => boolean,
-  getStage: () => ShareDirectionalNativeStage | null,
-  setStage: (stage: ShareDirectionalNativeStage | null) => void,
-  getPair: () => ShareDirectionalPair<Publication, Action> | null,
-  pairIsClaimed: (
-    pair: ShareDirectionalPair<Publication, Action>,
-  ) => boolean,
-): (() => void) | null {
+): ShareDirectionalNativeCapture | null {
   const ownerDocument = control.ownerDocument;
   const ownerWindow = ownerDocument.defaultView;
   if (!ownerWindow) return null;
   const ownerRealm = ownerWindow;
+  const addEventListener = ownerRealm.addEventListener;
+  const removeEventListener = ownerRealm.removeEventListener;
+  let stages: WeakMap<KeyboardEvent, ShareDirectionalNativeStage> | null =
+    new WeakMap();
+  let invalidEvents: WeakSet<KeyboardEvent> | null = new WeakSet();
+  const claimedEvents = new WeakSet<KeyboardEvent>();
+  let active = true;
+  let released = false;
+  const registrationAuthorityIsCurrent = () =>
+    ownerDocument.defaultView === ownerRealm &&
+    ownerRealm.addEventListener === addEventListener &&
+    ownerRealm.removeEventListener === removeEventListener &&
+    intrinsics.trusted.isCurrent();
+
   function rememberAgentDirectionalNative(
     this: EventTarget,
     nativeEvent: Event,
   ) {
-    const existingPair = getPair();
-    if (existingPair && pairIsClaimed(existingPair)) return;
-    setStage(null);
-    if (!eligible()) return;
+    if (
+      !active ||
+      released ||
+      !stages ||
+      !invalidEvents ||
+      !eligible() ||
+      intrinsics.getPrototypeOf(nativeEvent) !== intrinsics.keyboardPrototype
+    ) {
+      return;
+    }
+    const keyboardEvent = nativeEvent as KeyboardEvent;
+    if (stages.has(keyboardEvent)) {
+      invalidEvents.add(keyboardEvent);
+      return;
+    }
     const snapshot = readShareDirectionalNativeEvent(nativeEvent, intrinsics);
     const stage = snapshot
       ? captureShareDirectionalNativeStage(
-          nativeEvent,
+          registration,
+          keyboardEvent,
           this,
           snapshot,
           control,
@@ -1552,44 +1608,98 @@ function installShareDirectionalNativeCapture<
           intrinsics,
         )
       : null;
-    if (!stage || !eligible()) return;
-    setStage(stage);
-    ownerRealm.queueMicrotask(() => {
-      if (getStage() === stage && getPair()?.stage !== stage) setStage(null);
-    });
+    if (!stage || !eligible()) {
+      invalidEvents.add(keyboardEvent);
+      return;
+    }
+    stages.set(keyboardEvent, stage);
   }
-  try {
-    ownerRealm.addEventListener(
-      "keydown",
-      rememberAgentDirectionalNative,
-      true,
-    );
-  } catch {
-    return null;
-  }
-  return () => {
-    ownerRealm.removeEventListener(
-      "keydown",
-      rememberAgentDirectionalNative,
-      true,
+
+  const stageRemains = (stage: ShareDirectionalNativeStage) => {
+    if (
+      !active ||
+      released ||
+      !stages ||
+      !invalidEvents ||
+      stages.get(stage.nativeEvent) !== stage ||
+      invalidEvents.has(stage.nativeEvent) ||
+      stage.registration !== registration ||
+      !registrationAuthorityIsCurrent()
+    ) {
+      return false;
+    }
+    const snapshot = readShareDirectionalNativeEvent(stage.nativeEvent, intrinsics);
+    return Boolean(
+      snapshot &&
+      shareDirectionalStageMatches(
+        stage,
+        registration,
+        stage.nativeEvent,
+        snapshot,
+        control,
+        ownerDocument,
+        ownerRealm,
+        intrinsics,
+      ),
     );
   };
-}
 
-function preventShareDirectionalEvent(
-  nativeEvent: Event,
-  intrinsics: ShareDirectionalEventIntrinsics,
-): boolean {
+  const registration: ShareDirectionalNativeCapture = Object.freeze({
+    proofFor: (event: KeyboardEvent) => {
+      const stage = stages?.get(event);
+      return stage && !claimedEvents.has(event) && stageRemains(stage)
+        ? stage
+        : null;
+    },
+    claim: (stage: ShareDirectionalNativeStage) => {
+      if (
+        claimedEvents.has(stage.nativeEvent) ||
+        registration.proofFor(stage.nativeEvent) !== stage
+      ) {
+        return false;
+      }
+      claimedEvents.add(stage.nativeEvent);
+      return true;
+    },
+    retains: stageRemains,
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      stages = null;
+      invalidEvents = null;
+      try {
+        intrinsics.apply(removeEventListener, ownerRealm, [
+          "keydown",
+          rememberAgentDirectionalNative,
+          true,
+        ]);
+      } catch {
+        // Cleanup cannot replace the captured owner-Window method.
+      }
+    },
+    isCurrent: () =>
+      active &&
+      !released &&
+      registrationAuthorityIsCurrent(),
+  });
+
   try {
-    intrinsics.apply(intrinsics.event.preventDefault, nativeEvent, []);
-    return intrinsics.apply(
-      intrinsics.event.defaultPrevented,
-      nativeEvent,
-      [],
-    );
+    intrinsics.apply(addEventListener, ownerRealm, [
+      "keydown",
+      rememberAgentDirectionalNative,
+      true,
+    ]);
   } catch {
-    return false;
+    active = false;
+    released = true;
+    stages = null;
+    invalidEvents = null;
+    return null;
   }
+  if (registration.isCurrent()) return registration;
+  registration.release();
+  return null;
 }
 
 function captureShareRemoveGetters<const Fields extends readonly string[]>(
@@ -1998,26 +2108,6 @@ function captureShareRemoveKeyboardAuthority(
     intrinsicsAreCurrent,
   );
   if (!terminal) return null;
-  const methodMatches = (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => {
-    if (typeof value !== "function") return false;
-    try {
-      let owner: object | null = event;
-      while (owner) {
-        const descriptor = getOwnPropertyDescriptor(owner, property);
-        if (descriptor) {
-          return "value" in descriptor && descriptor.value === value;
-        }
-        owner = prototypeOf(owner) as object | null;
-      }
-      return false;
-    } catch {
-      return false;
-    }
-  };
   return Object.freeze({
     presentation,
     list,
@@ -2039,7 +2129,6 @@ function captureShareRemoveKeyboardAuthority(
     terminal,
     apply,
     prototypeOf,
-    methodMatches,
     isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
   });
 }
@@ -2440,35 +2529,22 @@ function captureShareRemoveReactEvent(
 ): ShareRemoveReactSnapshot | null {
   try {
     const proof = event as ReactKeyboardEvent<HTMLElement> & {
-      readonly isComposing?: boolean;
+      readonly isComposing?: unknown;
       readonly preventDefault?: unknown;
-      readonly stopPropagation?: unknown;
       readonly isDefaultPrevented?: unknown;
       readonly isPropagationStopped?: unknown;
     };
     const preventDefault = proof.preventDefault;
-    const stopPropagation = proof.stopPropagation;
     const isDefaultPrevented = proof.isDefaultPrevented;
     const isPropagationStopped = proof.isPropagationStopped;
+    const composing = proof.isComposing === undefined
+      ? null
+      : proof.isComposing;
     if (
       typeof preventDefault !== "function" ||
-      typeof stopPropagation !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
-      !authority.methodMatches(event, "preventDefault", preventDefault) ||
-      !authority.methodMatches(event, "stopPropagation", stopPropagation) ||
-      !authority.methodMatches(
-        event,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) ||
-      !authority.methodMatches(
-        event,
-        "isPropagationStopped",
-        isPropagationStopped,
-      ) ||
-      authority.apply(isDefaultPrevented, event, []) !== false ||
-      authority.apply(isPropagationStopped, event, []) !== false ||
+      (composing !== null && typeof composing !== "boolean") ||
       event === (native.event as unknown) ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
@@ -2487,8 +2563,7 @@ function captureShareRemoveReactEvent(
       event.altKey !== native.altKey ||
       event.metaKey !== native.metaKey ||
       event.shiftKey !== native.shiftKey ||
-      (proof.isComposing !== undefined &&
-        proof.isComposing !== native.composing) ||
+      (composing !== null && composing !== native.composing) ||
       (event.view !== null &&
         !Object.is(event.view, authority.ownerWindow) &&
         !Object.is(event.view, native.terminal.receiver)) ||
@@ -2503,9 +2578,28 @@ function captureShareRemoveReactEvent(
       currentTarget,
       phase: native.phase,
       view: event.view,
+      composing,
+      type: event.type,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      isTrusted: event.isTrusted,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      locale: event.locale,
+      charCode: event.charCode,
+      keyCode: event.keyCode,
+      which: event.which,
+      timeStamp: event.timeStamp,
+      repeat: event.repeat,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      detail: event.detail,
       methods: Object.freeze({
         preventDefault,
-        stopPropagation,
         isDefaultPrevented,
         isPropagationStopped,
       }),
@@ -2521,77 +2615,97 @@ function shareRemoveReactSnapshotIsCurrent(
   native: ShareRemoveNativeSnapshot,
   currentTarget: HTMLElement | null,
   expectedDefaultPrevented = false,
+  currentDefaultQuery = snapshot.methods.isDefaultPrevented,
 ) {
   try {
     const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
+      readonly isComposing?: unknown;
       readonly preventDefault?: unknown;
-      readonly stopPropagation?: unknown;
       readonly isDefaultPrevented?: unknown;
       readonly isPropagationStopped?: unknown;
     };
+    const composing = event.isComposing === undefined
+      ? null
+      : event.isComposing;
     return (
       event.nativeEvent === snapshot.nativeEvent &&
       event.nativeEvent === native.event &&
-      event.type === native.type &&
+      event.type === snapshot.type &&
+      snapshot.type === native.type &&
       event.target === snapshot.target &&
       event.target === native.target &&
       event.currentTarget === currentTarget &&
       event.eventPhase === snapshot.phase &&
-      event.bubbles === native.bubbles &&
-      event.cancelable === native.cancelable &&
+      event.bubbles === snapshot.bubbles &&
+      snapshot.bubbles === native.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      snapshot.cancelable === native.cancelable &&
       event.defaultPrevented === expectedDefaultPrevented &&
-      event.isTrusted === native.trusted &&
-      event.key === native.key &&
-      event.code === native.code &&
-      event.location === native.location &&
-      event.repeat === native.repeat &&
-      event.ctrlKey === native.ctrlKey &&
-      event.altKey === native.altKey &&
-      event.metaKey === native.metaKey &&
-      event.shiftKey === native.shiftKey &&
+      event.isTrusted === snapshot.isTrusted &&
+      snapshot.isTrusted === native.trusted &&
+      event.key === snapshot.key &&
+      snapshot.key === native.key &&
+      event.code === snapshot.code &&
+      snapshot.code === native.code &&
+      event.location === snapshot.location &&
+      snapshot.location === native.location &&
+      event.locale === snapshot.locale &&
+      event.charCode === snapshot.charCode &&
+      event.keyCode === snapshot.keyCode &&
+      event.which === snapshot.which &&
+      event.timeStamp === snapshot.timeStamp &&
+      event.repeat === snapshot.repeat &&
+      snapshot.repeat === native.repeat &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      snapshot.ctrlKey === native.ctrlKey &&
+      event.altKey === snapshot.altKey &&
+      snapshot.altKey === native.altKey &&
+      event.metaKey === snapshot.metaKey &&
+      snapshot.metaKey === native.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      snapshot.shiftKey === native.shiftKey &&
+      composing === snapshot.composing &&
+      (composing === null || composing === native.composing) &&
       event.view === snapshot.view &&
       (event.view === null ||
         Object.is(event.view, authority.ownerWindow) ||
         Object.is(event.view, native.terminal.receiver)) &&
-      event.detail === native.detail &&
+      event.detail === snapshot.detail &&
+      snapshot.detail === native.detail &&
       event.preventDefault === snapshot.methods.preventDefault &&
-      event.stopPropagation === snapshot.methods.stopPropagation &&
-      (expectedDefaultPrevented ||
-        event.isDefaultPrevented === snapshot.methods.isDefaultPrevented) &&
+      event.isDefaultPrevented === currentDefaultQuery &&
       event.isPropagationStopped ===
-        snapshot.methods.isPropagationStopped &&
-      authority.methodMatches(
-        event,
-        "preventDefault",
-        snapshot.methods.preventDefault,
-      ) &&
-      authority.methodMatches(
-        event,
-        "stopPropagation",
-        snapshot.methods.stopPropagation,
-      ) &&
-      (expectedDefaultPrevented ||
-        authority.methodMatches(
-          event,
-          "isDefaultPrevented",
-          snapshot.methods.isDefaultPrevented,
-        )) &&
-      authority.methodMatches(
-        event,
-        "isPropagationStopped",
-        snapshot.methods.isPropagationStopped,
-      ) &&
-      authority.apply(
-        event.isDefaultPrevented,
-        snapshot.event,
-        [],
-      ) === expectedDefaultPrevented &&
-      authority.apply(
-        snapshot.methods.isPropagationStopped,
-        snapshot.event,
-        [],
-      ) === false
+        snapshot.methods.isPropagationStopped
     );
+  } catch {
+    return false;
+  }
+}
+
+function queryShareRemoveReactMethod(
+  snapshot: ShareRemoveReactSnapshot,
+  method: (...args: never[]) => unknown,
+  expected: boolean,
+  authority: ShareRemoveKeyboardAuthority,
+  revalidate: () => boolean,
+) {
+  try {
+    const result = authority.apply(method, snapshot.event, []);
+    return result === expected && revalidate();
+  } catch {
+    return false;
+  }
+}
+
+function callShareRemoveReactMethod(
+  snapshot: ShareRemoveReactSnapshot,
+  method: (...args: never[]) => unknown,
+  authority: ShareRemoveKeyboardAuthority,
+  revalidate: () => boolean,
+) {
+  try {
+    authority.apply(method, snapshot.event, []);
+    return revalidate();
   } catch {
     return false;
   }
@@ -2878,10 +2992,10 @@ function retireLocalAgentCardPublication(
   publication: LocalAgentCardPublication,
 ) {
   publication.active = false;
-  publication.directionalStage = null;
-  publication.directionalPair = null;
-  publication.removeDirectionalCapture?.();
-  publication.removeDirectionalCapture = null;
+  publication.directionalCapture?.release();
+  publication.directionalCapture = null;
+  publication.directionalPairs = new WeakMap();
+  publication.directionalFence = null;
   publication.observer?.disconnect();
   publication.observer = null;
   publication.placementObserver?.disconnect();
@@ -3263,8 +3377,6 @@ export const ShareDialog = memo(function ShareDialog({
   const claimedNativeControlEventsRef = useRef(new WeakSet<Event>());
   const claimedDirectionalPairsRef = useRef(new WeakSet<object>());
   const claimedControlElementsRef = useRef(new WeakMap<HTMLButtonElement, object>());
-  const attemptedRemoveReactEventsRef = useRef(new WeakSet<object>());
-  const attemptedRemoveNativeEventsRef = useRef(new WeakSet<object>());
   const claimedRemoveDeliveriesRef = useRef(new WeakSet<object>());
   const claimedRemovePairsRef = useRef(new WeakSet<object>());
   const claimedRemoveMovementsRef = useRef(new WeakSet<object>());
@@ -3799,11 +3911,12 @@ export const ShareDialog = memo(function ShareDialog({
         agentToggle: null,
         agentPanel: null,
         agentDirectionalIntrinsics: null,
-        agentDirectionalStage: null,
-        agentDirectionalPair: null,
-        removeAgentDirectionalCapture: null,
+        agentDirectionalCapture: null,
+        agentDirectionalPairs: new WeakMap(),
+        agentDirectionalFence: null,
         removeNavigation: null,
         removeNavigationPairs: new WeakMap(),
+        removeNavigationFence: null,
         controlBindings: new Set(),
         footer: null,
         done: null,
@@ -3895,11 +4008,12 @@ export const ShareDialog = memo(function ShareDialog({
     if (runtime && !runtime.retired) {
       runtime.active = false;
       runtime.retired = true;
-      runtime.agentDirectionalStage = null;
-      runtime.agentDirectionalPair = null;
-      runtime.removeAgentDirectionalCapture?.();
-      runtime.removeAgentDirectionalCapture = null;
+      runtime.agentDirectionalCapture?.release();
+      runtime.agentDirectionalCapture = null;
+      runtime.agentDirectionalPairs = new WeakMap();
+      runtime.agentDirectionalFence = null;
       runtime.removeNavigationPairs = new WeakMap();
+      runtime.removeNavigationFence = null;
       runtime.removeNavigation?.retire();
       runtime.removeNavigation = null;
       clearShareCloseProvenance(runtime);
@@ -4945,12 +5059,25 @@ export const ShareDialog = memo(function ShareDialog({
     const control = runtime?.agentToggle;
     const panel = runtime?.agentPanel;
     const intrinsics = runtime?.agentDirectionalIntrinsics;
-    const stage = runtime?.agentDirectionalStage;
+    const registration = runtime?.agentDirectionalCapture;
     const visit = candidate.visit;
-    const nativeEvent = event?.nativeEvent;
+    const permissionContext = candidate.permissionContext;
+    let nativeEvent: Event;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return null;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object") return null;
     const snapshot = intrinsics && nativeEvent
       ? readShareDirectionalNativeEvent(nativeEvent, intrinsics)
       : null;
+    const stage =
+      registration &&
+      intrinsics &&
+      intrinsics.getPrototypeOf(nativeEvent) === intrinsics.keyboardPrototype
+        ? registration.proofFor(nativeEvent as KeyboardEvent)
+        : null;
     const nextExpanded = snapshot
       ? shareDirectionalDestination(snapshot.key, candidate.agentExpanded)
       : null;
@@ -4960,12 +5087,14 @@ export const ShareDialog = memo(function ShareDialog({
       !control ||
       !panel ||
       !intrinsics ||
+      !registration ||
       !stage ||
       !visit ||
+      !permissionContext ||
       !snapshot ||
       nextExpanded === null ||
-      runtime.agentDirectionalPair !== null ||
-      runtime.claims.has("agent-directional") ||
+      runtime.agentDirectionalFence !== null ||
+      runtime.agentDirectionalPairs.has(stage.nativeEvent) ||
       control !== event.currentTarget ||
       card.ownerDocument !== control.ownerDocument ||
       panel.ownerDocument !== control.ownerDocument ||
@@ -4984,6 +5113,7 @@ export const ShareDialog = memo(function ShareDialog({
     const action = Object.freeze<ShareAgentDirectionalAction>({
       presentation: candidate,
       visit,
+      permissionContext,
       documentId: candidate.document.id,
       origin: candidate.origin,
       expanded: candidate.agentExpanded,
@@ -5011,7 +5141,8 @@ export const ShareDialog = memo(function ShareDialog({
       !capture ||
       !shareDirectionalStageMatches(
         stage,
-        nativeEvent,
+        registration,
+        stage.nativeEvent,
         snapshot,
         control,
         ownerDocument,
@@ -5029,21 +5160,84 @@ export const ShareDialog = memo(function ShareDialog({
     > = {
       publication: candidate,
       action,
-      nativeEvent,
+      nativeEvent: stage.nativeEvent,
       stage,
       capture,
     };
     Object.freeze(pair);
-    runtime.agentDirectionalStage = null;
-    runtime.agentDirectionalPair = pair;
-    ownerWindow.queueMicrotask(() => {
+    runtime.agentDirectionalPairs.set(stage.nativeEvent, pair);
+    runtime.agentDirectionalFence = pair;
+    const revalidate = () => {
+      const currentSnapshot = readShareDirectionalNativeEvent(
+        stage.nativeEvent,
+        intrinsics,
+      );
+      return Boolean(
+        currentSnapshot &&
+        runtime.agentDirectionalFence === pair &&
+        runtime.agentDirectionalPairs.get(stage.nativeEvent) === pair &&
+        runtime.agentDirectionalCapture === registration &&
+        registration.retains(stage) &&
+        action.presentation === candidate &&
+        action.visit === candidate.visit &&
+        action.permissionContext === candidate.permissionContext &&
+        action.documentId === candidate.document.id &&
+        action.origin === candidate.origin &&
+        action.expanded === candidate.agentExpanded &&
+        action.nextExpanded ===
+          shareDirectionalDestination(
+            currentSnapshot.key,
+            candidate.agentExpanded,
+          ) &&
+        action.card === runtime.agentCard &&
+        action.control === runtime.agentToggle &&
+        action.panel === runtime.agentPanel &&
+        shareDirectionalNativeSnapshotsMatch(
+          stage.snapshot,
+          currentSnapshot,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          capture,
+          stage.nativeEvent,
+          currentSnapshot,
+          control,
+          ownerDocument,
+          ownerWindow,
+          intrinsics,
+          intrinsics.capturingPhase,
+          control,
+          false,
+          capture.methods.isDefaultPrevented,
+        ) &&
+        controlPlacementIsCurrent(candidate) &&
+        presentationIsCurrent(candidate),
+      );
+    };
+    try {
       if (
-        runtime.agentDirectionalPair === pair &&
-        !claimedDirectionalPairsRef.current.has(pair)
+        !revalidate() ||
+        !queryShareDirectionalReactMethod(
+          capture,
+          capture.methods.isDefaultPrevented,
+          false,
+          intrinsics,
+          revalidate,
+        ) ||
+        !queryShareDirectionalReactMethod(
+          capture,
+          capture.methods.isPropagationStopped,
+          false,
+          intrinsics,
+          revalidate,
+        )
       ) {
-        runtime.agentDirectionalPair = null;
+        runtime.agentDirectionalPairs.delete(stage.nativeEvent);
       }
-    });
+    } finally {
+      if (runtime.agentDirectionalFence === pair) {
+        runtime.agentDirectionalFence = null;
+      }
+    }
   };
 
   const claimAgentDirectionalKey = (
@@ -5052,10 +5246,24 @@ export const ShareDialog = memo(function ShareDialog({
   ) => {
     const candidate = currentPresentation(source);
     const runtime = presentationRuntimesRef.current.get(candidate);
-    const pair = runtime?.agentDirectionalPair;
-    const action = pair?.action;
+    let nativeEvent: Event;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return null;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object") return null;
     const intrinsics = runtime?.agentDirectionalIntrinsics;
-    const nativeEvent = event?.nativeEvent;
+    const pairKey =
+      intrinsics &&
+      intrinsics.getPrototypeOf(nativeEvent) === intrinsics.keyboardPrototype
+        ? nativeEvent as KeyboardEvent
+        : null;
+    const pair =
+      runtime && pairKey
+        ? runtime.agentDirectionalPairs.get(pairKey)
+        : undefined;
+    const action = pair?.action;
     const snapshot = intrinsics && nativeEvent
       ? readShareDirectionalNativeEvent(nativeEvent, intrinsics)
       : null;
@@ -5065,15 +5273,16 @@ export const ShareDialog = memo(function ShareDialog({
       !action ||
       !intrinsics ||
       !snapshot ||
+      runtime.agentDirectionalFence !== null ||
       pair.publication !== candidate ||
       pair.action !== action ||
       pair.nativeEvent !== nativeEvent ||
       pair.capture.nativeEvent !== nativeEvent ||
       pair.capture.event === event ||
       claimedDirectionalPairsRef.current.has(pair) ||
-      runtime.claims.has("agent-directional") ||
       action.presentation !== candidate ||
       action.visit !== candidate.visit ||
+      action.permissionContext !== candidate.permissionContext ||
       action.documentId !== candidate.document.id ||
       action.origin !== candidate.origin ||
       action.expanded !== candidate.agentExpanded ||
@@ -5108,17 +5317,14 @@ export const ShareDialog = memo(function ShareDialog({
     if (
       !ownerWindow ||
       !bubble ||
-      pair.capture.prototype !== bubble.prototype ||
       pair.capture.target !== bubble.target ||
       pair.capture.currentTarget !== bubble.currentTarget ||
       pair.capture.eventPhase !== intrinsics.capturingPhase ||
       bubble.eventPhase !== intrinsics.bubblingPhase ||
-      !shareDirectionalReactMethodsAreCurrent(pair.capture, intrinsics) ||
-      !shareDirectionalReactMethodsAreCurrent(bubble, intrinsics) ||
-      !shareDirectionalReactMethodsMatch(pair.capture, bubble) ||
       !shareDirectionalStageMatches(
         pair.stage,
-        nativeEvent,
+        pair.stage.registration,
+        pair.nativeEvent,
         snapshot,
         action.control,
         ownerDocument,
@@ -5136,37 +5342,239 @@ export const ShareDialog = memo(function ShareDialog({
     ) {
       return null;
     }
-    if (!claim(source, "agent-directional")) return null;
-    claimedDirectionalPairsRef.current.add(pair);
-    claimedControlActionsRef.current.add(action);
-    claimedControlEventsRef.current.add(pair.capture.event);
-    claimedControlEventsRef.current.add(event);
-    claimedNativeControlEventsRef.current.add(nativeEvent);
-    claimedControlElementsRef.current.set(action.control, action);
-    if (
-      runtime.agentDirectionalPair !== pair ||
-      !claimedDirectionalPairsRef.current.has(pair) ||
-      !claimedControlActionsRef.current.has(action) ||
-      !claimedControlEventsRef.current.has(pair.capture.event) ||
-      !claimedControlEventsRef.current.has(event) ||
-      !claimedNativeControlEventsRef.current.has(nativeEvent) ||
-      claimedControlElementsRef.current.get(action.control) !== action ||
-      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !==
-        action.control ||
-      !presentationIsCurrent(candidate)
-    ) {
-      return null;
+    runtime.agentDirectionalFence = pair;
+    const registration = pair.stage.registration;
+    const revalidate = (
+      expectedNativeDefaultPrevented: boolean,
+      bubbleDefaultQuery: ShareDirectionalReactMethod,
+    ) => {
+      const currentSnapshot = readShareDirectionalNativeEvent(
+        pair.nativeEvent,
+        intrinsics,
+      );
+      return Boolean(
+        currentSnapshot &&
+        runtime.agentDirectionalFence === pair &&
+        runtime.agentDirectionalPairs.get(pair.nativeEvent) === pair &&
+        runtime.agentDirectionalCapture === registration &&
+        registration.retains(pair.stage) &&
+        pair.publication === candidate &&
+        pair.action === action &&
+        action.presentation === candidate &&
+        action.visit === candidate.visit &&
+        action.permissionContext === candidate.permissionContext &&
+        action.documentId === candidate.document.id &&
+        action.origin === candidate.origin &&
+        action.expanded === candidate.agentExpanded &&
+        action.nextExpanded ===
+          shareDirectionalDestination(
+            currentSnapshot.key,
+            candidate.agentExpanded,
+          ) &&
+        action.card === runtime.agentCard &&
+        action.control === runtime.agentToggle &&
+        action.panel === runtime.agentPanel &&
+        shareDirectionalNativeSnapshotsMatch(
+          pair.stage.snapshot,
+          currentSnapshot,
+          expectedNativeDefaultPrevented,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          pair.capture,
+          pair.nativeEvent,
+          pair.stage.snapshot,
+          action.control,
+          ownerDocument,
+          ownerWindow,
+          intrinsics,
+          intrinsics.capturingPhase,
+          null,
+          false,
+          pair.capture.methods.isDefaultPrevented,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          bubble,
+          pair.nativeEvent,
+          currentSnapshot,
+          action.control,
+          ownerDocument,
+          ownerWindow,
+          intrinsics,
+          intrinsics.bubblingPhase,
+          action.control,
+          expectedNativeDefaultPrevented,
+          bubbleDefaultQuery,
+        ) &&
+        intrinsics.apply(intrinsics.activeElement, ownerDocument, []) ===
+          action.control &&
+        controlPlacementIsCurrent(candidate) &&
+        presentationIsCurrent(candidate),
+      );
+    };
+    try {
+      if (
+        !revalidate(false, bubble.methods.isDefaultPrevented) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isDefaultPrevented,
+          false,
+          intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        claimedDirectionalPairsRef.current.has(pair) ||
+        claimedControlActionsRef.current.has(action) ||
+        claimedControlEventsRef.current.has(pair.capture.event) ||
+        claimedControlEventsRef.current.has(event) ||
+        claimedNativeControlEventsRef.current.has(nativeEvent) ||
+        claimedControlElementsRef.current.get(action.control) === action ||
+        !registration.claim(pair.stage)
+      ) {
+        return null;
+      }
+      claimedDirectionalPairsRef.current.add(pair);
+      claimedControlActionsRef.current.add(action);
+      claimedControlEventsRef.current.add(pair.capture.event);
+      claimedControlEventsRef.current.add(event);
+      claimedNativeControlEventsRef.current.add(nativeEvent);
+      claimedControlElementsRef.current.set(action.control, action);
+      runtime.agentDirectionalPairs.delete(pair.nativeEvent);
+      const claimedIsCurrent = (
+        expectedNativeDefaultPrevented: boolean,
+        bubbleDefaultQuery: ShareDirectionalReactMethod,
+      ) => {
+        const currentSnapshot = readShareDirectionalNativeEvent(
+          pair.nativeEvent,
+          intrinsics,
+        );
+        return Boolean(
+          currentSnapshot &&
+          runtime.agentDirectionalFence === pair &&
+          !runtime.agentDirectionalPairs.has(pair.nativeEvent) &&
+          runtime.agentDirectionalCapture === registration &&
+          registration.retains(pair.stage) &&
+          claimedDirectionalPairsRef.current.has(pair) &&
+          claimedControlActionsRef.current.has(action) &&
+          claimedControlEventsRef.current.has(pair.capture.event) &&
+          claimedControlEventsRef.current.has(event) &&
+          claimedNativeControlEventsRef.current.has(nativeEvent) &&
+          claimedControlElementsRef.current.get(action.control) === action &&
+          action.permissionContext === candidate.permissionContext &&
+          shareDirectionalNativeSnapshotsMatch(
+            pair.stage.snapshot,
+            currentSnapshot,
+            expectedNativeDefaultPrevented,
+          ) &&
+          shareDirectionalReactSnapshotIsCurrent(
+            pair.capture,
+            pair.nativeEvent,
+            pair.stage.snapshot,
+            action.control,
+            ownerDocument,
+            ownerWindow,
+            intrinsics,
+            intrinsics.capturingPhase,
+            null,
+            false,
+            pair.capture.methods.isDefaultPrevented,
+          ) &&
+          shareDirectionalReactSnapshotIsCurrent(
+            bubble,
+            pair.nativeEvent,
+            currentSnapshot,
+            action.control,
+            ownerDocument,
+            ownerWindow,
+            intrinsics,
+            intrinsics.bubblingPhase,
+            action.control,
+            expectedNativeDefaultPrevented,
+            bubbleDefaultQuery,
+          ) &&
+          intrinsics.apply(intrinsics.activeElement, ownerDocument, []) ===
+            action.control &&
+          controlPlacementIsCurrent(candidate) &&
+          presentationIsCurrent(candidate),
+        );
+      };
+      if (
+        !claimedIsCurrent(false, bubble.methods.isDefaultPrevented) ||
+        !callShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.preventDefault,
+          intrinsics,
+          () => {
+            const currentDefaultQuery = event.isDefaultPrevented;
+            return (
+              typeof currentDefaultQuery === "function" &&
+              claimedIsCurrent(true, currentDefaultQuery)
+            );
+          },
+        )
+      ) {
+        return null;
+      }
+      const currentDefaultQuery = event.isDefaultPrevented;
+      if (
+        typeof currentDefaultQuery !== "function" ||
+        !claimedIsCurrent(true, currentDefaultQuery) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          currentDefaultQuery,
+          true,
+          intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        )
+      ) {
+        return null;
+      }
+      return action;
+    } finally {
+      if (runtime.agentDirectionalFence === pair) {
+        runtime.agentDirectionalFence = null;
+      }
     }
-    if (
-      !preventShareDirectionalEvent(nativeEvent, intrinsics) ||
-      runtime.agentDirectionalPair !== pair ||
-      intrinsics.apply(intrinsics.activeElement, ownerDocument, []) !==
-        action.control ||
-      !presentationIsCurrent(candidate)
-    ) {
-      return null;
-    }
-    return action;
   };
 
   const removeNavigationIsCurrent = (
@@ -5291,17 +5699,14 @@ export const ShareDialog = memo(function ShareDialog({
     } catch {
       return;
     }
+    if (!nativeEvent || typeof nativeEvent !== "object") return;
     if (
       !nativeEvent ||
       typeof nativeEvent !== "object" ||
-      activeRemoveDeliveryRef.current ||
-      attemptedRemoveReactEventsRef.current.has(event) ||
-      attemptedRemoveNativeEventsRef.current.has(nativeEvent)
+      activeRemoveDeliveryRef.current
     ) {
       return;
     }
-    attemptedRemoveReactEventsRef.current.add(event);
-    attemptedRemoveNativeEventsRef.current.add(nativeEvent);
     const candidate = currentPresentation(sourcePresentation);
     const runtime = presentationRuntimesRef.current.get(candidate);
     const publication = runtime?.removeNavigation;
@@ -5310,6 +5715,7 @@ export const ShareDialog = memo(function ShareDialog({
       !runtime ||
       !publication ||
       !authority ||
+      runtime.removeNavigationFence !== null ||
       event.currentTarget !== publication.listElement
     ) {
       return;
@@ -5341,6 +5747,7 @@ export const ShareDialog = memo(function ShareDialog({
       !capture ||
       !source ||
       !destination ||
+      runtime.removeNavigationPairs.has(native.event) ||
       native.terminal !== authority.terminal.proofFor(native.event) ||
       !shareRemoveNativeSnapshotIsCurrent(native, authority) ||
       !removeNavigationIsCurrent(
@@ -5384,6 +5791,51 @@ export const ShareDialog = memo(function ShareDialog({
       }),
     });
     runtime.removeNavigationPairs.set(native.event, pair);
+    runtime.removeNavigationFence = pair;
+    const revalidate = () =>
+      runtime.removeNavigationFence === pair &&
+      runtime.removeNavigationPairs.get(native.event) === pair &&
+      runtime.removeNavigation === publication &&
+      authority.terminal.retains(pair.terminal) &&
+      shareRemoveNativeSnapshotIsCurrent(native, authority) &&
+      shareRemoveReactSnapshotIsCurrent(
+        capture,
+        authority,
+        native,
+        publication.listElement,
+      ) &&
+      removeNavigationIsCurrent(
+        candidate,
+        publication,
+        source,
+        destination,
+        native.key,
+      );
+    try {
+      if (
+        !revalidate() ||
+        !queryShareRemoveReactMethod(
+          capture,
+          capture.methods.isDefaultPrevented,
+          false,
+          authority,
+          revalidate,
+        ) ||
+        !queryShareRemoveReactMethod(
+          capture,
+          capture.methods.isPropagationStopped,
+          false,
+          authority,
+          revalidate,
+        )
+      ) {
+        runtime.removeNavigationPairs.delete(native.event);
+      }
+    } finally {
+      if (runtime.removeNavigationFence === pair) {
+        runtime.removeNavigationFence = null;
+      }
+    }
   };
 
   const completeRemoveNavigation = (
@@ -5399,18 +5851,19 @@ export const ShareDialog = memo(function ShareDialog({
     } catch {
       return;
     }
+    if (!nativeEvent || typeof nativeEvent !== "object") return;
     const pairKey =
       runtime?.removeNavigation?.authority &&
-      nativeEvent instanceof runtime.removeNavigation.authority.KeyboardEvent
-        ? nativeEvent
+      typeof nativeEvent === "object" &&
+      nativeEvent !== null &&
+      runtime.removeNavigation.authority.prototypeOf(nativeEvent) ===
+        runtime.removeNavigation.authority.KeyboardEvent.prototype
+       ? nativeEvent as KeyboardEvent
         : null;
     const pair =
       runtime && pairKey
         ? runtime.removeNavigationPairs.get(pairKey)
         : undefined;
-    if (runtime && pairKey) {
-      runtime.removeNavigationPairs.delete(pairKey);
-    }
     if (
       !runtime ||
       !pair ||
@@ -5418,12 +5871,10 @@ export const ShareDialog = memo(function ShareDialog({
       typeof nativeEvent !== "object" ||
       pair.native.event !== nativeEvent ||
       activeRemoveDeliveryRef.current ||
-      attemptedRemoveReactEventsRef.current.has(event) ||
-      !attemptedRemoveNativeEventsRef.current.has(nativeEvent)
+      runtime.removeNavigationFence !== null
     ) {
       return;
     }
-    attemptedRemoveReactEventsRef.current.add(event);
     const {
       publication,
       authority,
@@ -5490,104 +5941,201 @@ export const ShareDialog = memo(function ShareDialog({
       pair,
       bubble,
     });
-    if (
-      claimedRemoveDeliveriesRef.current.has(delivery) ||
-      claimedRemovePairsRef.current.has(pair) ||
-      claimedRemoveMovementsRef.current.has(pair.movement) ||
-      claimedRemovePublicationClaimsRef.current.has(pair.publicationClaim) ||
-      claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) ||
-      claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) ||
-      claimedRemoveDestinationClaimsRef.current.has(pair.destinationClaim) ||
-      claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) ||
-      claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) ||
-      claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) ||
-      claimedRemoveReactWrappersRef.current.has(pair.capture.event) ||
-      claimedRemoveReactWrappersRef.current.has(event) ||
-      claimedRemoveNativeKeyEventsRef.current.has(native.event) ||
-      !authority.terminal.claim(pair.terminal)
-    ) {
-      return;
-    }
-    claimedRemoveDeliveriesRef.current.add(delivery);
-    claimedRemovePairsRef.current.add(pair);
-    claimedRemoveMovementsRef.current.add(pair.movement);
-    claimedRemovePublicationClaimsRef.current.add(pair.publicationClaim);
-    claimedRemoveVisitClaimsRef.current.add(pair.visitClaim);
-    claimedRemoveSourceClaimsRef.current.add(pair.sourceClaim);
-    claimedRemoveDestinationClaimsRef.current.add(pair.destinationClaim);
-    claimedRemoveWrapperClaimsRef.current.add(pair.wrapperClaim);
-    claimedRemoveNativeClaimsRef.current.add(pair.nativeClaim);
-    claimedRemoveWindowClaimsRef.current.add(pair.windowClaim);
-    claimedRemoveReactWrappersRef.current.add(pair.capture.event);
-    claimedRemoveReactWrappersRef.current.add(event);
-    claimedRemoveNativeKeyEventsRef.current.add(native.event);
-    activeRemoveDeliveryRef.current = delivery;
+    runtime.removeNavigationFence = pair;
+    const revalidate = (
+      expectedNativeDefaultPrevented: boolean,
+      bubbleDefaultQuery: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"],
+    ) =>
+      runtime.removeNavigationFence === pair &&
+      runtime.removeNavigationPairs.get(native.event) === pair &&
+      runtime.removeNavigation === publication &&
+      authority.terminal.retains(pair.terminal) &&
+      shareRemoveNativeSnapshotIsCurrent(
+        native,
+        authority,
+        expectedNativeDefaultPrevented,
+      ) &&
+      shareRemoveReactSnapshotIsCurrent(
+        pair.capture,
+        authority,
+        pair.native,
+        null,
+      ) &&
+      shareRemoveReactSnapshotIsCurrent(
+        bubble,
+        authority,
+        native,
+        currentElement,
+        expectedNativeDefaultPrevented,
+        bubbleDefaultQuery,
+      ) &&
+      removeNavigationIsCurrent(
+        candidate,
+        publication,
+        source,
+        destination,
+        key,
+      );
     try {
       if (
-        activeRemoveDeliveryRef.current !== delivery ||
-        !claimedRemoveDeliveriesRef.current.has(delivery) ||
-        !claimedRemovePairsRef.current.has(pair) ||
-        !claimedRemoveMovementsRef.current.has(pair.movement) ||
-        !claimedRemovePublicationClaimsRef.current.has(
+        !revalidate(false, bubble.methods.isDefaultPrevented) ||
+        !queryShareRemoveReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          authority,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareRemoveReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          authority,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareRemoveReactMethod(
+          bubble,
+          bubble.methods.isDefaultPrevented,
+          false,
+          authority,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareRemoveReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          authority,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        claimedRemoveDeliveriesRef.current.has(delivery) ||
+        claimedRemovePairsRef.current.has(pair) ||
+        claimedRemoveMovementsRef.current.has(pair.movement) ||
+        claimedRemovePublicationClaimsRef.current.has(pair.publicationClaim) ||
+        claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) ||
+        claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) ||
+        claimedRemoveDestinationClaimsRef.current.has(pair.destinationClaim) ||
+        claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) ||
+        claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) ||
+        claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) ||
+        claimedRemoveReactWrappersRef.current.has(pair.capture.event) ||
+        claimedRemoveReactWrappersRef.current.has(event) ||
+        claimedRemoveNativeKeyEventsRef.current.has(native.event) ||
+        !authority.terminal.claim(pair.terminal)
+      ) {
+        return;
+      }
+      claimedRemoveDeliveriesRef.current.add(delivery);
+      claimedRemovePairsRef.current.add(pair);
+      claimedRemoveMovementsRef.current.add(pair.movement);
+      claimedRemovePublicationClaimsRef.current.add(pair.publicationClaim);
+      claimedRemoveVisitClaimsRef.current.add(pair.visitClaim);
+      claimedRemoveSourceClaimsRef.current.add(pair.sourceClaim);
+      claimedRemoveDestinationClaimsRef.current.add(pair.destinationClaim);
+      claimedRemoveWrapperClaimsRef.current.add(pair.wrapperClaim);
+      claimedRemoveNativeClaimsRef.current.add(pair.nativeClaim);
+      claimedRemoveWindowClaimsRef.current.add(pair.windowClaim);
+      claimedRemoveReactWrappersRef.current.add(pair.capture.event);
+      claimedRemoveReactWrappersRef.current.add(event);
+      claimedRemoveNativeKeyEventsRef.current.add(native.event);
+      runtime.removeNavigationPairs.delete(native.event);
+      activeRemoveDeliveryRef.current = delivery;
+      const claimedAuthorityIsCurrent = (
+        expectedNativeDefaultPrevented: boolean,
+        bubbleDefaultQuery: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"],
+      ) =>
+        runtime.removeNavigationFence === pair &&
+        !runtime.removeNavigationPairs.has(native.event) &&
+        runtime.removeNavigation === publication &&
+        activeRemoveDeliveryRef.current === delivery &&
+        claimedRemoveDeliveriesRef.current.has(delivery) &&
+        claimedRemovePairsRef.current.has(pair) &&
+        claimedRemoveMovementsRef.current.has(pair.movement) &&
+        claimedRemovePublicationClaimsRef.current.has(
           pair.publicationClaim,
-        ) ||
-        !claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) ||
-        !claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) ||
-        !claimedRemoveDestinationClaimsRef.current.has(
+        ) &&
+        claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) &&
+        claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) &&
+        claimedRemoveDestinationClaimsRef.current.has(
           pair.destinationClaim,
-        ) ||
-        !claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) ||
-        !claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) ||
-        !claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) ||
-        !authority.terminal.retains(pair.terminal) ||
-        !shareRemoveReactSnapshotIsCurrent(
+        ) &&
+        claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) &&
+        claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) &&
+        claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) &&
+        authority.terminal.retains(pair.terminal) &&
+        shareRemoveNativeSnapshotIsCurrent(
+          native,
+          authority,
+          expectedNativeDefaultPrevented,
+        ) &&
+        shareRemoveReactSnapshotIsCurrent(
           pair.capture,
           authority,
           pair.native,
           null,
-        ) ||
-        !shareRemoveReactSnapshotIsCurrent(
+        ) &&
+        shareRemoveReactSnapshotIsCurrent(
           bubble,
           authority,
           native,
           currentElement,
-        ) ||
-        !shareRemoveNativeSnapshotIsCurrent(native, authority) ||
-        !removeNavigationIsCurrent(
+          expectedNativeDefaultPrevented,
+          bubbleDefaultQuery,
+        ) &&
+        removeNavigationIsCurrent(
           candidate,
           publication,
           source,
           destination,
           key,
+        );
+      if (
+        !claimedAuthorityIsCurrent(false, bubble.methods.isDefaultPrevented) ||
+        !callShareRemoveReactMethod(
+          bubble,
+          bubble.methods.preventDefault,
+          authority,
+          () => {
+            const currentDefaultQuery = event.isDefaultPrevented;
+            return (
+              typeof currentDefaultQuery === "function" &&
+              claimedAuthorityIsCurrent(true, currentDefaultQuery)
+            );
+          },
         )
       ) {
         return;
       }
-      authority.apply(
-        bubble.methods.preventDefault,
-        bubble.event,
-        [],
-      );
+      const currentDefaultQuery = event.isDefaultPrevented;
       if (
-        activeRemoveDeliveryRef.current !== delivery ||
-        event.preventDefault !== bubble.methods.preventDefault ||
-        event.isPropagationStopped !==
-          bubble.methods.isPropagationStopped ||
-        !shareRemoveNativeSnapshotIsCurrent(native, authority, true) ||
-        !shareRemoveReactSnapshotIsCurrent(
+        typeof currentDefaultQuery !== "function" ||
+        !claimedAuthorityIsCurrent(true, currentDefaultQuery) ||
+        !queryShareRemoveReactMethod(
           bubble,
-          authority,
-          native,
-          currentElement,
+          currentDefaultQuery,
           true,
+          authority,
+          () => claimedAuthorityIsCurrent(true, currentDefaultQuery),
         ) ||
-        !authority.terminal.retains(pair.terminal) ||
-        !removeNavigationIsCurrent(
-          candidate,
-          publication,
-          source,
-          destination,
-          key,
+        !queryShareRemoveReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          authority,
+          () => claimedAuthorityIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareRemoveReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          authority,
+          () => claimedAuthorityIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareRemoveReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          authority,
+          () => claimedAuthorityIsCurrent(true, currentDefaultQuery),
         )
       ) {
         return;
@@ -5600,6 +6148,9 @@ export const ShareDialog = memo(function ShareDialog({
     } finally {
       if (activeRemoveDeliveryRef.current === delivery) {
         activeRemoveDeliveryRef.current = null;
+      }
+      if (runtime.removeNavigationFence === pair) {
+        runtime.removeNavigationFence = null;
       }
     }
   };
@@ -5698,28 +6249,22 @@ export const ShareDialog = memo(function ShareDialog({
   ) => {
     const control = runtime.agentToggle;
     const intrinsics = runtime.agentDirectionalIntrinsics;
-    if (!control || !intrinsics || runtime.removeAgentDirectionalCapture) {
+    if (!control || !intrinsics || runtime.agentDirectionalCapture) {
       return false;
     }
-    const remove = installShareDirectionalNativeCapture(
+    const registration = installShareDirectionalNativeCapture(
       control,
       intrinsics,
       () =>
         runtime.active &&
         runtime.published &&
         !runtime.retired &&
-        runtime.agentDirectionalPair === null &&
+        runtime.agentDirectionalFence === null &&
         activePresentationRef.current === candidate &&
         presentationIsCurrent(candidate),
-      () => runtime.agentDirectionalStage,
-      (stage) => {
-        runtime.agentDirectionalStage = stage;
-      },
-      () => runtime.agentDirectionalPair,
-      (pair) => claimedDirectionalPairsRef.current.has(pair),
     );
-    if (!remove) return false;
-    runtime.removeAgentDirectionalCapture = remove;
+    if (!registration) return false;
+    runtime.agentDirectionalCapture = registration;
     return true;
   }, [presentationIsCurrent]);
 
@@ -6634,9 +7179,9 @@ export function AgentCollaborateCard({
       ownerWindow,
       placement,
       intrinsics,
-      directionalStage: null,
-      directionalPair: null,
-      removeDirectionalCapture: null,
+      directionalCapture: null,
+      directionalPairs: new WeakMap(),
+      directionalFence: null,
       observer: null,
       placementObserver: null,
       active: false,
@@ -6683,30 +7228,24 @@ export function AgentCollaborateCard({
     publication.placementObserver = placementObserver;
     publication.active = true;
     localPublicationRef.current = publication;
-    const removeDirectionalCapture = installShareDirectionalNativeCapture(
+    const directionalCapture = installShareDirectionalNativeCapture(
       control,
       intrinsics,
       () =>
         localPublicationRef.current === publication &&
         publication.active &&
         !publication.claimed &&
-        publication.directionalPair === null &&
+        publication.directionalFence === null &&
         drainLocalAgentCardMutations(publication) &&
         sharePlacementMatches(ownerDocument, placement) &&
         localAgentCardDomIsExact(publication),
-      () => publication.directionalStage,
-      (stage) => {
-        publication.directionalStage = stage;
-      },
-      () => publication.directionalPair,
-      (pair) => localClaimedPairsRef.current.has(pair),
     );
-    if (!removeDirectionalCapture) {
+    if (!directionalCapture) {
       localPublicationRef.current = null;
       retireLocalAgentCardPublication(publication);
       return;
     }
-    publication.removeDirectionalCapture = removeDirectionalCapture;
+    publication.directionalCapture = directionalCapture;
     return () => {
       if (localPublicationRef.current === publication) {
         localPublicationRef.current = null;
@@ -6724,20 +7263,35 @@ export function AgentCollaborateCard({
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
     const publication = localPublicationRef.current;
-    const stage = publication?.directionalStage;
-    const nativeEvent = event?.nativeEvent;
+    let nativeEvent: Event;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object") return;
+    const registration = publication?.directionalCapture;
     const snapshot = publication && nativeEvent
       ? readShareDirectionalNativeEvent(nativeEvent, publication.intrinsics)
       : null;
+    const stage =
+      publication &&
+      registration &&
+      publication.intrinsics.getPrototypeOf(nativeEvent) ===
+        publication.intrinsics.keyboardPrototype
+        ? registration.proofFor(nativeEvent as KeyboardEvent)
+        : null;
     const nextExpanded = snapshot
       ? shareDirectionalDestination(snapshot.key, localRender.expanded)
       : null;
     if (
       !publication ||
+      !registration ||
       !stage ||
       !snapshot ||
       nextExpanded === null ||
-      publication.directionalPair !== null ||
+      publication.directionalFence !== null ||
+      publication.directionalPairs.has(stage.nativeEvent) ||
       publication.render !== localRender ||
       publication.render.mount !== mount ||
       publication.render.origin !== origin ||
@@ -6784,7 +7338,8 @@ export function AgentCollaborateCard({
       !capture ||
       !shareDirectionalStageMatches(
         stage,
-        nativeEvent,
+        registration,
+        stage.nativeEvent,
         snapshot,
         publication.control,
         publication.ownerDocument,
@@ -6805,30 +7360,110 @@ export function AgentCollaborateCard({
     > = {
       publication,
       action,
-      nativeEvent,
+      nativeEvent: stage.nativeEvent,
       stage,
       capture,
     };
     Object.freeze(pair);
-    publication.directionalStage = null;
-    publication.directionalPair = pair;
-    publication.ownerWindow.queueMicrotask(() => {
+    publication.directionalPairs.set(stage.nativeEvent, pair);
+    publication.directionalFence = pair;
+    const revalidate = () => {
+      const currentSnapshot = readShareDirectionalNativeEvent(
+        stage.nativeEvent,
+        publication.intrinsics,
+      );
+      return Boolean(
+        currentSnapshot &&
+        localPublicationRef.current === publication &&
+        publication.directionalFence === pair &&
+        publication.directionalPairs.get(stage.nativeEvent) === pair &&
+        publication.directionalCapture === registration &&
+        registration.retains(stage) &&
+        publication.active &&
+        !publication.claimed &&
+        publication.render === localRender &&
+        action.publication === publication &&
+        action.render === localRender &&
+        action.expanded === expanded &&
+        action.nextExpanded ===
+          shareDirectionalDestination(currentSnapshot.key, localRender.expanded) &&
+        action.card === publication.card &&
+        action.control === publication.control &&
+        action.panel === publication.panel &&
+        shareDirectionalNativeSnapshotsMatch(
+          stage.snapshot,
+          currentSnapshot,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          capture,
+          stage.nativeEvent,
+          currentSnapshot,
+          publication.control,
+          publication.ownerDocument,
+          publication.ownerWindow,
+          publication.intrinsics,
+          publication.intrinsics.capturingPhase,
+          publication.control,
+          false,
+          capture.methods.isDefaultPrevented,
+        ) &&
+        drainLocalAgentCardMutations(publication) &&
+        sharePlacementMatches(
+          publication.ownerDocument,
+          publication.placement,
+        ) &&
+        localAgentCardDomIsExact(publication),
+      );
+    };
+    try {
       if (
-        publication.directionalPair === pair &&
-        !localClaimedPairsRef.current.has(pair)
+        !revalidate() ||
+        !queryShareDirectionalReactMethod(
+          capture,
+          capture.methods.isDefaultPrevented,
+          false,
+          publication.intrinsics,
+          revalidate,
+        ) ||
+        !queryShareDirectionalReactMethod(
+          capture,
+          capture.methods.isPropagationStopped,
+          false,
+          publication.intrinsics,
+          revalidate,
+        )
       ) {
-        publication.directionalPair = null;
+        publication.directionalPairs.delete(stage.nativeEvent);
       }
-    });
+    } finally {
+      if (publication.directionalFence === pair) {
+        publication.directionalFence = null;
+      }
+    }
   };
 
   const handleLocalDirectionalKey = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
     const publication = localPublicationRef.current;
-    const pair = publication?.directionalPair;
+    let nativeEvent: Event;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object") return;
+    const pairKey =
+      publication &&
+      publication.intrinsics.getPrototypeOf(nativeEvent) ===
+        publication.intrinsics.keyboardPrototype
+        ? nativeEvent as KeyboardEvent
+        : null;
+    const pair =
+      publication && pairKey
+        ? publication.directionalPairs.get(pairKey)
+        : undefined;
     const action = pair?.action;
-    const nativeEvent = event?.nativeEvent;
     const snapshot = publication && nativeEvent
       ? readShareDirectionalNativeEvent(nativeEvent, publication.intrinsics)
       : null;
@@ -6837,6 +7472,7 @@ export function AgentCollaborateCard({
       !pair ||
       !action ||
       !snapshot ||
+      publication.directionalFence !== null ||
       pair.publication !== publication ||
       pair.action !== action ||
       pair.nativeEvent !== nativeEvent ||
@@ -6880,23 +7516,14 @@ export function AgentCollaborateCard({
     );
     if (
       !bubble ||
-      pair.capture.prototype !== bubble.prototype ||
       pair.capture.target !== bubble.target ||
       pair.capture.currentTarget !== bubble.currentTarget ||
       pair.capture.eventPhase !== publication.intrinsics.capturingPhase ||
       bubble.eventPhase !== publication.intrinsics.bubblingPhase ||
-      !shareDirectionalReactMethodsAreCurrent(
-        pair.capture,
-        publication.intrinsics,
-      ) ||
-      !shareDirectionalReactMethodsAreCurrent(
-        bubble,
-        publication.intrinsics,
-      ) ||
-      !shareDirectionalReactMethodsMatch(pair.capture, bubble) ||
       !shareDirectionalStageMatches(
         pair.stage,
-        nativeEvent,
+        pair.stage.registration,
+        pair.nativeEvent,
         snapshot,
         publication.control,
         publication.ownerDocument,
@@ -6918,45 +7545,259 @@ export function AgentCollaborateCard({
     ) {
       return;
     }
-    publication.claimed = true;
-    localClaimedActionsRef.current.add(action);
-    localClaimedPairsRef.current.add(pair);
-    localClaimedReactEventsRef.current.add(pair.capture.event);
-    localClaimedReactEventsRef.current.add(event);
-    localClaimedNativeEventsRef.current.add(nativeEvent);
-    if (
-      localPublicationRef.current !== publication ||
-      publication.directionalPair !== pair ||
-      !localClaimedPairsRef.current.has(pair) ||
-      !localClaimedActionsRef.current.has(action) ||
-      !localClaimedReactEventsRef.current.has(pair.capture.event) ||
-      !localClaimedReactEventsRef.current.has(event) ||
-      !localClaimedNativeEventsRef.current.has(nativeEvent) ||
-      publication.intrinsics.apply(
-        publication.intrinsics.activeElement,
-        publication.ownerDocument,
-        [],
-      ) !== publication.control ||
-      !drainLocalAgentCardMutations(publication) ||
-      !localAgentCardDomIsExact(publication)
-    ) {
-      return;
+    publication.directionalFence = pair;
+    const registration = pair.stage.registration;
+    const revalidate = (
+      expectedNativeDefaultPrevented: boolean,
+      bubbleDefaultQuery: ShareDirectionalReactMethod,
+    ) => {
+      const currentSnapshot = readShareDirectionalNativeEvent(
+        pair.nativeEvent,
+        publication.intrinsics,
+      );
+      return Boolean(
+        currentSnapshot &&
+        localPublicationRef.current === publication &&
+        publication.directionalFence === pair &&
+        publication.directionalPairs.get(pair.nativeEvent) === pair &&
+        publication.directionalCapture === registration &&
+        registration.retains(pair.stage) &&
+        publication.active &&
+        !publication.claimed &&
+        publication.render === localRender &&
+        action.publication === publication &&
+        action.render === localRender &&
+        action.expanded === expanded &&
+        action.nextExpanded ===
+          shareDirectionalDestination(
+            currentSnapshot.key,
+            localRender.expanded,
+          ) &&
+        action.card === publication.card &&
+        action.control === publication.control &&
+        action.panel === publication.panel &&
+        shareDirectionalNativeSnapshotsMatch(
+          pair.stage.snapshot,
+          currentSnapshot,
+          expectedNativeDefaultPrevented,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          pair.capture,
+          pair.nativeEvent,
+          pair.stage.snapshot,
+          publication.control,
+          publication.ownerDocument,
+          publication.ownerWindow,
+          publication.intrinsics,
+          publication.intrinsics.capturingPhase,
+          null,
+          false,
+          pair.capture.methods.isDefaultPrevented,
+        ) &&
+        shareDirectionalReactSnapshotIsCurrent(
+          bubble,
+          pair.nativeEvent,
+          currentSnapshot,
+          publication.control,
+          publication.ownerDocument,
+          publication.ownerWindow,
+          publication.intrinsics,
+          publication.intrinsics.bubblingPhase,
+          publication.control,
+          expectedNativeDefaultPrevented,
+          bubbleDefaultQuery,
+        ) &&
+        publication.intrinsics.apply(
+          publication.intrinsics.activeElement,
+          publication.ownerDocument,
+          [],
+        ) === publication.control &&
+        drainLocalAgentCardMutations(publication) &&
+        sharePlacementMatches(
+          publication.ownerDocument,
+          publication.placement,
+        ) &&
+        localAgentCardDomIsExact(publication),
+      );
+    };
+    let committed = false;
+    try {
+      if (
+        !revalidate(false, bubble.methods.isDefaultPrevented) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          publication.intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          publication.intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isDefaultPrevented,
+          false,
+          publication.intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          publication.intrinsics,
+          () => revalidate(false, bubble.methods.isDefaultPrevented),
+        ) ||
+        localClaimedActionsRef.current.has(action) ||
+        localClaimedPairsRef.current.has(pair) ||
+        localClaimedReactEventsRef.current.has(pair.capture.event) ||
+        localClaimedReactEventsRef.current.has(event) ||
+        localClaimedNativeEventsRef.current.has(nativeEvent) ||
+        !registration.claim(pair.stage)
+      ) {
+        return;
+      }
+      publication.claimed = true;
+      localClaimedActionsRef.current.add(action);
+      localClaimedPairsRef.current.add(pair);
+      localClaimedReactEventsRef.current.add(pair.capture.event);
+      localClaimedReactEventsRef.current.add(event);
+      localClaimedNativeEventsRef.current.add(nativeEvent);
+      publication.directionalPairs.delete(pair.nativeEvent);
+      const claimedIsCurrent = (
+        expectedNativeDefaultPrevented: boolean,
+        bubbleDefaultQuery: ShareDirectionalReactMethod,
+      ) => {
+        const currentSnapshot = readShareDirectionalNativeEvent(
+          pair.nativeEvent,
+          publication.intrinsics,
+        );
+        return Boolean(
+          currentSnapshot &&
+          localPublicationRef.current === publication &&
+          publication.directionalFence === pair &&
+          !publication.directionalPairs.has(pair.nativeEvent) &&
+          publication.directionalCapture === registration &&
+          registration.retains(pair.stage) &&
+          publication.active &&
+          publication.claimed &&
+          localClaimedActionsRef.current.has(action) &&
+          localClaimedPairsRef.current.has(pair) &&
+          localClaimedReactEventsRef.current.has(pair.capture.event) &&
+          localClaimedReactEventsRef.current.has(event) &&
+          localClaimedNativeEventsRef.current.has(nativeEvent) &&
+          publication.render === localRender &&
+          action.render === localRender &&
+          shareDirectionalNativeSnapshotsMatch(
+            pair.stage.snapshot,
+            currentSnapshot,
+            expectedNativeDefaultPrevented,
+          ) &&
+          shareDirectionalReactSnapshotIsCurrent(
+            pair.capture,
+            pair.nativeEvent,
+            pair.stage.snapshot,
+            publication.control,
+            publication.ownerDocument,
+            publication.ownerWindow,
+            publication.intrinsics,
+            publication.intrinsics.capturingPhase,
+            null,
+            false,
+            pair.capture.methods.isDefaultPrevented,
+          ) &&
+          shareDirectionalReactSnapshotIsCurrent(
+            bubble,
+            pair.nativeEvent,
+            currentSnapshot,
+            publication.control,
+            publication.ownerDocument,
+            publication.ownerWindow,
+            publication.intrinsics,
+            publication.intrinsics.bubblingPhase,
+            publication.control,
+            expectedNativeDefaultPrevented,
+            bubbleDefaultQuery,
+          ) &&
+          publication.intrinsics.apply(
+            publication.intrinsics.activeElement,
+            publication.ownerDocument,
+            [],
+          ) === publication.control &&
+          drainLocalAgentCardMutations(publication) &&
+          sharePlacementMatches(
+            publication.ownerDocument,
+            publication.placement,
+          ) &&
+          localAgentCardDomIsExact(publication),
+        );
+      };
+      if (
+        !claimedIsCurrent(false, bubble.methods.isDefaultPrevented) ||
+        !callShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.preventDefault,
+          publication.intrinsics,
+          () => {
+            const currentDefaultQuery = event.isDefaultPrevented;
+            return (
+              typeof currentDefaultQuery === "function" &&
+              claimedIsCurrent(true, currentDefaultQuery)
+            );
+          },
+        )
+      ) {
+        return;
+      }
+      const currentDefaultQuery = event.isDefaultPrevented;
+      if (
+        typeof currentDefaultQuery !== "function" ||
+        !claimedIsCurrent(true, currentDefaultQuery) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          currentDefaultQuery,
+          true,
+          publication.intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isDefaultPrevented,
+          false,
+          publication.intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          pair.capture,
+          pair.capture.methods.isPropagationStopped,
+          false,
+          publication.intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        ) ||
+        !queryShareDirectionalReactMethod(
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          publication.intrinsics,
+          () => claimedIsCurrent(true, currentDefaultQuery),
+        )
+      ) {
+        return;
+      }
+      setLocalExpanded(action.nextExpanded);
+      committed = true;
+    } finally {
+      if (!committed && localPublicationRef.current === publication) {
+        publication.claimed = false;
+      }
+      if (publication.directionalFence === pair) {
+        publication.directionalFence = null;
+      }
     }
-    if (
-      !preventShareDirectionalEvent(nativeEvent, publication.intrinsics) ||
-      localPublicationRef.current !== publication ||
-      publication.directionalPair !== pair ||
-      publication.intrinsics.apply(
-        publication.intrinsics.activeElement,
-        publication.ownerDocument,
-        [],
-      ) !== publication.control ||
-      !drainLocalAgentCardMutations(publication) ||
-      !localAgentCardDomIsExact(publication)
-    ) {
-      return;
-    }
-    setLocalExpanded(action.nextExpanded);
   };
 
   return (
