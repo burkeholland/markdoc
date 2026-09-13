@@ -2474,7 +2474,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           </form>
           {childError && (
             <div className="mx-1.5 mt-1.5 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
-              <span className="min-w-0 flex-1">{childError.message}</span>
+              <span className="min-w-0 flex-1 wrap-anywhere">{childError.message}</span>
               <button
                 ref={(element) => {
                   if (presentation.retry) bindElement(presentation, presentation.retry, element);
