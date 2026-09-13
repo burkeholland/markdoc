@@ -653,6 +653,204 @@ describe("CollaboratorLoginInput", () => {
     expect(input()).not.toHaveAttribute("aria-activedescendant");
   });
 
+  describe("native identity titles", () => {
+    const firstIdentity = {
+      ...user(`octocat-${"a".repeat(31)}`),
+      name: `${'Ada <span data-person="north">Lovelace</span> & "Analyst" \'One\' '.repeat(4)}North`,
+    };
+    const secondIdentity = {
+      ...user(`octodog-${"b".repeat(31)}`),
+      name: `${'Grace <button title="south">Hopper</button> & "Admiral" \'Two\' '.repeat(4)}South`,
+    };
+    const focusable = "a[href], button, input, select, textarea, [tabindex], [contenteditable]";
+
+    function expectIdentity(row: HTMLElement, candidate: SearchAnswer["users"][number]) {
+      expect(row).toHaveAttribute("data-login", candidate.login);
+      expect(row).toHaveAccessibleName(
+        candidate.name ? `${candidate.name}@${candidate.login}` : `@${candidate.login}`,
+      );
+      expect(row.children).toHaveLength(candidate.name ? 3 : 2);
+      expect(Array.from(row.querySelectorAll("*"), (element) => element.tagName)).toEqual(
+        candidate.name
+          ? ["SPAN", "SPAN", "SPAN", "IMG", "SPAN", "SPAN"]
+          : ["SPAN", "SPAN", "SPAN", "IMG", "SPAN"],
+      );
+      expect(row.querySelectorAll(focusable)).toHaveLength(0);
+      expect(row).not.toHaveAttribute("tabindex");
+      expect(row.firstElementChild).toHaveAttribute("aria-hidden", "true");
+      expect(row.querySelector(".avatar")).toHaveAttribute("title", candidate.login);
+      expect(row.querySelector("img")).toHaveAttribute("src", candidate.avatarUrl);
+      expect(row.querySelector("img")).toHaveAttribute("alt", candidate.login);
+      if (candidate.name) {
+        const name = row.children.item(1);
+        expect(name?.textContent).toBe(candidate.name);
+        expect(name).toHaveAttribute("title", candidate.name);
+        expect(name).toHaveAttribute("class", "min-w-0 truncate text-[13px] text-ink");
+        expect(name?.getAttributeNames().sort()).toEqual(["class", "title"]);
+      }
+      const login = row.lastElementChild;
+      expect(login?.textContent).toBe(`@${candidate.login}`);
+      expect(login).toHaveAttribute("title", `@${candidate.login}`);
+      expect(login).toHaveAttribute(
+        "class",
+        `min-w-0 truncate ${candidate.name ? "text-xs text-ink-3" : "text-[13px] text-ink"}`,
+      );
+      expect(login?.getAttributeNames().sort()).toEqual(["class", "title"]);
+    }
+
+    it.each([
+      { label: "first long name", candidate: firstIdentity },
+      { label: "second long name", candidate: secondIdentity },
+      { label: "null name", candidate: { ...firstIdentity, name: null } },
+      { label: "empty name", candidate: { ...secondIdentity, name: "" } },
+    ])("preserves literal text, hover highlighting, and one explicit pick for $label", async ({ candidate }) => {
+      expect(candidate.login).toHaveLength(39);
+      expect(suggestQuery(candidate.login)).toBe(candidate.login);
+      if (candidate.name) expect(candidate.name.length).toBeGreaterThanOrEqual(200);
+      searchUsers.mockResolvedValue({ users: [user("octo-other"), candidate], limited: false });
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      const rendered = render(
+        <KeyboardHarness onChange={onChange} onPick={onPick} onSubmit={onSubmit} />,
+      );
+      const controls = Array.from(rendered.container.querySelectorAll(focusable));
+      expect(controls).toHaveLength(3);
+      input().focus();
+      await settle();
+
+      const list = screen.getByTestId("share-login-suggestions");
+      const [other, row] = listOptions();
+      const ids = listOptions().map((option) => option.id);
+      expect(ids).toEqual([`${list.id}-option-0`, `${list.id}-option-1`]);
+      expect(list.id).toBe(input().getAttribute("aria-controls"));
+      expect(options()).toEqual(["octo-other", candidate.login]);
+      expectIdentity(row, candidate);
+      expect(other).toHaveAccessibleName("@octo-other");
+      expect(listOptions().every((option) => option.getAttribute("aria-selected") === "false")).toBe(true);
+      expect(input()).not.toHaveAttribute("aria-activedescendant");
+
+      for (const label of Array.from(row.children).slice(1)) {
+        fireEvent.mouseOver(label);
+        expect(row).toHaveAttribute("aria-selected", "true");
+        expect(row).toHaveClass("bg-surface-3");
+        expect(other).toHaveAttribute("aria-selected", "false");
+        expect(input()).toHaveAttribute("aria-activedescendant", row.id);
+        expect(input()).toHaveFocus();
+        expectIdentity(row, candidate);
+        fireEvent.mouseOver(other);
+        expect(other).toHaveAttribute("aria-selected", "true");
+        expect(row).toHaveAttribute("aria-selected", "false");
+        expect(input()).toHaveAttribute("aria-activedescendant", other.id);
+      }
+      await settle(1000);
+      expect(listOptions().map((option) => option.id)).toEqual(ids);
+      expect(listOptions()).toHaveLength(2);
+      expect(Array.from(rendered.container.querySelectorAll(focusable))).toEqual(controls);
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(searchUsers.mock.calls.map(([query]) => query)).toEqual(["octo"]);
+
+      const login = row.lastElementChild!;
+      fireEvent.mouseOver(login);
+      expect(fireEvent.mouseDown(login)).toBe(false);
+      fireEvent.click(login);
+      expect(input()).toHaveValue(candidate.login);
+      expect(input()).toHaveFocus();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith(candidate.login);
+      expect(onPick).toHaveBeenCalledExactlyOnceWith(candidate.login);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      await settle(1000);
+      expect(searchUsers).toHaveBeenCalledTimes(1);
+    });
+
+    it("follows same-login replacement, query cache reuse, removal, and a fresh reopening", async () => {
+      const updatedIdentity = { ...firstIdentity, name: secondIdentity.name };
+      const pendingUpdate = deferred<SearchAnswer>();
+      searchUsers
+        .mockResolvedValueOnce({ users: [firstIdentity], limited: false })
+        .mockReturnValueOnce(pendingUpdate.promise)
+        .mockResolvedValueOnce({ users: [secondIdentity], limited: false });
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const rendered = render(
+        <DirectHarness initialValue="oc" onChange={onChange} onPick={onPick} />,
+      );
+      input().focus();
+      await settle();
+      const firstRow = listOptions()[0];
+      const optionId = firstRow.id;
+      expectIdentity(firstRow, firstIdentity);
+      fireEvent.mouseOver(firstRow.lastElementChild!);
+      expect(firstRow).toHaveAttribute("aria-selected", "true");
+
+      type("octo");
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      expect(rendered.container.querySelectorAll("[title]")).toHaveLength(0);
+      expect(input()).not.toHaveAttribute("aria-activedescendant");
+      await settle();
+      await act(async () => {
+        pendingUpdate.resolve({ users: [updatedIdentity], limited: false });
+      });
+      expectIdentity(listOptions()[0], updatedIdentity);
+      expect(listOptions()[0].id).toBe(optionId);
+      expect(listOptions()[0]).toHaveAttribute("aria-selected", "false");
+      expect(screen.queryByTitle(firstIdentity.name)).toBeNull();
+
+      type("");
+      expect(rendered.container.querySelectorAll("[title]")).toHaveLength(0);
+      type("octo");
+      await settle();
+      expectIdentity(listOptions()[0], updatedIdentity);
+      expect(listOptions()[0].id).toBe(optionId);
+      fireEvent.blur(input());
+      expect(rendered.container.querySelectorAll("[title]")).toHaveLength(0);
+      fireEvent.focus(input());
+      expectIdentity(listOptions()[0], updatedIdentity);
+      expect(searchUsers.mock.calls.map(([query]) => query)).toEqual(["oc", "octo"]);
+
+      type("octod");
+      expect(rendered.container.querySelectorAll("[title]")).toHaveLength(0);
+      await settle();
+      expectIdentity(listOptions()[0], secondIdentity);
+      expect(listOptions()[0].id).toBe(optionId);
+      expect(screen.queryByTitle(`@${firstIdentity.login}`)).toBeNull();
+      type("oc");
+      await settle();
+      expectIdentity(listOptions()[0], firstIdentity);
+      expect(screen.queryByTitle(secondIdentity.name)).toBeNull();
+      expect(searchUsers.mock.calls.map(([query]) => query)).toEqual(["oc", "octo", "octod"]);
+      expect(onChange.mock.calls.map(([value]) => value)).toEqual(["octo", "", "octo", "octod", "oc"]);
+      expect(onPick).not.toHaveBeenCalled();
+
+      rendered.unmount();
+      expect(screen.queryByTitle(firstIdentity.name)).toBeNull();
+      const reopenedIdentity = { ...firstIdentity, name: "" };
+      searchUsers.mockResolvedValueOnce({ users: [reopenedIdentity], limited: false });
+      const reopenedChange = vi.fn();
+      render(<DirectHarness initialValue="oc" onChange={reopenedChange} onPick={onPick} />);
+      input().focus();
+      await settle();
+      const reopenedRow = listOptions()[0];
+      expectIdentity(reopenedRow, reopenedIdentity);
+      expect(screen.queryByTitle(firstIdentity.name)).toBeNull();
+      expect(screen.queryByTitle(secondIdentity.name)).toBeNull();
+      expect(reopenedRow).toHaveAttribute("aria-selected", "false");
+      fireEvent.mouseOver(reopenedRow.lastElementChild!);
+      expect(reopenedRow).toHaveAttribute("aria-selected", "true");
+      expect(input()).toHaveAttribute("aria-activedescendant", reopenedRow.id);
+      expect(reopenedChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(dispatchKeyDown(input(), "Enter").defaultPrevented).toBe(true);
+      expect(reopenedChange).toHaveBeenCalledExactlyOnceWith(reopenedIdentity.login);
+      expect(onPick).toHaveBeenCalledExactlyOnceWith(reopenedIdentity.login);
+      expect(searchUsers.mock.calls.map(([query]) => query)).toEqual(["oc", "octo", "octod", "oc"]);
+    });
+  });
+
   it("announces the pending debounced query without disabling typing or exact-handle submission", async () => {
     const pending = deferred<SearchAnswer>();
     searchUsers.mockReturnValue(pending.promise);
