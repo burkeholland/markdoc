@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { hostname, networkInterfaces } from "node:os";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -390,17 +390,39 @@ describe("outbound webhooks", () => {
   it("re-enables only an owned hook in place, is idempotent, and makes it visible to the dispatcher", async () => {
     received.length = 0;
     respondWith = 200;
-    const created = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
-    const db = await getDb();
-    await db.update(schema.webhooks).set({ active: false, failures: 20 }).where(eq(schema.webhooks.id, created.id));
-    await db.insert(schema.webhookDeliveries).values({ id: "enable-history", webhookId: created.id, event: "comment.added", status: 500, durationMs: 12, attempt: 4 });
-
-    // Populate the dispatcher cache while this hook is inactive.
-    actor = bob;
-    await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "While disabled." }) }), { params: Promise.resolve({ id: docId }) });
     await sweepWebhooks();
     await settleWebhookDeliveries();
-    await new Promise((r) => setTimeout(r, 100));
+    const created = await createWebhook(alice, { url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
+    const db = await getDb();
+
+    // Populate the dispatcher cache and cursor, then disable through the delivery lifecycle so both are invalidated.
+    actor = bob;
+    await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "Before disable." }) }), { params: Promise.resolve({ id: docId }) });
+    await sweepWebhooks();
+    await settleWebhookDeliveries();
+    expect(received.map((entry) => entry.json.body)).toEqual(["Before disable."]);
+
+    await db.update(schema.webhooks).set({ failures: 19 }).where(eq(schema.webhooks.id, created.id));
+    const [failingHook] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    respondWith = 500;
+    const disabledResult = await deliverWebhook(failingHook, { type: "test", documentId: null, documentTitle: null, cursor: null, actor: null, at: new Date().toISOString() }, 4);
+    expect(disabledResult).toMatchObject({ status: 500, ok: false, attempt: 4 });
+    const [disabled] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
+    expect(disabled).toMatchObject({ active: false, failures: 20 });
+
+    received.length = 0;
+    respondWith = 200;
+    const disabledComment = await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "While disabled." }) }), { params: Promise.resolve({ id: docId }) });
+    expect(disabledComment.status).toBe(200);
+    const [disabledActivity] = await db
+      .select()
+      .from(schema.activity)
+      .where(eq(schema.activity.documentId, docId))
+      .orderBy(desc(schema.activity.createdAt))
+      .limit(1);
+    expect(disabledActivity).toMatchObject({ action: "comment.add", detail: { quote: "While disabled." } });
+    await sweepWebhooks(disabledActivity.createdAt.getTime() + 1);
+    await settleWebhookDeliveries();
     expect(received).toHaveLength(0);
 
     const callEnable = (id: string) => enableWebhookRoute(new Request(`http://localhost/api/webhooks/${id}/enable`, { method: "POST" }), { params: Promise.resolve({ id }) });
@@ -431,11 +453,11 @@ describe("outbound webhooks", () => {
     const enabled = await callEnable(created.id);
     expect(enabled.status).toBe(200);
     const body = (await enabled.json()) as { webhook: Record<string, unknown> };
-    expect(body.webhook).toMatchObject({ id: created.id, url: receiverUrl, events: ["comment.added"], documentIds: [docId], active: true, failures: 0, lastDelivery: { status: 500, attempt: 4, event: "comment.added" } });
+    expect(body.webhook).toMatchObject({ id: created.id, url: receiverUrl, events: ["comment.added"], documentIds: [docId], active: true, failures: 0, lastDelivery: { status: 500, attempt: 4, event: "test" } });
     expect(body.webhook).not.toHaveProperty("secret");
 
     const [after] = await db.select().from(schema.webhooks).where(eq(schema.webhooks.id, created.id));
-    expect(after).toMatchObject({ active: true, failures: 0, secret: before.secret, url: before.url, events: before.events, documentIds: before.documentIds, createdAt: before.createdAt });
+    expect(after).toMatchObject({ id: before.id, active: true, failures: 0, secret: before.secret, url: before.url, events: before.events, documentIds: before.documentIds, createdAt: before.createdAt });
     expect(await db.select().from(schema.webhookDeliveries).where(eq(schema.webhookDeliveries.webhookId, created.id))).toEqual(historyBefore);
     expect(await activeWebhooksFor(alice.id)).toContainEqual({ id: created.id, url: receiverUrl, events: ["comment.added"], documentIds: [docId] });
 
@@ -448,6 +470,7 @@ describe("outbound webhooks", () => {
     await postComment(new Request(`http://localhost/api/documents/${docId}/comments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "add", from: 0, to: 5, body: "After enable." }) }), { params: Promise.resolve({ id: docId }) });
     await waitFor(() => received.some((entry) => entry.json.body === "After enable."), 1000);
     await settleWebhookDeliveries();
+    expect(received.filter((entry) => entry.json.body === "After enable.")).toHaveLength(1);
     expect(received.some((entry) => entry.json.body === "While disabled.")).toBe(false);
     await deleteWebhook(alice.id, created.id);
   });
