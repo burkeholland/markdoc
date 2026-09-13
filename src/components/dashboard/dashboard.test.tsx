@@ -1663,7 +1663,7 @@ describe("dashboard Account menu directional publication", () => {
 
 });
 
-describe("TrashView per-card keyboard navigation", () => {
+describe("TrashView per-card keyboard navigation provenance", () => {
   const first = trashedDoc("keyboard-first", "Keyboard first");
   const second = trashedDoc("keyboard-second", "Keyboard second");
   const trash = (
@@ -2035,7 +2035,7 @@ describe("TrashView per-card keyboard navigation", () => {
   });
 });
 
-describe("TrashView per-card keyboard navigation", () => {
+describe("TrashView per-card keyboard navigation native authority", () => {
   const first = trashedDoc("keyboard-first", "Keyboard first");
   const second = trashedDoc("keyboard-second", "Keyboard second");
   const trash = (
@@ -2349,21 +2349,33 @@ describe("TrashView per-card keyboard navigation", () => {
       expect(view.setup.focus).not.toHaveBeenCalled();
       expect(outsider).toHaveFocus();
 
-      const foreign = new KeyboardEvent("keydown", {
+      const foreignFrame =
+        view.ownerDocument.createElement("iframe");
+      view.ownerDocument.body.append(foreignFrame);
+      const foreignDocument = foreignFrame.contentDocument;
+      const foreignWindow = foreignDocument?.defaultView;
+      if (!foreignDocument || !foreignWindow) {
+        throw new Error("The foreign key realm is unavailable");
+      }
+      const foreignTarget =
+        foreignDocument.createElement("button");
+      foreignDocument.body.append(foreignTarget);
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
         key: "ArrowRight",
         code: "ArrowRight",
         bubbles: true,
         cancelable: true,
-        view: window,
+        view: foreignWindow,
       });
-      markSearchResultEventTrusted(foreign, window);
+      markSearchResultEventTrusted(foreign, foreignWindow);
       restore.focus();
       view.setup.preventDefault.mockClear();
       view.setup.focus.mockClear();
-      act(() => restore.dispatchEvent(foreign));
+      act(() => foreignTarget.dispatchEvent(foreign));
       expect(foreign.defaultPrevented).toBe(false);
       expect(view.setup.preventDefault).not.toHaveBeenCalled();
       expect(view.setup.focus).not.toHaveBeenCalled();
+      foreignFrame.remove();
 
       view.setup.preventDefault.mockClear();
       view.setup.focus.mockClear();

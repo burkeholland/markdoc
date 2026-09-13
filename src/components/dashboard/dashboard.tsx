@@ -13453,6 +13453,7 @@ function createTrashPublication(
       try {
         const event = proof.event;
         const path = authority.composedPath.call(event);
+        const view = authority.view.read(event);
         return (
           authority.isCurrent() &&
           event instanceof authority.KeyboardEvent &&
@@ -13480,7 +13481,8 @@ function createTrashPublication(
           !authority.shiftKey.read(event) &&
           !authority.repeat.read(event) &&
           !authority.composing.read(event) &&
-          authority.view.read(event) === authority.ownerWindow &&
+          (view === authority.ownerWindow ||
+            view === proof.window.receiver) &&
           pathsMatch(proof.path, path) &&
           pathsMatch(proof.window.path, path) &&
           path.at(-2) === publication.ownerDocument &&
@@ -13602,6 +13604,7 @@ function createTrashPublication(
         );
         const windowProof =
           authority.terminal.proofFor(nativeEvent);
+        const view = authority.view.read(nativeEvent);
         if (
           !card ||
           card.authority !== cardAuthority ||
@@ -13634,8 +13637,8 @@ function createTrashPublication(
           authority.shiftKey.read(nativeEvent) ||
           authority.repeat.read(nativeEvent) ||
           authority.composing.read(nativeEvent) ||
-          authority.view.read(nativeEvent) !==
-            authority.ownerWindow ||
+          (view !== authority.ownerWindow &&
+            view !== windowProof.receiver) ||
           authority.activeElement.read(
             publication.ownerDocument,
           ) !== source.element ||
