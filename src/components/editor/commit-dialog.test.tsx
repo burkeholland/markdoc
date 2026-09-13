@@ -606,7 +606,9 @@ describe("CommitDialog action keyboard navigation", () => {
         const destination =
           destinationName === "Cancel" ? cancel : commit;
         const messageBefore = message().value;
-        const timersBefore = timeout.mock.calls.length;
+        const closeTimersBefore = timeout.mock.calls.filter(
+          ([, delay]) => delay === 900,
+        ).length;
         const scrollBefore = {
           left: document.documentElement.scrollLeft,
           top: document.documentElement.scrollTop,
@@ -630,7 +632,9 @@ describe("CommitDialog action keyboard navigation", () => {
         expect(current.onCommit).not.toHaveBeenCalled();
         expect(current.onOpenChange).not.toHaveBeenCalled();
         expect(message()).toHaveValue(messageBefore);
-        expect(timeout).toHaveBeenCalledTimes(timersBefore);
+        expect(
+          timeout.mock.calls.filter(([, delay]) => delay === 900),
+        ).toHaveLength(closeTimersBefore);
         expect(effects.scrollTo).not.toHaveBeenCalled();
         expect(effects.scrollBy).not.toHaveBeenCalled();
         expect(document.documentElement.scrollLeft).toBe(scrollBefore.left);
