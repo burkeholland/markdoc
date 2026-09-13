@@ -3354,7 +3354,7 @@ function searchControlElementsAreExact(
       errorRoot.children.length !== 2 ||
       errorRoot.firstElementChild !== errorMessage ||
       errorMessage.parentElement !== errorRoot ||
-      errorMessage.className !== "min-w-0 flex-1" ||
+      errorMessage.className !== "min-w-0 flex-1 wrap-anywhere" ||
       errorMessage.textContent?.trim() !== text.error ||
       errorRoot.lastElementChild !== retry ||
       retry.parentElement !== errorRoot ||
@@ -12440,7 +12440,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               data-testid="search-error"
               onClickCapture={captureErrorClick}
             >
-              <span ref={captureErrorMessage} className="min-w-0 flex-1">
+              <span ref={captureErrorMessage} className="min-w-0 flex-1 wrap-anywhere">
                 Content search failed: {currentSearchError.message}. Showing title matches only.
               </span>
               <button
@@ -14003,7 +14003,7 @@ function createTrashPublication(
         errorElement.dataset.testid !== "trash-error" ||
         errorElement.children.length !== 2 ||
         !(errorText instanceof ownerWindow.HTMLSpanElement) ||
-        errorText.className !== "min-w-0 flex-1" ||
+        errorText.className !== "min-w-0 flex-1 wrap-anywhere" ||
         errorText.textContent !== error ||
         !(retry instanceof ownerWindow.HTMLButtonElement) ||
         !retry.isConnected ||
@@ -15466,7 +15466,7 @@ export function TrashView({
           aria-atomic="true"
           data-testid="trash-error"
         >
-          <span className="min-w-0 flex-1">{presentation.error}</span>
+          <span className="min-w-0 flex-1 wrap-anywhere">{presentation.error}</span>
           <button
             ref={captureRetry}
             type="button"
