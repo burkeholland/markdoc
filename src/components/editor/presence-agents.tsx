@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useLayoutEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useLayoutEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { Bot, Loader2, Radio } from "lucide-react";
 import type { CollabSession, PresenceUser } from "@/editor/collab/session";
 import { agentDisplayName } from "@/editor/collab/mentions";
@@ -343,12 +349,14 @@ function createPresencePublicationRuntime<Publication extends PresenceExactPubli
   root,
   owners,
   clearCurrent,
+  onRetire,
 }: {
   publication: Publication;
   cells: PresencePublicationCells<Publication>;
   root: HTMLElement;
   owners: readonly PresenceElementOwnerView[];
   clearCurrent: () => void;
+  onRetire?: () => void;
 }): PresencePublicationRuntime<Publication> | null {
   const placement = capturePresencePlacement(root);
   if (!placement) return null;
@@ -379,6 +387,7 @@ function createPresencePublicationRuntime<Publication extends PresenceExactPubli
       cells.successorOf.current = publication;
     }
     clearCurrent();
+    onRetire?.();
     queueMicrotask(() => {
       if (cells.replay.current?.source !== publication) guard.release();
     });
@@ -585,13 +594,29 @@ interface PresenceRequestsCells {
   readonly successorOf: { current: PresenceRequestsPublication | null };
   readonly replay: { current: PresenceReplay<PresenceRequestsPublication> | null };
   readonly claimedEvents: WeakSet<Event>;
+  readonly attemptedKeyboardReactEvents: WeakSet<object>;
+  readonly attemptedKeyboardNativeEvents: WeakSet<object>;
+  readonly claimedKeyboardDeliveries: WeakSet<PresenceKeyboardDelivery>;
+  readonly claimedKeyboardPairs: WeakSet<PresenceKeyboardPair>;
+  readonly claimedKeyboardMovements: WeakSet<object>;
+  readonly claimedKeyboardPublications: WeakSet<object>;
+  readonly claimedKeyboardWrappers: WeakSet<object>;
+  readonly claimedKeyboardNativeClaims: WeakSet<object>;
+  readonly claimedKeyboardWindowClaims: WeakSet<object>;
+  readonly claimedKeyboardSources: WeakSet<object>;
+  readonly claimedKeyboardDestinations: WeakSet<object>;
+  readonly claimedKeyboardReactEvents: WeakSet<object>;
+  readonly keyboardDelivery: { current: PresenceKeyboardDelivery | null };
 }
 
 interface PresenceRequestPublication {
+  readonly identity: symbol;
+  readonly index: number;
   readonly render: PresenceRequestRender;
   readonly captureRow: (element: HTMLLIElement | null) => void;
   readonly captureCancel: (element: HTMLButtonElement | null) => void;
   readonly onCancel: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly onCancelKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }
 
 interface PresenceRequestsPublication extends PresenceExactPublication<PresenceRequestsAuthority> {
@@ -599,13 +624,1361 @@ interface PresenceRequestsPublication extends PresenceExactPublication<PresenceR
   readonly rows: readonly PresenceRequestPublication[];
   readonly captureSection: (element: HTMLDivElement | null) => void;
   readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly onListKeyDownCapture: (event: ReactKeyboardEvent<HTMLUListElement>) => void;
 }
 
 interface PresenceRequestsPublicationSet {
   readonly rows: readonly PresenceRequestPublication[];
   readonly captureSection: (element: HTMLDivElement | null) => void;
   readonly captureList: (element: HTMLUListElement | null) => void;
+  readonly onListKeyDownCapture: (event: ReactKeyboardEvent<HTMLUListElement>) => void;
   readonly establish: () => void | (() => void);
+}
+
+type PresenceNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+type PresenceKeyboardGetter = (this: object) => unknown;
+type PresenceKeyboardEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble"
+  | "composed";
+type PresenceKeyboardKeyField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+interface PresenceKeyboardGetterAuthority<Field extends string> {
+  readonly getters: Readonly<Record<Field, PresenceKeyboardGetter>>;
+  readonly isCurrent: () => boolean;
+}
+
+interface PresenceKeyboardMethodAuthority<Method> {
+  readonly method: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface PresenceKeyboardWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+type PresenceKeyboardFocus = (
+  this: HTMLElement,
+  options?: FocusOptions,
+) => void;
+
+interface PresenceKeyboardTrustedAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface PresenceKeyboardTerminalProof {
+  readonly registration: PresenceKeyboardTerminalRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface PresenceKeyboardTerminalRegistration {
+  readonly proofFor: (
+    event: KeyboardEvent,
+  ) => PresenceKeyboardTerminalProof | null;
+  readonly claim: (proof: PresenceKeyboardTerminalProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface PresencePublishedCancel {
+  readonly identity: symbol;
+  readonly publication: PresenceRequestsPublication;
+  readonly row: PresenceRequestPublication;
+  readonly render: PresenceRequestRender;
+  readonly owner: PresenceElementOwner<HTMLButtonElement>;
+  readonly rowOwner: PresenceElementOwner<HTMLLIElement>;
+  readonly element: HTMLButtonElement;
+  readonly rowElement: HTMLLIElement;
+  readonly index: number;
+  readonly order: number;
+  readonly session: CollabSession;
+  readonly onCancel: NonNullable<PresenceRequestsProps["onCancel"]>;
+}
+
+interface PresenceKeyboardAuthority {
+  readonly publication: PresenceRequestsPublication;
+  readonly section: HTMLDivElement;
+  readonly list: HTMLUListElement;
+  readonly controls: readonly PresencePublishedCancel[];
+  readonly document: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly UIEvent: typeof UIEvent;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly Document: typeof Document;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly HTMLButtonElement: typeof HTMLButtonElement;
+  readonly event: PresenceKeyboardGetterAuthority<PresenceKeyboardEventField>["getters"];
+  readonly keyboard: PresenceKeyboardGetterAuthority<PresenceKeyboardKeyField>["getters"];
+  readonly view: PresenceKeyboardGetter;
+  readonly detail: PresenceKeyboardGetter;
+  readonly activeElement: PresenceKeyboardGetter;
+  readonly composedPath: Event["composedPath"];
+  readonly focus: PresenceKeyboardFocus;
+  readonly trusted: PresenceKeyboardTrustedAuthority;
+  readonly terminal: PresenceKeyboardTerminalRegistration;
+  readonly apply: typeof Reflect.apply;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly isCurrent: () => boolean;
+}
+
+interface PresenceKeyboardEventSnapshot {
+  readonly event: KeyboardEvent;
+  readonly type: string;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: EventTarget;
+  readonly phase: number;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly key: PresenceNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly view: Window | EventTarget | null;
+  readonly detail: number;
+  readonly trusted: true;
+  readonly terminal: PresenceKeyboardTerminalProof;
+}
+
+interface PresenceKeyboardReactMethods {
+  readonly preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface PresenceKeyboardReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly methods: PresenceKeyboardReactMethods;
+}
+
+interface PresenceKeyboardPair {
+  readonly publication: PresenceRequestsPublication;
+  readonly runtime: PresencePublicationRuntime<PresenceRequestsPublication>;
+  readonly authority: PresenceKeyboardAuthority;
+  readonly native: PresenceKeyboardEventSnapshot;
+  readonly capture: PresenceKeyboardReactSnapshot;
+  readonly terminal: PresenceKeyboardTerminalProof;
+  readonly source: PresencePublishedCancel;
+  readonly destination: PresencePublishedCancel;
+  readonly key: PresenceNavigationKey;
+  readonly movement: object;
+  readonly publicationClaim: object;
+  readonly wrapperClaim: object;
+  readonly nativeClaim: object;
+  readonly windowClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
+}
+
+interface PresenceKeyboardDelivery {
+  readonly pair: PresenceKeyboardPair;
+  readonly bubble: PresenceKeyboardReactSnapshot;
+}
+
+function presenceKeyboardDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value &&
+        current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function capturePresenceKeyboardGetters<
+  const Fields extends readonly string[],
+>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): PresenceKeyboardGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], PresenceKeyboardGetter][] = [];
+  const descriptors: [Fields[number], PropertyDescriptor][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], PresenceKeyboardGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) =>
+        presenceKeyboardDescriptorsMatch(
+          getOwnPropertyDescriptor(prototype, field),
+          expected,
+        ),
+      ),
+  });
+}
+
+function capturePresenceKeyboardMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  name: PropertyKey,
+): PresenceKeyboardMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, name);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      presenceKeyboardDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, name),
+        expected,
+      ),
+  });
+}
+
+function capturePresenceKeyboardWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): PresenceKeyboardWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(
+      ({ target: entry, descriptor, prototype }) =>
+        getPrototypeOf(entry) === prototype &&
+        (descriptor
+          ? presenceKeyboardDescriptorsMatch(
+              getOwnPropertyDescriptor(entry, property),
+              descriptor,
+            )
+          : getOwnPropertyDescriptor(entry, property) === undefined),
+    ) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function capturePresenceKeyboardTrustedAuthority(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): PresenceKeyboardTrustedAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    presenceKeyboardDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as PresenceKeyboardGetter, event, []) as boolean,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function createPresenceKeyboardTerminalRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  EventConstructor: typeof Event,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardEventPrototype: object,
+  eventCurrentTarget: PresenceKeyboardGetter,
+  eventPhase: PresenceKeyboardGetter,
+  composedPath: Event["composedPath"],
+  addEventListener: PresenceKeyboardWindowMethod<Window["addEventListener"]>,
+  removeEventListener: PresenceKeyboardWindowMethod<
+    Window["removeEventListener"]
+  >,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): PresenceKeyboardTerminalRegistration | null {
+  const proofs = new WeakMap<
+    KeyboardEvent,
+    PresenceKeyboardTerminalProof
+  >();
+  const invalidEvents = new WeakSet<Event>();
+  const claimed = new WeakSet<Event>();
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardEventPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = apply(
+        eventCurrentTarget,
+        event,
+        [],
+      ) as EventTarget | null;
+      const phase = apply(eventPhase, event, []) as number;
+      const path = apply(composedPath, event, []) as EventTarget[];
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this ||
+        terminal !== this ||
+        phase !== EventConstructor.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event,
+        Object.freeze({
+          registration,
+          nativeEvent: event,
+          receiver: this,
+          currentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      claimed.has(event) ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = apply(composedPath, event, []) as EventTarget[];
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+
+  const registration: PresenceKeyboardTerminalRegistration = Object.freeze({
+    proofFor,
+    claim: (proof: PresenceKeyboardTerminalProof) => {
+      if (
+        claimed.has(proof.nativeEvent) ||
+        proofFor(proof.nativeEvent) !== proof
+      ) {
+        return false;
+      }
+      claimed.add(proof.nativeEvent);
+      return true;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      apply(removeEventListener.value, ownerWindow, [
+        "keydown",
+        listener,
+        true,
+      ]);
+    },
+    isCurrent: () =>
+      active &&
+      !released &&
+      intrinsicsAreCurrent() &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent(),
+  });
+
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, [
+      "keydown",
+      listener,
+      true,
+    ]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function capturePresenceKeyboardAuthority(
+  publication: PresenceRequestsPublication,
+  section: HTMLDivElement,
+  list: HTMLUListElement,
+  rowOwners: readonly PresenceElementOwner<HTMLLIElement>[],
+  cancelOwners: readonly PresenceElementOwner<HTMLButtonElement>[],
+): PresenceKeyboardAuthority | null {
+  const { authority, rows } = publication;
+  const { onCancel, session } = authority;
+  const document = section.ownerDocument;
+  const ownerWindow = document.defaultView;
+  if (
+    !onCancel ||
+    !ownerWindow ||
+    list.ownerDocument !== document ||
+    list.parentElement !== section ||
+    rows.length !== authority.rows.length ||
+    rowOwners.length !== rows.length ||
+    cancelOwners.length !== rows.length
+  ) {
+    return null;
+  }
+
+  const controls: PresencePublishedCancel[] = [];
+  for (const [index, row] of rows.entries()) {
+    const render = authority.rows[index];
+    if (!render || row.render !== render || row.index !== index) return null;
+    if (!render.cancellable) continue;
+    const rowElement = rowOwners[index]?.element() ?? null;
+    const element = cancelOwners[index]?.element() ?? null;
+    if (
+      !rowElement ||
+      !element ||
+      rowElement.ownerDocument !== document ||
+      element.ownerDocument !== document ||
+      rowElement.parentElement !== list ||
+      list.children.item(index) !== rowElement ||
+      element.parentElement !== rowElement ||
+      rowElement.children.item(2) !== element
+    ) {
+      return null;
+    }
+    controls.push(
+      Object.freeze({
+        identity: Symbol("presence request keyboard cancel"),
+        publication,
+        row,
+        render,
+        owner: cancelOwners[index]!,
+        rowOwner: rowOwners[index]!,
+        element,
+        rowElement,
+        index,
+        order: controls.length,
+        session,
+        onCancel,
+      }),
+    );
+  }
+  if (controls.length < 1) return null;
+
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor =
+    objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const HTMLButtonElementConstructor = ownerWindow.HTMLButtonElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const eventGetters = capturePresenceKeyboardGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+      "composed",
+    ] as const,
+  );
+  const keyboardGetters = capturePresenceKeyboardGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = capturePresenceKeyboardGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view", "detail"] as const,
+  );
+  const documentGetters = capturePresenceKeyboardGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath =
+    capturePresenceKeyboardMethod<Event["composedPath"]>(
+      getOwnPropertyDescriptor,
+      eventPrototype,
+      "composedPath",
+    );
+  const focus = capturePresenceKeyboardMethod<PresenceKeyboardFocus>(
+    getOwnPropertyDescriptor,
+    HTMLElementConstructor.prototype,
+    "focus",
+  );
+  const addEventListener = capturePresenceKeyboardWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = capturePresenceKeyboardWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor(
+      "presence-request-keyboard-intrinsic",
+    );
+  } catch {
+    return null;
+  }
+  const trusted = capturePresenceKeyboardTrustedAuthority(
+    getOwnPropertyDescriptor,
+    apply,
+    probe,
+  );
+  if (!trusted) return null;
+
+  let poisoned = false;
+  const intrinsicsAreCurrent = () => {
+    if (poisoned) return false;
+    try {
+      const current =
+        document.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        ownerWindow.HTMLButtonElement === HTMLButtonElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        focus.isCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
+        trusted.isCurrent();
+      if (!current) poisoned = true;
+      return current;
+    } catch {
+      poisoned = true;
+      return false;
+    }
+  };
+  try {
+    if (!intrinsicsAreCurrent() || trusted.read(probe) !== false) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const terminal = createPresenceKeyboardTerminalRegistration(
+    ownerWindow,
+    document,
+    EventConstructor,
+    KeyboardEventConstructor,
+    keyboardEventPrototype,
+    eventGetters.getters.currentTarget,
+    eventGetters.getters.eventPhase,
+    composedPath.method,
+    addEventListener,
+    removeEventListener,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+  );
+  if (!terminal) return null;
+  return Object.freeze({
+    publication,
+    section,
+    list,
+    controls: Object.freeze(controls),
+    document,
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
+    HTMLButtonElement: HTMLButtonElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    detail: uiGetters.getters.detail,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    focus: focus.method,
+    trusted,
+    terminal,
+    apply,
+    prototypeOf,
+    isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+  });
+}
+
+function presenceKeyboardValue<Value>(
+  authority: PresenceKeyboardAuthority,
+  getter: PresenceKeyboardGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function presenceKeyboardIdentitiesMatch(
+  left: unknown,
+  right: unknown,
+) {
+  return left === right;
+}
+
+function isPresenceNavigationKey(
+  key: string,
+): key is PresenceNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function presenceControlIsEnabled(control: PresencePublishedCancel) {
+  const { element, rowElement, owner, rowOwner } = control;
+  return (
+    owner.element() === element &&
+    rowOwner.element() === rowElement &&
+    element.isConnected &&
+    rowElement.isConnected &&
+    !element.disabled &&
+    element.ownerDocument === rowElement.ownerDocument &&
+    element.parentElement === rowElement
+  );
+}
+
+function presenceKeyboardDestination(
+  authority: PresenceKeyboardAuthority,
+  source: PresencePublishedCancel,
+  key: PresenceNavigationKey,
+) {
+  const { controls } = authority;
+  const sourceIndex = controls.indexOf(source);
+  if (sourceIndex < 0 || !presenceControlIsEnabled(source)) return null;
+  let destinationIndex: number | null = null;
+  const step =
+    key === "ArrowLeft" || key === "ArrowUp"
+      ? -1
+      : key === "ArrowRight" || key === "ArrowDown"
+        ? 1
+        : 0;
+  if (step !== 0) {
+    for (
+      let index = sourceIndex + step;
+      index >= 0 && index < controls.length;
+      index += step
+    ) {
+      const control = controls[index];
+      if (control && presenceControlIsEnabled(control)) {
+        destinationIndex = index;
+        break;
+      }
+    }
+  } else if (key === "Home") {
+    destinationIndex = controls.findIndex(presenceControlIsEnabled);
+  } else {
+    for (let index = controls.length - 1; index >= 0; index -= 1) {
+      const control = controls[index];
+      if (control && presenceControlIsEnabled(control)) {
+        destinationIndex = index;
+        break;
+      }
+    }
+  }
+  if (
+    destinationIndex === null ||
+    destinationIndex < 0 ||
+    destinationIndex === sourceIndex
+  ) {
+    return null;
+  }
+  const destination = controls[destinationIndex];
+  return destination && destination !== source ? destination : null;
+}
+
+function capturePresenceKeyboardEvent(
+  authority: PresenceKeyboardAuthority,
+  nativeEvent: Event,
+  expectedPhase: number,
+): PresenceKeyboardEventSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !==
+      authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const type = presenceKeyboardValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = presenceKeyboardValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = presenceKeyboardValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = presenceKeyboardValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = presenceKeyboardValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = presenceKeyboardValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = presenceKeyboardValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = presenceKeyboardValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const composed = presenceKeyboardValue<boolean>(
+      authority,
+      authority.event.composed,
+      nativeEvent,
+    );
+    const key = presenceKeyboardValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    );
+    const code = presenceKeyboardValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const location = presenceKeyboardValue<number>(
+      authority,
+      authority.keyboard.location,
+      nativeEvent,
+    );
+    const repeat = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = presenceKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = presenceKeyboardValue<Window | EventTarget | null>(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const detail = presenceKeyboardValue<number>(
+      authority,
+      authority.detail,
+      nativeEvent,
+    );
+    const activeElement = presenceKeyboardValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.document,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    const terminal = authority.terminal.proofFor(
+      nativeEvent as KeyboardEvent,
+    );
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.HTMLButtonElement) ||
+      target.ownerDocument !== authority.document ||
+      activeElement !== target ||
+      !currentTarget ||
+      phase !== expectedPhase ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      !isPresenceNavigationKey(key) ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      (view !== null &&
+        view !== authority.ownerWindow &&
+        (!terminal || view !== terminal.receiver)) ||
+      trusted !== true ||
+      !terminal
+    ) {
+      return null;
+    }
+
+    const expectedPath: EventTarget[] = [];
+    let node: Node | null = target;
+    while (node) {
+      expectedPath.push(node);
+      if (node === authority.document) break;
+      node = node.parentNode;
+    }
+    expectedPath.push(terminal.receiver);
+    if (
+      expectedPath.at(-2) !== authority.document ||
+      path.length !== expectedPath.length ||
+      path.some((entry, index) => entry !== expectedPath[index]) ||
+      path.length !== terminal.path.length ||
+      path.some((entry, index) => entry !== terminal.path[index]) ||
+      terminal.receiver !== terminal.currentTarget ||
+      terminal.receiver !== terminal.terminal ||
+      !path.includes(currentTarget) ||
+      !path.includes(authority.section) ||
+      !path.includes(authority.list)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed,
+      key,
+      code,
+      location,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      detail,
+      trusted: true,
+      terminal,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function presenceKeyboardEventsMatch(
+  capture: PresenceKeyboardEventSnapshot,
+  bubble: PresenceKeyboardEventSnapshot,
+  authority: PresenceKeyboardAuthority,
+) {
+  return (
+    capture.event === bubble.event &&
+    capture.type === bubble.type &&
+    capture.target === bubble.target &&
+    capture.currentTarget === bubble.currentTarget &&
+    capture.phase === authority.Event.CAPTURING_PHASE &&
+    bubble.phase === authority.Event.BUBBLING_PHASE &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.composed === bubble.composed &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.location === bubble.location &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.altKey === bubble.altKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.view === bubble.view &&
+    capture.detail === bubble.detail &&
+    capture.trusted === bubble.trusted &&
+    capture.terminal === bubble.terminal &&
+    capture.path.length === bubble.path.length &&
+    capture.path.every((entry, index) => entry === bubble.path[index])
+  );
+}
+
+function presenceKeyboardSnapshotRemainsExact(
+  snapshot: PresenceKeyboardEventSnapshot,
+  authority: PresenceKeyboardAuthority,
+  expectedDefaultPrevented = snapshot.defaultPrevented,
+) {
+  try {
+    const currentPath = authority.apply(
+      authority.composedPath,
+      snapshot.event,
+      [],
+    ) as EventTarget[];
+    return (
+      authority.isCurrent() &&
+      authority.prototypeOf(snapshot.event) ===
+        authority.KeyboardEvent.prototype &&
+      authority.trusted.matches(snapshot.event) &&
+      authority.trusted.read(snapshot.event) === snapshot.trusted &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.type,
+        snapshot.event,
+      ) === snapshot.type &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.target,
+        snapshot.event,
+      ) === snapshot.target &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.currentTarget,
+        snapshot.event,
+      ) === snapshot.currentTarget &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.eventPhase,
+        snapshot.event,
+      ) === snapshot.phase &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.bubbles,
+        snapshot.event,
+      ) === snapshot.bubbles &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.cancelable,
+        snapshot.event,
+      ) === snapshot.cancelable &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.defaultPrevented,
+        snapshot.event,
+      ) === expectedDefaultPrevented &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.cancelBubble,
+        snapshot.event,
+      ) === snapshot.cancelBubble &&
+      presenceKeyboardValue(
+        authority,
+        authority.event.composed,
+        snapshot.event,
+      ) === snapshot.composed &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.key,
+        snapshot.event,
+      ) === snapshot.key &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.code,
+        snapshot.event,
+      ) === snapshot.code &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.location,
+        snapshot.event,
+      ) === snapshot.location &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.repeat,
+        snapshot.event,
+      ) === snapshot.repeat &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.isComposing,
+        snapshot.event,
+      ) === snapshot.composing &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.ctrlKey,
+        snapshot.event,
+      ) === snapshot.ctrlKey &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.altKey,
+        snapshot.event,
+      ) === snapshot.altKey &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.metaKey,
+        snapshot.event,
+      ) === snapshot.metaKey &&
+      presenceKeyboardValue(
+        authority,
+        authority.keyboard.shiftKey,
+        snapshot.event,
+      ) === snapshot.shiftKey &&
+      presenceKeyboardValue(
+        authority,
+        authority.view,
+        snapshot.event,
+      ) === snapshot.view &&
+      presenceKeyboardValue(
+        authority,
+        authority.detail,
+        snapshot.event,
+      ) === snapshot.detail &&
+      currentPath.length === snapshot.path.length &&
+      currentPath.every(
+        (entry, index) => entry === snapshot.path[index],
+      ) &&
+      currentPath.at(-1) === snapshot.terminal.receiver
+    );
+  } catch {
+    return false;
+  }
+}
+
+function capturePresenceKeyboardReactEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  authority: PresenceKeyboardAuthority,
+  native: PresenceKeyboardEventSnapshot,
+  currentTarget: HTMLElement,
+): PresenceKeyboardReactSnapshot | null {
+  try {
+    const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    const preventDefault = reactEvent.preventDefault;
+    const isDefaultPrevented = reactEvent.isDefaultPrevented;
+    const isPropagationStopped = reactEvent.isPropagationStopped;
+    if (
+      typeof preventDefault !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      authority.apply(isDefaultPrevented, event, []) !== false ||
+      authority.apply(isPropagationStopped, event, []) !== false ||
+      reactEvent.preventDefault !== preventDefault ||
+      reactEvent.isDefaultPrevented !== isDefaultPrevented ||
+      reactEvent.isPropagationStopped !== isPropagationStopped ||
+      event.nativeEvent !== native.event ||
+      event.type !== native.type ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.trusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.repeat !== native.repeat ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      (event.view !== null &&
+        !presenceKeyboardIdentitiesMatch(
+          event.view,
+          authority.ownerWindow,
+        ) &&
+        !presenceKeyboardIdentitiesMatch(
+          event.view,
+          native.terminal.receiver,
+        )) ||
+      event.detail !== native.detail
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent: native.event,
+      target: native.target,
+      currentTarget,
+      phase: native.phase,
+      view: event.view,
+      methods: Object.freeze({
+        preventDefault,
+        isDefaultPrevented,
+        isPropagationStopped,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function presenceKeyboardReactSnapshotMatches(
+  snapshot: PresenceKeyboardReactSnapshot,
+  authority: PresenceKeyboardAuthority,
+  native: PresenceKeyboardEventSnapshot,
+  currentTarget: HTMLElement | null,
+) {
+  try {
+    const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    return (
+      event.nativeEvent === snapshot.nativeEvent &&
+      event.nativeEvent === native.event &&
+      event.type === native.type &&
+      event.target === snapshot.target &&
+      event.target === native.target &&
+      event.currentTarget === currentTarget &&
+      event.eventPhase === snapshot.phase &&
+      event.eventPhase === native.phase &&
+      event.bubbles === native.bubbles &&
+      event.cancelable === native.cancelable &&
+      event.defaultPrevented === native.defaultPrevented &&
+      event.isTrusted === native.trusted &&
+      event.key === native.key &&
+      event.code === native.code &&
+      event.location === native.location &&
+      event.repeat === native.repeat &&
+      event.ctrlKey === native.ctrlKey &&
+      event.altKey === native.altKey &&
+      event.metaKey === native.metaKey &&
+      event.shiftKey === native.shiftKey &&
+      event.view === snapshot.view &&
+      (event.view === null ||
+        presenceKeyboardIdentitiesMatch(
+          event.view,
+          authority.ownerWindow,
+        ) ||
+        presenceKeyboardIdentitiesMatch(
+          event.view,
+          native.terminal.receiver,
+        )) &&
+      event.detail === native.detail &&
+      event.preventDefault === snapshot.methods.preventDefault &&
+      event.isDefaultPrevented ===
+        snapshot.methods.isDefaultPrevented &&
+      event.isPropagationStopped ===
+        snapshot.methods.isPropagationStopped &&
+      authority.apply(
+        snapshot.methods.isDefaultPrevented,
+        snapshot.event,
+        [],
+      ) === false &&
+      authority.apply(
+        snapshot.methods.isPropagationStopped,
+        snapshot.event,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
 }
 
 function createPresenceRequestsAuthority(
@@ -743,6 +2116,8 @@ function createPresenceRequestsPublication(
   const renders = authority.rows;
   let currentRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
   let lastRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
+  let keyboardAuthority: PresenceKeyboardAuthority | null = null;
+  let keyboardPairs = new WeakMap<KeyboardEvent, PresenceKeyboardPair>();
   let successorRequested = false;
   const onElementChange = (
     owner: PresenceElementOwnerView,
@@ -825,11 +2200,12 @@ function createPresenceRequestsPublication(
     const section = sectionOwner.element();
     const list = listOwner.element();
     const document = section?.ownerDocument;
+    const view = document?.defaultView;
     if (
       !section ||
       !section.isConnected ||
       !section.parentNode ||
-      !document?.defaultView ||
+      !view ||
       section.tagName !== "DIV" ||
       section.className !== REQUEST_SECTION_CLASS ||
       section.dataset.testid !== "presence-requests" ||
@@ -849,12 +2225,12 @@ function createPresenceRequestsPublication(
     }
     const title = section.children.item(0);
     if (
-      !(title instanceof HTMLDivElement) ||
+      !(title instanceof view.HTMLDivElement) ||
       title.ownerDocument !== document ||
       title.className !== REQUEST_TITLE_CLASS ||
       title.textContent !== "Requests" ||
       title.childNodes.length !== 1 ||
-      title.firstChild?.nodeType !== document.defaultView.Node.TEXT_NODE
+      title.firstChild?.nodeType !== view.Node.TEXT_NODE
     ) {
       return false;
     }
@@ -883,7 +2259,7 @@ function createPresenceRequestsPublication(
       const state = details?.children.item(1);
       const iconGraphic = icon?.children.item(0);
       if (
-        !(icon instanceof HTMLSpanElement) ||
+        !(icon instanceof view.HTMLSpanElement) ||
         icon.ownerDocument !== document ||
         icon.className !== cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3") ||
         icon.children.length !== 1 ||
@@ -892,17 +2268,17 @@ function createPresenceRequestsPublication(
         iconGraphic.getAttribute("aria-hidden") !== "true" ||
         iconGraphic.getAttribute("width") !== "14" ||
         iconGraphic.getAttribute("height") !== "14" ||
-        !(details instanceof HTMLSpanElement) ||
+        !(details instanceof view.HTMLSpanElement) ||
         details.ownerDocument !== document ||
         details.className !== REQUEST_DETAILS_CLASS ||
         details.children.length !== 2 ||
         details.childNodes.length !== 2 ||
-        !(instruction instanceof HTMLSpanElement) ||
+        !(instruction instanceof view.HTMLSpanElement) ||
         instruction.ownerDocument !== document ||
         instruction.className !== REQUEST_INSTRUCTION_CLASS ||
         instruction.textContent !== render.instruction ||
         instruction.children.length !== 0 ||
-        !(state instanceof HTMLSpanElement) ||
+        !(state instanceof view.HTMLSpanElement) ||
         state.ownerDocument !== document ||
         state.className !== REQUEST_STATE_CLASS ||
         state.dataset.testid !== "presence-request-state" ||
@@ -921,7 +2297,6 @@ function createPresenceRequestsPublication(
         cancel.parentElement === row &&
         row.children.item(2) === cancel &&
         cancel.type === "button" &&
-        !cancel.disabled &&
         cancel.className === REQUEST_CANCEL_CLASS &&
         cancel.getAttribute("aria-label") === "Cancel request" &&
         cancel.dataset.testid === "presence-request-cancel" &&
@@ -964,6 +2339,429 @@ function createPresenceRequestsPublication(
       listOwner.element()?.children.item(index) === row
     );
   };
+  const keyboardNavigationIsCurrent = (
+    runtime: PresencePublicationRuntime<PresenceRequestsPublication>,
+    publication: PresenceRequestsPublication,
+    keyboard: PresenceKeyboardAuthority,
+    source: PresencePublishedCancel,
+    destination: PresencePublishedCancel,
+    key: PresenceNavigationKey,
+  ) => {
+    if (
+      keyboardAuthority !== keyboard ||
+      keyboard.publication !== publication ||
+      keyboard.section !== sectionOwner.element() ||
+      keyboard.list !== listOwner.element() ||
+      keyboard.document !== keyboard.section.ownerDocument ||
+      keyboard.ownerWindow !== keyboard.document.defaultView ||
+      !keyboard.isCurrent() ||
+      !ownsAuthority(runtime, publication) ||
+      keyboard.controls.length !==
+        renders.filter((render) => render.cancellable).length ||
+      !keyboard.controls.includes(source) ||
+      !keyboard.controls.includes(destination) ||
+      source === destination ||
+      source.publication !== publication ||
+      destination.publication !== publication ||
+      source.session !== session ||
+      destination.session !== session ||
+      source.onCancel !== onCancel ||
+      destination.onCancel !== onCancel ||
+      source.row !== rows[source.index] ||
+      destination.row !== rows[destination.index] ||
+      source.row.render !== source.render ||
+      destination.row.render !== destination.render ||
+      source.render !== renders[source.index] ||
+      destination.render !== renders[destination.index] ||
+      source.owner !== cancelOwners[source.index] ||
+      destination.owner !== cancelOwners[destination.index] ||
+      source.rowOwner !== rowOwners[source.index] ||
+      destination.rowOwner !== rowOwners[destination.index] ||
+      source.owner.element() !== source.element ||
+      destination.owner.element() !== destination.element ||
+      source.rowOwner.element() !== source.rowElement ||
+      destination.rowOwner.element() !== destination.rowElement ||
+      source.rowElement.parentElement !== keyboard.list ||
+      destination.rowElement.parentElement !== keyboard.list ||
+      keyboard.list.children.item(source.index) !== source.rowElement ||
+      keyboard.list.children.item(destination.index) !==
+        destination.rowElement ||
+      source.element.parentElement !== source.rowElement ||
+      destination.element.parentElement !== destination.rowElement ||
+      source.rowElement.children.item(2) !== source.element ||
+      destination.rowElement.children.item(2) !== destination.element ||
+      !source.render.cancellable ||
+      !destination.render.cancellable ||
+      !presenceControlIsEnabled(source) ||
+      !presenceControlIsEnabled(destination) ||
+      presenceKeyboardDestination(keyboard, source, key) !== destination
+    ) {
+      return false;
+    }
+    let order = 0;
+    for (const [index, render] of renders.entries()) {
+      if (!render.cancellable) {
+        if (cancelOwners[index]?.element() !== null) return false;
+        continue;
+      }
+      const control = keyboard.controls[order];
+      if (
+        !control ||
+        control.order !== order ||
+        control.index !== index ||
+        control.publication !== publication ||
+        control.row !== rows[index] ||
+        control.render !== render ||
+        control.owner !== cancelOwners[index] ||
+        control.rowOwner !== rowOwners[index]
+      ) {
+        return false;
+      }
+      order += 1;
+    }
+    try {
+      return (
+        order === keyboard.controls.length &&
+        presenceKeyboardValue<Element | null>(
+          keyboard,
+          keyboard.activeElement,
+          keyboard.document,
+        ) === source.element
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const captureKeyboardNavigation = (
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      keyboardPairs.has(nativeEvent as KeyboardEvent) ||
+      cells.keyboardDelivery.current ||
+      cells.attemptedKeyboardReactEvents.has(event) ||
+      cells.attemptedKeyboardNativeEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    cells.attemptedKeyboardReactEvents.add(event);
+    cells.attemptedKeyboardNativeEvents.add(nativeEvent);
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const keyboard = keyboardAuthority;
+    if (
+      !runtime ||
+      !publication ||
+      !keyboard ||
+      publication !== keyboard.publication
+    ) {
+      return;
+    }
+    const native = capturePresenceKeyboardEvent(
+      keyboard,
+      nativeEvent as Event,
+      keyboard.Event.CAPTURING_PHASE,
+    );
+    const list = listOwner.element();
+    const capture =
+      native && list
+        ? capturePresenceKeyboardReactEvent(
+            event as ReactKeyboardEvent<HTMLElement>,
+            keyboard,
+            native,
+            list,
+          )
+        : null;
+    const source = native
+      ? keyboard.controls.find(
+          (control) => control.element === native.target,
+        )
+      : undefined;
+    const destination =
+      source && native
+        ? presenceKeyboardDestination(keyboard, source, native.key)
+        : null;
+    if (
+      !native ||
+      !capture ||
+      !source ||
+      !destination ||
+      native.terminal !== keyboard.terminal.proofFor(native.event) ||
+      !native.path.includes(source.rowElement) ||
+      !presenceKeyboardSnapshotRemainsExact(native, keyboard) ||
+      !keyboardNavigationIsCurrent(
+        runtime,
+        publication,
+        keyboard,
+        source,
+        destination,
+        native.key,
+      )
+    ) {
+      return;
+    }
+    const pair: PresenceKeyboardPair = Object.freeze({
+      publication,
+      runtime,
+      authority: keyboard,
+      native,
+      capture,
+      terminal: native.terminal,
+      source,
+      destination,
+      key: native.key,
+      movement: Object.freeze({
+        publication,
+        source,
+        destination,
+        key: native.key,
+      }),
+      publicationClaim: Object.freeze({ publication }),
+      wrapperClaim: Object.freeze({ capture: event }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({
+        registration: keyboard.terminal,
+        proof: native.terminal,
+        receiver: native.terminal.receiver,
+      }),
+      sourceClaim: Object.freeze({ source }),
+      destinationClaim: Object.freeze({ destination }),
+    });
+    keyboardPairs.set(native.event, pair);
+  };
+
+  const completeKeyboardNavigation = (
+    index: number,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    const pair =
+      nativeEvent &&
+      typeof nativeEvent === "object"
+        ? keyboardPairs.get(nativeEvent as KeyboardEvent)
+        : undefined;
+    if (
+      !pair ||
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pair.native.event !== nativeEvent ||
+      cells.keyboardDelivery.current ||
+      cells.attemptedKeyboardReactEvents.has(event) ||
+      !cells.attemptedKeyboardNativeEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    const {
+      authority: keyboard,
+      publication,
+      runtime,
+      source,
+      destination,
+      key,
+    } = pair;
+    let delivery: PresenceKeyboardDelivery | null = null;
+    try {
+      const currentElement = cancelOwners[index]?.element() ?? null;
+      const native = capturePresenceKeyboardEvent(
+        keyboard,
+        nativeEvent as Event,
+        keyboard.Event.BUBBLING_PHASE,
+      );
+      const bubble =
+        native && currentElement
+          ? capturePresenceKeyboardReactEvent(
+              event as ReactKeyboardEvent<HTMLElement>,
+              keyboard,
+              native,
+              currentElement,
+            )
+          : null;
+      if (
+        !currentElement ||
+        !native ||
+        !bubble ||
+        bubble.event === pair.capture.event ||
+        pair.publication !== publication ||
+        pair.runtime !== runtime ||
+        pair.authority !== keyboard ||
+        source.index !== index ||
+        source.row !== rows[index] ||
+        source.owner !== cancelOwners[index] ||
+        source.element !== currentElement ||
+        event.currentTarget !== currentElement ||
+        pair.capture.currentTarget !== keyboard.list ||
+        bubble.currentTarget !== source.element ||
+        pair.capture.phase !== keyboard.Event.CAPTURING_PHASE ||
+        bubble.phase !== keyboard.Event.BUBBLING_PHASE ||
+        native.terminal !== pair.terminal ||
+        !presenceKeyboardEventsMatch(pair.native, native, keyboard) ||
+        !presenceKeyboardReactSnapshotMatches(
+          pair.capture,
+          keyboard,
+          pair.native,
+          null,
+        ) ||
+        !presenceKeyboardReactSnapshotMatches(
+          bubble,
+          keyboard,
+          native,
+          currentElement,
+        ) ||
+        !presenceKeyboardSnapshotRemainsExact(native, keyboard) ||
+        !keyboardNavigationIsCurrent(
+          runtime,
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+
+      keyboardPairs.delete(pair.native.event);
+      cells.attemptedKeyboardReactEvents.add(event);
+      delivery = Object.freeze({ pair, bubble });
+      if (
+        cells.claimedKeyboardDeliveries.has(delivery) ||
+        cells.claimedKeyboardPairs.has(pair) ||
+        cells.claimedKeyboardMovements.has(pair.movement) ||
+        cells.claimedKeyboardPublications.has(pair.publicationClaim) ||
+        cells.claimedKeyboardWrappers.has(pair.wrapperClaim) ||
+        cells.claimedKeyboardNativeClaims.has(pair.nativeClaim) ||
+        cells.claimedKeyboardWindowClaims.has(pair.windowClaim) ||
+        cells.claimedKeyboardSources.has(pair.sourceClaim) ||
+        cells.claimedKeyboardDestinations.has(pair.destinationClaim) ||
+        cells.claimedKeyboardReactEvents.has(pair.capture.event) ||
+        cells.claimedKeyboardReactEvents.has(bubble.event) ||
+        cells.claimedEvents.has(native.event) ||
+        !cells.attemptedKeyboardReactEvents.has(pair.capture.event) ||
+        !cells.attemptedKeyboardReactEvents.has(bubble.event) ||
+        !cells.attemptedKeyboardNativeEvents.has(native.event) ||
+        keyboard.terminal.claim(pair.terminal) !== true
+      ) {
+        return;
+      }
+      cells.claimedKeyboardDeliveries.add(delivery);
+      cells.claimedKeyboardPairs.add(pair);
+      cells.claimedKeyboardMovements.add(pair.movement);
+      cells.claimedKeyboardPublications.add(pair.publicationClaim);
+      cells.claimedKeyboardWrappers.add(pair.wrapperClaim);
+      cells.claimedKeyboardNativeClaims.add(pair.nativeClaim);
+      cells.claimedKeyboardWindowClaims.add(pair.windowClaim);
+      cells.claimedKeyboardSources.add(pair.sourceClaim);
+      cells.claimedKeyboardDestinations.add(pair.destinationClaim);
+      cells.claimedKeyboardReactEvents.add(pair.capture.event);
+      cells.claimedKeyboardReactEvents.add(bubble.event);
+      cells.claimedEvents.add(native.event);
+      cells.keyboardDelivery.current = delivery;
+
+      if (
+        cells.keyboardDelivery.current !== delivery ||
+        !presenceKeyboardReactSnapshotMatches(
+          pair.capture,
+          keyboard,
+          pair.native,
+          null,
+        ) ||
+        !presenceKeyboardReactSnapshotMatches(
+          bubble,
+          keyboard,
+          native,
+          currentElement,
+        ) ||
+        !presenceKeyboardSnapshotRemainsExact(native, keyboard) ||
+        !keyboardNavigationIsCurrent(
+          runtime,
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+
+      keyboard.apply(
+        bubble.methods.preventDefault,
+        bubble.event,
+        [],
+      );
+      const currentDefaultQuery = bubble.event.isDefaultPrevented;
+      const currentPropagationQuery =
+        bubble.event.isPropagationStopped;
+      if (
+        bubble.event.preventDefault !==
+          bubble.methods.preventDefault ||
+        typeof currentDefaultQuery !== "function" ||
+        typeof currentPropagationQuery !== "function" ||
+        currentPropagationQuery !==
+          bubble.methods.isPropagationStopped ||
+        presenceKeyboardValue<boolean>(
+          keyboard,
+          keyboard.event.defaultPrevented,
+          native.event,
+        ) !== true ||
+        presenceKeyboardValue<boolean>(
+          keyboard,
+          keyboard.event.cancelBubble,
+          native.event,
+        ) !== false ||
+        bubble.event.defaultPrevented !== true ||
+        keyboard.apply(
+          currentDefaultQuery,
+          bubble.event,
+          [],
+        ) !== true ||
+        keyboard.apply(
+          currentPropagationQuery,
+          bubble.event,
+          [],
+        ) !== false ||
+        !presenceKeyboardSnapshotRemainsExact(
+          native,
+          keyboard,
+          true,
+        ) ||
+        cells.keyboardDelivery.current !== delivery ||
+        !keyboardNavigationIsCurrent(
+          runtime,
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      keyboard.apply(keyboard.focus, destination.element, [
+        { preventScroll: true },
+      ]);
+    } catch {
+      return;
+    } finally {
+      if (delivery && cells.keyboardDelivery.current === delivery) {
+        cells.keyboardDelivery.current = null;
+      }
+    }
+  };
+
   const requestReplaySuccessor = (
     runtime: PresencePublicationRuntime<PresenceRequestsPublication>,
   ) => {
@@ -990,6 +2788,8 @@ function createPresenceRequestsPublication(
   let runtimeForPublication: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
   const rows = renders.map((render, index): PresenceRequestPublication =>
     Object.freeze({
+      identity: Symbol("presence request row"),
+      index,
       render,
       captureRow: rowOwners[index]!.capture,
       captureCancel: cancelOwners[index]!.capture,
@@ -1015,12 +2815,18 @@ function createPresenceRequestsPublication(
         }
         onCancel!(render.id);
       },
+      onCancelKeyDown: (
+        event: ReactKeyboardEvent<HTMLButtonElement>,
+      ) => {
+        completeKeyboardNavigation(index, event);
+      },
     }));
   const publication: PresenceRequestsPublication = Object.freeze({
     authority,
     rows: Object.freeze(rows),
     captureSection: sectionOwner.capture,
     captureList: listOwner.capture,
+    onListKeyDownCapture: captureKeyboardNavigation,
     retire: () => runtimeForPublication?.retire() ?? false,
     isRetired: () => runtimeForPublication?.isRetired() ?? true,
   });
@@ -1075,8 +2881,31 @@ function createPresenceRequestsPublication(
       clearCurrent: () => {
         if (currentRuntime?.publication === publication) currentRuntime = null;
       },
+      onRetire: () => {
+        keyboardPairs = new WeakMap<
+          KeyboardEvent,
+          PresenceKeyboardPair
+        >();
+        keyboardAuthority?.terminal.release();
+        keyboardAuthority = null;
+      },
     });
     if (!runtime) return undefined;
+    const requiresKeyboard = renders.some((render) => render.cancellable);
+    const keyboard = requiresKeyboard
+      ? capturePresenceKeyboardAuthority(
+          publication,
+          section,
+          listOwner.element()!,
+          rowOwners,
+          cancelOwners,
+        )
+      : null;
+    if (requiresKeyboard && !keyboard) {
+      runtime.retire();
+      return undefined;
+    }
+    keyboardAuthority = keyboard;
     runtimeForPublication = runtime;
     currentRuntime = runtime;
     lastRuntime = runtime;
@@ -1087,6 +2916,7 @@ function createPresenceRequestsPublication(
     rows: publication.rows,
     captureSection: publication.captureSection,
     captureList: publication.captureList,
+    onListKeyDownCapture: publication.onListKeyDownCapture,
     establish,
   });
 }
@@ -1099,6 +2929,19 @@ export function PresenceRequests(props: PresenceRequestsProps) {
     successorOf: { current: null },
     replay: { current: null },
     claimedEvents: new WeakSet<Event>(),
+    attemptedKeyboardReactEvents: new WeakSet<object>(),
+    attemptedKeyboardNativeEvents: new WeakSet<object>(),
+    claimedKeyboardDeliveries: new WeakSet<PresenceKeyboardDelivery>(),
+    claimedKeyboardPairs: new WeakSet<PresenceKeyboardPair>(),
+    claimedKeyboardMovements: new WeakSet<object>(),
+    claimedKeyboardPublications: new WeakSet<object>(),
+    claimedKeyboardWrappers: new WeakSet<object>(),
+    claimedKeyboardNativeClaims: new WeakSet<object>(),
+    claimedKeyboardWindowClaims: new WeakSet<object>(),
+    claimedKeyboardSources: new WeakSet<object>(),
+    claimedKeyboardDestinations: new WeakSet<object>(),
+    claimedKeyboardReactEvents: new WeakSet<object>(),
+    keyboardDelivery: { current: null },
   }));
   const [, setPublicationRevision] = useState(0);
   const requestPublicationSuccessor = useCallback(() => {
@@ -1111,32 +2954,48 @@ export function PresenceRequests(props: PresenceRequestsProps) {
   );
 
   useLayoutEffect(() => publication.establish(), [publication]);
-  const { captureSection, captureList, rows } = publication;
+  const {
+    captureSection,
+    captureList,
+    onListKeyDownCapture,
+    rows,
+  } = publication;
 
   return (
     <div ref={captureSection} className={REQUEST_SECTION_CLASS} data-testid="presence-requests">
       <div className={REQUEST_TITLE_CLASS}>Requests</div>
-      <ul ref={captureList} className={REQUEST_LIST_CLASS}>
-        {rows.map(({ render, captureRow, captureCancel, onCancel }) => {
-          return (
-            <li ref={captureRow} key={render.id} className={REQUEST_ROW_CLASS} data-testid="presence-request" data-status={render.status}>
-              <span className={cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3")}>
-                {render.status === "claimed" ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Bot size={14} aria-hidden="true" />}
-              </span>
-              <span className={REQUEST_DETAILS_CLASS}>
-                <span className={REQUEST_INSTRUCTION_CLASS}>{render.instruction}</span>
-                <span className={REQUEST_STATE_CLASS} data-testid="presence-request-state">
-                  {render.state}
+      <ul
+        ref={captureList}
+        className={REQUEST_LIST_CLASS}
+        onKeyDownCapture={onListKeyDownCapture}
+      >
+        {rows.map(
+          ({
+            render,
+            captureRow,
+            captureCancel,
+            onCancel,
+            onCancelKeyDown,
+          }) => {
+            return (
+              <li ref={captureRow} key={render.id} className={REQUEST_ROW_CLASS} data-testid="presence-request" data-status={render.status}>
+                <span className={cn("mt-0.5 shrink-0", render.status === "claimed" ? "text-violet-600 dark:text-violet-300" : "text-ink-3")}>
+                  {render.status === "claimed" ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Bot size={14} aria-hidden="true" />}
                 </span>
-              </span>
-              {render.cancellable && (
-                <button ref={captureCancel} type="button" className={REQUEST_CANCEL_CLASS} onClick={onCancel} aria-label="Cancel request" data-testid="presence-request-cancel">
-                  Cancel
-                </button>
-              )}
-            </li>
-          );
-        })}
+                <span className={REQUEST_DETAILS_CLASS}>
+                  <span className={REQUEST_INSTRUCTION_CLASS}>{render.instruction}</span>
+                  <span className={REQUEST_STATE_CLASS} data-testid="presence-request-state">
+                    {render.state}
+                  </span>
+                </span>
+                {render.cancellable && (
+                  <button ref={captureCancel} type="button" className={REQUEST_CANCEL_CLASS} onClick={onCancel} onKeyDown={onCancelKeyDown} aria-label="Cancel request" data-testid="presence-request-cancel">
+                    Cancel
+                  </button>
+                )}
+              </li>
+            );
+          })}
       </ul>
     </div>
   );
