@@ -18,7 +18,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 type NotificationSnapshot = ReturnType<typeof useNotifications>;
 type NotificationRouter = ReturnType<typeof useRouter>;
 type NotificationNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
-type NotificationKeyboardKey = NotificationNavigationKey | "Delete";
+type NotificationKeyboardKey = "Delete";
 type NotificationRowActionKey =
   | "ArrowLeft"
   | "ArrowUp"
@@ -248,6 +248,23 @@ interface NotificationReactKeyboardSnapshot {
   readonly methods: NotificationReactKeyboardMethods;
 }
 
+interface NotificationReactKeyboardCurrentQueries {
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface NotificationListPublicCall {
+  readonly identity: symbol;
+  readonly method: (...args: never[]) => unknown;
+  readonly receiver: ReactKeyboardEvent<HTMLElement>;
+}
+
+interface NotificationListPublicCallFence {
+  readonly publication: NotificationStripPublication;
+  active: NotificationListPublicCall | null;
+  revoked: boolean;
+}
+
 interface NotificationRowMovement {
   readonly identity: symbol;
   readonly publication: NotificationStripPublication;
@@ -283,6 +300,50 @@ interface NotificationRowKeyPair {
 
 interface NotificationRowKeyDelivery {
   readonly pair: NotificationRowKeyPair;
+  readonly bubble: NotificationReactKeyboardSnapshot;
+}
+
+interface NotificationListMovement {
+  readonly identity: symbol;
+  readonly publication: NotificationStripPublication;
+  readonly order: readonly NotificationRowPublication[];
+  readonly sourceRow: NotificationRowPublication;
+  readonly destinationRow: NotificationRowPublication;
+  readonly sourceAction: NotificationActionPublication;
+  readonly destinationAction: NotificationActionPublication;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: NotificationNavigationKey;
+}
+
+interface NotificationListKeyPair {
+  readonly publication: NotificationStripPublication;
+  readonly pairings: WeakMap<KeyboardEvent, NotificationListKeyPair>;
+  readonly publicCalls: NotificationListPublicCallFence;
+  readonly native: NotificationNativeKeyboardFacts;
+  readonly nativeEvent: KeyboardEvent;
+  readonly capture: NotificationReactKeyboardSnapshot;
+  readonly windowProof: NotificationWindowProof;
+  readonly sourceRow: NotificationRowPublication;
+  readonly destinationRow: NotificationRowPublication;
+  readonly sourceAction: NotificationActionPublication;
+  readonly destinationAction: NotificationActionPublication;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: NotificationNavigationKey;
+  readonly movement: NotificationListMovement;
+  readonly publicationClaim: object;
+  readonly orderClaim: object;
+  readonly authorityClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
+  readonly captureClaim: object;
+  readonly nativeClaim: object;
+  readonly windowClaim: object;
+}
+
+interface NotificationListKeyDelivery {
+  readonly pair: NotificationListKeyPair;
   readonly bubble: NotificationReactKeyboardSnapshot;
 }
 
@@ -347,6 +408,9 @@ interface NotificationStripPublicationSet {
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLLIElement>,
   ) => void;
+  readonly onListKeyDownCapture: (
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ) => void;
   readonly onDismissKeyDown: (
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
@@ -378,6 +442,18 @@ class NotificationStripCoordinator {
   #claimedRowReactEvents = new WeakSet<object>();
   #claimedRowNativeEvents = new WeakSet<object>();
   #activeRowDelivery: NotificationRowKeyDelivery | null = null;
+  #claimedListDeliveries = new WeakSet<NotificationListKeyDelivery>();
+  #claimedListPairs = new WeakSet<NotificationListKeyPair>();
+  #claimedListMovements = new WeakSet<NotificationListMovement>();
+  #claimedListPublicationClaims = new WeakSet<object>();
+  #claimedListOrderClaims = new WeakSet<object>();
+  #claimedListAuthorityClaims = new WeakSet<object>();
+  #claimedListSourceClaims = new WeakSet<object>();
+  #claimedListDestinationClaims = new WeakSet<object>();
+  #claimedListCaptureClaims = new WeakSet<object>();
+  #claimedListNativeClaims = new WeakSet<object>();
+  #claimedListWindowClaims = new WeakSet<object>();
+  #activeListDelivery: NotificationListKeyDelivery | null = null;
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -623,6 +699,101 @@ class NotificationStripCoordinator {
   finishRowMovement(delivery: NotificationRowKeyDelivery) {
     if (this.#activeRowDelivery === delivery) {
       this.#activeRowDelivery = null;
+    }
+  }
+
+  canStageListMovement() {
+    return this.#activeListDelivery === null;
+  }
+
+  claimListMovement(delivery: NotificationListKeyDelivery) {
+    const { pair, bubble } = delivery;
+    if (
+      this.#activeListDelivery ||
+      !this.isCurrent(pair.publication) ||
+      pair.publication.rows[pair.sourceRow.authority.index] !==
+        pair.sourceRow ||
+      pair.publication.rows[pair.destinationRow.authority.index] !==
+        pair.destinationRow ||
+      this.#claimedPublications.has(pair.publication) ||
+      this.#claimedActions.has(pair.sourceAction) ||
+      this.#claimedEvents.has(pair.capture.event) ||
+      this.#claimedEvents.has(bubble.event) ||
+      this.#claimedEvents.has(pair.nativeEvent) ||
+      this.#claimedListDeliveries.has(delivery) ||
+      this.#claimedListPairs.has(pair) ||
+      this.#claimedListMovements.has(pair.movement) ||
+      this.#claimedListPublicationClaims.has(pair.publicationClaim) ||
+      this.#claimedListOrderClaims.has(pair.orderClaim) ||
+      this.#claimedListAuthorityClaims.has(pair.authorityClaim) ||
+      this.#claimedListSourceClaims.has(pair.sourceClaim) ||
+      this.#claimedListDestinationClaims.has(pair.destinationClaim) ||
+      this.#claimedListCaptureClaims.has(pair.captureClaim) ||
+      this.#claimedListNativeClaims.has(pair.nativeClaim) ||
+      this.#claimedListWindowClaims.has(pair.windowClaim) ||
+      !pair.publication.keyListener?.claim(
+        pair.windowProof,
+        pair.publication,
+      )
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(pair.publication);
+    this.#claimedActions.add(pair.sourceAction);
+    this.#claimedEvents.add(pair.capture.event);
+    this.#claimedEvents.add(bubble.event);
+    this.#claimedEvents.add(pair.nativeEvent);
+    this.#claimedListDeliveries.add(delivery);
+    this.#claimedListPairs.add(pair);
+    this.#claimedListMovements.add(pair.movement);
+    this.#claimedListPublicationClaims.add(pair.publicationClaim);
+    this.#claimedListOrderClaims.add(pair.orderClaim);
+    this.#claimedListAuthorityClaims.add(pair.authorityClaim);
+    this.#claimedListSourceClaims.add(pair.sourceClaim);
+    this.#claimedListDestinationClaims.add(pair.destinationClaim);
+    this.#claimedListCaptureClaims.add(pair.captureClaim);
+    this.#claimedListNativeClaims.add(pair.nativeClaim);
+    this.#claimedListWindowClaims.add(pair.windowClaim);
+    this.#activeListDelivery = delivery;
+    return true;
+  }
+
+  listMovementIsDelivering(delivery: NotificationListKeyDelivery) {
+    const { pair, bubble } = delivery;
+    return (
+      this.#activeListDelivery === delivery &&
+      this.#claimedPublications.has(pair.publication) &&
+      this.#claimedActions.has(pair.sourceAction) &&
+      this.#claimedEvents.has(pair.capture.event) &&
+      this.#claimedEvents.has(bubble.event) &&
+      this.#claimedEvents.has(pair.nativeEvent) &&
+      this.#claimedListDeliveries.has(delivery) &&
+      this.#claimedListPairs.has(pair) &&
+      this.#claimedListMovements.has(pair.movement) &&
+      this.#claimedListPublicationClaims.has(pair.publicationClaim) &&
+      this.#claimedListOrderClaims.has(pair.orderClaim) &&
+      this.#claimedListAuthorityClaims.has(pair.authorityClaim) &&
+      this.#claimedListSourceClaims.has(pair.sourceClaim) &&
+      this.#claimedListDestinationClaims.has(pair.destinationClaim) &&
+      this.#claimedListCaptureClaims.has(pair.captureClaim) &&
+      this.#claimedListNativeClaims.has(pair.nativeClaim) &&
+      this.#claimedListWindowClaims.has(pair.windowClaim) &&
+      pair.movement.publication === pair.publication &&
+      pair.movement.order === pair.publication.rows &&
+      pair.movement.sourceRow === pair.sourceRow &&
+      pair.movement.destinationRow === pair.destinationRow &&
+      pair.movement.sourceAction === pair.sourceAction &&
+      pair.movement.destinationAction === pair.destinationAction &&
+      pair.movement.source === pair.source &&
+      pair.movement.destination === pair.destination &&
+      pair.movement.key === pair.key &&
+      this.isCurrent(pair.publication)
+    );
+  }
+
+  finishListMovement(delivery: NotificationListKeyDelivery) {
+    if (this.#activeListDelivery === delivery) {
+      this.#activeListDelivery = null;
     }
   }
 }
@@ -1964,6 +2135,194 @@ function notificationReactKeyboardRemainsExact(
   }
 }
 
+function captureNotificationPublicReactKeyboard(
+  event: ReactKeyboardEvent<HTMLElement>,
+  publication: NotificationStripPublication,
+  native: NotificationNativeKeyboardFacts,
+  nativeEvent: KeyboardEvent,
+  currentTarget: HTMLElement,
+  windowProof: NotificationWindowProof,
+): NotificationReactKeyboardSnapshot | null {
+  const intrinsics = publication.events;
+  if (!intrinsics) return null;
+  try {
+    const preventDefault = event.preventDefault;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    const reactIsComposing = (
+      event as ReactKeyboardEvent<HTMLElement> & {
+        isComposing?: unknown;
+      }
+    ).isComposing;
+    const view = event.view;
+    if (
+      typeof preventDefault !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      event.preventDefault !== preventDefault ||
+      event.isDefaultPrevented !== isDefaultPrevented ||
+      event.isPropagationStopped !== isPropagationStopped ||
+      event === (nativeEvent as unknown) ||
+      event.nativeEvent !== nativeEvent ||
+      event.type !== native.type ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.isTrusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      event.repeat !== native.repeat ||
+      (reactIsComposing !== undefined &&
+        reactIsComposing !== native.isComposing) ||
+      event.detail !== native.detail ||
+      (!Object.is(view, null) &&
+        !Object.is(view, publication.ownerWindow) &&
+        !Object.is(view, windowProof.receiver))
+    ) {
+      return null;
+    }
+    const captured = Object.freeze<NotificationReactKeyboardSnapshot>({
+      event,
+      nativeEvent,
+      target: native.target as HTMLButtonElement,
+      currentTarget,
+      phase: native.phase,
+      view,
+      methods: Object.freeze({
+        preventDefault,
+        isDefaultPrevented,
+        isPropagationStopped,
+      }),
+    });
+    return notificationPublicReactKeyboardSurfaceIsExact(
+      captured,
+      publication,
+      native,
+      currentTarget,
+    )
+      ? captured
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function notificationPublicReactKeyboardSurfaceIsExact(
+  snapshot: NotificationReactKeyboardSnapshot,
+  publication: NotificationStripPublication,
+  native: NotificationNativeKeyboardFacts,
+  currentTarget: HTMLElement | null,
+  defaultPrevented = false,
+): NotificationReactKeyboardCurrentQueries | null {
+  const intrinsics = publication.events;
+  if (!intrinsics) return null;
+  try {
+    const event = snapshot.event;
+    const methods = snapshot.methods;
+    const currentPreventDefault = event.preventDefault;
+    const currentIsDefaultPrevented = event.isDefaultPrevented;
+    const currentIsPropagationStopped = event.isPropagationStopped;
+    const reactIsComposing = (
+      event as ReactKeyboardEvent<HTMLElement> & {
+        isComposing?: unknown;
+      }
+    ).isComposing;
+    if (
+      typeof currentPreventDefault !== "function" ||
+      typeof currentIsDefaultPrevented !== "function" ||
+      typeof currentIsPropagationStopped !== "function" ||
+      event.nativeEvent !== snapshot.nativeEvent ||
+      event.type !== native.type ||
+      event.target !== snapshot.target ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== snapshot.phase ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== defaultPrevented ||
+      event.isTrusted !== native.isTrusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      event.repeat !== native.repeat ||
+      (reactIsComposing !== undefined &&
+        reactIsComposing !== native.isComposing) ||
+      event.detail !== native.detail ||
+      !Object.is(event.view, snapshot.view) ||
+      (!Object.is(event.view, null) &&
+        !Object.is(event.view, publication.ownerWindow) &&
+        !Object.is(event.view, native.path.at(-1))) ||
+      currentPreventDefault !== methods.preventDefault ||
+      currentIsPropagationStopped !== methods.isPropagationStopped ||
+      (defaultPrevented
+        ? currentIsDefaultPrevented === methods.isDefaultPrevented
+        : currentIsDefaultPrevented !== methods.isDefaultPrevented) ||
+      !intrinsics.methodMatches(
+        event,
+        "preventDefault",
+        currentPreventDefault,
+      ) ||
+      !intrinsics.methodMatches(
+        event,
+        "isDefaultPrevented",
+        currentIsDefaultPrevented,
+      ) ||
+      !intrinsics.methodMatches(
+        event,
+        "isPropagationStopped",
+        currentIsPropagationStopped,
+      ) ||
+      event.preventDefault !== currentPreventDefault ||
+      event.isDefaultPrevented !== currentIsDefaultPrevented ||
+      event.isPropagationStopped !== currentIsPropagationStopped ||
+      event.nativeEvent !== snapshot.nativeEvent ||
+      event.type !== native.type ||
+      event.target !== snapshot.target ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== snapshot.phase ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== defaultPrevented ||
+      event.isTrusted !== native.isTrusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      event.repeat !== native.repeat ||
+      (reactIsComposing !== undefined &&
+        reactIsComposing !== native.isComposing) ||
+      event.detail !== native.detail ||
+      !Object.is(event.view, snapshot.view)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      isDefaultPrevented: currentIsDefaultPrevented,
+      isPropagationStopped: currentIsPropagationStopped,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function notificationRowDestination(
   row: NotificationRowPublication,
   source: HTMLButtonElement,
@@ -1989,6 +2348,38 @@ function notificationRowDestination(
     });
   }
   return null;
+}
+
+function notificationListDestination(
+  publication: NotificationStripPublication,
+  sourceIndex: number,
+  key: NotificationNavigationKey,
+) {
+  if (
+    publication.rows.length <= 1 ||
+    sourceIndex < 0 ||
+    sourceIndex >= publication.rows.length
+  ) {
+    return null;
+  }
+  let destinationIndex = sourceIndex;
+  if (key === "ArrowDown") {
+    destinationIndex = (sourceIndex + 1) % publication.rows.length;
+  } else if (key === "ArrowUp") {
+    destinationIndex =
+      (sourceIndex - 1 + publication.rows.length) %
+      publication.rows.length;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else {
+    destinationIndex = publication.rows.length - 1;
+  }
+  if (destinationIndex === sourceIndex) return null;
+  const row = publication.rows[destinationIndex];
+  const destination = publication.openControls[destinationIndex];
+  return row && destination && row.open === destination
+    ? Object.freeze({ index: destinationIndex, row, destination })
+    : null;
 }
 
 function isNotificationNavigationKey(
@@ -2057,6 +2448,10 @@ function createNotificationStripPublication(
 ): NotificationStripPublicationSet {
   let currentRuntime: NotificationPublicationRuntime | null = null;
   let lastRuntime: NotificationPublicationRuntime | null = null;
+  let listKeyPublication: NotificationStripPublication | null = null;
+  let listKeyPairs: WeakMap<KeyboardEvent, NotificationListKeyPair> | null =
+    null;
+  let listPublicCallFence: NotificationListPublicCallFence | null = null;
   let successorRequested = false;
   const snapshot = authority.snapshot;
   const items = authority.items;
@@ -2114,6 +2509,32 @@ function createNotificationStripPublication(
         dismissOwner,
       ]),
     ]);
+  const activateListNavigation = (
+    publication: NotificationStripPublication,
+  ) => {
+    if (listKeyPublication || listKeyPairs || listPublicCallFence) return false;
+    listKeyPublication = publication;
+    listKeyPairs = new WeakMap<KeyboardEvent, NotificationListKeyPair>();
+    listPublicCallFence = {
+      publication,
+      active: null,
+      revoked: false,
+    };
+    return true;
+  };
+  const revokeListNavigation = (
+    publication: NotificationStripPublication,
+  ) => {
+    if (listKeyPublication !== publication) return;
+    const publicCalls = listPublicCallFence;
+    if (publicCalls?.publication === publication) {
+      publicCalls.revoked = true;
+      publicCalls.active = null;
+    }
+    listKeyPublication = null;
+    listKeyPairs = null;
+    listPublicCallFence = null;
+  };
 
   const factsAreCurrent = () => {
     if (
@@ -2349,6 +2770,7 @@ function createNotificationStripPublication(
       if (retired) return false;
       retired = true;
       retirement = reason;
+      revokeListNavigation(publication);
       keyListener?.release(publication);
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
@@ -2402,7 +2824,10 @@ function createNotificationStripPublication(
           domGuard.release();
           return false;
         }
-        if (!keyListener?.activate(publication)) {
+        if (
+          !keyListener?.activate(publication) ||
+          !activateListNavigation(publication)
+        ) {
           retire("element");
           return false;
         }
@@ -2682,10 +3107,10 @@ function createNotificationStripPublication(
         path,
       } = nativeFacts;
       if (
-        (!isNotificationNavigationKey(key) && key !== "Delete") ||
-        (key === "Delete" &&
-          (code !== "Delete" ||
-            location !== publication.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD))
+        key !== "Delete" ||
+        code !== "Delete" ||
+        location !==
+          publication.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD
       ) {
         return null;
       }
@@ -2775,18 +3200,7 @@ function createNotificationStripPublication(
       ) {
         return null;
       }
-      let destinationIndex = sourceIndex;
-      if (key === "ArrowDown") {
-        destinationIndex = (sourceIndex + 1) % publication.rows.length;
-      } else if (key === "ArrowUp") {
-        destinationIndex =
-          (sourceIndex - 1 + publication.rows.length) %
-          publication.rows.length;
-      } else if (key === "Home") {
-        destinationIndex = 0;
-      } else if (key === "End") {
-        destinationIndex = publication.rows.length - 1;
-      }
+      const destinationIndex = sourceIndex;
       const destinationRow = publication.rows[destinationIndex];
       const destination = publication.openControls[destinationIndex];
       if (
@@ -2801,7 +3215,7 @@ function createNotificationStripPublication(
       }
       return Object.freeze({
         publicationIdentity: publication.identity,
-        actionKind: key === "Delete" ? "delete" : "browse",
+        actionKind: "delete",
         nativeEvent,
         source,
         sourceIndex,
@@ -2876,6 +3290,755 @@ function createNotificationStripPublication(
         runtime.historyIsClean() &&
         runtime.publishedDomMatches(),
     );
+  };
+
+  const listPublicCallsAreIdle = (
+    publication: NotificationStripPublication,
+    publicCalls: NotificationListPublicCallFence,
+  ) =>
+    listPublicCallFence === publicCalls &&
+    listKeyPublication === publication &&
+    publicCalls.publication === publication &&
+    !publicCalls.revoked &&
+    publicCalls.active === null;
+
+  const invokeListPublicCall = (
+    publicCalls: NotificationListPublicCallFence,
+    method: (...args: never[]) => unknown,
+    receiver: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    const publication = publicCalls.publication;
+    const events = publication.events;
+    if (!events || !listPublicCallsAreIdle(publication, publicCalls)) {
+      return null;
+    }
+    const call = Object.freeze<NotificationListPublicCall>({
+      identity: Symbol("notification-list-public-call"),
+      method,
+      receiver,
+    });
+    publicCalls.active = call;
+    let value: unknown;
+    try {
+      value = events.apply(method, receiver, []);
+    } catch {
+      return null;
+    } finally {
+      if (
+        listPublicCallFence === publicCalls &&
+        !publicCalls.revoked &&
+        publicCalls.active === call
+      ) {
+        publicCalls.active = null;
+      }
+    }
+    return listPublicCallsAreIdle(publication, publicCalls)
+      ? Object.freeze({ value })
+      : null;
+  };
+
+  const listReactQueriesAreExact = (
+    publicCalls: NotificationListPublicCallFence,
+    snapshot: NotificationReactKeyboardSnapshot,
+    native: NotificationNativeKeyboardFacts,
+    currentTarget: HTMLElement | null,
+    defaultPrevented: boolean,
+    validateAfterCall: () => boolean,
+  ) => {
+    let queries = notificationPublicReactKeyboardSurfaceIsExact(
+      snapshot,
+      publicCalls.publication,
+      native,
+      currentTarget,
+      defaultPrevented,
+    );
+    if (!queries) return false;
+    const defaultResult = invokeListPublicCall(
+      publicCalls,
+      queries.isDefaultPrevented,
+      snapshot.event,
+    );
+    if (
+      !defaultResult ||
+      defaultResult.value !== defaultPrevented ||
+      !validateAfterCall()
+    ) {
+      return false;
+    }
+    queries = notificationPublicReactKeyboardSurfaceIsExact(
+      snapshot,
+      publicCalls.publication,
+      native,
+      currentTarget,
+      defaultPrevented,
+    );
+    if (!queries) return false;
+    const propagationResult = invokeListPublicCall(
+      publicCalls,
+      queries.isPropagationStopped,
+      snapshot.event,
+    );
+    return Boolean(
+      propagationResult &&
+      propagationResult.value === false &&
+      validateAfterCall(),
+    );
+  };
+
+  const listMovementIsCurrent = (
+    runtime: NotificationPublicationRuntime,
+    publication: NotificationStripPublication,
+    pairings: WeakMap<KeyboardEvent, NotificationListKeyPair>,
+    publicCalls: NotificationListPublicCallFence,
+    sourceRow: NotificationRowPublication,
+    destinationRow: NotificationRowPublication,
+    source: HTMLButtonElement,
+    destination: HTMLButtonElement,
+    key: NotificationNavigationKey,
+  ) => {
+    const sourceIndex = sourceRow.authority.index;
+    const destinationIndex = destinationRow.authority.index;
+    const resolved = notificationListDestination(
+      publication,
+      sourceIndex,
+      key,
+    );
+    return Boolean(
+      currentRuntime === runtime &&
+      !runtime.isRetired() &&
+      listKeyPublication === publication &&
+      listKeyPairs === pairings &&
+      listPublicCallsAreIdle(publication, publicCalls) &&
+      publication.authority === authority &&
+      rows[sourceIndex] === sourceRow.authority &&
+      rows[destinationIndex] === destinationRow.authority &&
+      publication.rows[sourceIndex] === sourceRow &&
+      publication.rows[destinationIndex] === destinationRow &&
+      sourceIndex >= 0 &&
+      destinationIndex >= 0 &&
+      sourceIndex !== destinationIndex &&
+      sourceRow.item.parentElement === publication.list &&
+      destinationRow.item.parentElement === publication.list &&
+      publication.list.children.item(sourceIndex) === sourceRow.item &&
+      publication.list.children.item(destinationIndex) ===
+      destinationRow.item &&
+      sourceRow.open === source &&
+      destinationRow.open === destination &&
+      sourceRow.browseAction.publicationIdentity === publication.identity &&
+      destinationRow.browseAction.publicationIdentity ===
+      publication.identity &&
+      sourceRow.browseAction.rowIndex === sourceIndex &&
+      destinationRow.browseAction.rowIndex === destinationIndex &&
+      sourceRow.browseAction.kind === "browse" &&
+      destinationRow.browseAction.kind === "browse" &&
+      publication.openControls[sourceIndex] === source &&
+      publication.openControls[destinationIndex] === destination &&
+      publication.focusCustody.controls[sourceIndex] === source &&
+      publication.focusCustody.controls[destinationIndex] === destination &&
+      publication.focusCustody.activeElement() === source &&
+      source.isConnected &&
+      destination.isConnected &&
+      source.ownerDocument === publication.ownerDocument &&
+      destination.ownerDocument === publication.ownerDocument &&
+      source.parentElement === sourceRow.item &&
+      destination.parentElement === destinationRow.item &&
+      isEffectivelyEnabled(source) &&
+      isEffectivelyEnabled(destination) &&
+      resolved?.index === destinationIndex &&
+      resolved.row === destinationRow &&
+      resolved.destination === destination &&
+      publication.keyListener?.isCurrent() === true &&
+      coordinator.isCurrent(publication) &&
+      factsAreCurrent() &&
+      exactDomIsCurrent() &&
+      runtime.historyIsClean() &&
+      runtime.publishedDomMatches(),
+    );
+  };
+
+  const captureListNavigation = (
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const pairings = listKeyPairs;
+    const publicCalls = listPublicCallFence;
+    if (
+      !runtime ||
+      !publication ||
+      !pairings ||
+      !publicCalls ||
+      listKeyPublication !== publication ||
+      !listPublicCallsAreIdle(publication, publicCalls) ||
+      !coordinator.canStageListMovement()
+    ) {
+      return;
+    }
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pairings.has(nativeEvent as KeyboardEvent)
+    ) {
+      return;
+    }
+    const events = publication.events;
+    const listener = publication.keyListener;
+    if (
+      !events ||
+      !listener ||
+      runtime.isRetired() ||
+      publication.authority !== authority ||
+      publication.list !== event.currentTarget
+    ) {
+      return;
+    }
+    const native = events.readKeyboard(nativeEvent);
+    const proof = native
+      ? listener.proofFor(
+        nativeEvent as KeyboardEvent,
+        publication,
+      )
+      : null;
+    const sourceIndex = native
+      ? publication.openControls.findIndex(
+        (control) => control === native.target,
+      )
+      : -1;
+    const sourceRow =
+      sourceIndex >= 0 ? publication.rows[sourceIndex] : undefined;
+    const source = sourceRow?.open;
+    const key =
+      native && isNotificationNavigationKey(native.key)
+        ? native.key
+        : null;
+    const resolved =
+      key && sourceRow
+        ? notificationListDestination(publication, sourceIndex, key)
+        : null;
+    const capture =
+      native && proof
+        ? captureNotificationPublicReactKeyboard(
+          event,
+          publication,
+          native,
+          nativeEvent as KeyboardEvent,
+          publication.list,
+          proof,
+        )
+        : null;
+    if (
+      !native ||
+      !proof ||
+      !sourceRow ||
+      !source ||
+      !key ||
+      !resolved ||
+      !capture ||
+      native.type !== "keydown" ||
+      native.phase !== events.capturingPhase ||
+      !native.bubbles ||
+      !native.cancelable ||
+      native.defaultPrevented ||
+      native.cancelBubble ||
+      !native.isTrusted ||
+      native.ctrlKey ||
+      native.altKey ||
+      native.metaKey ||
+      native.shiftKey ||
+      native.repeat ||
+      native.isComposing ||
+      native.target !== source ||
+      native.currentTarget === null ||
+      !native.path.includes(native.currentTarget) ||
+      proof.publication !== publication ||
+      proof.nativeEvent !== nativeEvent ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      native.path.at(-1) !== proof.receiver ||
+      (native.view !== null &&
+        native.view !== publication.ownerWindow &&
+        native.view !== proof.receiver) ||
+      !notificationKeyboardPathMatches(
+        native.path,
+        sourceRow.openPath,
+        proof.receiver,
+      ) ||
+      !listMovementIsCurrent(
+        runtime,
+        publication,
+        pairings,
+        publicCalls,
+        sourceRow,
+        resolved.row,
+        source,
+        resolved.destination,
+        key,
+      )
+    ) {
+      return;
+    }
+    const captureAttemptIsCurrent = () => {
+      const currentNative = events.readKeyboard(
+        nativeEvent as KeyboardEvent,
+      );
+      return Boolean(
+        currentNative &&
+        notificationKeyboardStableFactsMatch(native, currentNative) &&
+        currentNative.currentTarget === native.currentTarget &&
+        currentNative.phase === native.phase &&
+        listener.proofFor(
+          nativeEvent as KeyboardEvent,
+          publication,
+        ) === proof &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          capture,
+          publication,
+          currentNative,
+          publication.list,
+        ) &&
+        !pairings.has(nativeEvent as KeyboardEvent) &&
+        coordinator.canStageListMovement() &&
+        listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          sourceRow,
+          resolved.row,
+          source,
+          resolved.destination,
+          key,
+        ),
+      );
+    };
+    if (
+      !captureAttemptIsCurrent() ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        capture,
+        native,
+        publication.list,
+        false,
+        captureAttemptIsCurrent,
+      )
+    ) {
+      return;
+    }
+    const movement = Object.freeze<NotificationListMovement>({
+      identity: Symbol("notification-list-movement"),
+      publication,
+      order: publication.rows,
+      sourceRow,
+      destinationRow: resolved.row,
+      sourceAction: sourceRow.browseAction,
+      destinationAction: resolved.row.browseAction,
+      source,
+      destination: resolved.destination,
+      key,
+    });
+    const pair = Object.freeze<NotificationListKeyPair>({
+      publication,
+      pairings,
+      publicCalls,
+      native,
+      nativeEvent: nativeEvent as KeyboardEvent,
+      capture,
+      windowProof: proof,
+      sourceRow,
+      destinationRow: resolved.row,
+      sourceAction: sourceRow.browseAction,
+      destinationAction: resolved.row.browseAction,
+      source,
+      destination: resolved.destination,
+      key,
+      movement,
+      publicationClaim: Object.freeze({ publication, publicCalls }),
+      orderClaim: Object.freeze({
+        rows: publication.rows,
+        controls: publication.openControls,
+      }),
+      authorityClaim: Object.freeze({
+        authority,
+        snapshot,
+        items,
+        rows,
+        router,
+        push,
+        markRead,
+        markAllRead,
+      }),
+      sourceClaim: Object.freeze({
+        row: sourceRow,
+        action: sourceRow.browseAction,
+        source,
+      }),
+      destinationClaim: Object.freeze({
+        row: resolved.row,
+        action: resolved.row.browseAction,
+        destination: resolved.destination,
+      }),
+      captureClaim: Object.freeze({ capture }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({
+        listener,
+        proof,
+        receiver: proof.receiver,
+      }),
+    });
+    if (
+      captureAttemptIsCurrent() &&
+      listKeyPairs === pairings &&
+      !pairings.has(pair.nativeEvent)
+    ) {
+      pairings.set(pair.nativeEvent, pair);
+    }
+  };
+
+  const completeListNavigation = (
+    row: NotificationRowAuthority,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const pairings = listKeyPairs;
+    const publicCalls = listPublicCallFence;
+    if (
+      !runtime ||
+      !publication ||
+      !pairings ||
+      !publicCalls ||
+      listKeyPublication !== publication ||
+      !listPublicCallsAreIdle(publication, publicCalls) ||
+      !coordinator.canStageListMovement()
+    ) {
+      return;
+    }
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    const pair =
+      nativeEvent && typeof nativeEvent === "object"
+        ? pairings.get(nativeEvent as KeyboardEvent)
+        : undefined;
+    if (
+      !pair ||
+      pair.publication !== publication ||
+      pair.pairings !== pairings ||
+      pair.publicCalls !== publicCalls ||
+      pair.nativeEvent !== nativeEvent ||
+      pair.sourceRow.authority !== row ||
+      rows[row.index] !== row
+    ) {
+      return;
+    }
+    const events = publication.events;
+    const listener = publication.keyListener;
+    if (!events || !listener) return;
+    const native = events.readKeyboard(nativeEvent);
+    const proof = native
+      ? listener.proofFor(
+        nativeEvent as KeyboardEvent,
+        publication,
+      )
+      : null;
+    const bubble =
+      native && proof
+        ? captureNotificationPublicReactKeyboard(
+          event,
+          publication,
+          native,
+          nativeEvent as KeyboardEvent,
+          pair.source,
+          proof,
+        )
+        : null;
+    if (
+      !native ||
+      !proof ||
+      !bubble ||
+      bubble.event === pair.capture.event ||
+      event.currentTarget !== pair.source ||
+      pair.sourceRow.open !== pair.source ||
+      pair.destinationRow.open !== pair.destination ||
+      pair.sourceAction !== pair.sourceRow.browseAction ||
+      pair.destinationAction !== pair.destinationRow.browseAction ||
+      native.phase !== events.bubblingPhase ||
+      pair.native.phase !== events.capturingPhase ||
+      native.currentTarget !== pair.native.currentTarget ||
+      proof !== pair.windowProof ||
+      proof.receiver !== native.path.at(-1) ||
+      !notificationKeyboardStableFactsMatch(pair.native, native) ||
+      !listMovementIsCurrent(
+        runtime,
+        publication,
+        pairings,
+        publicCalls,
+        pair.sourceRow,
+        pair.destinationRow,
+        pair.source,
+        pair.destination,
+        pair.key,
+      ) ||
+      listKeyPairs !== pairings ||
+      pairings.get(pair.nativeEvent) !== pair
+    ) {
+      return;
+    }
+    const unclaimedDeliveryIsCurrent = () => {
+      const currentNative = events.readKeyboard(pair.nativeEvent);
+      return Boolean(
+        currentNative &&
+        notificationKeyboardStableFactsMatch(native, currentNative) &&
+        currentNative.currentTarget === native.currentTarget &&
+        currentNative.phase === native.phase &&
+        listener.proofFor(pair.nativeEvent, publication) === proof &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          pair.capture,
+          publication,
+          pair.native,
+          null,
+        ) &&
+        notificationPublicReactKeyboardSurfaceIsExact(
+          bubble,
+          publication,
+          currentNative,
+          pair.source,
+        ) &&
+        pairings.get(pair.nativeEvent) === pair &&
+        coordinator.canStageListMovement() &&
+        listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+        ),
+      );
+    };
+    if (
+      !unclaimedDeliveryIsCurrent() ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        bubble,
+        native,
+        pair.source,
+        false,
+        unclaimedDeliveryIsCurrent,
+      ) ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        pair.capture,
+        pair.native,
+        null,
+        false,
+        unclaimedDeliveryIsCurrent,
+      ) ||
+      !listReactQueriesAreExact(
+        publicCalls,
+        bubble,
+        native,
+        pair.source,
+        false,
+        unclaimedDeliveryIsCurrent,
+      )
+    ) {
+      return;
+    }
+    const delivery = Object.freeze<NotificationListKeyDelivery>({
+      pair,
+      bubble,
+    });
+    if (
+      !unclaimedDeliveryIsCurrent() ||
+      !coordinator.claimListMovement(delivery)
+    ) {
+      return;
+    }
+    try {
+      if (
+        currentRuntime !== runtime ||
+        listKeyPublication !== publication ||
+        listKeyPairs !== pairings ||
+        pairings.get(pair.nativeEvent) !== pair ||
+        !coordinator.listMovementIsDelivering(delivery) ||
+        !listener.retains(pair.windowProof, publication) ||
+        !listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+        )
+      ) {
+        return;
+      }
+      const claimedDeliveryIsCurrent = (
+        defaultPrevented: boolean,
+        pairIsRetained = false,
+      ) => {
+        const currentNative = events.readKeyboard(pair.nativeEvent);
+        return Boolean(
+          currentNative &&
+          notificationKeyboardStableFactsMatch(
+            native,
+            currentNative,
+            defaultPrevented,
+          ) &&
+          currentNative.currentTarget === native.currentTarget &&
+          currentNative.phase === native.phase &&
+          listener.retains(pair.windowProof, publication) &&
+          coordinator.listMovementIsDelivering(delivery) &&
+          (pairIsRetained
+            ? pairings.get(pair.nativeEvent) === pair
+            : !pairings.has(pair.nativeEvent)) &&
+          notificationPublicReactKeyboardSurfaceIsExact(
+            pair.capture,
+            publication,
+            pair.native,
+            null,
+          ) &&
+          notificationPublicReactKeyboardSurfaceIsExact(
+            bubble,
+            publication,
+            currentNative,
+            pair.source,
+            defaultPrevented,
+          ) &&
+          listMovementIsCurrent(
+            runtime,
+            publication,
+            pairings,
+            publicCalls,
+            pair.sourceRow,
+            pair.destinationRow,
+            pair.source,
+            pair.destination,
+            pair.key,
+          ),
+        );
+      };
+      if (
+        !claimedDeliveryIsCurrent(false, true) ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          pair.capture,
+          pair.native,
+          null,
+          false,
+          () => claimedDeliveryIsCurrent(false, true),
+        ) ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          bubble,
+          native,
+          pair.source,
+          false,
+          () => claimedDeliveryIsCurrent(false, true),
+        ) ||
+        !claimedDeliveryIsCurrent(false, true) ||
+        !notificationPublicReactKeyboardSurfaceIsExact(
+          bubble,
+          publication,
+          native,
+          pair.source,
+        ) ||
+        !pairings.delete(pair.nativeEvent) ||
+        !claimedDeliveryIsCurrent(false)
+      ) {
+        return;
+      }
+      const prevention = invokeListPublicCall(
+        publicCalls,
+        bubble.methods.preventDefault,
+        bubble.event,
+      );
+      if (!prevention || !claimedDeliveryIsCurrent(true)) return;
+      const preventedNative = events.readKeyboard(pair.nativeEvent);
+      if (
+        !preventedNative ||
+        !notificationKeyboardStableFactsMatch(
+          native,
+          preventedNative,
+          true,
+        ) ||
+        preventedNative.currentTarget !== native.currentTarget ||
+        preventedNative.phase !== native.phase ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          pair.capture,
+          pair.native,
+          null,
+          false,
+          () => claimedDeliveryIsCurrent(true),
+        ) ||
+        !listReactQueriesAreExact(
+          publicCalls,
+          bubble,
+          preventedNative,
+          pair.source,
+          true,
+          () => claimedDeliveryIsCurrent(true),
+        )
+      ) {
+        return;
+      }
+      const finalNative = events.readKeyboard(pair.nativeEvent);
+      if (
+        !finalNative ||
+        !notificationKeyboardStableFactsMatch(
+          preventedNative,
+          finalNative,
+          true,
+        ) ||
+        finalNative.currentTarget !== preventedNative.currentTarget ||
+        finalNative.phase !== preventedNative.phase ||
+        finalNative.cancelBubble ||
+        !listener.retains(pair.windowProof, publication) ||
+        !coordinator.listMovementIsDelivering(delivery) ||
+        currentRuntime !== runtime ||
+        listKeyPublication !== publication ||
+        listKeyPairs !== pairings ||
+        listPublicCallFence !== publicCalls ||
+        pairings.has(pair.nativeEvent) ||
+        !listMovementIsCurrent(
+          runtime,
+          publication,
+          pairings,
+          publicCalls,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+        ) ||
+        !claimedDeliveryIsCurrent(true)
+      ) {
+        return;
+      }
+      publication.focusCustody.focus(
+        pair.destination,
+        NOTIFICATION_ROW_PREVENT_SCROLL,
+      );
+    } finally {
+      coordinator.finishListMovement(delivery);
+    }
   };
 
   const captureRowNavigation = (
@@ -3310,6 +4473,7 @@ function createNotificationStripPublication(
     row: NotificationRowAuthority,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
+    completeListNavigation(row, event);
     const runtime = currentRuntime;
     const publication = runtime?.publication;
     const publishedRow =
@@ -3392,6 +4556,7 @@ function createNotificationStripPublication(
     onDismiss,
     onKeyDown,
     onRowKeyDownCapture: captureRowNavigation,
+    onListKeyDownCapture: captureListNavigation,
     onDismissKeyDown: completeRowNavigation,
   });
 }
@@ -3453,6 +4618,7 @@ export function NotificationsStrip() {
     onDismiss,
     onKeyDown,
     onRowKeyDownCapture,
+    onListKeyDownCapture,
     onDismissKeyDown,
   } = publication;
 
@@ -3478,7 +4644,11 @@ export function NotificationsStrip() {
           <CheckCheck size={14} /> Mark all read
         </button>
       </div>
-      <ul ref={captureList} className="flex flex-col gap-1.5">
+      <ul
+        ref={captureList}
+        className="flex flex-col gap-1.5"
+        onKeyDownCapture={onListKeyDownCapture}
+      >
         {publishedRows.map((published) => {
           const row = published.authority;
           const notification = row.notification;
