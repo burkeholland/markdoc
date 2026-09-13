@@ -415,10 +415,9 @@ function publicTabWrapper<T extends HTMLElement>(
     metaKey: event.metaKey,
     shiftKey: event.shiftKey,
     repeat: event.repeat,
-    isComposing: event.isComposing,
     view: event.view,
     ...methods,
-  }) as ReactKeyboardEvent<T>;
+  }) as unknown as ReactKeyboardEvent<T>;
 }
 
 function dispatchTabKeyWithPublicWrappers(

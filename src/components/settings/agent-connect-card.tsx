@@ -1332,7 +1332,7 @@ interface AgentTabReactSnapshot {
   readonly metaKey: boolean;
   readonly shiftKey: boolean;
   readonly repeat: boolean;
-  readonly view: Window | null;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
   readonly preventDefault: () => void;
   readonly stopPropagation: () => void;
   readonly isDefaultPrevented: () => boolean;
