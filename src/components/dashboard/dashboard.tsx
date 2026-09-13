@@ -12259,8 +12259,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 {...accountOpenAutoFocusProps}
               >
                 <div className="px-2.5 py-2">
-                  <div className="truncate text-sm font-medium text-ink">{user.name}</div>
-                  {user.login && <div className="truncate text-xs text-ink-3">@{user.login}</div>}
+                  <div className="truncate text-sm font-medium text-ink" title={user.name}>{user.name}</div>
+                  {user.login && <div className="truncate text-xs text-ink-3" title={`@${user.login}`}>@{user.login}</div>}
                 </div>
                 <MenuItem ref={captureAccountSettings} icon={<Bot size={15} />} onSelect={openAccountSettings}>
                   Agents &amp; API tokens

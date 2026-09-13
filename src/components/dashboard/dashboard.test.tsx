@@ -61,7 +61,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 import { ApiError, api } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
-import { Dashboard, TemplateGrid, TrashView } from "./dashboard";
+import { Dashboard, TemplateGrid, TrashView, type DashboardProps } from "./dashboard";
 
 const SEARCH_DEBOUNCE_MS = 250;
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
@@ -1541,6 +1541,202 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("dashboard Account menu identity titles", () => {
+  const identities = [
+    {
+      ...USER,
+      name: `  ${'Alex <strong title="Full name">Mixed CASE & "quotes"</strong> '.repeat(5)}  `,
+      login: `  ${'MiXeD-<img src="identity" alt=\'literal\'>-&-'.repeat(6)}  `,
+    },
+    {
+      ...USER,
+      id: "second-account",
+      name: ` ${"Morgan <em data-name='Other'>Another \"identity\" & CASE</em> ".repeat(5)} `,
+      login: ` ${'OtHeR-<a href="/settings">"literal"</a>-'.repeat(6)} `,
+    },
+  ];
+
+  function expectIdentity(user: DashboardProps["user"]) {
+    const menu = screen.getByRole("menu", { name: "Account" });
+    const metadata = menu.firstElementChild;
+    if (!(metadata instanceof HTMLDivElement)) {
+      throw new Error("The Account metadata was not a div");
+    }
+    const name = metadata.children.item(0);
+    const login = metadata.children.item(1);
+    expect(metadata.className).toBe("px-2.5 py-2");
+    expect(metadata.children).toHaveLength(user.login ? 2 : 1);
+    expect(metadata.querySelectorAll("*")).toHaveLength(user.login ? 2 : 1);
+    expect(name).toBeInstanceOf(HTMLDivElement);
+    expect(name?.className).toBe("truncate text-sm font-medium text-ink");
+    expect(name?.textContent).toBe(user.name);
+    expect(name?.getAttribute("title")).toBe(user.name);
+    expect(name?.getAttributeNames().sort()).toEqual(["class", "title"]);
+    if (user.login) {
+      expect(login).toBeInstanceOf(HTMLDivElement);
+      expect(login?.className).toBe("truncate text-xs text-ink-3");
+      expect(login?.textContent).toBe(`@${user.login}`);
+      expect(login?.getAttribute("title")).toBe(`@${user.login}`);
+      expect(login?.getAttributeNames().sort()).toEqual(["class", "title"]);
+    } else {
+      expect(login).toBeNull();
+    }
+    expect([...menu.querySelectorAll("[title]")]).toEqual(
+      user.login ? [name, login] : [name],
+    );
+    expect(menu.querySelector('[title="@undefined"], [title="@null"]')).toBeNull();
+    expect(metadata.querySelector('a, button, input, [tabindex], [role], [aria-label]')).toBeNull();
+    expect(menu.className).toBe(
+      "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-56",
+    );
+    const settings = accountMenuItem("Agents & API tokens");
+    const signOut = accountMenuItem("Sign out");
+    expect([...menu.children]).toEqual([metadata, settings, signOut]);
+    expect(within(menu).getAllByRole("menuitem")).toEqual([settings, signOut]);
+    expect([...menu.querySelectorAll("[tabindex]")]).toEqual([settings, signOut]);
+    expect(settings.className).toBe("menu-item");
+    expect(signOut.className).toBe("menu-item");
+    expect(menu).toHaveAttribute("tabindex", "0");
+    expect(accountTrigger()).toHaveAccessibleName("Account");
+    expect(accountTrigger().children).toHaveLength(1);
+    return { menu, metadata, name, login };
+  }
+
+  function dashboard(user: DashboardProps["user"]) {
+    return <Dashboard user={user} documents={DOCUMENTS} githubAvailable githubConfigured />;
+  }
+
+  function openAccount() {
+    fireEvent.pointerDown(accountTrigger(), { button: 0, ctrlKey: false });
+  }
+
+  async function closeAccount() {
+    fireEvent.keyDown(accountMenuItem("Agents & API tokens"), { key: "Escape", code: "Escape" });
+    await act(async () => {
+      vi.advanceTimersByTime(0);
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("menu")).toBeNull();
+  }
+
+  it.each(identities)("keeps long literal identity $id exact and passive on the existing divs", async (user) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    render(dashboard(user));
+    openAccount();
+    await act(async () => {
+      vi.advanceTimersByTime(0);
+      await Promise.resolve();
+    });
+    expect(user.name.length).toBeGreaterThanOrEqual(200);
+    expect(user.login.length).toBeGreaterThanOrEqual(200);
+    const { menu, metadata } = expectIdentity(user);
+    const avatar = accountTrigger().firstElementChild;
+    const markup = menu.outerHTML;
+    const activeElement = document.activeElement;
+    const effects = [
+      ...Object.values(router), signOutSafely, fetch, searchDocuments, listDocuments,
+      createDocument, restoreDocument, purgeDocument, starDocument, unstarDocument, focus,
+    ];
+    for (const effect of effects) effect.mockClear();
+    const schedules = [
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+    ];
+    // Measure only synchronous hover dispatch, not React/Radix's async setup or cleanup.
+    const timers = vi.getTimerCount();
+    for (const element of metadata.children) {
+      fireEvent.pointerOver(element, { pointerType: "mouse" });
+      fireEvent.pointerMove(element, { pointerType: "mouse" });
+      fireEvent.mouseOver(element);
+      fireEvent.mouseMove(element);
+      fireEvent.mouseOut(element);
+      fireEvent.pointerOut(element, { pointerType: "mouse" });
+    }
+    expect(vi.getTimerCount()).toBe(timers);
+    for (const schedule of schedules) {
+      expect(schedule).not.toHaveBeenCalled();
+      schedule.mockRestore();
+    }
+    for (const effect of effects) expect(effect).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(activeElement);
+    expect(menu.outerHTML).toBe(markup);
+    expect(accountTrigger().firstElementChild).toBe(avatar);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    fireEvent.click(accountMenuItem("Agents & API tokens"));
+    expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
+    expect(signOutSafely).not.toHaveBeenCalled();
+    expect(screen.queryByRole("menu")).toBeNull();
+    openAccount();
+    expectIdentity(user);
+    fireEvent.click(accountMenuItem("Sign out"));
+    expect(signOutSafely).toHaveBeenCalledOnce();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it.each([null, undefined, ""])("omits a %s login on initial render and after removal", async (login) => {
+    const user: DashboardProps["user"] = { ...USER, login: null };
+    // Exercise an omitted runtime field without widening the production user contract.
+    Object.defineProperty(user, "login", { value: login });
+    const view = render(dashboard(user));
+    openAccount();
+    expectIdentity(user);
+    view.rerender(dashboard(identities[0]));
+    expectIdentity(identities[0]);
+    view.rerender(dashboard(user));
+    expectIdentity(user);
+    await closeAccount();
+    openAccount();
+    expectIdentity(user);
+  });
+
+  it("preserves whitespace-only login text instead of trimming or hiding it", () => {
+    const user = { ...USER, login: "   " };
+    render(dashboard(user));
+    openAccount();
+    expectIdentity(user);
+  });
+
+  it("updates the same metadata divs for name/login changes and replaces closed or open account data", async () => {
+    const first = identities[0];
+    const second = identities[1];
+    const view = render(dashboard(first));
+    openAccount();
+    const original = expectIdentity(first);
+    const renamed = { ...first, name: second.name };
+    view.rerender(dashboard(renamed));
+    const current = expectIdentity(renamed);
+    expect(current.name).toBe(original.name);
+    expect(current.login).toBe(original.login);
+    expect([...current.menu.querySelectorAll("[title]")].map((element) => element.getAttribute("title")))
+      .not.toContain(first.name);
+
+    const relogged = { ...renamed, login: second.login };
+    view.rerender(dashboard(relogged));
+    expect(expectIdentity(relogged).login).toBe(original.login);
+    view.rerender(dashboard({ ...relogged, name: "" }));
+    expectIdentity({ ...relogged, name: "" });
+
+    view.rerender(dashboard(second));
+    expectIdentity(second);
+    await closeAccount();
+    view.rerender(dashboard(first));
+    expect(screen.queryByRole("menu")).toBeNull();
+    openAccount();
+    expectIdentity(first);
+    await closeAccount();
+    view.rerender(dashboard({ ...second, login: null }));
+    openAccount();
+    expectIdentity({ ...second, login: null });
+    expect(router.push).not.toHaveBeenCalled();
+    expect(signOutSafely).not.toHaveBeenCalled();
+  });
 });
 
 describe("dashboard Account menu directional publication", () => {
