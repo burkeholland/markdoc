@@ -1708,7 +1708,7 @@ describe("editor header Publish options directional focus", () => {
       }
     });
 
-    it.each([
+    const malformedPublicValues: ReadonlyArray<readonly [string, string, () => unknown]> = [
       ["wrong target", "target", () => document.body],
       ["wrong currentTarget", "currentTarget", () => document.body],
       ["released currentTarget", "currentTarget", () => null],
@@ -1736,7 +1736,8 @@ describe("editor header Publish options directional focus", () => {
       ["missing prevention", "preventDefault", () => undefined],
       ["missing default query", "isDefaultPrevented", () => undefined],
       ["missing propagation query", "isPropagationStopped", () => undefined],
-    ] as const)("rejects %s before prevention and accepts a clean successor", async (
+    ];
+    it.each(malformedPublicValues)("rejects %s before prevention and accepts a clean successor", async (
       _label, property, value,
     ) => {
       const measurements = publishKeyMeasurements();
@@ -2021,7 +2022,7 @@ describe("editor header Publish options directional focus", () => {
                 source.currentTarget.setAttribute("aria-label", "Changed");
                 source.currentTarget.setAttribute("aria-label", "Publish options");
               } else if (change === "role") {
-                props.session.role = "viewer";
+                Object.defineProperty(props.session, "role", { configurable: true, value: "viewer" });
               } else if (change === "permission") {
                 flushSync(() => view.root.render(
                   <StrictMode>
