@@ -12240,7 +12240,7 @@ function createTrashKeyboardWindowRegistration(
   const registration: TrashKeyboardWindowRegistration =
     Object.freeze({
       proofFor,
-      claim: (proof) => {
+      claim: (proof: TrashKeyboardWindowProof) => {
         if (claimed || proofFor(proof.nativeEvent) !== proof) {
           return false;
         }
@@ -12634,7 +12634,6 @@ function captureTrashReactKeyProof(
       event.altKey ||
       event.shiftKey ||
       event.repeat ||
-      event.isComposing ||
       typeof preventDefault !== "function" ||
       typeof stopPropagation !== "function" ||
       typeof isDefaultPrevented !== "function" ||

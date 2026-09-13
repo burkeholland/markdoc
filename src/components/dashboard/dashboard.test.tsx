@@ -741,9 +741,8 @@ function dispatchTrashKeyWithReactPairMutation(
   };
   const wrapped = {
     ...entry.props,
-    onKeyDownCapture: (
-      event: ReactKeyboardEvent<HTMLLIElement>,
-    ) => {
+    onKeyDownCapture: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
       delivery.capture = event;
       delivery.captureTarget = event.currentTarget;
       delivery.nativeCaptureTarget = Reflect.apply(
@@ -755,7 +754,8 @@ function dispatchTrashKeyWithReactPairMutation(
       capture(event);
       mutations.captureAfter?.(event);
     },
-    onKeyDown: (event: ReactKeyboardEvent<HTMLLIElement>) => {
+    onKeyDown: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
       delivery.bubble = event;
       delivery.bubbleTarget = event.currentTarget;
       delivery.nativeBubbleTarget = Reflect.apply(
@@ -1968,7 +1968,7 @@ function registerTrashKeyboardProvenanceTests() {
         first.title,
         "purge-button",
       );
-      let nested: KeyboardEvent | null = null;
+      const nested: KeyboardEvent[] = [];
       view.setup.preventDefault.mockImplementationOnce(function (
         this: Event,
       ) {
@@ -1977,11 +1977,12 @@ function registerTrashKeyboardProvenanceTests() {
           this,
           [],
         );
-        nested = createTrashKeyboardEvent(
+        const nestedEvent = createTrashKeyboardEvent(
           restore,
           "ArrowRight",
         );
-        restore.dispatchEvent(nested);
+        nested.push(nestedEvent);
+        restore.dispatchEvent(nestedEvent);
       });
       restore.focus();
       view.setup.preventDefault.mockClear();
@@ -1994,7 +1995,8 @@ function registerTrashKeyboardProvenanceTests() {
       );
 
       expect(outer.defaultPrevented).toBe(true);
-      expect(nested?.defaultPrevented).toBe(false);
+      expect(nested).toHaveLength(1);
+      expect(nested[0]?.defaultPrevented).toBe(false);
       expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
       expect(view.setup.focus).toHaveBeenCalledTimes(1);
       expect(view.setup.focusCalls).toEqual([
