@@ -8279,6 +8279,12 @@ interface LayoutSegmentReactKeyboardMethods {
   readonly isPropagationStopped: (...args: never[]) => unknown;
 }
 
+function isLayoutSegmentReactMethod(
+  value: unknown,
+): value is LayoutSegmentReactKeyboardMethods["isDefaultPrevented"] {
+  return typeof value === "function";
+}
+
 interface LayoutSegmentReactKeyboardSnapshot {
   readonly event: React.KeyboardEvent<HTMLButtonElement>;
   readonly nativeEvent: KeyboardEvent;
@@ -9393,7 +9399,7 @@ function createLayoutSegmentPresentation(
           return false;
         }
         if (
-          typeof method !== "function"
+          !isLayoutSegmentReactMethod(method)
           || method !== expectedMethod
           || !deliveryIsCurrent(
             currentNative,
@@ -9534,7 +9540,7 @@ function createLayoutSegmentPresentation(
       if (
         !prevention
         || !preventedNative
-        || typeof postPreventionBubbleDefault !== "function"
+        || !isLayoutSegmentReactMethod(postPreventionBubbleDefault)
         || !deliveryIsCurrent(
           preventedNative,
           layout,
