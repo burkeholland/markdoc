@@ -222,7 +222,7 @@ interface SharePresentationRuntime {
   agentDirectionalPair: ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction> | null;
   removeAgentDirectionalCapture: (() => void) | null;
   removeNavigation: ShareRemoveNavigationPublication | null;
-  removeNavigationPair: ShareRemoveNavigationPair | null;
+  removeNavigationPairs: WeakMap<KeyboardEvent, ShareRemoveNavigationPair>;
   controlBindings: Set<ShareControlElementRole>;
   footer: HTMLDivElement | null;
   done: HTMLButtonElement | null;
@@ -413,12 +413,10 @@ interface ShareRemoveReactMethods {
   readonly stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
   readonly isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
   readonly isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
-  readonly persist: ReactKeyboardEvent<HTMLElement>["persist"];
 }
 
 interface ShareRemoveReactSnapshot {
   readonly event: ReactKeyboardEvent<HTMLElement>;
-  readonly prototype: object;
   readonly nativeEvent: KeyboardEvent;
   readonly target: HTMLElement;
   readonly currentTarget: HTMLElement;
@@ -2447,21 +2445,16 @@ function captureShareRemoveReactEvent(
       readonly stopPropagation?: unknown;
       readonly isDefaultPrevented?: unknown;
       readonly isPropagationStopped?: unknown;
-      readonly persist?: unknown;
     };
-    const prototype = authority.prototypeOf(event) as object | null;
     const preventDefault = proof.preventDefault;
     const stopPropagation = proof.stopPropagation;
     const isDefaultPrevented = proof.isDefaultPrevented;
     const isPropagationStopped = proof.isPropagationStopped;
-    const persist = proof.persist;
     if (
-      !prototype ||
       typeof preventDefault !== "function" ||
       typeof stopPropagation !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
-      typeof persist !== "function" ||
       !authority.methodMatches(event, "preventDefault", preventDefault) ||
       !authority.methodMatches(event, "stopPropagation", stopPropagation) ||
       !authority.methodMatches(
@@ -2474,7 +2467,6 @@ function captureShareRemoveReactEvent(
         "isPropagationStopped",
         isPropagationStopped,
       ) ||
-      !authority.methodMatches(event, "persist", persist) ||
       authority.apply(isDefaultPrevented, event, []) !== false ||
       authority.apply(isPropagationStopped, event, []) !== false ||
       event === (native.event as unknown) ||
@@ -2506,7 +2498,6 @@ function captureShareRemoveReactEvent(
     }
     return Object.freeze({
       event,
-      prototype,
       nativeEvent: native.event,
       target: native.target,
       currentTarget,
@@ -2517,7 +2508,6 @@ function captureShareRemoveReactEvent(
         stopPropagation,
         isDefaultPrevented,
         isPropagationStopped,
-        persist,
       }),
     });
   } catch {
@@ -2538,10 +2528,8 @@ function shareRemoveReactSnapshotIsCurrent(
       readonly stopPropagation?: unknown;
       readonly isDefaultPrevented?: unknown;
       readonly isPropagationStopped?: unknown;
-      readonly persist?: unknown;
     };
     return (
-      authority.prototypeOf(event) === snapshot.prototype &&
       event.nativeEvent === snapshot.nativeEvent &&
       event.nativeEvent === native.event &&
       event.type === native.type &&
@@ -2572,7 +2560,6 @@ function shareRemoveReactSnapshotIsCurrent(
         event.isDefaultPrevented === snapshot.methods.isDefaultPrevented) &&
       event.isPropagationStopped ===
         snapshot.methods.isPropagationStopped &&
-      event.persist === snapshot.methods.persist &&
       authority.methodMatches(
         event,
         "preventDefault",
@@ -2594,7 +2581,6 @@ function shareRemoveReactSnapshotIsCurrent(
         "isPropagationStopped",
         snapshot.methods.isPropagationStopped,
       ) &&
-      authority.methodMatches(event, "persist", snapshot.methods.persist) &&
       authority.apply(
         event.isDefaultPrevented,
         snapshot.event,
@@ -3817,7 +3803,7 @@ export const ShareDialog = memo(function ShareDialog({
         agentDirectionalPair: null,
         removeAgentDirectionalCapture: null,
         removeNavigation: null,
-        removeNavigationPair: null,
+        removeNavigationPairs: new WeakMap(),
         controlBindings: new Set(),
         footer: null,
         done: null,
@@ -3913,7 +3899,7 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.agentDirectionalPair = null;
       runtime.removeAgentDirectionalCapture?.();
       runtime.removeAgentDirectionalCapture = null;
-      runtime.removeNavigationPair = null;
+      runtime.removeNavigationPairs = new WeakMap();
       runtime.removeNavigation?.retire();
       runtime.removeNavigation = null;
       clearShareCloseProvenance(runtime);
@@ -5324,7 +5310,6 @@ export const ShareDialog = memo(function ShareDialog({
       !runtime ||
       !publication ||
       !authority ||
-      runtime.removeNavigationPair ||
       event.currentTarget !== publication.listElement
     ) {
       return;
@@ -5398,12 +5383,7 @@ export const ShareDialog = memo(function ShareDialog({
         receiver: native.terminal.receiver,
       }),
     });
-    runtime.removeNavigationPair = pair;
-    authority.ownerWindow.queueMicrotask(() => {
-      if (runtime.removeNavigationPair === pair) {
-        runtime.removeNavigationPair = null;
-      }
-    });
+    runtime.removeNavigationPairs.set(native.event, pair);
   };
 
   const completeRemoveNavigation = (
@@ -5413,12 +5393,23 @@ export const ShareDialog = memo(function ShareDialog({
   ) => {
     const candidate = currentPresentation(sourcePresentation);
     const runtime = presentationRuntimesRef.current.get(candidate);
-    const pair = runtime?.removeNavigationPair;
     let nativeEvent: unknown;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
+    }
+    const pairKey =
+      runtime?.removeNavigation?.authority &&
+      nativeEvent instanceof runtime.removeNavigation.authority.KeyboardEvent
+        ? nativeEvent
+        : null;
+    const pair =
+      runtime && pairKey
+        ? runtime.removeNavigationPairs.get(pairKey)
+        : undefined;
+    if (runtime && pairKey) {
+      runtime.removeNavigationPairs.delete(pairKey);
     }
     if (
       !runtime ||
@@ -5433,7 +5424,6 @@ export const ShareDialog = memo(function ShareDialog({
       return;
     }
     attemptedRemoveReactEventsRef.current.add(event);
-    runtime.removeNavigationPair = null;
     const {
       publication,
       authority,

@@ -3193,44 +3193,206 @@ describe("ShareDialog collaborator Remove navigation", () => {
     }
   });
 
-  it("accepts distinct phase-local React prototypes and public prevention methods", async () => {
+  it.each(["absent", "replaced", "non-function"] as const)(
+    "ignores %s React persistence compatibility on both wrappers",
+    async (kind) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const pair = dispatchRemoveKeyWithBoundaryProbe(
+        bob,
+        "ArrowRight",
+        {},
+        (_phase, event) => {
+          if (kind === "absent") {
+            const methods = {
+              preventDefault: event.preventDefault,
+              stopPropagation: event.stopPropagation,
+              isDefaultPrevented: event.isDefaultPrevented,
+              isPropagationStopped: event.isPropagationStopped,
+            };
+            Object.defineProperties(event, Object.fromEntries(
+              Object.entries(methods).map(([name, value]) => [
+                name,
+                { configurable: true, writable: true, value },
+              ]),
+            ));
+            Object.setPrototypeOf(event, null);
+            expect("persist" in event).toBe(false);
+          } else {
+            Object.defineProperty(event, "persist", {
+              configurable: true,
+              writable: true,
+              value: kind === "replaced" ? vi.fn() : 17,
+            });
+          }
+        },
+      );
+
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
+  it("accepts unrelated phase-local prototypes and prototype drift with exact public methods", async () => {
     collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
     await openDialog();
     const bob = removeButton("bob");
     bob.focus();
-    const methods: Array<
+    const methods: Array<Record<
+      "preventDefault" | "stopPropagation" | "isDefaultPrevented" |
+        "isPropagationStopped",
       ReactKeyboardEvent<HTMLElement>["preventDefault"]
-    > = [];
+    >> = [];
+    const finalPrototypes: object[] = [];
 
     const pair = dispatchRemoveKeyWithBoundaryProbe(
       bob,
       "ArrowRight",
       {},
-      (_phase, event) => {
-        const prototype = Object.getPrototypeOf(event) as object;
-        const localPrototype = Object.create(prototype) as {
-          preventDefault?: () => void;
+      (phase, event) => {
+        const initialPrototype = Object.freeze({ phase, state: "initial" });
+        const finalPrototype = Object.freeze({ phase, state: "queried" });
+        const original = {
+          preventDefault: event.preventDefault,
+          stopPropagation: event.stopPropagation,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
         };
-        const inherited = event.preventDefault;
-        localPrototype.preventDefault = function (this: typeof event) {
-          return Reflect.apply(inherited, this, []);
+        let firstDefaultQuery = true;
+        const local = {
+          preventDefault: function (this: typeof event) {
+            return Reflect.apply(original.preventDefault, this, []);
+          },
+          stopPropagation: function (this: typeof event) {
+            return Reflect.apply(original.stopPropagation, this, []);
+          },
+          isDefaultPrevented: function (this: typeof event) {
+            const prevented = Reflect.apply(
+              original.isDefaultPrevented,
+              this,
+              [],
+            );
+            if (firstDefaultQuery) {
+              firstDefaultQuery = false;
+              Object.setPrototypeOf(this, finalPrototype);
+            }
+            return prevented;
+          },
+          isPropagationStopped: function (this: typeof event) {
+            return Reflect.apply(
+              original.isPropagationStopped,
+              this,
+              [],
+            );
+          },
         };
-        methods.push(localPrototype.preventDefault);
-        Object.setPrototypeOf(event, localPrototype);
-        Reflect.deleteProperty(
-          event as unknown as Record<string, unknown>,
-          "_reactName",
-        );
+        Object.setPrototypeOf(event, initialPrototype);
+        Object.defineProperties(event, Object.fromEntries(
+          Object.entries(local).map(([name, value]) => [
+            name,
+            { configurable: true, writable: true, value },
+          ]),
+        ));
+        methods.push(local);
+        finalPrototypes.push(finalPrototype);
       },
     );
 
     expect(pair.capture).not.toBe(pair.bubble);
-    expect(Object.getPrototypeOf(pair.capture))
-      .not.toBe(Object.getPrototypeOf(pair.bubble));
-    expect(methods[0]).not.toBe(methods[1]);
+    expect(Object.getPrototypeOf(pair.capture)).toBe(finalPrototypes[0]);
+    expect(Object.getPrototypeOf(pair.bubble)).toBe(finalPrototypes[1]);
+    for (const name of [
+      "preventDefault",
+      "stopPropagation",
+      "isDefaultPrevented",
+      "isPropagationStopped",
+    ] as const) {
+      expect(methods[0]?.[name]).not.toBe(methods[1]?.[name]);
+    }
     expect(pair.nativeEvent.defaultPrevented).toBe(true);
     expect(removeButton("charlie")).toHaveFocus();
   });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "isDefaultPrevented",
+    "isPropagationStopped",
+  ] as const)(
+    "rejects capture-wrapper %s drift and admits a distinct clean event",
+    async (method) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+
+      const rejected = dispatchRemoveKeyWithBoundaryProbe(
+        bob,
+        "ArrowRight",
+        {},
+        (phase, event) => {
+          if (phase !== "capture") return;
+          const original = event.isDefaultPrevented;
+          let queried = false;
+          Object.defineProperty(event, "isDefaultPrevented", {
+            configurable: true,
+            writable: true,
+            value: function (this: ReactKeyboardEvent<HTMLElement>) {
+              const prevented = Reflect.apply(original, this, []);
+              if (!queried) {
+                queried = true;
+                Object.defineProperty(this, method, {
+                  configurable: true,
+                  writable: true,
+                  value: vi.fn(),
+                });
+              }
+              return prevented;
+            },
+          });
+        },
+      );
+
+      expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+      expect(bob).toHaveFocus();
+      const recovered = dispatchRemoveKey(bob, "ArrowRight");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(removeButton("charlie")).toHaveFocus();
+    },
+  );
+
+  it.each([1, 3])(
+    "retains the exact native pair through %i capture microtask checkpoint(s)",
+    async (checkpoints) => {
+      collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
+      await openDialog();
+      const bob = removeButton("bob");
+      bob.focus();
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      let observed = 0;
+      bob.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+
+      try {
+        const event = dispatchRemoveKey(bob, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(removeButton("charlie")).toHaveFocus();
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("rejects malformed, modified, replayed, untrusted, unfocused, and activation keys without poisoning recovery", async () => {
     collaborators.mockResolvedValue(collaboratorRows("bob", "charlie"));
