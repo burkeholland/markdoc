@@ -168,13 +168,66 @@ function renderDirectKeyboard<Setup>(
   return view;
 }
 
-function reactProp<T>(element: Element, name: string): T {
+function reactProps(element: Element) {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the secret control");
   const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  if (!props) throw new Error("The secret control's React props were unavailable");
+  return props;
+}
+
+function reactProp<T>(element: Element, name: string): T {
+  const props = reactProps(element);
   const value = props?.[name];
   if (typeof value !== "function") throw new Error(`The secret control has no ${name} callback`);
   return value as T;
+}
+
+function setReactEventCurrentTarget(
+  event: ReactKeyboardEvent<Element>,
+  currentTarget: EventTarget | null,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(event, "currentTarget");
+  if (!descriptor || !("value" in descriptor)) {
+    throw new Error("The React keyboard event has no own currentTarget value");
+  }
+  Object.defineProperty(event, "currentTarget", {
+    ...descriptor,
+    value: currentTarget,
+  });
+}
+
+function renameNavigationReactWrapper<T extends Element>(
+  nativeEvent: KeyboardEvent,
+  currentTarget: T,
+  target: HTMLButtonElement,
+) {
+  return {
+    _reactName: "onKeyDown",
+    type: "keydown",
+    key: nativeEvent.key,
+    currentTarget,
+    target,
+    nativeEvent,
+    eventPhase: nativeEvent.eventPhase,
+    bubbles: true,
+    cancelable: true,
+    defaultPrevented: false,
+    repeat: false,
+    isComposing: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    isTrusted: true,
+    view: nativeEvent.view,
+    preventDefault: () => undefined,
+    stopPropagation: () => undefined,
+    isDefaultPrevented: () => false,
+    isPropagationStopped: () => false,
+    persist: () => undefined,
+    isPersistent: () => true,
+  } as unknown as ReactKeyboardEvent<T>;
 }
 
 function invokeHandlerFromNative(
@@ -273,6 +326,48 @@ async function showStrictRename(row = token) {
   };
 }
 
+type RenameNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+function createRenameNavigationKey(
+  target: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The token rename control has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    ...init,
+  });
+  setJsdomEventView(event, ownerWindow);
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchRenameNavigationKey(
+  target: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = createRenameNavigationKey(target, key, init, trusted);
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
 function renameEscape(
   target: HTMLElement,
   init: KeyboardEventInit & { type?: string } = {},
@@ -294,13 +389,12 @@ function renameEscape(
 }
 
 function markJsdomEventTrusted(event: Event) {
-  const implementation = Object.getOwnPropertySymbols(event)
-    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
-    .find((candidate): candidate is { isTrusted: boolean } =>
-      typeof candidate === "object"
-      && candidate !== null
-      && "isTrusted" in candidate
-      && candidate.isTrusted === false);
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  const implementation = implementationSymbol
+    ? (event as unknown as Record<symbol, { isTrusted: boolean }>)[implementationSymbol]
+    : null;
   const descriptor = implementation
     ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
     : undefined;
@@ -314,6 +408,17 @@ function markJsdomEventTrusted(event: Event) {
     set: () => undefined,
   });
   if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function setJsdomEventView(event: Event, ownerWindow: Window) {
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  const implementation = implementationSymbol
+    ? (event as unknown as Record<symbol, { view: Window | null }>)[implementationSymbol]
+    : null;
+  if (!implementation) throw new Error("Unable to set jsdom's internal event view slot");
+  implementation.view = ownerWindow;
 }
 
 function createTokenEscape(
@@ -1095,6 +1200,630 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(screen.queryByLabelText("Token name")).toBeNull();
     expect(callsFor("PATCH")).toHaveLength(0);
     expect(callsFor("POST")).toHaveLength(0);
+  });
+});
+
+describe("Settings → Agents: token rename control navigation", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["ArrowRight", "save", "cancel"],
+    ["ArrowDown", "save", "cancel"],
+    ["End", "save", "cancel"],
+    ["ArrowLeft", "cancel", "save"],
+    ["ArrowUp", "cancel", "save"],
+    ["Home", "cancel", "save"],
+  ] as const)(
+    "moves %s from %s to %s once without changing the rename",
+    async (key, sourceName, destinationName) => {
+      const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const rename = await showStrictRename();
+      const controls = {
+        save: screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement,
+        cancel: screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement,
+      };
+      const source = controls[sourceName];
+      const destination = controls[destinationName];
+      const formScroll = [rename.form.scrollLeft, rename.form.scrollTop] as const;
+      const pageScroll = [window.scrollX, window.scrollY] as const;
+      const requests = fetchMock.mock.calls.length;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const accepted = dispatchRenameNavigationKey(source, key);
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault.mock.contexts.filter((context) => context === accepted)).toHaveLength(1);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts).toEqual([destination]);
+      expect(preventDefault.mock.invocationCallOrder[0]).toBeLessThan(
+        focus.mock.invocationCallOrder[0]!,
+      );
+      expect(destination).toHaveFocus();
+      expect(screen.getByLabelText("Token name")).toBe(rename.input);
+      expect(rename.input).toHaveValue(token.name);
+      expect(screen.getByRole("button", { name: "Save name" })).toBe(controls.save);
+      expect(screen.getByRole("button", { name: "Cancel rename" })).toBe(controls.cancel);
+      expect(fetchMock).toHaveBeenCalledTimes(requests);
+      expect(callsFor("POST")).toHaveLength(0);
+      expect(callsFor("PATCH")).toHaveLength(0);
+      expect([rename.form.scrollLeft, rename.form.scrollTop]).toEqual(formScroll);
+      expect([window.scrollX, window.scrollY]).toEqual(pageScroll);
+    },
+  );
+
+  it.each([
+    ["present on both wrappers", null],
+    ["absent from the capture wrapper", "capture-absent"],
+    ["absent from the bubble wrapper", "bubble-absent"],
+    ["mutated on the capture wrapper", "capture-mutated"],
+    ["mutated on the bubble wrapper", "bubble-mutated"],
+  ] as const)("accepts distinct exact React wrappers with _reactName %s", async (_, variation) => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    const stage = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(save, "onKeyDown");
+    const deliver = reactProp<
+      (event: ReactKeyboardEvent<HTMLFormElement>) => void
+    >(rename.form, "onKeyDown");
+    let captureWrapper: object | null = null;
+    let bubbleWrapper: object | null = null;
+    save.addEventListener("keydown", (event) => {
+      const nativeEvent = event as KeyboardEvent;
+      const capture = renameNavigationReactWrapper(nativeEvent, save, save);
+      const bubble = renameNavigationReactWrapper(nativeEvent, rename.form, save);
+      const captureRecord = capture as unknown as Record<string, unknown>;
+      const bubbleRecord = bubble as unknown as Record<string, unknown>;
+      captureWrapper = capture;
+      bubbleWrapper = bubble;
+      if (variation === "capture-absent") {
+        Reflect.deleteProperty(captureRecord, "_reactName");
+      }
+      if (variation === "bubble-absent") {
+        Reflect.deleteProperty(bubbleRecord, "_reactName");
+      }
+      stage(capture);
+      if (variation === "capture-mutated") captureRecord._reactName = "onClick";
+      deliver(bubble);
+      if (variation === "bubble-mutated") bubbleRecord._reactName = "onClick";
+      setReactEventCurrentTarget(capture, null);
+      setReactEventCurrentTarget(bubble, null);
+    }, { once: true });
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+
+    expect(captureWrapper).not.toBeNull();
+    expect(bubbleWrapper).not.toBeNull();
+    expect(bubbleWrapper).not.toBe(captureWrapper);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(cancel).toHaveFocus();
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it.each([
+    "isDefaultPrevented",
+    "isPropagationStopped",
+  ] as const)("rejects %s method identity drift and admits a clean successor", async (method) => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const stage = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(save, "onKeyDown");
+    const deliver = reactProp<
+      (event: ReactKeyboardEvent<HTMLFormElement>) => void
+    >(rename.form, "onKeyDown");
+    save.addEventListener("keydown", (event) => {
+      const nativeEvent = event as KeyboardEvent;
+      const capture = renameNavigationReactWrapper(nativeEvent, save, save);
+      const bubble = renameNavigationReactWrapper(nativeEvent, rename.form, save);
+      stage(capture);
+      deliver(bubble);
+      setReactEventCurrentTarget(capture, null);
+      setReactEventCurrentTarget(bubble, null);
+      const descriptor = Object.getOwnPropertyDescriptor(bubble, method);
+      if (!descriptor || !("value" in descriptor)) {
+        throw new Error(`The React keyboard event has no own ${method} method`);
+      }
+      Object.defineProperty(bubble, method, {
+        ...descriptor,
+        value: () => false,
+      });
+    }, { once: true });
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rejected = dispatchRenameNavigationKey(save, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(save).toHaveFocus();
+
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(screen.getByRole("button", { name: "Cancel rename" })).toHaveFocus();
+  });
+
+  it.each([
+    ["ArrowLeft", "save"],
+    ["ArrowUp", "save"],
+    ["Home", "save"],
+    ["ArrowRight", "cancel"],
+    ["ArrowDown", "cancel"],
+    ["End", "cancel"],
+  ] as const)("leaves the non-wrapping %s boundary on %s native", async (key, sourceName) => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    await showStrictRename();
+    const source = screen.getByRole("button", {
+      name: sourceName === "save" ? "Save name" : "Cancel rename",
+    }) as HTMLButtonElement;
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = dispatchRenameNavigationKey(source, key);
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expect(screen.getByLabelText("Token name")).toHaveValue(token.name);
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("skips disabled Save as the sole remaining destination and recovers when the draft is valid", async () => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    fireEvent.change(rename.input, { target: { value: "" } });
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    expect(save).toBeDisabled();
+    cancel.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    for (const key of [
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowRight",
+      "ArrowDown",
+      "Home",
+      "End",
+    ] satisfies RenameNavigationKey[]) {
+      const rejected = dispatchRenameNavigationKey(cancel, key);
+      expect(rejected.defaultPrevented, key).toBe(false);
+    }
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(cancel).toHaveFocus();
+    expect(screen.getByLabelText("Token name")).toHaveValue("");
+
+    fireEvent.change(rename.input, { target: { value: "Current valid draft" } });
+    const currentSave = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const currentCancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    expect(currentSave).toBeEnabled();
+    currentCancel.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchRenameNavigationKey(currentCancel, "ArrowLeft");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts).toEqual([currentSave]);
+    expect(currentSave).toHaveFocus();
+    expect(screen.getByLabelText("Token name")).toHaveValue("Current valid draft");
+    expect(callsFor("POST")).toHaveLength(0);
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("rejects modified, repeated, composing, canceled, untrusted, unsupported, and wrong-focus input, then accepts a clean key", async () => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const outside = screen.getByTestId("token-row") as HTMLLIElement;
+    const invalid = [
+      [{ altKey: true }, true],
+      [{ ctrlKey: true }, true],
+      [{ metaKey: true }, true],
+      [{ shiftKey: true }, true],
+      [{ repeat: true }, true],
+      [{ isComposing: true }, true],
+      [{ bubbles: false }, true],
+      [{ cancelable: false }, true],
+      [{}, false],
+    ] as const;
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    for (const [init, trusted] of invalid) {
+      const rejected = dispatchRenameNavigationKey(save, "ArrowRight", init, trusted);
+      expect(rejected.defaultPrevented).toBe(false);
+    }
+    const unsupported = dispatchRenameNavigationKey(save, "Tab");
+    const prevented = createRenameNavigationKey(save, "ArrowRight");
+    prevented.preventDefault();
+    preventDefault.mockClear();
+    act(() => save.dispatchEvent(prevented));
+    const stopped = createRenameNavigationKey(save, "ArrowRight");
+    save.addEventListener("keydown", (event) => event.stopPropagation(), { once: true });
+    act(() => save.dispatchEvent(stopped));
+    outside.focus();
+    focus.mockClear();
+    const wrongFocus = dispatchRenameNavigationKey(save, "ArrowRight");
+
+    expect(unsupported.defaultPrevented).toBe(false);
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(wrongFocus.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(outside).toHaveFocus();
+    expect(screen.getByLabelText("Token name")).toBe(rename.input);
+    expect(callsFor("PATCH")).toHaveLength(0);
+
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Cancel rename" })).toHaveFocus();
+  });
+
+  it("rejects fabricated and foreign delivery without retiring current navigation", async () => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow as (Window & typeof globalThis) | null;
+    if (!foreignWindow) throw new Error("The foreign rename navigation realm was unavailable");
+    await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const handler = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(save, "onKeyDown");
+    const fabricatedNative = createRenameNavigationKey(save, "ArrowRight");
+    const fabricatedPrevent = vi.fn();
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    act(() => {
+      handler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        key: "ArrowRight",
+        currentTarget: save,
+        target: save,
+        nativeEvent: fabricatedNative,
+        preventDefault: fabricatedPrevent,
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      code: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    setJsdomEventView(foreign, foreignWindow);
+    markJsdomEventTrusted(foreign);
+    act(() => save.dispatchEvent(foreign));
+
+    expect(fabricatedNative.defaultPrevented).toBe(false);
+    expect(fabricatedPrevent).not.toHaveBeenCalled();
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(save).toHaveFocus();
+
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Cancel rename" })).toHaveFocus();
+    frame.remove();
+  });
+
+  it("binds the Window listener backing receiver to the original path terminal and rejects a structural lookalike", async () => {
+    const ownerWindow = window;
+    const nativeAddEventListener = ownerWindow.addEventListener;
+    const currentTarget = Object.getOwnPropertyDescriptor(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+    )?.get;
+    const composedPath = ownerWindow.Event.prototype.composedPath;
+    if (!currentTarget) throw new Error("The native event currentTarget getter was unavailable");
+    const lookalike: { document: Document; window: unknown } = {
+      document: ownerWindow.document,
+      window: null,
+    };
+    lookalike.window = lookalike;
+    let attacked: KeyboardEvent | null = null;
+    let navigationListener: EventListener | null = null;
+    const observation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget | null;
+    } = {};
+    nativeAddEventListener.call(ownerWindow, "keydown", function (this: EventTarget, event) {
+      if (event !== attacked) return;
+      observation.receiver = this;
+      observation.currentTarget = currentTarget.call(event);
+      observation.terminal = composedPath.call(event).at(-1) ?? null;
+      navigationListener?.call(lookalike as unknown as EventTarget, event);
+      event.stopImmediatePropagation();
+    }, { once: true });
+    const addEventListener = vi.spyOn(ownerWindow, "addEventListener");
+    const preventDefault = vi.spyOn(ownerWindow.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(ownerWindow.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const registered = addEventListener.mock.calls.findLastIndex(
+      ([type], index) =>
+        type === "keydown"
+        && addEventListener.mock.contexts[index] === rename.input.ownerDocument.defaultView,
+    );
+    const candidate = registered >= 0
+      ? addEventListener.mock.calls[registered]?.[1]
+      : null;
+    if (typeof candidate !== "function") {
+      throw new Error("The rename navigation Window listener was not registered");
+    }
+    navigationListener = candidate as EventListener;
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    attacked = createRenameNavigationKey(save, "ArrowRight");
+
+    act(() => save.dispatchEvent(attacked as KeyboardEvent));
+
+    expect(observation.receiver).toBeDefined();
+    expect(observation.currentTarget).toBe(observation.receiver);
+    expect(observation.terminal).toBe(observation.receiver);
+    expect(attacked.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(save).toHaveFocus();
+
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(screen.getByRole("button", { name: "Cancel rename" })).toHaveFocus();
+  });
+
+  it("claims before prevention, rejects replay and reentrant input, and admits a distinct successor", async () => {
+    const nativePreventDefault = window.Event.prototype.preventDefault;
+    let save: HTMLButtonElement | null = null;
+    let reentrant: KeyboardEvent | null = null;
+    let entered = false;
+    const preventDefault = vi
+      .spyOn(window.Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        nativePreventDefault.call(this);
+        if (!entered && save && reentrant) {
+          entered = true;
+          save.dispatchEvent(reentrant);
+        }
+      });
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    await showStrictRename();
+    save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    reentrant = createRenameNavigationKey(save, "ArrowRight");
+    const accepted = createRenameNavigationKey(save, "ArrowRight");
+
+    act(() => save?.dispatchEvent(accepted));
+
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(reentrant.defaultPrevented).toBe(false);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(cancel).toHaveFocus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => cancel.dispatchEvent(accepted));
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(cancel).toHaveFocus();
+
+    const successor = dispatchRenameNavigationKey(cancel, "ArrowLeft");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(save).toHaveFocus();
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it.each([
+    "restored control attribute",
+    "restored control order",
+    "detached and restored control",
+    "replaced and restored control",
+    "detached and restored ancestor",
+  ] as const)("retires %s history and admits a clean keyed successor", async (mutation) => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    if (mutation === "restored control attribute") {
+      save.setAttribute("data-transient", "true");
+      save.removeAttribute("data-transient");
+    } else if (mutation === "restored control order") {
+      const controls = save.parentElement;
+      if (!controls) throw new Error("The rename controls have no container");
+      controls.insertBefore(cancel, save);
+      controls.insertBefore(save, cancel);
+    } else if (mutation === "detached and restored control") {
+      const controls = save.parentElement;
+      if (!controls) throw new Error("The rename controls have no container");
+      save.remove();
+      controls.insertBefore(save, cancel);
+    } else if (mutation === "replaced and restored control") {
+      const replacement = save.cloneNode(true) as HTMLButtonElement;
+      save.replaceWith(replacement);
+      replacement.replaceWith(save);
+    } else {
+      const row = screen.getByTestId("token-row");
+      const parent = row.parentNode;
+      const next = row.nextSibling;
+      if (!parent) throw new Error("The token row has no parent");
+      row.remove();
+      parent.insertBefore(row, next);
+    }
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rejected = dispatchRenameNavigationKey(save, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Token name")).toBe(rename.input);
+    expect(callsFor("PATCH")).toHaveLength(0);
+
+    fetchMock
+      .mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    act(() => rename.root.render(
+      <StrictMode>
+        <TokensPanel key={`navigation-${mutation}`} origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+    ));
+    const currentRename = await screen.findByRole("button", { name: `Rename ${token.name}` });
+    fireEvent.click(currentRename);
+    const currentSave = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const currentCancel = screen.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    currentSave.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchRenameNavigationKey(currentSave, "ArrowRight");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(currentCancel).toHaveFocus();
+    expect(callsFor("PATCH")).toHaveLength(0);
+  });
+
+  it("uses the exact owner realm and leaves retained handlers inert after cleanup", async () => {
+    fetchMock
+      .mockResolvedValueOnce(response({ tokens: [token] }))
+      .mockResolvedValueOnce(response({ tokens: [token] }));
+    const view = renderDirectKeyboard(
+      <StrictMode>
+        <TokensPanel origin="https://markdoc.test" userLogin="alice" />
+      </StrictMode>,
+      (ownerWindow) => ({
+        preventDefault: vi.spyOn(ownerWindow.Event.prototype, "preventDefault"),
+        focus: vi.spyOn(ownerWindow.HTMLElement.prototype, "focus"),
+      }),
+    );
+    const panel = within(view.host);
+    const rename = await panel.findByRole("button", { name: `Rename ${token.name}` });
+    fireEvent.click(rename);
+    const save = panel.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    const cancel = panel.getByRole("button", { name: "Cancel rename" }) as HTMLButtonElement;
+    const stale = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(save, "onKeyDown");
+    save.focus();
+    view.setup.focus.mockClear();
+    view.setup.preventDefault.mockClear();
+
+    const accepted = dispatchRenameNavigationKey(save, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(view.setup.preventDefault).toHaveBeenCalledOnce();
+    expect(view.setup.focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(view.setup.focus.mock.contexts).toEqual([cancel]);
+    expect(cancel).toHaveFocus();
+
+    act(() => view.root.unmount());
+    const staleNative = createRenameNavigationKey(save, "ArrowRight");
+    const stalePrevent = vi.fn();
+    view.setup.focus.mockClear();
+    view.setup.preventDefault.mockClear();
+    act(() => stale({
+      _reactName: "onKeyDown",
+      type: "keydown",
+      key: "ArrowRight",
+      currentTarget: save,
+      target: save,
+      nativeEvent: staleNative,
+      preventDefault: stalePrevent,
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>));
+
+    expect(staleNative.defaultPrevented).toBe(false);
+    expect(stalePrevent).not.toHaveBeenCalled();
+    expect(view.setup.preventDefault).not.toHaveBeenCalled();
+    expect(view.setup.focus).not.toHaveBeenCalled();
+    expect(view.host).toBeEmptyDOMElement();
+  });
+
+  it("leaves Enter and Space native while retaining Save and Cancel activation", async () => {
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const rename = await showStrictRename();
+    const save = screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement;
+    save.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const enter = dispatchRenameNavigationKey(save, "Enter");
+    const space = dispatchRenameNavigationKey(save, " ");
+    expect(enter.defaultPrevented).toBe(false);
+    expect(space.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(save).toHaveFocus();
+    expect(screen.getByLabelText("Token name")).toBe(rename.input);
+    expect(callsFor("PATCH")).toHaveLength(0);
+
+    const renamed = { ...token, name: "Activated agent" };
+    fetchMock.mockResolvedValueOnce(response({ token: renamed }));
+    fireEvent.change(rename.input, { target: { value: renamed.name } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByRole("button", { name: `Rename ${renamed.name}` })).toBeVisible();
+    expect(patches()).toEqual([["/api/tokens/tok-1", { name: renamed.name }]]);
+
+    fireEvent.click(screen.getByRole("button", { name: `Rename ${renamed.name}` }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel rename" }));
+    expect(screen.queryByLabelText("Token name")).toBeNull();
+    expect(screen.getByRole("button", { name: `Rename ${renamed.name}` })).toHaveFocus();
+    expect(patches()).toHaveLength(1);
   });
 });
 
