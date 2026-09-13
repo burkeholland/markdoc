@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   useLayoutEffect,
@@ -9,6 +11,7 @@ import {
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { compile } from "tailwindcss";
 import * as Y from "yjs";
 import type { CollabSession } from "@/editor/collab/session";
 import type { LintIssue } from "@/editor/markdown/lint";
@@ -3346,6 +3349,198 @@ describe("status bar permanent retirement", () => {
     fireEvent.click(elementWithText("button", ISSUE_A.message));
     expect(current.issue).toHaveBeenCalledOnce();
     expect(current.issue).toHaveBeenCalledWith(ISSUE_A);
+  });
+});
+
+describe("status bar long issue descriptions", () => {
+  const messages = [
+    ["unbroken", "x".repeat(256)],
+    ["ordinary", "Use a descriptive link so readers know where it leads. ".repeat(6)],
+    ["literal", '<button tabindex="0">Not a control</button> & **literal** <img src="missing"> '.repeat(4)],
+  ] as const;
+
+  function expectWrappedIssues(issues: readonly LintIssue[]) {
+    const content = screen.getByTestId("status-issues-content");
+    expect(content).toHaveClass("w-80", "p-0");
+    expect(content).toHaveAttribute("data-align", "end");
+    expect(content.querySelector("ul")).toHaveAttribute(
+      "class",
+      "scrollbar-thin max-h-72 overflow-y-auto py-1",
+    );
+    const rows = [...content.querySelectorAll("button")];
+    expect(rows).toHaveLength(issues.length);
+    for (const [index, issue] of issues.entries()) {
+      const row = rows[index];
+      expect(row).toHaveAttribute("type", "button");
+      expect(row).toHaveAttribute(
+        "class",
+        "flex w-full items-start gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-surface-3",
+      );
+      expect(row.parentElement?.tagName).toBe("LI");
+      expect(row.childNodes).toHaveLength(3);
+      const spans = [...row.children];
+      expect(spans.map((span) => span.tagName)).toEqual(["SPAN", "SPAN", "SPAN"]);
+      expect(row.querySelectorAll("*")).toHaveLength(3);
+      const [dot, message, line] = spans;
+      expect(dot).toHaveAttribute(
+        "class",
+        `mt-0.5 h-2 w-2 shrink-0 rounded-full ${issue.severity === "error" ? "bg-danger" : "bg-warning"}`,
+      );
+      expect(dot.childNodes).toHaveLength(0);
+      expect(message).toHaveAttribute(
+        "class",
+        "min-w-0 flex-1 wrap-anywhere text-ink-2",
+      );
+      expect(message.textContent).toBe(issue.message);
+      expect(message.childNodes).toHaveLength(1);
+      expect(message.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(line).toHaveAttribute("class", "shrink-0 font-mono text-xs text-ink-4");
+      expect(line.textContent).toBe(`L${issue.line}`);
+      expect(row.textContent).toBe(`${issue.message}L${issue.line}`);
+      expect(row.tabIndex).toBe(0);
+      expect(row.querySelectorAll("[tabindex], [role], [title], [contenteditable], a, button, input")).toHaveLength(0);
+    }
+    return rows;
+  }
+
+  function inspectWithoutEffects(
+    props: StatusBarProps,
+    sets: StatusCallbacks[],
+    inspect: () => void,
+  ) {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const click = vi.spyOn(HTMLElement.prototype, "click");
+    const scroll = vi.spyOn(window, "scrollTo");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const counts = () => [
+      ...allCallbackCounts(sets),
+      controlled.lint.mock.calls.length,
+      controlled.sessionHook.mock.calls.length,
+      controlled.themeSetter.mock.calls.length,
+      focus.mock.calls.length,
+      click.mock.calls.length,
+      scroll.mock.calls.length,
+      timeout.mock.calls.length,
+      interval.mock.calls.length,
+      fetch.mock.calls.length,
+    ];
+    try {
+      const before = counts();
+      const source = props.session.ytext.toString();
+      const version = props.session.version;
+      const focused = document.activeElement;
+      const markup = document.body.innerHTML;
+      inspect();
+      expect(counts()).toEqual(before);
+      expect(props.session.ytext.toString()).toBe(source);
+      expect(props.session.version).toBe(version);
+      expect(document.activeElement).toBe(focused);
+      expect(document.body.innerHTML).toBe(markup);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  }
+
+  describe.each(["error", "warning"] as const)("%s", (severity) => {
+    it.each(messages)("wraps %s text without adding controls or changing the selected issue", async (_kind, message) => {
+      expect(message.length).toBeGreaterThanOrEqual(240);
+      const issue: LintIssue = { ...ISSUE_A, message, severity };
+      controlled.issues = [issue];
+      const current = callbacks();
+      const props = statusProps(current);
+      await renderStatus(props);
+      openIssues();
+      await nextTask();
+
+      inspectWithoutEffects(props, [current], () => {
+        expectWrappedIssues([issue]);
+        expect(screen.getByTestId("issues-button")).toHaveTextContent("1 issue");
+        expect(screen.getByTestId("issues-button")).toHaveClass(
+          severity === "error" ? "text-danger" : "text-warning",
+        );
+      });
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+
+      const row = elementWithText("button", message);
+      fireEvent.click(row);
+      fireEvent.click(row);
+      expect(current.issue).toHaveBeenCalledOnce();
+      expect(current.issue.mock.calls[0][0]).toBe(issue);
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 1, 0, 0]);
+    });
+  });
+
+  it.each(["replacement", "reorder", "removal", "document switch"] as const)(
+    "retires long issue handlers and renders the current ordered messages after %s",
+    async (transition) => {
+      const first: LintIssue = { ...ISSUE_A, message: messages[0][1] };
+      const second: LintIssue = { ...ISSUE_OTHER, message: messages[1][1] };
+      const replacement: LintIssue = { ...ISSUE_OTHER, message: messages[2][1] };
+      controlled.issues = [first, second];
+      const retired = callbacks();
+      const current = callbacks();
+      const props = statusProps(retired);
+      const view = await renderStatus(props);
+      openIssues();
+      await nextTask();
+      const stale = expectWrappedIssues([first, second]).map(captureClick);
+      const source = props.session.ytext.toString();
+      const version = props.session.version;
+      const nextIssues = transition === "reorder"
+        ? [second, first]
+        : transition === "removal"
+          ? [second]
+          : [replacement];
+      controlled.issues = nextIssues;
+      const nextProps: StatusBarProps = {
+        ...props,
+        onIssueSelect: current.issue,
+        ...(transition === "document switch" ? {
+          doc: documentDto({ id: "document-b" }),
+          session: fakeSession("session-b"),
+        } : {}),
+      };
+      await rerenderStatus(view, nextProps, transition);
+      openIssues();
+      await nextTask();
+
+      inspectWithoutEffects(nextProps, [retired, current], () => {
+        expectWrappedIssues(nextIssues);
+        for (const issue of [first, second]) {
+          if (!nextIssues.includes(issue))
+            expect(screen.queryByText(issue.message, { exact: true })).toBeNull();
+        }
+      });
+      for (const old of stale) {
+        const probe = invokeFabricatedClick(old);
+        expect(probe.preventDefault).not.toHaveBeenCalled();
+        expect(probe.stopPropagation).not.toHaveBeenCalled();
+        if (!old.element.isConnected) fireEvent.click(old.element);
+      }
+      expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+
+      const selected = nextIssues[0];
+      const row = elementWithText("button", selected.message);
+      fireEvent.click(row);
+      fireEvent.click(row);
+      expect(retired.issue).not.toHaveBeenCalled();
+      expect(current.issue).toHaveBeenCalledOnce();
+      expect(current.issue.mock.calls[0][0]).toBe(selected);
+      expect(props.session.ytext.toString()).toBe(source);
+      expect(props.session.version).toBe(version);
+    },
+  );
+
+  it("emits min-width zero and overflow-wrap anywhere from installed Tailwind", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["min-w-0", "wrap-anywhere", "flex-1", "shrink-0"]);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.flex-1\s*\{\s*flex:\s*1;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
   });
 });
 

@@ -5217,7 +5217,7 @@ function StatusBarIssueRow({
       }}
     >
       <span className={cn("mt-0.5 h-2 w-2 shrink-0 rounded-full", row.severity === "error" ? "bg-danger" : "bg-warning")} />
-      <span className="flex-1 text-ink-2">{row.message}</span>
+      <span className="min-w-0 flex-1 wrap-anywhere text-ink-2">{row.message}</span>
       <span className="shrink-0 font-mono text-xs text-ink-4">L{row.line}</span>
     </button>
   );
