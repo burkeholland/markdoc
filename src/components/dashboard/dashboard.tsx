@@ -11985,6 +11985,7 @@ interface TrashKeyboardNativeProof {
   readonly publication: TrashPublication;
   readonly card: TrashCardPublication;
   readonly movement: TrashKeyboardMovement;
+  readonly delegatedRoot: EventTarget;
   readonly path: readonly EventTarget[];
   readonly terminal: EventTarget;
   readonly window: TrashKeyboardWindowProof;
@@ -13444,6 +13445,23 @@ function createTrashPublication(
       expected.length === current.length &&
       expected.every((entry, index) => current[index] === entry);
 
+    const delegatedRootIsCurrent = (
+      card: TrashCardPublication,
+      path: readonly EventTarget[],
+      delegatedRoot: EventTarget,
+    ) => {
+      const cardIndex = path.indexOf(card.element);
+      const publicationRootIndex = path.indexOf(publication.root);
+      const delegatedRootIndex = path.indexOf(delegatedRoot);
+      return (
+        cardIndex >= 0 &&
+        publicationRootIndex > cardIndex &&
+        delegatedRootIndex > publicationRootIndex &&
+        delegatedRootIndex < path.length - 1 &&
+        path.lastIndexOf(delegatedRoot) === delegatedRootIndex
+      );
+    };
+
     const nativeKeyboardIsCurrent = (
       proof: TrashKeyboardNativeProof,
       expectedPhase: number,
@@ -13467,7 +13485,7 @@ function createTrashPublication(
           authority.target.read(event) ===
             proof.movement.source.element &&
           authority.currentTarget.read(event) ===
-            proof.card.element &&
+            proof.delegatedRoot &&
           authority.phase.read(event) === expectedPhase &&
           authority.bubbles.read(event) &&
           authority.cancelable.read(event) &&
@@ -13485,6 +13503,11 @@ function createTrashPublication(
             view === proof.window.receiver) &&
           pathsMatch(proof.path, path) &&
           pathsMatch(proof.window.path, path) &&
+          delegatedRootIsCurrent(
+            proof.card,
+            path,
+            proof.delegatedRoot,
+          ) &&
           path.at(-2) === publication.ownerDocument &&
           path.at(-1) === proof.terminal &&
           proof.window.registration === authority.terminal &&
@@ -13605,6 +13628,8 @@ function createTrashPublication(
         const windowProof =
           authority.terminal.proofFor(nativeEvent);
         const view = authority.view.read(nativeEvent);
+        const delegatedRoot =
+          authority.currentTarget.read(nativeEvent);
         if (
           !card ||
           card.authority !== cardAuthority ||
@@ -13621,8 +13646,7 @@ function createTrashPublication(
           authority.trusted.read(nativeEvent) !== true ||
           authority.type.read(nativeEvent) !== "keydown" ||
           authority.target.read(nativeEvent) !== source.element ||
-          authority.currentTarget.read(nativeEvent) !==
-            card.element ||
+          !delegatedRoot ||
           authority.phase.read(nativeEvent) !==
             authority.Event.CAPTURING_PHASE ||
           !authority.bubbles.read(nativeEvent) ||
@@ -13670,7 +13694,8 @@ function createTrashPublication(
           windowProof.receiver !== windowProof.terminal ||
           !source.path.every(
             (entry, index) => path[index] === entry,
-          )
+          ) ||
+          !delegatedRootIsCurrent(card, path, delegatedRoot)
         ) {
           return;
         }
@@ -13688,6 +13713,7 @@ function createTrashPublication(
           publication,
           card,
           movement,
+          delegatedRoot,
           path: Object.freeze([...path]),
           terminal,
           window: windowProof,

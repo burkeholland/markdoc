@@ -583,6 +583,37 @@ function dispatchTrashKey(
   return event;
 }
 
+const first = trashedDoc("keyboard-first", "Keyboard first");
+const second = trashedDoc("keyboard-second", "Keyboard second");
+const trash = (
+  documents: DocumentSummaryDto[] = [first, second],
+  busy: string | null = null,
+  error: string | null = "Trash warning",
+  callbacks: {
+    onRetry: () => void;
+    onRestore: (document: DocumentSummaryDto) => void;
+    onPurge: (document: DocumentSummaryDto) => void;
+  } = {
+    onRetry: () => {},
+    onRestore: () => {},
+    onPurge: () => {},
+  },
+  key?: string,
+) => (
+  <StrictMode>
+    <TrashView
+      key={key}
+      documents={documents}
+      busy={busy}
+      loading={false}
+      error={error}
+      onRetry={callbacks.onRetry}
+      onRestore={callbacks.onRestore}
+      onPurge={callbacks.onPurge}
+    />
+  </StrictMode>
+);
+
 function renderTrashKeyboard<Setup>(
   node: ReactNode,
   setup: (ownerWindow: Window & typeof globalThis) => Setup,
@@ -675,9 +706,17 @@ function dispatchTrashKeyWithReactPairMutation(
   const entry = reactPropsEntry(card);
   const capture = entry.props.onKeyDownCapture;
   const bubble = entry.props.onKeyDown;
+  const ownerWindow = target.ownerDocument.defaultView;
+  const nativeCurrentTargetGetter = ownerWindow
+    ? Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get
+    : null;
   if (
     typeof capture !== "function" ||
-    typeof bubble !== "function"
+    typeof bubble !== "function" ||
+    !nativeCurrentTargetGetter
   ) {
     throw new Error("The Trash card has no complete key delivery pair");
   }
@@ -686,6 +725,8 @@ function dispatchTrashKeyWithReactPairMutation(
     bubble: ReactKeyboardEvent<HTMLLIElement> | null;
     captureTarget: EventTarget | null;
     bubbleTarget: EventTarget | null;
+    nativeCaptureTarget: EventTarget | null;
+    nativeBubbleTarget: EventTarget | null;
     capturePhase: number;
     bubblePhase: number;
   } = {
@@ -693,6 +734,8 @@ function dispatchTrashKeyWithReactPairMutation(
     bubble: null,
     captureTarget: null,
     bubbleTarget: null,
+    nativeCaptureTarget: null,
+    nativeBubbleTarget: null,
     capturePhase: Event.NONE,
     bubblePhase: Event.NONE,
   };
@@ -703,6 +746,11 @@ function dispatchTrashKeyWithReactPairMutation(
     ) => {
       delivery.capture = event;
       delivery.captureTarget = event.currentTarget;
+      delivery.nativeCaptureTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
       delivery.capturePhase = event.eventPhase;
       capture(event);
       mutations.captureAfter?.(event);
@@ -710,6 +758,11 @@ function dispatchTrashKeyWithReactPairMutation(
     onKeyDown: (event: ReactKeyboardEvent<HTMLLIElement>) => {
       delivery.bubble = event;
       delivery.bubbleTarget = event.currentTarget;
+      delivery.nativeBubbleTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
       delivery.bubblePhase = event.eventPhase;
       mutations.bubbleBefore?.(event);
       bubble(event);
@@ -733,6 +786,8 @@ function dispatchTrashKeyWithReactPairMutation(
     bubbleEvent: delivery.bubble,
     captureTarget: delivery.captureTarget,
     bubbleTarget: delivery.bubbleTarget,
+    nativeCaptureTarget: delivery.nativeCaptureTarget,
+    nativeBubbleTarget: delivery.nativeBubbleTarget,
     capturePhase: delivery.capturePhase,
     bubblePhase: delivery.bubblePhase,
   };
@@ -1663,38 +1718,7 @@ describe("dashboard Account menu directional publication", () => {
 
 });
 
-describe("TrashView per-card keyboard navigation provenance", () => {
-  const first = trashedDoc("keyboard-first", "Keyboard first");
-  const second = trashedDoc("keyboard-second", "Keyboard second");
-  const trash = (
-    documents: DocumentSummaryDto[] = [first, second],
-    busy: string | null = null,
-    error: string | null = "Trash warning",
-    callbacks: {
-      onRetry: () => void;
-      onRestore: (document: DocumentSummaryDto) => void;
-      onPurge: (document: DocumentSummaryDto) => void;
-    } = {
-      onRetry: () => {},
-      onRestore: () => {},
-      onPurge: () => {},
-    },
-    key?: string,
-  ) => (
-    <StrictMode>
-      <TrashView
-        key={key}
-        documents={documents}
-        busy={busy}
-        loading={false}
-        error={error}
-        onRetry={callbacks.onRetry}
-        onRestore={callbacks.onRestore}
-        onPurge={callbacks.onPurge}
-      />
-    </StrictMode>
-  );
-
+function registerTrashKeyboardProvenanceTests() {
   it("rejects a crossed card delivery without consuming a clean successor event", () => {
     const view = renderTrashKeyboard(
       trash(),
@@ -2033,40 +2057,9 @@ describe("TrashView per-card keyboard navigation provenance", () => {
       successor.dispose();
     }
   });
-});
+}
 
-describe("TrashView per-card keyboard navigation native authority", () => {
-  const first = trashedDoc("keyboard-first", "Keyboard first");
-  const second = trashedDoc("keyboard-second", "Keyboard second");
-  const trash = (
-    documents: DocumentSummaryDto[] = [first, second],
-    busy: string | null = null,
-    error: string | null = "Trash warning",
-    callbacks: {
-      onRetry: () => void;
-      onRestore: (document: DocumentSummaryDto) => void;
-      onPurge: (document: DocumentSummaryDto) => void;
-    } = {
-      onRetry: () => {},
-      onRestore: () => {},
-      onPurge: () => {},
-    },
-    key?: string,
-  ) => (
-    <StrictMode>
-      <TrashView
-        key={key}
-        documents={documents}
-        busy={busy}
-        loading={false}
-        error={error}
-        onRetry={callbacks.onRetry}
-        onRestore={callbacks.onRestore}
-        onPurge={callbacks.onPurge}
-      />
-    </StrictMode>
-  );
-
+function registerTrashKeyboardNativeAuthorityTests() {
   it("binds an accepted key to the event-local backing Window receiver, currentTarget, and path terminal", () => {
     const view = renderTrashKeyboard(
       trash(),
@@ -2464,7 +2457,7 @@ describe("TrashView per-card keyboard navigation native authority", () => {
       view.dispose();
     }
   });
-});
+}
 
 describe("dashboard Account menu directional publication", () => {
   it("retains pointer, Enter, Space, activation, Escape, and outside dismissal", async () => {
@@ -9989,37 +9982,8 @@ describe("TrashView publication ownership", () => {
 });
 
 describe("TrashView per-card keyboard navigation", () => {
-  const first = trashedDoc("keyboard-first", "Keyboard first");
-  const second = trashedDoc("keyboard-second", "Keyboard second");
-
-  const trash = (
-    documents: DocumentSummaryDto[] = [first, second],
-    busy: string | null = null,
-    error: string | null = "Trash warning",
-    callbacks: {
-      onRetry: () => void;
-      onRestore: (document: DocumentSummaryDto) => void;
-      onPurge: (document: DocumentSummaryDto) => void;
-    } = {
-      onRetry: () => {},
-      onRestore: () => {},
-      onPurge: () => {},
-    },
-    key?: string,
-  ) => (
-    <StrictMode>
-      <TrashView
-        key={key}
-        documents={documents}
-        busy={busy}
-        loading={false}
-        error={error}
-        onRetry={callbacks.onRetry}
-        onRestore={callbacks.onRestore}
-        onPurge={callbacks.onPurge}
-      />
-    </StrictMode>
-  );
+  registerTrashKeyboardProvenanceTests();
+  registerTrashKeyboardNativeAuthorityTests();
 
   it.each([
     ["restore-button", "purge-button", "ArrowRight"],
@@ -10133,7 +10097,7 @@ describe("TrashView per-card keyboard navigation", () => {
     },
   );
 
-  it("attests distinct card capture and bubble wrappers without relying on wrapper prototypes or private fields", () => {
+  it("attests distinct card wrappers and their shared delegated native root without private fields", () => {
     const view = renderTrashKeyboard(
       trash(),
       trackTrashNavigationEffects,
@@ -10191,6 +10155,11 @@ describe("TrashView per-card keyboard navigation", () => {
       );
       expect(delivery.captureTarget).toBe(card);
       expect(delivery.bubbleTarget).toBe(card);
+      expect(delivery.nativeCaptureTarget).toBe(view.host);
+      expect(delivery.nativeCaptureTarget).not.toBe(card);
+      expect(delivery.nativeBubbleTarget).toBe(
+        delivery.nativeCaptureTarget,
+      );
       expect(delivery.capturePhase).toBe(Event.CAPTURING_PHASE);
       expect(delivery.bubblePhase).toBe(Event.BUBBLING_PHASE);
       expect(
